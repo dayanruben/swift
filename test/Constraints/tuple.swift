@@ -181,7 +181,7 @@ variadicWithTrailingClosure(fn: +)
 func gcd_23700031<T>(_ a: T, b: T) {
   var a = a
   var b = b
-  (a, b) = (b, a % b)  // expected-error {{referencing operator function '%' on 'BinaryInteger' requires that 'T' conform to 'BinaryInteger'}}
+  (a, b) = (b, a % b)  // expected-error {{binary operator '%' cannot be applied to two 'T' operands}}
 }
 
 // <rdar://problem/24210190>
@@ -305,6 +305,8 @@ if case (foo: let x, foo: let y) = zeroTuple { print(x+y) } // expected-error {{
 // expected-warning@-1 {{'if' condition is always true}}
 
 enum BishBash { case bar(foo: Int, foo: String) }
+// expected-error@-1 {{invalid redeclaration of 'foo'}}
+// expected-note@-2 {{'foo' previously declared here}}
 let enumLabelDup: BishBash = .bar(foo: 0, foo: "") // expected-error {{cannot create a tuple with a duplicate element label}}
 
 func dupLabelClosure(_ fn: () -> Void) {}
@@ -318,3 +320,20 @@ struct DupLabelSubscript {
 
 let dupLabelSubscriptStruct = DupLabelSubscript()
 let _ = dupLabelSubscriptStruct[foo: 5, foo: 5] // ok
+
+// SR-12869
+
+var dict: [String: (Int, Int)] = [:]
+let bignum: Int64 = 1337
+dict["test"] = (bignum, 1) // expected-error {{cannot assign value of type '(Int64, Int)' to subscript of type '(Int, Int)'}}
+
+var tuple: (Int, Int)
+tuple = (bignum, 1) // expected-error {{cannot assign value of type '(Int64, Int)' to type '(Int, Int)'}}
+
+var optionalTuple: (Int, Int)?
+var optionalTuple2: (Int64, Int)? = (bignum, 1) 
+var optionalTuple3: (UInt64, Int)? = (bignum, 1) // expected-error {{cannot convert value of type '(Int64, Int)' to specified type '(UInt64, Int)?'}}
+
+optionalTuple = (bignum, 1) // expected-error {{cannot assign value of type '(Int64, Int)' to type '(Int, Int)'}}
+// Optional to Optional
+optionalTuple = optionalTuple2 // expected-error {{cannot assign value of type '(Int64, Int)?' to type '(Int, Int)?'}}

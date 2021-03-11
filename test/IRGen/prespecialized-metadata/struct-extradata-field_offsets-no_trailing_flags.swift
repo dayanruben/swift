@@ -1,21 +1,21 @@
 // RUN: %target-swift-frontend -emit-ir %s | %FileCheck %s -DINT=i%target-ptrsize -DALIGNMENT=%target-alignment
 
-// REQUIRES: OS=macosx || OS=ios || OS=tvos || OS=watchos || OS=linux-gnu
+// REQUIRES: VENDOR=apple || OS=linux-gnu
 // UNSUPPORTED: CPU=i386 && OS=ios
 // UNSUPPORTED: CPU=armv7 && OS=ios
 // UNSUPPORTED: CPU=armv7s && OS=ios
 
-//      CHECK: [[EXTRA_DATA_PATTERN:@[0-9]+]]  = internal constant { 
+//      CHECK: [[EXTRA_DATA_PATTERN:@[0-9]+]]  = internal constant <{ 
 // CHECK-SAME:     i32
 // CHECK-SAME:   , i32
 // CHECK-SAME:   , i32
 //           :   , [4 x i8] 
-// CHECK-SAME: } { 
+// CHECK-SAME: }> <{ 
 // CHECK-SAME:   i32 0, 
 // CHECK-SAME:   i32 8, 
 // CHECK-SAME:   i32 16
 //           :   , [4 x i8] zeroinitializer 
-// CHECK-SAME: }, align [[ALIGNMENT]]
+// CHECK-SAME: }>, align [[ALIGNMENT]]
 //      CHECK: @"$s4main4PairVMP" = internal constant <{ 
 //           :   i32, 
 //           :   i32, 
@@ -60,11 +60,11 @@
 //           :   i32 trunc (
 // CHECK-SAME:     [[INT]] sub (
 // CHECK-SAME:       [[INT]] ptrtoint (
-// CHECK-SAME:         { i32
+// CHECK-SAME:         <{ i32
 // CHECK-SAME:         , i32
 // CHECK-SAME:         , i32
 //           :         , [4 x i8] 
-// CHECK-SAME:         }* [[EXTRA_DATA_PATTERN]] to [[INT]]
+// CHECK-SAME:         }>* [[EXTRA_DATA_PATTERN]] to [[INT]]
 // CHECK-SAME:       ), 
 // CHECK-SAME:       [[INT]] ptrtoint (
 // CHECK-SAME:         i32* getelementptr inbounds (

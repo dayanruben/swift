@@ -11,7 +11,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/IDE/SourceEntityWalker.h"
-#include "swift/Parse/Lexer.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Decl.h"
@@ -23,7 +22,9 @@
 #include "swift/AST/Stmt.h"
 #include "swift/AST/TypeRepr.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Basic/SourceManager.h"
+#include "swift/Parse/Lexer.h"
 #include "clang/Basic/Module.h"
 
 using namespace swift;
@@ -68,13 +69,13 @@ private:
 
   bool handleImports(ImportDecl *Import);
   bool handleCustomAttributes(Decl *D);
-  bool passModulePathElements(ArrayRef<ImportDecl::AccessPathElement> Path,
+  bool passModulePathElements(ImportPath::Module Path,
                               const clang::Module *ClangMod);
 
   bool passReference(ValueDecl *D, Type Ty, SourceLoc Loc, SourceRange Range,
                      ReferenceMetaData Data);
   bool passReference(ValueDecl *D, Type Ty, DeclNameLoc Loc, ReferenceMetaData Data);
-  bool passReference(ModuleEntity Mod, Located<Identifier> IdLoc);
+  bool passReference(ModuleEntity Mod, ImportPath::Element IdLoc);
 
   bool passSubscriptReference(ValueDecl *D, SourceLoc Loc,
                               ReferenceMetaData Data, bool IsOpenBracket);
@@ -83,7 +84,7 @@ private:
 
   bool passCallArgNames(Expr *Fn, TupleExpr *TupleE);
 
-  bool shouldIgnore(Decl *D, bool &ShouldVisitChildren);
+  bool shouldIgnore(Decl *D);
 
   ValueDecl *extractDecl(Expr *Fn) const {
     Fn = Fn->getSemanticsProvidingExpr();
@@ -105,9 +106,8 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
   if (isDone())
     return false;
 
-  bool ShouldVisitChildren;
-  if (shouldIgnore(D, ShouldVisitChildren))
-    return ShouldVisitChildren;
+  if (shouldIgnore(D))
+    return isa<PatternBindingDecl>(D);
 
   if (!handleCustomAttributes(D)) {
     Cancelled = true;
@@ -119,8 +119,12 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
   bool IsExtension = false;
 
   if (auto *VD = dyn_cast<ValueDecl>(D)) {
-    if (VD->hasName() && !VD->isImplicit())
+    if (VD->hasName() && !VD->isImplicit()) {
+      SourceManager &SM = VD->getASTContext().SourceMgr;
       NameLen = VD->getBaseName().userFacingName().size();
+      if (Loc.isValid() && SM.extractText({Loc, 1}) == "`")
+        NameLen += 2;
+    }
 
     auto ReportParamList = [&](ParameterList *PL) {
       for (auto *PD : *PL) {
@@ -136,12 +140,9 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
       return false;
     };
 
-    if (auto AF = dyn_cast<AbstractFunctionDecl>(VD)) {
-      if (ReportParamList(AF->getParameters()))
-        return false;
-    }
-    if (auto SD = dyn_cast<SubscriptDecl>(VD)) {
-      if (ReportParamList(SD->getIndices()))
+    if (isa<AbstractFunctionDecl>(VD) || isa<SubscriptDecl>(VD)) {
+      auto ParamList = getParameterList(VD);
+      if (ReportParamList(ParamList))
         return false;
     }
   } else if (auto *ED = dyn_cast<ExtensionDecl>(D)) {
@@ -175,14 +176,14 @@ bool SemaAnnotator::walkToDeclPre(Decl *D) {
       }
       return false;
     }
-  } else {
-    return true;
   }
 
   CharSourceRange Range = (Loc.isValid()) ? CharSourceRange(Loc, NameLen)
                                           : CharSourceRange();
-  ShouldVisitChildren = SEWalker.walkToDeclPre(D, Range);
-  if (ShouldVisitChildren && IsExtension) {
+  bool ShouldVisitChildren = SEWalker.walkToDeclPre(D, Range);
+  // walkToDeclPost is only called when visiting children, so make sure to only
+  // push the extension decl in that case (otherwise it won't be popped)
+  if (IsExtension && ShouldVisitChildren) {
     ExtDecls.push_back(static_cast<ExtensionDecl*>(D));
   }
   return ShouldVisitChildren;
@@ -192,18 +193,13 @@ bool SemaAnnotator::walkToDeclPost(Decl *D) {
   if (isDone())
     return false;
 
-  bool ShouldVisitChildren;
-  if (shouldIgnore(D, ShouldVisitChildren))
+  if (shouldIgnore(D))
     return true;
 
   if (isa<ExtensionDecl>(D)) {
     assert(ExtDecls.back() == D);
     ExtDecls.pop_back();
   }
-
-  if (!isa<ValueDecl>(D) && !isa<ExtensionDecl>(D) && !isa<ImportDecl>(D) &&
-      !isa<IfConfigDecl>(D))
-    return true;
 
   bool Continue = SEWalker.walkToDeclPost(D);
   if (!Continue)
@@ -411,6 +407,7 @@ std::pair<bool, Expr *> SemaAnnotator::walkToExprPre(Expr *E) {
       case KeyPathExpr::Component::Kind::OptionalWrap:
       case KeyPathExpr::Component::Kind::OptionalForce:
       case KeyPathExpr::Component::Kind::Identity:
+      case KeyPathExpr::Component::Kind::DictionaryKey:
         break;
       }
     }
@@ -507,6 +504,17 @@ std::pair<bool, Expr *> SemaAnnotator::walkToExprPre(Expr *E) {
 
       return doSkipChildren();
     }
+  } else if (auto DMRE = dyn_cast<DynamicMemberRefExpr>(E)) {
+    // Visit in source order.
+    if (!DMRE->getBase()->walk(*this))
+        return stopTraversal;
+    if (!passReference(DMRE->getMember().getDecl(), DMRE->getType(),
+                       DMRE->getNameLoc(),
+                       ReferenceMetaData(SemaReferenceKind::DynamicMemberRef,
+                                         OpAccess)))
+        return stopTraversal;
+    // We already visited the children.
+    return doSkipChildren();
   }
 
   return { true, E };
@@ -583,7 +591,7 @@ bool SemaAnnotator::handleCustomAttributes(Decl *D) {
     }
   }
   for (auto *customAttr : D->getAttrs().getAttributes<CustomAttr, true>()) {
-    if (auto *Repr = customAttr->getTypeLoc().getTypeRepr()) {
+    if (auto *Repr = customAttr->getTypeRepr()) {
       if (!Repr->walk(*this))
         return false;
     }
@@ -631,14 +639,15 @@ bool SemaAnnotator::handleImports(ImportDecl *Import) {
 }
 
 bool SemaAnnotator::passModulePathElements(
-    ArrayRef<ImportDecl::AccessPathElement> Path,
+    ImportPath::Module Path,
     const clang::Module *ClangMod) {
 
-  if (Path.empty() || !ClangMod)
-    return true;
+  assert(ClangMod && "can't passModulePathElements of null ClangMod");
 
-  if (!passModulePathElements(Path.drop_back(1), ClangMod->Parent))
-    return false;
+  // Visit parent, if any, first.
+  if (ClangMod->Parent && Path.hasSubmodule())
+    if (!passModulePathElements(Path.getParentPath(), ClangMod->Parent))
+      return false;
 
   return passReference(ClangMod, Path.back());
 }
@@ -670,7 +679,11 @@ bool SemaAnnotator::passCallAsFunctionReference(ValueDecl *D, SourceLoc Loc,
 
 bool SemaAnnotator::
 passReference(ValueDecl *D, Type Ty, DeclNameLoc Loc, ReferenceMetaData Data) {
-  return passReference(D, Ty, Loc.getBaseNameLoc(), Loc.getSourceRange(), Data);
+  SourceManager &SM = D->getASTContext().SourceMgr;
+  SourceLoc BaseStart = Loc.getBaseNameLoc(), BaseEnd = BaseStart;
+  if (BaseStart.isValid() && SM.extractText({BaseStart, 1}) == "`")
+    BaseEnd = Lexer::getLocForEndOfToken(SM, BaseStart.getAdvancedLoc(1));
+  return passReference(D, Ty, BaseStart, {BaseStart, BaseEnd}, Data);
 }
 
 bool SemaAnnotator::
@@ -698,6 +711,12 @@ passReference(ValueDecl *D, Type Ty, SourceLoc BaseNameLoc, SourceRange Range,
     }
   }
 
+  if (D == nullptr) {
+    // FIXME: When does this happen?
+    assert(false && "unhandled reference");
+    return true;
+  }
+
   CharSourceRange CharRange =
     Lexer::getCharSourceRangeFromSourceRange(D->getASTContext().SourceMgr,
                                              Range);
@@ -709,7 +728,7 @@ passReference(ValueDecl *D, Type Ty, SourceLoc BaseNameLoc, SourceRange Range,
 }
 
 bool SemaAnnotator::passReference(ModuleEntity Mod,
-                                  Located<Identifier> IdLoc) {
+                                  ImportPath::Element IdLoc) {
   if (IdLoc.Loc.isInvalid())
     return true;
   unsigned NameLen = IdLoc.Item.getLength();
@@ -747,14 +766,10 @@ bool SemaAnnotator::passCallArgNames(Expr *Fn, TupleExpr *TupleE) {
   return true;
 }
 
-bool SemaAnnotator::shouldIgnore(Decl *D, bool &ShouldVisitChildren) {
-  if (D->isImplicit() &&
-      !isa<PatternBindingDecl>(D) &&
-      !isa<ConstructorDecl>(D)) {
-    ShouldVisitChildren = false;
-    return true;
-  }
-  return false;
+bool SemaAnnotator::shouldIgnore(Decl *D) {
+  // TODO: There should really be a separate field controlling whether
+  //       constructors are visited or not
+  return D->isImplicit() && !isa<ConstructorDecl>(D);
 }
 
 bool SourceEntityWalker::walk(SourceFile &SrcFile) {

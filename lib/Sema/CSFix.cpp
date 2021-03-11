@@ -16,15 +16,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "CSFix.h"
 #include "CSDiagnostics.h"
-#include "ConstraintLocator.h"
-#include "ConstraintSystem.h"
-#include "OverloadChoice.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/SourceManager.h"
+#include "swift/Sema/ConstraintLocator.h"
+#include "swift/Sema/ConstraintSystem.h"
+#include "swift/Sema/CSFix.h"
+#include "swift/Sema/OverloadChoice.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
@@ -82,21 +83,24 @@ bool UnwrapOptionalBase::diagnose(const Solution &solution, bool asNote) const {
   bool resultIsOptional =
       getKind() == FixKind::UnwrapOptionalBaseWithOptionalResult;
   MemberAccessOnOptionalBaseFailure failure(solution, getLocator(), MemberName,
-                                            resultIsOptional);
+                                            MemberBaseType, resultIsOptional);
   return failure.diagnose(asNote);
 }
 
 UnwrapOptionalBase *UnwrapOptionalBase::create(ConstraintSystem &cs,
                                                DeclNameRef member,
+                                               Type memberBaseType,
                                                ConstraintLocator *locator) {
-  return new (cs.getAllocator())
-      UnwrapOptionalBase(cs, FixKind::UnwrapOptionalBase, member, locator);
+  return new (cs.getAllocator()) UnwrapOptionalBase(
+      cs, FixKind::UnwrapOptionalBase, member, memberBaseType, locator);
 }
 
 UnwrapOptionalBase *UnwrapOptionalBase::createWithOptionalResult(
-    ConstraintSystem &cs, DeclNameRef member, ConstraintLocator *locator) {
-  return new (cs.getAllocator()) UnwrapOptionalBase(
-      cs, FixKind::UnwrapOptionalBaseWithOptionalResult, member, locator);
+    ConstraintSystem &cs, DeclNameRef member, Type memberBaseType,
+    ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      UnwrapOptionalBase(cs, FixKind::UnwrapOptionalBaseWithOptionalResult,
+                         member, memberBaseType, locator);
 }
 
 bool AddAddressOf::diagnose(const Solution &solution, bool asNote) const {
@@ -118,18 +122,23 @@ bool TreatRValueAsLValue::diagnose(const Solution &solution,
 
 TreatRValueAsLValue *TreatRValueAsLValue::create(ConstraintSystem &cs,
                                    ConstraintLocator *locator) {
+  if (locator->isLastElement<LocatorPathElt::ApplyArgToParam>())
+    locator = cs.getConstraintLocator(
+        locator, LocatorPathElt::ArgumentAttribute::forInOut());
+
   return new (cs.getAllocator()) TreatRValueAsLValue(cs, locator);
 }
 
 bool CoerceToCheckedCast::diagnose(const Solution &solution,
                                    bool asNote) const {
-  MissingForcedDowncastFailure failure(solution, getFromType(), getToType(),
-                                       getLocator());
+  InvalidCoercionFailure failure(solution, getFromType(), getToType(),
+                                 UseConditionalCast, getLocator());
   return failure.diagnose(asNote);
 }
 
 CoerceToCheckedCast *CoerceToCheckedCast::attempt(ConstraintSystem &cs,
                                                   Type fromType, Type toType,
+                                                  bool useConditionalCast,
                                                   ConstraintLocator *locator) {
   // If any of the types has a type variable, don't add the fix.
   if (fromType->hasTypeVariable() || toType->hasTypeVariable())
@@ -142,34 +151,73 @@ CoerceToCheckedCast *CoerceToCheckedCast::attempt(ConstraintSystem &cs,
   if (!coerceExpr)
     return nullptr;
 
-  auto subExpr = coerceExpr->getSubExpr();
-  auto castKind =
-      TypeChecker::typeCheckCheckedCast(fromType, toType,
-                                        CheckedCastContextKind::None, cs.DC,
-                                        coerceExpr->getLoc(), subExpr,
-                                        coerceExpr->getCastTypeLoc().getSourceRange());
+  const auto castKind = TypeChecker::typeCheckCheckedCast(
+      fromType, toType, CheckedCastContextKind::Coercion, cs.DC,
+      SourceLoc(), coerceExpr->getSubExpr(), SourceRange());
 
   // Invalid cast.
   if (castKind == CheckedCastKind::Unresolved)
     return nullptr;
 
   return new (cs.getAllocator())
-      CoerceToCheckedCast(cs, fromType, toType, locator);
+      CoerceToCheckedCast(cs, fromType, toType, useConditionalCast, locator);
 }
+
+bool TreatArrayLiteralAsDictionary::diagnose(const Solution &solution,
+                                             bool asNote) const {
+  ArrayLiteralToDictionaryConversionFailure failure(solution,
+                                                    getToType(), getFromType(),
+                                                    getLocator());
+  return failure.diagnose(asNote);
+};
+
+TreatArrayLiteralAsDictionary *
+TreatArrayLiteralAsDictionary::create(ConstraintSystem &cs,
+                                      Type dictionaryTy, Type arrayTy,
+                                      ConstraintLocator *locator) {
+  assert(getAsExpr<ArrayExpr>(locator->getAnchor())->getNumElements() <= 1);
+  return new (cs.getAllocator())
+      TreatArrayLiteralAsDictionary(cs, dictionaryTy, arrayTy, locator);
+};
 
 bool MarkExplicitlyEscaping::diagnose(const Solution &solution,
                                       bool asNote) const {
-  NoEscapeFuncToTypeConversionFailure failure(solution, getFromType(),
-                                              getToType(), getLocator());
+  AttributedFuncToTypeConversionFailure failure(
+      solution, getFromType(), getToType(), getLocator(),
+      AttributedFuncToTypeConversionFailure::Escaping);
   return failure.diagnose(asNote);
 }
 
 MarkExplicitlyEscaping *
 MarkExplicitlyEscaping::create(ConstraintSystem &cs, Type lhs, Type rhs,
                                ConstraintLocator *locator) {
+  if (locator->isLastElement<LocatorPathElt::ApplyArgToParam>())
+    locator = cs.getConstraintLocator(
+        locator, LocatorPathElt::ArgumentAttribute::forEscaping());
+
   return new (cs.getAllocator()) MarkExplicitlyEscaping(cs, lhs, rhs, locator);
 }
 
+bool AddConcurrentAttribute::diagnose(const Solution &solution,
+                                      bool asNote) const {
+  AttributedFuncToTypeConversionFailure failure(
+      solution, getFromType(), getToType(), getLocator(),
+      AttributedFuncToTypeConversionFailure::Concurrent);
+  return failure.diagnose(asNote);
+}
+
+AddConcurrentAttribute *
+AddConcurrentAttribute::create(ConstraintSystem &cs,
+                               FunctionType *fromType,
+                               FunctionType *toType,
+                               ConstraintLocator *locator) {
+  if (locator->isLastElement<LocatorPathElt::ApplyArgToParam>())
+    locator = cs.getConstraintLocator(
+        locator, LocatorPathElt::ArgumentAttribute::forConcurrent());
+
+  return new (cs.getAllocator()) AddConcurrentAttribute(
+      cs, fromType, toType, locator);
+}
 bool RelabelArguments::diagnose(const Solution &solution, bool asNote) const {
   LabelingFailure failure(solution, getLocator(), getLabels());
   return failure.diagnose(asNote);
@@ -198,6 +246,34 @@ bool MissingConformance::diagnose(const Solution &solution, bool asNote) const {
   MissingConformanceFailure failure(
       solution, locator, std::make_pair(NonConformingType, ProtocolType));
   return failure.diagnose(asNote);
+}
+
+bool MissingConformance::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  auto *primaryFix = commonFixes.front().second->getAs<MissingConformance>();
+  assert(primaryFix);
+
+  if (llvm::all_of(
+          commonFixes,
+          [&primaryFix](
+              const std::pair<const Solution *, const ConstraintFix *> &entry) {
+            return primaryFix->isEqual(entry.second);
+          }))
+    return diagnose(*commonFixes.front().first);
+
+  // If the location is the same but there are different requirements
+  // involved let's not attempt to diagnose that as an ambiguity.
+  return false;
+}
+
+bool MissingConformance::isEqual(const ConstraintFix *other) const {
+  auto *conformanceFix = other->getAs<MissingConformance>();
+  if (!conformanceFix)
+    return false;
+
+  return IsContextual == conformanceFix->IsContextual &&
+         NonConformingType->isEqual(conformanceFix->NonConformingType) &&
+         ProtocolType->isEqual(conformanceFix->ProtocolType);
 }
 
 MissingConformance *
@@ -246,6 +322,33 @@ bool ContextualMismatch::diagnose(const Solution &solution, bool asNote) const {
   return failure.diagnose(asNote);
 }
 
+bool ContextualMismatch::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  auto getTypes =
+      [&](const std::pair<const Solution *, const ConstraintFix *> &entry)
+      -> std::pair<Type, Type> {
+    auto &solution = *entry.first;
+    auto *fix = static_cast<const ContextualMismatch *>(entry.second);
+
+    return {solution.simplifyType(fix->getFromType()),
+            solution.simplifyType(fix->getToType())};
+  };
+
+  auto etalonTypes = getTypes(commonFixes.front());
+  if (llvm::all_of(
+          commonFixes,
+          [&](const std::pair<const Solution *, const ConstraintFix *> &entry) {
+            auto types = getTypes(entry);
+            return etalonTypes.first->isEqual(types.first) &&
+                   etalonTypes.second->isEqual(types.second);
+          })) {
+    const auto &primary = commonFixes.front();
+    return primary.second->diagnose(*primary.first, /*asNote=*/false);
+  }
+
+  return false;
+}
+
 ContextualMismatch *ContextualMismatch::create(ConstraintSystem &cs, Type lhs,
                                                Type rhs,
                                                ConstraintLocator *locator) {
@@ -278,9 +381,11 @@ getStructuralTypeContext(const Solution &solution, ConstraintLocator *locator) {
                            solution.getType(coerceExpr->getSubExpr()),
                            solution.getType(coerceExpr));
   } else if (auto *assignExpr = getAsExpr<AssignExpr>(locator->getAnchor())) {
-    return std::make_tuple(CTP_AssignSource,
+    auto CTP = isa<SubscriptExpr>(assignExpr->getDest()) ? CTP_SubscriptAssignSource
+                                                         : CTP_AssignSource;
+    return std::make_tuple(CTP,
                            solution.getType(assignExpr->getSrc()),
-                           solution.getType(assignExpr->getDest()));
+                           solution.getType(assignExpr->getDest())->getRValueType());
   } else if (auto *call = getAsExpr<CallExpr>(locator->getAnchor())) {
     assert(isa<TypeExpr>(call->getFn()));
     return std::make_tuple(
@@ -323,8 +428,10 @@ bool AllowTupleTypeMismatch::coalesceAndDiagnose(
     return false;
   }
 
-  TupleContextualFailure failure(solution, purpose, fromType, toType, indices,
-                                 locator);
+  TupleContextualFailure failure(solution, purpose,
+                                 fromType->lookThroughAllOptionalTypes(),
+                                 toType->lookThroughAllOptionalTypes(),
+                                 indices, locator);
   return failure.diagnose(asNote);
 }
 
@@ -369,6 +476,57 @@ bool AllowFunctionTypeMismatch::coalesceAndDiagnose(
 bool AllowFunctionTypeMismatch::diagnose(const Solution &solution,
                                          bool asNote) const {
   return coalesceAndDiagnose(solution, {}, asNote);
+}
+
+bool AllowFunctionTypeMismatch::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  if (ContextualMismatch::diagnoseForAmbiguity(commonFixes))
+    return true;
+
+  auto *locator = getLocator();
+  // If this is a mismatch between two function types at argument
+  // position, there is a tailored diagnostic for that.
+  if (auto argConv =
+          locator->getLastElementAs<LocatorPathElt::ApplyArgToParam>()) {
+    auto &cs = getConstraintSystem();
+    auto &DE = cs.getASTContext().Diags;
+    auto &solution = *commonFixes[0].first;
+
+    auto info = getStructuralTypeContext(solution, locator);
+    if (!info)
+      return false;
+
+    auto *argLoc = cs.getConstraintLocator(simplifyLocatorToAnchor(locator));
+
+    auto overload = solution.getOverloadChoiceIfAvailable(
+        solution.getCalleeLocator(argLoc));
+    if (!overload)
+      return false;
+
+    auto name = overload->choice.getName().getBaseName();
+    DE.diagnose(getLoc(getAnchor()), diag::no_candidates_match_argument_type,
+                name.userFacingName(), std::get<2>(*info),
+                argConv->getParamIdx());
+
+    for (auto &entry : commonFixes) {
+      auto &solution = *entry.first;
+      auto overload = solution.getOverloadChoiceIfAvailable(
+          solution.getCalleeLocator(argLoc));
+
+      if (!(overload && overload->choice.isDecl()))
+        continue;
+
+      auto *decl = overload->choice.getDecl();
+      if (decl->getLoc().isValid()) {
+        DE.diagnose(decl, diag::found_candidate_type,
+                    solution.simplifyType(overload->openedType));
+      }
+    }
+
+    return true;
+  }
+
+  return false;
 }
 
 AllowFunctionTypeMismatch *
@@ -443,22 +601,22 @@ InsertExplicitCall *InsertExplicitCall::create(ConstraintSystem &cs,
 
 bool UsePropertyWrapper::diagnose(const Solution &solution, bool asNote) const {
   ExtraneousPropertyWrapperUnwrapFailure failure(
-      solution, Wrapped, UsingStorageWrapper, Base, Wrapper, getLocator());
+      solution, Wrapped, UsingProjection, Base, Wrapper, getLocator());
   return failure.diagnose(asNote);
 }
 
 UsePropertyWrapper *UsePropertyWrapper::create(ConstraintSystem &cs,
                                                VarDecl *wrapped,
-                                               bool usingStorageWrapper,
+                                               bool usingProjection,
                                                Type base, Type wrapper,
                                                ConstraintLocator *locator) {
   return new (cs.getAllocator()) UsePropertyWrapper(
-      cs, wrapped, usingStorageWrapper, base, wrapper, locator);
+      cs, wrapped, usingProjection, base, wrapper, locator);
 }
 
 bool UseWrappedValue::diagnose(const Solution &solution, bool asNote) const {
   MissingPropertyWrapperUnwrapFailure failure(solution, PropertyWrapper,
-                                              usingStorageWrapper(), Base,
+                                              usingProjection(), Base,
                                               Wrapper, getLocator());
   return failure.diagnose(asNote);
 }
@@ -469,6 +627,27 @@ UseWrappedValue *UseWrappedValue::create(ConstraintSystem &cs,
                                          ConstraintLocator *locator) {
   return new (cs.getAllocator())
       UseWrappedValue(cs, propertyWrapper, base, wrapper, locator);
+}
+
+bool AddProjectedValue::diagnose(const Solution &solution, bool asNote) const {
+  MissingProjectedValueFailure failure(solution, wrapperType, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AddProjectedValue *AddProjectedValue::create(ConstraintSystem &cs, Type wrapperType,
+                                             ConstraintLocator *locator) {
+  return new (cs.getAllocator()) AddProjectedValue(cs, wrapperType, locator);
+}
+
+bool AddPropertyWrapperAttribute::diagnose(const Solution &solution, bool asNote) const {
+  MissingPropertyWrapperAttributeFailure failure(solution, wrapperType, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AddPropertyWrapperAttribute *AddPropertyWrapperAttribute::create(ConstraintSystem &cs,
+                                                                 Type wrapperType,
+                                                                 ConstraintLocator *locator) {
+  return new (cs.getAllocator()) AddPropertyWrapperAttribute(cs, wrapperType, locator);
 }
 
 bool UseSubscriptOperator::diagnose(const Solution &solution,
@@ -516,6 +695,23 @@ DefineMemberBasedOnUse::create(ConstraintSystem &cs, Type baseType,
                                ConstraintLocator *locator) {
   return new (cs.getAllocator())
       DefineMemberBasedOnUse(cs, baseType, member, alreadyDiagnosed, locator);
+}
+
+bool DefineMemberBasedOnUnintendedGenericParam::diagnose(
+    const Solution &solution, bool asNote) const {
+  UnintendedExtraGenericParamMemberFailure failure(solution, BaseType, Name,
+                                                   ParamName, getLocator());
+  return failure.diagnose(asNote);
+}
+
+DefineMemberBasedOnUnintendedGenericParam *
+DefineMemberBasedOnUnintendedGenericParam::create(ConstraintSystem &cs,
+                                                  Type baseType,
+                                                  DeclNameRef member,
+                                                  Identifier paramName,
+                                                  ConstraintLocator *locator) {
+  return new (cs.getAllocator()) DefineMemberBasedOnUnintendedGenericParam(
+      cs, baseType, member, paramName, locator);
 }
 
 AllowMemberRefOnExistential *
@@ -640,9 +836,9 @@ bool AddMissingArguments::diagnose(const Solution &solution,
 
 AddMissingArguments *
 AddMissingArguments::create(ConstraintSystem &cs,
-                            ArrayRef<SynthesizedParam> synthesizedArgs,
+                            ArrayRef<SynthesizedArg> synthesizedArgs,
                             ConstraintLocator *locator) {
-  unsigned size = totalSizeToAlloc<SynthesizedParam>(synthesizedArgs.size());
+  unsigned size = totalSizeToAlloc<SynthesizedArg>(synthesizedArgs.size());
   void *mem = cs.getAllocator().Allocate(size, alignof(AddMissingArguments));
   return new (mem) AddMissingArguments(cs, synthesizedArgs, locator);
 }
@@ -690,6 +886,29 @@ bool MoveOutOfOrderArgument::diagnose(const Solution &solution,
   return failure.diagnose(asNote);
 }
 
+bool MoveOutOfOrderArgument::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  auto *primaryFix =
+      commonFixes.front().second->getAs<MoveOutOfOrderArgument>();
+  assert(primaryFix);
+
+  if (llvm::all_of(
+          commonFixes,
+          [&primaryFix](
+              const std::pair<const Solution *, const ConstraintFix *> &entry) {
+            return primaryFix->isEqual(entry.second);
+          }))
+    return diagnose(*commonFixes.front().first);
+
+  return false;
+}
+
+bool MoveOutOfOrderArgument::isEqual(const ConstraintFix *other) const {
+  auto OoOFix = other->getAs<MoveOutOfOrderArgument>();
+  return OoOFix ? ArgIdx == OoOFix->ArgIdx && PrevArgIdx == OoOFix->PrevArgIdx
+                : false;
+}
+
 MoveOutOfOrderArgument *MoveOutOfOrderArgument::create(
     ConstraintSystem &cs, unsigned argIdx, unsigned prevArgIdx,
     ArrayRef<ParamBinding> bindings, ConstraintLocator *locator) {
@@ -723,6 +942,19 @@ AllowAnyObjectKeyPathRoot::create(ConstraintSystem &cs,
   return new (cs.getAllocator()) AllowAnyObjectKeyPathRoot(cs, locator);
 }
 
+bool AllowMultiArgFuncKeyPathMismatch::diagnose(const Solution &solution,
+                                                bool asNote) const {
+  MultiArgFuncKeyPathFailure failure(solution, functionType, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowMultiArgFuncKeyPathMismatch *
+AllowMultiArgFuncKeyPathMismatch::create(ConstraintSystem &cs, Type fnType,
+                                         ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+  AllowMultiArgFuncKeyPathMismatch(cs, fnType, locator);
+}
+
 bool TreatKeyPathSubscriptIndexAsHashable::diagnose(const Solution &solution,
                                                     bool asNote) const {
   KeyPathSubscriptIndexHashableFailure failure(solution, NonConformingType,
@@ -745,6 +977,11 @@ bool AllowInvalidRefInKeyPath::diagnose(const Solution &solution,
     return failure.diagnose(asNote);
   }
 
+  case RefKind::EnumCase: {
+    InvalidEnumCaseRefInKeyPath failure(solution, Member, getLocator());
+    return failure.diagnose(asNote);
+  }
+
   case RefKind::MutatingGetter: {
     InvalidMemberWithMutatingGetterInKeyPath failure(solution, Member,
                                                      getLocator());
@@ -760,6 +997,29 @@ bool AllowInvalidRefInKeyPath::diagnose(const Solution &solution,
   llvm_unreachable("covered switch");
 }
 
+bool AllowInvalidRefInKeyPath::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  auto *primaryFix =
+      commonFixes.front().second->getAs<AllowInvalidRefInKeyPath>();
+  assert(primaryFix);
+
+  if (llvm::all_of(
+          commonFixes,
+          [&primaryFix](
+              const std::pair<const Solution *, const ConstraintFix *> &entry) {
+            return primaryFix->isEqual(entry.second);
+          })) {
+    return diagnose(*commonFixes.front().first);
+  }
+
+  return false;
+}
+
+bool AllowInvalidRefInKeyPath::isEqual(const ConstraintFix *other) const {
+  auto *refFix = other->getAs<AllowInvalidRefInKeyPath>();
+  return refFix ? Kind == refFix->Kind && Member == refFix->Member : false;
+}
+
 AllowInvalidRefInKeyPath *
 AllowInvalidRefInKeyPath::forRef(ConstraintSystem &cs, ValueDecl *member,
                                  ConstraintLocator *locator) {
@@ -768,6 +1028,12 @@ AllowInvalidRefInKeyPath::forRef(ConstraintSystem &cs, ValueDecl *member,
   if (isa<FuncDecl>(member))
     return AllowInvalidRefInKeyPath::create(cs, RefKind::Method, member,
                                             locator);
+
+  // Referencing enum cases in key path is not currently allowed.
+  if (isa<EnumElementDecl>(member)) {
+    return AllowInvalidRefInKeyPath::create(cs, RefKind::EnumCase, member,
+                                            locator);
+  }
 
   // Referencing initializers in key path is not currently allowed.
   if (isa<ConstructorDecl>(member))
@@ -816,14 +1082,19 @@ RemoveAddressOf *RemoveAddressOf::create(ConstraintSystem &cs, Type lhs, Type rh
   return new (cs.getAllocator()) RemoveAddressOf(cs, lhs, rhs, locator);
 }
 
+RemoveReturn::RemoveReturn(ConstraintSystem &cs, Type resultTy,
+                           ConstraintLocator *locator)
+    : ContextualMismatch(cs, FixKind::RemoveReturn, resultTy,
+                         cs.getASTContext().TheEmptyTupleType, locator) {}
+
 bool RemoveReturn::diagnose(const Solution &solution, bool asNote) const {
   ExtraneousReturnFailure failure(solution, getLocator());
   return failure.diagnose(asNote);
 }
 
-RemoveReturn *RemoveReturn::create(ConstraintSystem &cs,
+RemoveReturn *RemoveReturn::create(ConstraintSystem &cs, Type resultTy,
                                    ConstraintLocator *locator) {
-  return new (cs.getAllocator()) RemoveReturn(cs, locator);
+  return new (cs.getAllocator()) RemoveReturn(cs, resultTy, locator);
 }
 
 bool CollectionElementContextualMismatch::diagnose(const Solution &solution,
@@ -866,18 +1137,18 @@ DefaultGenericArgument::create(ConstraintSystem &cs, GenericTypeParamType *param
   return new (cs.getAllocator()) DefaultGenericArgument(cs, param, locator);
 }
 
-SkipUnhandledConstructInFunctionBuilder *
-SkipUnhandledConstructInFunctionBuilder::create(ConstraintSystem &cs,
+SkipUnhandledConstructInResultBuilder *
+SkipUnhandledConstructInResultBuilder::create(ConstraintSystem &cs,
                                                 UnhandledNode unhandled,
                                                 NominalTypeDecl *builder,
                                                 ConstraintLocator *locator) {
   return new (cs.getAllocator())
-    SkipUnhandledConstructInFunctionBuilder(cs, unhandled, builder, locator);
+    SkipUnhandledConstructInResultBuilder(cs, unhandled, builder, locator);
 }
 
-bool SkipUnhandledConstructInFunctionBuilder::diagnose(const Solution &solution,
+bool SkipUnhandledConstructInResultBuilder::diagnose(const Solution &solution,
                                                        bool asNote) const {
-  SkipUnhandledConstructInFunctionBuilderFailure failure(solution, unhandled,
+  SkipUnhandledConstructInResultBuilderFailure failure(solution, unhandled,
                                                          builder, getLocator());
   return failure.diagnose(asNote);
 }
@@ -985,6 +1256,21 @@ DropThrowsAttribute *DropThrowsAttribute::create(ConstraintSystem &cs,
       DropThrowsAttribute(cs, fromType, toType, locator);
 }
 
+bool DropAsyncAttribute::diagnose(const Solution &solution,
+                                   bool asNote) const {
+  AsyncFunctionConversionFailure failure(solution, getFromType(),
+                                         getToType(), getLocator());
+  return failure.diagnose(asNote);
+}
+
+DropAsyncAttribute *DropAsyncAttribute::create(ConstraintSystem &cs,
+                                               FunctionType *fromType,
+                                               FunctionType *toType,
+                                               ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      DropAsyncAttribute(cs, fromType, toType, locator);
+}
+
 bool IgnoreContextualType::diagnose(const Solution &solution,
                                     bool asNote) const {
   ContextualFailure failure(solution, getFromType(), getToType(), getLocator());
@@ -1028,6 +1314,43 @@ bool IgnoreAssignmentDestinationType::diagnose(const Solution &solution,
   return failure.diagnose(asNote);
 }
 
+bool IgnoreAssignmentDestinationType::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  auto &cs = getConstraintSystem();
+
+  // If all of the types are the same let's try to diagnose
+  // this as if there is no ambiguity.
+  if (ContextualMismatch::diagnoseForAmbiguity(commonFixes))
+    return true;
+
+  auto *commonLocator = getLocator();
+  auto *assignment = castToExpr<AssignExpr>(commonLocator->getAnchor());
+
+  auto &solution = *commonFixes.front().first;
+  auto *calleeLocator = solution.getCalleeLocator(
+      solution.getConstraintLocator(assignment->getSrc()));
+  auto overload = solution.getOverloadChoiceIfAvailable(calleeLocator);
+  if (!overload)
+    return false;
+
+  auto memberName = overload->choice.getName().getBaseName();
+  auto destType = solution.getType(assignment->getDest());
+
+  auto &DE = cs.getASTContext().Diags;
+  // TODO(diagnostics): It might be good to add a tailored diagnostic
+  // for cases like this instead of using "contextual" one.
+  DE.diagnose(assignment->getSrc()->getLoc(),
+              diag::no_candidates_match_result_type,
+              memberName.userFacingName(),
+              solution.simplifyType(destType)->getRValueType());
+
+  for (auto &entry : commonFixes) {
+    entry.second->diagnose(*entry.first, /*asNote=*/true);
+  }
+
+  return true;
+}
+
 IgnoreAssignmentDestinationType *
 IgnoreAssignmentDestinationType::create(ConstraintSystem &cs, Type sourceTy,
                                         Type destTy,
@@ -1048,28 +1371,6 @@ AllowInOutConversion *AllowInOutConversion::create(ConstraintSystem &cs,
                                                    ConstraintLocator *locator) {
   return new (cs.getAllocator())
       AllowInOutConversion(cs, argType, paramType, locator);
-}
-
-/// Check whether given `value` type is indeed a the same type as a `RawValue`
-/// type of a given raw representable type.
-static bool isValueOfRawRepresentable(ConstraintSystem &cs,
-                                      Type rawRepresentableType,
-                                      Type valueType) {
-  auto rawType = isRawRepresentable(cs, rawRepresentableType);
-  if (!rawType)
-    return false;
-
-  KnownProtocolKind protocols[] = {
-      KnownProtocolKind::ExpressibleByStringLiteral,
-      KnownProtocolKind::ExpressibleByIntegerLiteral};
-
-  for (auto protocol : protocols) {
-    if (conformsToKnownProtocol(cs, valueType, protocol) &&
-        valueType->isEqual(rawType))
-      return true;
-  }
-
-  return false;
 }
 
 ExpandArrayIntoVarargs *
@@ -1107,32 +1408,32 @@ bool ExpandArrayIntoVarargs::diagnose(const Solution &solution,
   return failure.diagnose(asNote);
 }
 
-ExplicitlyConstructRawRepresentable *
-ExplicitlyConstructRawRepresentable::attempt(ConstraintSystem &cs, Type argType,
-                                             Type paramType,
-                                             ConstraintLocatorBuilder locator) {
-  auto rawRepresentableType = paramType->lookThroughAllOptionalTypes();
-  auto valueType = argType->lookThroughAllOptionalTypes();
-
-  if (isValueOfRawRepresentable(cs, rawRepresentableType, valueType))
-    return new (cs.getAllocator()) ExplicitlyConstructRawRepresentable(
-        cs, valueType, rawRepresentableType, cs.getConstraintLocator(locator));
-
-  return nullptr;
+bool ExplicitlyConstructRawRepresentable::diagnose(const Solution &solution,
+                                                   bool asNote) const {
+  MissingRawRepresentableInitFailure failure(solution, RawReprType,
+                                             ExpectedType, getLocator());
+  return failure.diagnose(asNote);
 }
 
-UseValueTypeOfRawRepresentative *
-UseValueTypeOfRawRepresentative::attempt(ConstraintSystem &cs, Type argType,
-                                         Type paramType,
-                                         ConstraintLocatorBuilder locator) {
-  auto rawRepresentableType = argType->lookThroughAllOptionalTypes();
-  auto valueType = paramType->lookThroughAllOptionalTypes();
+ExplicitlyConstructRawRepresentable *
+ExplicitlyConstructRawRepresentable::create(ConstraintSystem &cs,
+                                            Type rawReprType, Type expectedType,
+                                            ConstraintLocator *locator) {
+  return new (cs.getAllocator()) ExplicitlyConstructRawRepresentable(
+      cs, rawReprType, expectedType, locator);
+}
 
-  if (isValueOfRawRepresentable(cs, rawRepresentableType, valueType))
-    return new (cs.getAllocator()) UseValueTypeOfRawRepresentative(
-        cs, rawRepresentableType, valueType, cs.getConstraintLocator(locator));
+bool UseRawValue::diagnose(const Solution &solution, bool asNote) const {
+  MissingRawValueFailure failure(solution, RawReprType, ExpectedType,
+                                 getLocator());
+  return failure.diagnose(asNote);
+}
 
-  return nullptr;
+UseRawValue *UseRawValue::create(ConstraintSystem &cs, Type rawReprType,
+                                 Type expectedType,
+                                 ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      UseRawValue(cs, rawReprType, expectedType, locator);
 }
 
 unsigned AllowArgumentMismatch::getParamIdx() const {
@@ -1163,21 +1464,6 @@ bool RemoveInvalidCall::diagnose(const Solution &solution, bool asNote) const {
 RemoveInvalidCall *RemoveInvalidCall::create(ConstraintSystem &cs,
                                              ConstraintLocator *locator) {
   return new (cs.getAllocator()) RemoveInvalidCall(cs, locator);
-}
-
-bool AllowInvalidUseOfTrailingClosure::diagnose(const Solution &solution,
-                                                bool asNote) const {
-  InvalidUseOfTrailingClosure failure(solution, getFromType(), getToType(),
-                                      getLocator());
-  return failure.diagnose(asNote);
-}
-
-AllowInvalidUseOfTrailingClosure *
-AllowInvalidUseOfTrailingClosure::create(ConstraintSystem &cs, Type argType,
-                                         Type paramType,
-                                         ConstraintLocator *locator) {
-  return new (cs.getAllocator())
-      AllowInvalidUseOfTrailingClosure(cs, argType, paramType, locator);
 }
 
 bool TreatEphemeralAsNonEphemeral::diagnose(const Solution &solution,
@@ -1214,6 +1500,38 @@ SpecifyBaseTypeForContextualMember *SpecifyBaseTypeForContextualMember::create(
     ConstraintSystem &cs, DeclNameRef member, ConstraintLocator *locator) {
   return new (cs.getAllocator())
       SpecifyBaseTypeForContextualMember(cs, member, locator);
+}
+
+std::string SpecifyClosureParameterType::getName() const {
+  std::string name;
+  llvm::raw_string_ostream OS(name);
+
+  auto *closure = castToExpr<ClosureExpr>(getAnchor());
+  auto paramLoc =
+      getLocator()->castLastElementTo<LocatorPathElt::TupleElement>();
+
+  auto *PD = closure->getParameters()->get(paramLoc.getIndex());
+
+  OS << "specify type for parameter ";
+  if (PD->isAnonClosureParam()) {
+    OS << "$" << paramLoc.getIndex();
+  } else {
+    OS << "'" << PD->getParameterName() << "'";
+  }
+
+  return OS.str();
+}
+
+bool SpecifyClosureParameterType::diagnose(const Solution &solution,
+                                           bool asNote) const {
+  UnableToInferClosureParameterType failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+SpecifyClosureParameterType *
+SpecifyClosureParameterType::create(ConstraintSystem &cs,
+                                    ConstraintLocator *locator) {
+  return new (cs.getAllocator()) SpecifyClosureParameterType(cs, locator);
 }
 
 bool SpecifyClosureReturnType::diagnose(const Solution &solution,
@@ -1309,4 +1627,348 @@ AllowKeyPathRootTypeMismatch::create(ConstraintSystem &cs, Type lhs, Type rhs,
                                      ConstraintLocator *locator) {
   return new (cs.getAllocator())
       AllowKeyPathRootTypeMismatch(cs, lhs, rhs, locator);
+}
+
+SpecifyKeyPathRootType *
+SpecifyKeyPathRootType::create(ConstraintSystem &cs,
+                               ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      SpecifyKeyPathRootType(cs, locator);
+}
+
+bool SpecifyKeyPathRootType::diagnose(const Solution &solution,
+                                      bool asNote) const {
+  UnableToInferKeyPathRootFailure failure(solution, getLocator());
+  
+  return failure.diagnose(asNote);
+}
+
+bool UnwrapOptionalBaseKeyPathApplication::diagnose(const Solution &solution,
+                                                    bool asNote) const {
+  MissingOptionalUnwrapKeyPathFailure failure(solution, getFromType(),
+                                              getToType(), getLocator());
+  return failure.diagnose(asNote);
+}
+
+UnwrapOptionalBaseKeyPathApplication *
+UnwrapOptionalBaseKeyPathApplication::attempt(ConstraintSystem &cs, Type baseTy,
+                                              Type rootTy,
+                                              ConstraintLocator *locator) {
+  if(baseTy->hasTypeVariable() || rootTy->hasTypeVariable())
+    return nullptr;
+
+  if (!isExpr<SubscriptExpr>(locator->getAnchor()))
+    return nullptr;
+  
+  // Only diagnose this if base is an optional type and we only have a
+  // single level of optionality so we can safely suggest unwrapping.
+  auto nonOptionalTy = baseTy->getOptionalObjectType();
+  if (!nonOptionalTy || nonOptionalTy->getOptionalObjectType())
+    return nullptr;
+
+  auto result =
+      cs.matchTypes(nonOptionalTy, rootTy, ConstraintKind::Subtype,
+                    ConstraintSystem::TypeMatchFlags::TMF_ApplyingFix, locator);
+  if (result.isFailure())
+    return nullptr;
+
+  return new (cs.getAllocator())
+      UnwrapOptionalBaseKeyPathApplication(cs, baseTy, rootTy, locator);
+}
+
+bool SpecifyLabelToAssociateTrailingClosure::diagnose(const Solution &solution,
+                                                      bool asNote) const {
+  TrailingClosureRequiresExplicitLabel failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+SpecifyLabelToAssociateTrailingClosure *
+SpecifyLabelToAssociateTrailingClosure::create(ConstraintSystem &cs,
+                                               ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      SpecifyLabelToAssociateTrailingClosure(cs, locator);
+}
+
+bool AllowKeyPathWithoutComponents::diagnose(const Solution &solution,
+                                             bool asNote) const {
+  InvalidEmptyKeyPathFailure failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowKeyPathWithoutComponents *
+AllowKeyPathWithoutComponents::create(ConstraintSystem &cs,
+                                      ConstraintLocator *locator) {
+  return new (cs.getAllocator()) AllowKeyPathWithoutComponents(cs, locator);
+}
+
+bool IgnoreInvalidResultBuilderBody::diagnose(const Solution &solution,
+                                                bool asNote) const {
+  switch (Phase) {
+  // Handled below
+  case ErrorInPhase::PreCheck:
+    break;
+  case ErrorInPhase::ConstraintGeneration:
+    return true; // Already diagnosed by `matchResultBuilder`.
+  }
+
+  auto *S = castToExpr<ClosureExpr>(getAnchor())->getBody();
+
+  class PreCheckWalker : public ASTWalker {
+    DeclContext *DC;
+    DiagnosticTransaction Transaction;
+
+  public:
+    PreCheckWalker(DeclContext *dc)
+        : DC(dc), Transaction(dc->getASTContext().Diags) {}
+
+    std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+      auto hasError = ConstraintSystem::preCheckExpression(
+          E, DC, /*replaceInvalidRefsWithErrors=*/true);
+      return std::make_pair(false, hasError ? nullptr : E);
+    }
+
+    std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
+      return std::make_pair(true, S);
+    }
+
+    // Ignore patterns because result builder pre-check does so as well.
+    std::pair<bool, Pattern *> walkToPatternPre(Pattern *P) override {
+      return std::make_pair(false, P);
+    }
+
+    bool diagnosed() const {
+      return Transaction.hasErrors();
+    }
+  };
+
+  PreCheckWalker walker(solution.getDC());
+  S->walk(walker);
+
+  return walker.diagnosed();
+}
+
+IgnoreInvalidResultBuilderBody *IgnoreInvalidResultBuilderBody::create(
+    ConstraintSystem &cs, ErrorInPhase phase, ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      IgnoreInvalidResultBuilderBody(cs, phase, locator);
+}
+
+bool SpecifyContextualTypeForNil::diagnose(const Solution &solution,
+                                           bool asNote) const {
+  MissingContextualTypeForNil failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+SpecifyContextualTypeForNil *
+SpecifyContextualTypeForNil::create(ConstraintSystem &cs,
+                                    ConstraintLocator *locator) {
+  return new (cs.getAllocator()) SpecifyContextualTypeForNil(cs, locator);
+}
+
+bool AllowRefToInvalidDecl::diagnose(const Solution &solution,
+                                     bool asNote) const {
+  ReferenceToInvalidDeclaration failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowRefToInvalidDecl *
+AllowRefToInvalidDecl::create(ConstraintSystem &cs,
+                              ConstraintLocator *locator) {
+  return new (cs.getAllocator()) AllowRefToInvalidDecl(cs, locator);
+}
+
+bool IgnoreResultBuilderWithReturnStmts::diagnose(const Solution &solution,
+                                                  bool asNote) const {
+  InvalidReturnInResultBuilderBody failure(solution, BuilderType, getLocator());
+  return failure.diagnose(asNote);
+}
+
+IgnoreResultBuilderWithReturnStmts *
+IgnoreResultBuilderWithReturnStmts::create(ConstraintSystem &cs, Type builderTy,
+                                           ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      IgnoreResultBuilderWithReturnStmts(cs, builderTy, locator);
+}
+
+bool SpecifyBaseTypeForOptionalUnresolvedMember::diagnose(
+    const Solution &solution, bool asNote) const {
+  MemberMissingExplicitBaseTypeFailure failure(solution, MemberName,
+                                               getLocator());
+  return failure.diagnose(asNote);
+}
+
+SpecifyBaseTypeForOptionalUnresolvedMember *
+SpecifyBaseTypeForOptionalUnresolvedMember::attempt(
+    ConstraintSystem &cs, ConstraintKind kind, Type baseTy,
+    DeclNameRef memberName, FunctionRefKind functionRefKind,
+    MemberLookupResult result, ConstraintLocator *locator) {
+
+  if (kind != ConstraintKind::UnresolvedValueMember)
+    return nullptr;
+
+  // None or only one viable candidate, there is no ambiguity.
+  if (result.ViableCandidates.size() <= 1)
+    return nullptr;
+
+  // Only diagnose those situations for static members.
+  if (!baseTy->is<MetatypeType>())
+    return nullptr;
+
+  // Don't diagnose for function members e.g. Foo? = .none(0).
+  if (functionRefKind != FunctionRefKind::Unapplied)
+    return nullptr;
+
+  Type underlyingBaseType = baseTy->getMetatypeInstanceType();
+  if (!underlyingBaseType->getNominalOrBoundGenericNominal())
+    return nullptr;
+
+  if (!underlyingBaseType->getOptionalObjectType())
+    return nullptr;
+
+  auto unwrappedType = underlyingBaseType->lookThroughAllOptionalTypes();
+  bool allOptionalBaseCandidates = true;
+  auto filterViableCandidates =
+      [&](SmallVector<OverloadChoice, 4> &candidates,
+          SmallVector<OverloadChoice, 4> &viableCandidates,
+          bool &allOptionalBase) {
+        for (OverloadChoice choice : candidates) {
+          if (!choice.isDecl())
+            continue;
+
+          auto memberDecl = choice.getDecl();
+          if (isa<FuncDecl>(memberDecl))
+            continue;
+          if (memberDecl->isInstanceMember())
+            continue;
+
+          allOptionalBase &= bool(choice.getBaseType()
+                                      ->getMetatypeInstanceType()
+                                      ->getOptionalObjectType());
+
+          if (auto EED = dyn_cast<EnumElementDecl>(memberDecl)) {
+            if (!EED->hasAssociatedValues())
+              viableCandidates.push_back(choice);
+          } else if (auto VD = dyn_cast<VarDecl>(memberDecl)) {
+            if (unwrappedType->hasTypeVariable() ||
+                VD->getInterfaceType()->isEqual(unwrappedType))
+              viableCandidates.push_back(choice);
+          }
+        }
+      };
+
+  SmallVector<OverloadChoice, 4> viableCandidates;
+  filterViableCandidates(result.ViableCandidates, viableCandidates,
+                         allOptionalBaseCandidates);
+
+  // Also none or only one viable candidate after filtering candidates, there is
+  // no ambiguity.
+  if (viableCandidates.size() <= 1)
+    return nullptr;
+
+  // Right now, name lookup only unwraps a single layer of optionality, which
+  // for cases where base type is a multi-optional type e.g. Foo?? it only
+  // finds optional base candidates. To produce the correct warning we perform
+  // an extra lookup on unwrapped type.
+  if (!allOptionalBaseCandidates)
+    return new (cs.getAllocator())
+        SpecifyBaseTypeForOptionalUnresolvedMember(cs, memberName, locator);
+
+  MemberLookupResult unwrappedResult =
+      cs.performMemberLookup(kind, memberName, MetatypeType::get(unwrappedType),
+                             functionRefKind, locator,
+                             /*includeInaccessibleMembers*/ false);
+  SmallVector<OverloadChoice, 4> unwrappedViableCandidates;
+  filterViableCandidates(unwrappedResult.ViableCandidates,
+                         unwrappedViableCandidates, allOptionalBaseCandidates);
+  if (unwrappedViableCandidates.empty())
+    return nullptr;
+
+  return new (cs.getAllocator())
+      SpecifyBaseTypeForOptionalUnresolvedMember(cs, memberName, locator);
+}
+
+AllowCheckedCastCoercibleOptionalType *
+AllowCheckedCastCoercibleOptionalType::create(ConstraintSystem &cs,
+                                              Type fromType, Type toType,
+                                              CheckedCastKind kind,
+                                              ConstraintLocator *locator) {
+  return new (cs.getAllocator()) AllowCheckedCastCoercibleOptionalType(
+      cs, fromType, toType, kind, locator);
+}
+
+bool AllowCheckedCastCoercibleOptionalType::diagnose(const Solution &solution,
+                                                     bool asNote) const {
+  CoercibleOptionalCheckedCastFailure failure(
+      solution, getFromType(), getToType(), CastKind, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowAlwaysSucceedCheckedCast *
+AllowAlwaysSucceedCheckedCast::create(ConstraintSystem &cs, Type fromType,
+                                      Type toType, CheckedCastKind kind,
+                                      ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      AllowAlwaysSucceedCheckedCast(cs, fromType, toType, kind, locator);
+}
+
+bool AllowAlwaysSucceedCheckedCast::diagnose(const Solution &solution,
+                                             bool asNote) const {
+  AlwaysSucceedCheckedCastFailure failure(solution, getFromType(), getToType(),
+                                          CastKind, getLocator());
+  return failure.diagnose(asNote);
+}
+
+// Although function types maybe compile-time convertible because
+// compiler can emit thunks at SIL to handle the conversion when
+// required, only convertions that are supported by the runtime are
+// when types are trivially equal or non-throwing from type is equal
+// to throwing to type without throwing clause conversions are not
+// possible at runtime.
+bool AllowUnsupportedRuntimeCheckedCast::runtimeSupportedFunctionTypeCast(
+    FunctionType *fnFromType, FunctionType *fnToType) {
+  if (fnFromType->isEqual(fnToType)) {
+    return true;
+  } else if (!fnFromType->isThrowing() && fnToType->isThrowing()) {
+    return fnFromType->isEqual(
+        fnToType->getWithoutThrowing()->castTo<FunctionType>());
+  }
+  // Runtime cannot perform such conversion.
+  return false;
+}
+
+AllowUnsupportedRuntimeCheckedCast *
+AllowUnsupportedRuntimeCheckedCast::attempt(ConstraintSystem &cs, Type fromType,
+                                            Type toType, CheckedCastKind kind,
+                                            ConstraintLocator *locator) {
+  auto fnFromType = fromType->getAs<FunctionType>();
+  auto fnToType = toType->getAs<FunctionType>();
+
+  if (!(fnFromType && fnToType))
+    return nullptr;
+
+  if (runtimeSupportedFunctionTypeCast(fnFromType, fnToType))
+    return nullptr;
+
+  return new (cs.getAllocator())
+      AllowUnsupportedRuntimeCheckedCast(cs, fromType, toType, kind, locator);
+}
+
+bool AllowUnsupportedRuntimeCheckedCast::diagnose(const Solution &solution,
+                                                 bool asNote) const {
+  UnsupportedRuntimeCheckedCastFailure failure(
+      solution, getFromType(), getToType(), CastKind, getLocator());
+  return failure.diagnose(asNote);
+}
+
+bool AllowInvalidStaticMemberRefOnProtocolMetatype::diagnose(
+    const Solution &solution, bool asNote) const {
+  InvalidMemberRefOnProtocolMetatype failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowInvalidStaticMemberRefOnProtocolMetatype *
+AllowInvalidStaticMemberRefOnProtocolMetatype::create(
+    ConstraintSystem &cs, ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      AllowInvalidStaticMemberRefOnProtocolMetatype(cs, locator);
 }

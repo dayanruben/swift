@@ -1,4 +1,4 @@
-//===--- DeadFunctionElimination.cpp - Eliminate dead functions -----------===//
+//===- DeadFunctionElimination.cpp - Eliminate dead functions and globals -===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -27,15 +27,11 @@
 using namespace swift;
 
 STATISTIC(NumDeadFunc, "Number of dead functions eliminated");
+STATISTIC(NumDeadGlobals, "Number of dead global variables eliminated");
 
 namespace {
 
-/// This is a base class for passes that are based on function liveness
-/// computations like e.g. dead function elimination.
-/// It provides a common logic for computing live (i.e. reachable) functions.
-class FunctionLivenessComputation {
-protected:
-
+class DeadFunctionAndGlobalElimination {
   /// Represents a function which is implementing a vtable or witness table
   /// method.
   struct FuncImpl {
@@ -105,14 +101,14 @@ protected:
     if (F->isDynamicallyReplaceable())
       return true;
 
+    // Don't remove pre-specialized functions. We need to preserver the
+    // pre-specialization specifications from other modules.
+    if (F->hasPrespecialization())
+      return true;
+
     // ObjC functions are called through the runtime and are therefore alive
     // even if not referenced inside SIL.
     if (F->getRepresentation() == SILFunctionTypeRepresentation::ObjCMethod)
-      return true;
-
-    // Global initializers are always emitted into the defining module and
-    // their bodies are never SIL serialized.
-    if (F->isGlobalInit())
       return true;
 
     return false;
@@ -138,6 +134,11 @@ protected:
   /// Returns true if a witness table is marked as alive.
   bool isAlive(SILWitnessTable *WT) {
     return AliveFunctionsAndTables.count(WT) != 0;
+  }
+
+  /// Returns true if a global variable is marked as alive.
+  bool isAlive(SILGlobalVariable *global) {
+    return AliveFunctionsAndTables.count(global) != 0;
   }
 
   /// Marks a function as alive.
@@ -199,6 +200,16 @@ protected:
     }
   }
 
+  /// Marks the \p global and all functions, which are referenced from its
+  /// initializer as alive.
+  void makeAlive(SILGlobalVariable *global) {
+    AliveFunctionsAndTables.insert(global);
+    for (const SILInstruction &initInst : *global) {
+      if (auto *fRef = dyn_cast<FunctionRefInst>(&initInst))
+        ensureAlive(fRef->getReferencedFunction());
+    }
+  }
+
   /// Marks the declarations referenced by a key path pattern as alive if they
   /// aren't yet.
   void
@@ -232,6 +243,12 @@ protected:
   void ensureAlive(SILFunction *F) {
     if (!isAlive(F))
       makeAlive(F);
+  }
+
+  /// Marks a global variable as alive if it is not alive yet.
+  void ensureAlive(SILGlobalVariable *global) {
+    if (!isAlive(global))
+      makeAlive(global);
   }
 
   /// Marks a witness table as alive if it is not alive yet.
@@ -329,7 +346,7 @@ protected:
           MethodInfo *mi = getMethodInfo(funcDecl, /*isWitnessTable*/ false);
           ensureAliveClassMethod(mi, dyn_cast<FuncDecl>(funcDecl), MethodCl);
         } else if (auto *FRI = dyn_cast<FunctionRefInst>(&I)) {
-          ensureAlive(FRI->getInitiallyReferencedFunction());
+          ensureAlive(FRI->getReferencedFunction());
         } else if (auto *FRI = dyn_cast<DynamicFunctionRefInst>(&I)) {
           ensureAlive(FRI->getInitiallyReferencedFunction());
         } else if (auto *FRI = dyn_cast<PreviousDynamicFunctionRefInst>(&I)) {
@@ -337,6 +354,10 @@ protected:
         } else if (auto *KPI = dyn_cast<KeyPathInst>(&I)) {
           for (auto &component : KPI->getPattern()->getComponents())
             ensureKeyPathComponentIsAlive(component);
+        } else if (auto *GA = dyn_cast<GlobalAddrInst>(&I)) {
+          ensureAlive(GA->getReferencedGlobal());
+        } else if (auto *GV = dyn_cast<GlobalValueInst>(&I)) {
+          ensureAlive(GV->getReferencedGlobal());
         }
       }
     }
@@ -376,9 +397,6 @@ protected:
     return false;
   }
 
-  /// Find anchors in vtables and witness tables, if required.
-  virtual void findAnchorsInTables() = 0;
-
   /// Find all functions which are alive from the beginning.
   /// For example, functions which may be referenced externally.
   void findAnchors() {
@@ -391,19 +409,23 @@ protected:
         ensureAlive(&F);
       }
 
+      // Make sure that functions referenced by _specialize(target: targetFun())
+      // are kept alive.
+      F.forEachSpecializeAttrTargetFunction(
+          [this](SILFunction *targetFun) { ensureAlive(targetFun); });
+
       if (!F.shouldOptimize()) {
         LLVM_DEBUG(llvm::dbgs() << "  anchor a no optimization function: "
                                 << F.getName() << "\n");
         ensureAlive(&F);
       }
     }
+    
+    for (SILGlobalVariable &global : Module->getSILGlobals()) {
+      if (global.isPossiblyUsedExternally())
+        ensureAlive(&global);
+    }
   }
-
-public:
-  FunctionLivenessComputation(SILModule *module,
-                              bool keepExternalWitnessTablesAlive) :
-    Module(module),
-    keepExternalWitnessTablesAlive(keepExternalWitnessTablesAlive) {}
 
   /// The main entry point of the optimization.
   bool findAliveFunctions() {
@@ -425,34 +447,21 @@ public:
     return false;
   }
 
-  virtual ~FunctionLivenessComputation() {}
-};
-
-} // end anonymous namespace
-
-//===----------------------------------------------------------------------===//
-//                             DeadFunctionElimination
-//===----------------------------------------------------------------------===//
-
-namespace {
-
-class DeadFunctionElimination : FunctionLivenessComputation {
-
   void collectMethodImplementations() {
     // Collect vtable method implementations.
-    for (SILVTable &vTable : Module->getVTableList()) {
-      for (const SILVTable::Entry &entry : vTable.getEntries()) {
+    for (auto &vTable : Module->getVTables()) {
+      for (const SILVTable::Entry &entry : vTable->getEntries()) {
         // We don't need to collect destructors because we mark them as alive
         // anyway.
-        if (entry.Method.kind == SILDeclRef::Kind::Deallocator ||
-            entry.Method.kind == SILDeclRef::Kind::IVarDestroyer) {
+        if (entry.getMethod().kind == SILDeclRef::Kind::Deallocator ||
+            entry.getMethod().kind == SILDeclRef::Kind::IVarDestroyer) {
           continue;
         }
-        SILFunction *F = entry.Implementation;
-        auto *fd = getBaseMethod(cast<AbstractFunctionDecl>(
-                                                    entry.Method.getDecl()));
+        SILFunction *F = entry.getImplementation();
+        auto *fd = getBaseMethod(
+            cast<AbstractFunctionDecl>(entry.getMethod().getDecl()));
         MethodInfo *mi = getMethodInfo(fd, /*isWitnessTable*/ false);
-        mi->addClassMethodImpl(F, vTable.getClass());
+        mi->addClassMethodImpl(F, vTable->getClass());
       }
     }
 
@@ -492,26 +501,25 @@ class DeadFunctionElimination : FunctionLivenessComputation {
     }
   }
 
-  /// DeadFunctionElimination pass takes functions
-  /// reachable via vtables and witness_tables into account
+  /// Take functions reachable via vtables and witness_tables into account
   /// when computing a function liveness information.
-  void findAnchorsInTables() override {
+  void findAnchorsInTables() {
 
     collectMethodImplementations();
 
     // Check vtable methods.
-    for (SILVTable &vTable : Module->getVTableList()) {
-      for (const SILVTable::Entry &entry : vTable.getEntries()) {
-        if (entry.Method.kind == SILDeclRef::Kind::Deallocator ||
-            entry.Method.kind == SILDeclRef::Kind::IVarDestroyer) {
+    for (auto &vTable : Module->getVTables()) {
+      for (const SILVTable::Entry &entry : vTable->getEntries()) {
+        if (entry.getMethod().kind == SILDeclRef::Kind::Deallocator ||
+            entry.getMethod().kind == SILDeclRef::Kind::IVarDestroyer) {
           // Destructors are alive because they are called from swift_release
-          ensureAlive(entry.Implementation);
+          ensureAlive(entry.getImplementation());
           continue;
         }
 
-        SILFunction *F = entry.Implementation;
-        auto *fd = getBaseMethod(cast<AbstractFunctionDecl>(
-                                                     entry.Method.getDecl()));
+        SILFunction *F = entry.getImplementation();
+        auto *fd = getBaseMethod(
+            cast<AbstractFunctionDecl>(entry.getMethod().getDecl()));
 
         if (// We also have to check the method declaration's access level.
             // Needed if it's a public base method declared in another
@@ -600,23 +608,24 @@ class DeadFunctionElimination : FunctionLivenessComputation {
   /// Removes all dead methods from vtables and witness tables.
   bool removeDeadEntriesFromTables() {
     bool changedTable = false;
-    for (SILVTable &vTable : Module->getVTableList()) {
-      vTable.removeEntries_if([this, &changedTable]
-                              (SILVTable::Entry &entry) -> bool {
-        if (!isAlive(entry.Implementation)) {
-          LLVM_DEBUG(llvm::dbgs() << "  erase dead vtable method "
-                                  << entry.Implementation->getName() << "\n");
-          changedTable = true;
-          return true;
-        }
-        return false;
-      });
+    for (auto &vTable : Module->getVTables()) {
+      vTable->removeEntries_if(
+          [this, &changedTable](SILVTable::Entry &entry) -> bool {
+            if (!isAlive(entry.getImplementation())) {
+              LLVM_DEBUG(llvm::dbgs()
+                         << "  erase dead vtable method "
+                         << entry.getImplementation()->getName() << "\n");
+              changedTable = true;
+              return true;
+            }
+            return false;
+          });
     }
 
     auto &WitnessTables = Module->getWitnessTableList();
     for (auto WI = WitnessTables.begin(), EI = WitnessTables.end(); WI != EI;) {
       SILWitnessTable *WT = &*WI;
-      WI++;
+      ++WI;
       WT->clearMethods_if([this, &changedTable]
                           (const SILWitnessTable::MethodWitness &MW) -> bool {
         if (!isAlive(MW.Witness)) {
@@ -634,7 +643,7 @@ class DeadFunctionElimination : FunctionLivenessComputation {
               EI = DefaultWitnessTables.end();
          WI != EI;) {
       SILDefaultWitnessTable *WT = &*WI;
-      WI++;
+      ++WI;
       WT->clearMethods_if([this, &changedTable](SILFunction *MW) -> bool {
         if (!MW)
           return false;
@@ -651,11 +660,13 @@ class DeadFunctionElimination : FunctionLivenessComputation {
   }
 
 public:
-  DeadFunctionElimination(SILModule *module, bool keepExternalWitnessTablesAlive)
-      : FunctionLivenessComputation(module, keepExternalWitnessTablesAlive) {}
+  DeadFunctionAndGlobalElimination(SILModule *module,
+                                   bool keepExternalWitnessTablesAlive) :
+    Module(module),
+    keepExternalWitnessTablesAlive(keepExternalWitnessTablesAlive) {}
 
   /// The main entry point of the optimization.
-  void eliminateFunctions(SILModuleTransform *DFEPass) {
+  void eliminateFunctionsAndGlobals(SILModuleTransform *DFEPass) {
 
     LLVM_DEBUG(llvm::dbgs() << "running dead function elimination\n");
     findAliveFunctions();
@@ -664,11 +675,19 @@ public:
 
     // First drop all references so that we don't get problems with non-zero
     // reference counts of dead functions.
-    std::vector<SILFunction *> DeadFunctions;
+    llvm::SmallVector<SILFunction *, 16> DeadFunctions;
+    llvm::SmallVector<SILGlobalVariable *, 16> DeadGlobals;
     for (SILFunction &F : *Module) {
       if (!isAlive(&F)) {
         F.dropAllReferences();
         DeadFunctions.push_back(&F);
+      }
+    }
+    
+    for (SILGlobalVariable &global : Module->getSILGlobals()) {
+      if (!isAlive(&global)) {
+        global.dropAllReferences();
+        DeadGlobals.push_back(&global);
       }
     }
 
@@ -685,16 +704,18 @@ public:
     }
 
     // Last step: delete all dead functions.
-    while (!DeadFunctions.empty()) {
-      SILFunction *F = DeadFunctions.back();
-      DeadFunctions.pop_back();
-
-      LLVM_DEBUG(llvm::dbgs() << "  erase dead function " << F->getName()
+    for (SILFunction *deadFunc : DeadFunctions) {
+      LLVM_DEBUG(llvm::dbgs() << "  erase dead function " << deadFunc->getName()
                               << "\n");
-      NumDeadFunc++;
-      DFEPass->notifyWillDeleteFunction(F);
-      Module->eraseFunction(F);
+      ++NumDeadFunc;
+      DFEPass->notifyWillDeleteFunction(deadFunc);
+      Module->eraseFunction(deadFunc);
     }
+    for (SILGlobalVariable *deadGlobal : DeadGlobals) {
+      ++NumDeadGlobals;
+      Module->eraseGlobalVariable(deadGlobal);
+    }
+    
     if (changedTables)
       DFEPass->invalidateFunctionTables();
   }
@@ -708,13 +729,13 @@ public:
 
 namespace {
 
-class SILDeadFuncElimination : public SILModuleTransform {
+class DeadFunctionAndGlobalEliminationPass : public SILModuleTransform {
 
 private:
   bool isLateDFE;
 
 public:
-  SILDeadFuncElimination(bool isLateDFE) : isLateDFE(isLateDFE) { }
+  DeadFunctionAndGlobalEliminationPass(bool isLateDFE) : isLateDFE(isLateDFE) {}
 
   void run() override {
     LLVM_DEBUG(llvm::dbgs() << "Running DeadFuncElimination\n");
@@ -726,24 +747,25 @@ public:
     // can eliminate such functions.
     getModule()->invalidateSILLoaderCaches();
 
-    DeadFunctionElimination deadFunctionElimination(getModule(),
+    DeadFunctionAndGlobalElimination deadFunctionElimination(getModule(),
                                 /*keepExternalWitnessTablesAlive*/ !isLateDFE);
-    deadFunctionElimination.eliminateFunctions(this);
+    deadFunctionElimination.eliminateFunctionsAndGlobals(this);
   }
 };
 
 } // end anonymous namespace
 
-SILTransform *swift::createDeadFunctionElimination() {
-  return new SILDeadFuncElimination(/*isLateDFE*/ false);
+SILTransform *swift::createDeadFunctionAndGlobalElimination() {
+  return new DeadFunctionAndGlobalEliminationPass(/*isLateDFE*/ false);
 }
 
-SILTransform *swift::createLateDeadFunctionElimination() {
-  return new SILDeadFuncElimination(/*isLateDFE*/ true);
+SILTransform *swift::createLateDeadFunctionAndGlobalElimination() {
+  return new DeadFunctionAndGlobalEliminationPass(/*isLateDFE*/ true);
 }
 
 void swift::performSILDeadFunctionElimination(SILModule *M) {
-  llvm::SmallVector<PassKind, 1> Pass = {PassKind::DeadFunctionElimination};
+  llvm::SmallVector<PassKind, 1> Pass =
+    {PassKind::DeadFunctionAndGlobalElimination};
   auto &opts = M->getOptions();
   auto plan = SILPassPipelinePlan::getPassPipelineForKinds(opts, Pass);
   executePassPipelinePlan(M, plan);

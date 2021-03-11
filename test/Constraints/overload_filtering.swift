@@ -39,13 +39,24 @@ func testUnresolvedMember(i: Int) -> X {
   return .init(i, i)
 }
 
-func trailing(x: Int = 0, y: () -> Void) { }
-func trailing(x: Int = 0, z: Float) { }
+func test_member_filtering() {
+  struct S {
+    // Result types here are different intentionally,
+    // if there were the same simplication logic would
+    // trigger and disable overloads during constraint
+    // generation.
+    func foo(_: Int) -> S { S() }
+    func foo(_: String) -> Int { 42 }
 
-func testTrailing() {
-  // CHECK: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).trailing(x:z:)
-  trailing() { }
+    func bar(v: String) {}
+    func bar(_: Int) {}
+    func bar(a: Double, b: Int) {}
+  }
 
-  // CHECK: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).trailing(x:z:)
-  trailing(x: 5) { }
+  func test(s: S) {
+    // CHECK: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).test_member_filtering().S.bar(v:)
+    // CHECK-NEXT: disabled disjunction term {{.*}} bound to decl overload_filtering.(file).test_member_filtering().S.bar(a:b:)
+    // CHECK-NEXT: introducing single enabled disjunction term {{.*}} bound to decl overload_filtering.(file).test_member_filtering().S.bar
+    s.foo(42).bar(42)
+  }
 }

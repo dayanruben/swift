@@ -25,6 +25,7 @@ struct LLVM_LIBRARY_VISIBILITY LinearLifetimeChecker::ErrorBehaviorKind {
     PrintMessage = 2,
     Assert = 4,
     ReturnFalseOnLeak = 8,
+    StoreNonConsumingUsesOutsideLifetime = 16,
     PrintMessageAndReturnFalse = PrintMessage | ReturnFalse,
     PrintMessageAndAssert = PrintMessage | Assert,
     ReturnFalseOnLeakAssertOtherwise = ReturnFalseOnLeak | Assert,
@@ -32,6 +33,14 @@ struct LLVM_LIBRARY_VISIBILITY LinearLifetimeChecker::ErrorBehaviorKind {
 
   ErrorBehaviorKind() : Value(Invalid) {}
   ErrorBehaviorKind(inner_t Inner) : Value(Inner) { assert(Value != Invalid); }
+  ErrorBehaviorKind(unsigned Inner) : Value(inner_t(Inner)) {
+    assert(Value != Invalid);
+  }
+
+  bool shouldStoreNonConsumingUsesOutsideLifetime() const {
+    assert(Value != Invalid);
+    return Value & StoreNonConsumingUsesOutsideLifetime;
+  }
 
   bool shouldAssert() const {
     assert(Value != Invalid);
@@ -60,12 +69,14 @@ class LLVM_LIBRARY_VISIBILITY LinearLifetimeChecker::Error {
   bool foundUseAfterFree = false;
   bool foundLeak = false;
   bool foundOverConsume = false;
+  bool foundUseOutsideOfLifetime = false;
 
 public:
   Error() {}
 
   bool getFoundError() const {
-    return foundUseAfterFree || foundLeak || foundOverConsume;
+    return foundUseAfterFree || foundLeak || foundOverConsume ||
+           foundUseOutsideOfLifetime;
   }
 
   bool getFoundLeak() const { return foundLeak; }
@@ -73,42 +84,74 @@ public:
   bool getFoundUseAfterFree() const { return foundUseAfterFree; }
 
   bool getFoundOverConsume() const { return foundOverConsume; }
+
+  bool getFoundUseOutsideOfLifetime() const {
+    return foundUseOutsideOfLifetime;
+  }
 };
 
 class LLVM_LIBRARY_VISIBILITY LinearLifetimeChecker::ErrorBuilder {
   StringRef functionName;
   ErrorBehaviorKind behavior;
   Optional<Error> error;
-
-  // NOTE: This is only here so that we can emit a unique id for all errors to
-  // ease working with FileCheck.
-  static unsigned errorMessageCount;
+  unsigned *errorMessageCounter;
 
 public:
   ErrorBuilder(const SILFunction &fn,
-               LinearLifetimeChecker::ErrorBehaviorKind behavior)
-      : functionName(fn.getName()), behavior(behavior), error(Error()) {}
+               LinearLifetimeChecker::ErrorBehaviorKind behavior,
+               unsigned *errorMessageCounter = nullptr)
+      : functionName(fn.getName()), behavior(behavior), error(Error()),
+        errorMessageCounter(errorMessageCounter) {}
 
   ErrorBuilder(const SILFunction &fn,
-               LinearLifetimeChecker::ErrorBehaviorKind::inner_t behavior)
-      : functionName(fn.getName()), behavior(behavior), error(Error()) {}
+               LinearLifetimeChecker::ErrorBehaviorKind::inner_t behavior,
+               unsigned *errorMessageCounter = nullptr)
+      : ErrorBuilder(fn, LinearLifetimeChecker::ErrorBehaviorKind(behavior),
+                     errorMessageCounter) {}
 
-  Error getFinalError() && {
+  ErrorBuilder(const ErrorBuilder &other)
+      : functionName(other.functionName), behavior(other.behavior),
+        error(other.error), errorMessageCounter(other.errorMessageCounter) {}
+
+  ErrorBuilder &operator=(const ErrorBuilder &other) {
+    functionName = other.functionName;
+    behavior = other.behavior;
+    error = other.error;
+    errorMessageCounter = other.errorMessageCounter;
+    return *this;
+  }
+
+  Error consumeAndGetFinalError() && {
     auto result = *error;
     error = None;
+    errorMessageCounter = nullptr;
     return result;
+  }
+
+  void tryDumpErrorCounter() const {
+    if (!errorMessageCounter) {
+      return;
+    }
+    llvm::errs() << "Error#: " << *errorMessageCounter << ". ";
+  }
+
+  void tryIncrementErrorCounter() {
+    if (!errorMessageCounter) {
+      return;
+    }
+    ++(*errorMessageCounter);
   }
 
   bool handleLeak(llvm::function_ref<void()> &&messagePrinterFunc) {
     error->foundLeak = true;
 
     if (behavior.shouldPrintMessage()) {
-      llvm::errs() << "Error#: " << errorMessageCount
-                   << ". Begin Error in Function: '" << functionName << "'\n";
+      tryDumpErrorCounter();
+      llvm::errs() << "Begin Error in Function: '" << functionName << "'\n";
       messagePrinterFunc();
-      llvm::errs() << "Error#: " << errorMessageCount
-                   << ". End Error in Function: '" << functionName << "'\n";
-      ++errorMessageCount;
+      tryDumpErrorCounter();
+      llvm::errs() << "End Error in Function: '" << functionName << "'\n";
+      tryIncrementErrorCounter();
     }
 
     if (behavior.shouldReturnFalseOnLeak()) {
@@ -134,19 +177,29 @@ public:
     return handleError(std::move(messagePrinterFunc));
   }
 
+  /// Handle a case where we either found a use-after-free due to a
+  /// non-consuming use after our lifetime has ended /or/ if we found a use
+  /// before def of a non consuming value.
+  void
+  handleUseOutsideOfLifetime(llvm::function_ref<void()> &&messagePrinterFunc) {
+    error->foundUseOutsideOfLifetime = true;
+    handleError(std::move(messagePrinterFunc));
+  }
+
 private:
   bool handleError(llvm::function_ref<void()> &&messagePrinterFunc,
                    bool quiet = false) const {
     if (behavior.shouldPrintMessage()) {
       if (!quiet) {
-        llvm::errs() << "Error#: " << errorMessageCount
-                     << ". Begin Error in Function: '" << functionName << "'\n";
+        tryDumpErrorCounter();
+        llvm::errs() << "Begin Error in Function: '" << functionName << "'\n";
       }
       messagePrinterFunc();
       if (!quiet) {
-        llvm::errs() << "Error#: " << errorMessageCount
-                     << ". End Error in Function: '" << functionName << "'\n";
-        ++errorMessageCount;
+        tryDumpErrorCounter();
+        llvm::errs() << "End Error in Function: '" << functionName << "'\n";
+        auto *self = const_cast<ErrorBuilder *>(this);
+        self->tryIncrementErrorCounter();
       }
     }
 
@@ -155,7 +208,7 @@ private:
     }
 
     llvm::errs() << "Found ownership error?!\n";
-    llvm::report_fatal_error("triggering standard assertion failure routine");
+    llvm_unreachable("triggering standard assertion failure routine");
   }
 };
 

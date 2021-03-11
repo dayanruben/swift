@@ -66,13 +66,11 @@ class SwiftGizmo : Gizmo {
   // CHECK: bb0([[SELF_PARAM:%[0-9]+]] : @owned $SwiftGizmo):
   // CHECK-NEXT:   debug_value [[SELF_PARAM]] : $SwiftGizmo, let, name "self"
   // CHECK-NEXT:   [[SELF:%[0-9]+]] = mark_uninitialized [rootself] [[SELF_PARAM]] : $SwiftGizmo
+  // CHECK:        [[BORROWED_SELF:%.*]] = begin_borrow [[SELF]]
+  // CHECK-NEXT:   [[X:%[0-9]+]] = ref_element_addr [[BORROWED_SELF]] : $SwiftGizmo, #SwiftGizmo.x
   // CHECK:        [[XINIT:%[0-9]+]] = function_ref @$s12objc_dealloc10SwiftGizmoC1xAA1XCvpfi
   // CHECK-NEXT:   [[XOBJ:%[0-9]+]] = apply [[XINIT]]() : $@convention(thin) () -> @owned X
-  // CHECK-NEXT:   [[BORROWED_SELF:%.*]] = begin_borrow [[SELF]]
-  // CHECK-NEXT:   [[X:%[0-9]+]] = ref_element_addr [[BORROWED_SELF]] : $SwiftGizmo, #SwiftGizmo.x
-  // CHECK-NEXT:   [[WRITE:%.*]] = begin_access [modify] [dynamic] [[X]] : $*X
-  // CHECK-NEXT:   assign [[XOBJ]] to [[WRITE]] : $*X
-  // CHECK-NEXT:   end_access [[WRITE]] : $*X
+  // CHECK-NEXT:   store [[XOBJ]] to [init] [[X]] : $*X
   // CHECK-NEXT:   end_borrow [[BORROWED_SELF]]
   // CHECK-NEXT:   return [[SELF]] : $SwiftGizmo
 
@@ -80,7 +78,7 @@ class SwiftGizmo : Gizmo {
   // CHECK-LABEL: sil hidden [ossa] @$s12objc_dealloc10SwiftGizmoCfETo : $@convention(objc_method) (SwiftGizmo) -> ()
   // CHECK:      bb0([[SELF:%[0-9]+]] : @unowned $SwiftGizmo):
   // CHECK-NEXT: debug_value [[SELF]] : $SwiftGizmo, let, name "self"
-  // CHECK-NEXT: [[SELF_BORROW:%.*]] = begin_borrow [[SELF]]
+  // CHECK-NEXT: [[SELF_BORROW:%.*]] = unchecked_ownership_conversion %0 : $SwiftGizmo, @unowned to @guaranteed
   // CHECK-NEXT: [[X:%[0-9]+]] = ref_element_addr [[SELF_BORROW]] : $SwiftGizmo, #SwiftGizmo.x
   // CHECK-NEXT: [[X_ACCESS:%.*]] = begin_access [deinit] [static] [[X]]
   // CHECK-NEXT: destroy_addr [[X_ACCESS]]

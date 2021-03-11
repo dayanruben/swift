@@ -25,13 +25,14 @@ add_swift_unittest(SwiftBasicTests
   PrefixMapTest.cpp
   RangeTest.cpp
   SourceManagerTest.cpp
+  StableHasher.cpp
   STLExtrasTest.cpp
   StringExtrasTest.cpp
   SuccessorMapTest.cpp
   TaggedUnionTest.cpp
   ThreadSafeRefCntPointerTest.cpp
   TransformRangeTest.cpp
-  TreeScopedHashTableTest.cpp
+  TypeLookupError.cpp
   UnicodeTest.cpp
   ValueEnumeratorTest.cpp
   ${generated_tests}

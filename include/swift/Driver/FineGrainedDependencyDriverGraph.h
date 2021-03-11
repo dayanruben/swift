@@ -15,16 +15,13 @@
 
 #include "swift/AST/FineGrainedDependencies.h"
 #include "swift/Basic/Debug.h"
+#include "swift/Basic/Fingerprint.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/OptionSet.h"
 #include "swift/Driver/Job.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
@@ -59,7 +56,8 @@ class ModuleDepGraphNode : public DepGraphNode {
   bool hasBeenTracedAsADependent = false;
 
 public:
-  ModuleDepGraphNode(const DependencyKey &key, Optional<StringRef> fingerprint,
+  ModuleDepGraphNode(const DependencyKey &key,
+                     Optional<Fingerprint> fingerprint,
                      Optional<std::string> swiftDeps)
       : DepGraphNode(key, fingerprint), swiftDeps(swiftDeps) {}
 
@@ -189,10 +187,8 @@ class ModuleDepGraph {
   std::unordered_map<std::string, unsigned> dotFileSequenceNumber;
 
 public:
-  const bool verifyFineGrainedDependencyGraphAfterEveryImport;
-  const bool emitFineGrainedDependencyDotFileAfterEveryImport;
-
-  const bool EnableTypeFingerprints;
+  bool verifyFineGrainedDependencyGraphAfterEveryImport;
+  bool emitFineGrainedDependencyDotFileAfterEveryImport;
 
 private:
   /// If tracing dependencies, holds a vector used to hold the current path
@@ -206,7 +202,7 @@ private:
       dependencyPathsToJobs;
 
   /// For helping with performance tuning, may be null:
-  UnifiedStatsReporter *const stats;
+  UnifiedStatsReporter *stats;
 
   //==============================================================================
   // MARK: ModuleDepGraph - mutating dependencies
@@ -283,8 +279,6 @@ private:
     assert(swiftDeps.hasValue() && "Don't call me for expats.");
     auto iter = jobsBySwiftDeps.find(swiftDeps.getValue());
     assert(iter != jobsBySwiftDeps.end() && "All jobs should be tracked.");
-    assert(getSwiftDeps(iter->second) == swiftDeps.getValue() &&
-           "jobsBySwiftDeps should be inverse of getSwiftDeps.");
     return iter->second;
   }
 
@@ -299,14 +293,12 @@ public:
   /// \p stats may be null
   ModuleDepGraph(const bool verifyFineGrainedDependencyGraphAfterEveryImport,
                  const bool emitFineGrainedDependencyDotFileAfterEveryImport,
-                 const bool EnableTypeFingerprints,
                  const bool shouldTraceDependencies,
                  UnifiedStatsReporter *stats)
       : verifyFineGrainedDependencyGraphAfterEveryImport(
             verifyFineGrainedDependencyGraphAfterEveryImport),
         emitFineGrainedDependencyDotFileAfterEveryImport(
             emitFineGrainedDependencyDotFileAfterEveryImport),
-        EnableTypeFingerprints(EnableTypeFingerprints),
         currentPathIfTracing(
             shouldTraceDependencies
                 ? llvm::Optional<std::vector<const ModuleDepGraphNode *>>(
@@ -317,11 +309,10 @@ public:
   }
 
   /// For unit tests.
-  ModuleDepGraph(const bool EnableTypeFingerprints,
-                 const bool EmitDotFilesForDebugging = false)
+  ModuleDepGraph(const bool EmitDotFilesForDebugging = false)
       : ModuleDepGraph(
             true, /*emitFineGrainedDependencyDotFileAfterEveryImport=*/
-            EmitDotFilesForDebugging, EnableTypeFingerprints, false, nullptr) {}
+            EmitDotFilesForDebugging, false, nullptr) {}
 
   //============================================================================
   // MARK: ModuleDepGraph - updating from a switdeps file
@@ -339,6 +330,8 @@ public:
                                      const SourceFileDepGraph &,
                                      DiagnosticEngine &);
 
+  Changes loadFromSwiftModuleBuffer(const driver::Job *, llvm::MemoryBuffer &,
+                                    DiagnosticEngine &);
 
 private:
   /// Read a SourceFileDepGraph belonging to \p job from \p buffer
@@ -474,7 +467,7 @@ public:
   void printPath(raw_ostream &out, const driver::Job *node) const;
 
   /// Get a printable filename, given a node's swiftDeps.
-  StringRef getProvidingFilename(Optional<std::string> swiftDeps) const;
+  StringRef getProvidingFilename(const Optional<std::string> &swiftDeps) const;
 
   /// Print one node on the dependency path.
   static void printOneNodeOfPath(raw_ostream &out, const DependencyKey &key,
@@ -499,7 +492,12 @@ public:
 
   template <typename Nodes>
   std::vector<const driver::Job *>
-  findJobsToRecompileWhenNodesChange(const Nodes &);
+  findJobsToRecompileWhenNodesChange(const Nodes &nodes) {
+    std::vector<ModuleDepGraphNode *> foundDependents;
+    for (ModuleDepGraphNode *n : nodes)
+      findPreviouslyUntracedDependents(foundDependents, n);
+    return jobsContaining(foundDependents);
+  }
 
 private:
   std::vector<const driver::Job *>
@@ -525,6 +523,9 @@ public:
 
   void forEachUntracedJobDirectlyDependentOnExternalSwiftDeps(
       StringRef externalDependency, function_ref<void(const driver::Job *)> fn);
+  void forEachUntracedJobDirectlyDependentOnExternalIncrementalSwiftDeps(
+      StringRef externalDependency, function_ref<void(const driver::Job *)> fn);
+
   //============================================================================
   // MARK: ModuleDepGraph - verification
   //============================================================================

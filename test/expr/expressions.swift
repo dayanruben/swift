@@ -21,9 +21,9 @@ func1()
 _ = 4+7
 
 var bind_test1 : () -> () = func1
-var bind_test2 : Int = 4; func1 // expected-error {{expression resolves to an unused variable}}
+var bind_test2 : Int = 4; func1 // expected-warning {{variable is unused}}
 
-(func1, func2) // expected-error {{expression resolves to an unused variable}}
+(func1, func2) // expected-warning {{variable is unused}}
 
 func basictest() {
   // Simple integer variables.
@@ -246,15 +246,16 @@ func test_as_2() {
 func test_lambda() {
   // A simple closure.
   var a = { (value: Int) -> () in markUsed(value+1) }
+  // expected-warning@-1 {{initialization of variable 'a' was never used; consider replacing with assignment to '_' or removing it}}
 
   // A recursive lambda.
-  // FIXME: This should definitely be accepted.
   var fib = { (n: Int) -> Int in
+    // expected-warning@-1 {{variable 'fib' was never mutated; consider changing to 'let' constant}}
     if (n < 2) {
       return n
     }
     
-    return fib(n-1)+fib(n-2) // expected-error 2 {{variable used within its own initial value}}
+    return fib(n-1)+fib(n-2)
   }
 }
 
@@ -713,7 +714,7 @@ func unusedExpressionResults() {
   // <rdar://problem/20749592> Conditional Optional binding hides compiler error
   let optionalc:C? = nil
   optionalc?.method()  // ok
-  optionalc?.method  // expected-error {{expression resolves to an unused function}}
+  optionalc?.method  // expected-error {{function is unused}}
 }
 
 
@@ -781,8 +782,8 @@ func testNilCoalescePrecedence(cond: Bool, a: Int?, r: ClosedRange<Int>?) {
   // ?? should have higher precedence than logical operators like || and comparisons.
   if cond || (a ?? 42 > 0) {}  // Ok.
   if (cond || a) ?? 42 > 0 {}  // expected-error {{cannot be used as a boolean}} {{15-15=(}} {{16-16= != nil)}}
-  // expected-error@-1 {{type 'Int' cannot be used as a boolean; test for '!= 0' instead}}
-  // expected-error@-2 {{cannot convert value of type 'Bool' to expected argument type 'Int'}}
+  // expected-error@-1 {{binary operator '>' cannot be applied to operands of type 'Bool' and 'Int'}}  expected-note@-1 {{overloads for '>' exist with these partially matching parameter list}}
+  // expected-error@-2 {{binary operator '??' cannot be applied to operands of type 'Bool' and 'Int'}}
   if (cond || a) ?? (42 > 0) {}  // expected-error {{cannot be used as a boolean}} {{15-15=(}} {{16-16= != nil)}}
 
   if cond || a ?? 42 > 0 {}    // Parses as the first one, not the others.
@@ -790,8 +791,7 @@ func testNilCoalescePrecedence(cond: Bool, a: Int?, r: ClosedRange<Int>?) {
 
   // ?? should have lower precedence than range and arithmetic operators.
   let r1 = r ?? (0...42) // ok
-  let r2 = (r ?? 0)...42 // not ok: expected-error 2 {{cannot convert value of type 'Int' to expected argument type 'ClosedRange<Int>'}}
-  // expected-error@-1 {{referencing operator function '...' on 'Comparable' requires that 'ClosedRange<Int>' conform to 'Comparable'}}
+  let r2 = (r ?? 0)...42 // not ok: expected-error {{binary operator '??' cannot be applied to operands of type 'ClosedRange<Int>?' and 'Int'}}
   let r3 = r ?? 0...42 // parses as the first one, not the second.
   
   
@@ -841,7 +841,7 @@ func inoutTests(_ arr: inout Int) {
 
   inoutTests((&x, 24).0) // expected-error {{use of extraneous '&'}}
 
-  inoutTests((&x)) // expected-error {{use of extraneous '&'}}
+  inoutTests((&x)) // expected-error {{use of extraneous '&'}} {{15-16=(}} {{14-15=&}}
   inoutTests(&x)
   
   // <rdar://problem/17489894> inout not rejected as operand to assignment operator

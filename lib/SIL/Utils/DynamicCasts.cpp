@@ -25,7 +25,7 @@ static unsigned getAnyMetatypeDepth(CanType type) {
   unsigned depth = 0;
   while (auto metatype = dyn_cast<AnyMetatypeType>(type)) {
     type = metatype.getInstanceType();
-    depth++;
+    ++depth;
   }
   return depth;
 }
@@ -205,7 +205,51 @@ static CanType getHashableExistentialType(ModuleDecl *M) {
   auto hashable =
     M->getASTContext().getProtocol(KnownProtocolKind::Hashable);
   if (!hashable) return CanType();
-  return hashable->getDeclaredType()->getCanonicalType();
+  return hashable->getDeclaredInterfaceType()->getCanonicalType();
+}
+
+static bool canBeExistential(CanType ty) {
+  // If ty is an archetype, conservatively assume it's an existential.
+  return ty.isAnyExistentialType() || ty->is<ArchetypeType>();
+}
+
+static bool canBeClass(CanType ty) {
+  // If ty is an archetype, conservatively assume it's an existential.
+  return ty.getClassOrBoundGenericClass() || ty->is<ArchetypeType>();
+}
+
+bool SILDynamicCastInst::isRCIdentityPreserving() const {
+  // Casts which cast from a trivial type, like a metatype, to something which
+  // is retainable (or vice versa), like an AnyObject, are not RC identity
+  // preserving.
+  // On some platforms such casts dynamically allocate a ref-counted box for the
+  // metatype. Naturally that is the place where a new rc-identity begins.
+  // Therefore such a cast is introducing a new rc identical object.
+  //
+  // If RCIdentityAnalysis would look through such a cast, ARC optimizations
+  // would get confused and might eliminate a retain of such an object
+  // completely.
+  SILFunction &f = *getFunction();
+  if (getSourceLoweredType().isTrivial(f) != getTargetLoweredType().isTrivial(f))
+    return false;
+
+  CanType source = getSourceFormalType();
+  CanType target = getTargetFormalType();
+
+  // An existential may be holding a reference to a bridgeable struct.
+  // In this case, ARC on the existential affects the refcount of the container
+  // holding the struct, not the class to which the struct is bridged.
+  // Therefore, don't assume RC identity when casting between existentials and
+  // classes (and also between two existentials).
+  if (canBeExistential(source) &&
+      (canBeClass(target) || canBeExistential(target)))
+    return false;
+
+  // And vice versa.
+  if (canBeClass(source) && canBeExistential(target))
+    return false;
+
+  return true;
 }
 
 /// Check if a given type conforms to _BridgedToObjectiveC protocol.
@@ -492,9 +536,14 @@ swift::classifyDynamicCast(ModuleDecl *M,
       // A function cast can succeed if the function types can be identical,
       // or if the target type is throwier than the original.
 
+      // An async function cannot be cast to a non-async function and
+      // vice-versa.
+      if (sourceFunction->isAsync() != targetFunction->isAsync())
+        return DynamicCastFeasibility::WillFail;
+
       // A non-throwing source function can be cast to a throwing target type,
       // but not vice versa.
-      if (sourceFunction->throws() && !targetFunction->throws())
+      if (sourceFunction->isThrowing() && !targetFunction->isThrowing())
         return DynamicCastFeasibility::WillFail;
       
       // The cast can't change the representation at runtime.
@@ -719,7 +768,7 @@ swift::classifyDynamicCast(ModuleDecl *M,
 static unsigned getOptionalDepth(CanType type) {
   unsigned depth = 0;
   while (CanType objectType = type.getOptionalObjectType()) {
-    depth++;
+    ++depth;
     type = objectType;
   }
   return depth;
@@ -943,7 +992,7 @@ namespace {
         } else {
           // switch enum always start as @owned.
           SILValue sourceObjectValue = someBB->createPhiArgument(
-              loweredSourceObjectType, ValueOwnershipKind::Owned);
+              loweredSourceObjectType, OwnershipKind::Owned);
           objectSource = Source(sourceObjectValue, sourceObjectType);
         }
 
@@ -980,8 +1029,8 @@ namespace {
       if (target.isAddress()) {
         return target.asAddressSource();
       } else {
-        SILValue result = contBB->createPhiArgument(target.LoweredType,
-                                                    ValueOwnershipKind::Owned);
+        SILValue result =
+            contBB->createPhiArgument(target.LoweredType, OwnershipKind::Owned);
         return target.asScalarSource(result);
       }
     }

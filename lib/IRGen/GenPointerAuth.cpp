@@ -71,9 +71,9 @@ llvm::Value *irgen::emitPointerAuthStrip(IRGenFunction &IGF,
 FunctionPointer irgen::emitPointerAuthResign(IRGenFunction &IGF,
                                              const FunctionPointer &fn,
                                           const PointerAuthInfo &newAuthInfo) {
-  llvm::Value *fnPtr = emitPointerAuthResign(IGF, fn.getPointer(),
+  llvm::Value *fnPtr = emitPointerAuthResign(IGF, fn.getRawPointer(),
                                              fn.getAuthInfo(), newAuthInfo);
-  return FunctionPointer(fnPtr, newAuthInfo, fn.getSignature());
+  return FunctionPointer(fn.getKind(), fnPtr, newAuthInfo, fn.getSignature());
 }
 
 llvm::Value *irgen::emitPointerAuthResign(IRGenFunction &IGF,
@@ -309,6 +309,9 @@ PointerAuthEntity::getDeclDiscriminator(IRGenModule &IGM) const {
       case Special::TypeDescriptor:
       case Special::TypeDescriptorAsArgument:
         return SpecialPointerAuthDiscriminators::TypeDescriptor;
+      case Special::ProtocolConformanceDescriptor:
+      case Special::ProtocolConformanceDescriptorAsArgument:
+        return SpecialPointerAuthDiscriminators::ProtocolConformanceDescriptor;
       case Special::PartialApplyCapture:
         return PointerAuthDiscriminator_PartialApplyCapture;
       case Special::KeyPathDestroy:
@@ -457,7 +460,8 @@ static void hashStringForList(IRGenModule &IGM, const ArrayRef<T> &list,
       // Indirect params and return values have to be opaque.
       Out << "-indirect";
     } else {
-      CanType Ty = paramOrRetVal.getArgumentType(IGM.getSILModule(), fnType);
+      CanType Ty = paramOrRetVal.getArgumentType(
+          IGM.getSILModule(), fnType, IGM.getMaximalTypeExpansionContext());
       if (Ty->hasTypeParameter())
         Ty = genericEnv->mapTypeIntoContext(Ty)->getCanonicalType();
       hashStringForType(IGM, Ty, Out, genericEnv);
@@ -475,7 +479,8 @@ static void hashStringForList(IRGenModule &IGM,
       // Indirect params and return values have to be opaque.
       Out << "-indirect";
     } else {
-      CanType Ty = paramOrRetVal.getReturnValueType(IGM.getSILModule(), fnType);
+      CanType Ty = paramOrRetVal.getReturnValueType(
+          IGM.getSILModule(), fnType, IGM.getMaximalTypeExpansionContext());
       if (Ty->hasTypeParameter())
         Ty = genericEnv->mapTypeIntoContext(Ty)->getCanonicalType();
       hashStringForType(IGM, Ty, Out, genericEnv);
@@ -546,7 +551,8 @@ static uint64_t getYieldTypesHash(IRGenModule &IGM, CanSILFunctionType type) {
     } else if (yield.isFormalIndirect()) {
       out << "indirect";
     } else {
-      CanType Ty = yield.getArgumentType(IGM.getSILModule(), type);
+      CanType Ty = yield.getArgumentType(IGM.getSILModule(), type,
+                                         IGM.getMaximalTypeExpansionContext());
       if (Ty->hasTypeParameter())
         Ty = genericEnv->mapTypeIntoContext(Ty)->getCanonicalType();
       hashStringForType(IGM, Ty, out, genericEnv);

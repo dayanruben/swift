@@ -207,6 +207,7 @@ extension _StringObject {
   internal init(
     object: AnyObject, discriminator: UInt64, countAndFlags: CountAndFlags
   ) {
+    defer { _fixLifetime(object) }
     let builtinRawObject: Builtin.Int64 = Builtin.reinterpretCast(object)
     let builtinDiscrim: Builtin.Int64 = discriminator._value
     self.init(
@@ -293,7 +294,7 @@ extension _StringObject.CountAndFlags {
  on arm64.
 */
 extension _StringObject.Nibbles {
-  // The canonical empty sting is an empty small string
+  // The canonical empty string is an empty small string
   @inlinable @inline(__always)
   internal static var emptyString: UInt64 {
     return _StringObject.Nibbles.small(isASCII: true)
@@ -902,7 +903,7 @@ extension _StringObject {
       return sharedUTF8
     }
     return UnsafeBufferPointer(
-      start: self.nativeUTF8Start, count: self.largeCount)
+      _uncheckedStart: self.nativeUTF8Start, count: self.largeCount)
   }
 
   // Whether the object stored can be bridged directly as a NSString

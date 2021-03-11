@@ -113,10 +113,10 @@ func protocol_concrete_casts(_ p1: P1, p2: P2, p12: P1 & P2) {
 
   _ = p2 as! S1 // expected-warning {{cast from 'P2' to unrelated type 'S1' always fails}}
 
-  _ = p12 as! S1
-  _ = p12 as! S2
+  _ = p12 as! S1 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S1' always fails}}
+  _ = p12 as! S2 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S2' always fails}}
   _ = p12 as! S12
-  _ = p12 as! S3
+  _ = p12 as! S3 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S3' always fails}}
 
   // Type queries.
   var _:Bool = p1 is S1
@@ -128,10 +128,10 @@ func protocol_concrete_casts(_ p1: P1, p2: P2, p12: P1 & P2) {
 
   var _:Bool = p2 is S1 // expected-warning {{cast from 'P2' to unrelated type 'S1' always fails}}
 
-  var _:Bool = p12 is S1
-  var _:Bool = p12 is S2
+  var _:Bool = p12 is S1 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S1' always fails}}
+  var _:Bool = p12 is S2 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S2' always fails}}
   var _:Bool = p12 is S12
-  var _:Bool = p12 is S3
+  var _:Bool = p12 is S3 // expected-warning {{cast from 'P1 & P2' to unrelated type 'S3' always fails}}
 }
 
 func conditional_cast(_ b: B) -> D? {
@@ -232,11 +232,11 @@ func test_tuple_casts_no_warn() {
   _ = arr as! [(Foo, Foo)] // Ok
   _ = tup as! (Foo, Foo) // Ok
 
-  _ = arr as! [(Foo, Foo, Foo)] // expected-warning {{cast from '[(Any, Any)]' to unrelated type '[(Foo, Foo, Foo)]' always fails}}
+  _ = arr as! [(Foo, Foo, Foo)] // Ok
   _ = tup as! (Foo, Foo, Foo) // expected-warning {{cast from '(Any, Any)' to unrelated type '(Foo, Foo, Foo)' always fails}}
 
-  _ = arr as! [(a: Foo, Foo)] // expected-warning {{cast from '[(Any, Any)]' to unrelated type '[(a: Foo, Foo)]' always fails}}
-  _ = tup as! (a: Foo, Foo) // expected-warning {{cast from '(Any, Any)' to unrelated type '(a: Foo, Foo)' always fails}}
+  _ = arr as! [(a: Foo, Foo)] // Ok
+  _ = tup as! (a: Foo, Foo) // Ok
 }
 
 infix operator ^^^
@@ -252,11 +252,13 @@ func test_coercions_with_overloaded_operator(str: String, optStr: String?, veryO
 
   _ = (str ?? "") as Int // expected-error {{cannot convert value of type 'String' to type 'Int' in coercion}}
   _ = (optStr ?? "") as Int // expected-error {{cannot convert value of type 'String' to type 'Int' in coercion}}
-  _ = (optStr ?? "") as Int? // expected-error {{cannot convert value of type 'String' to type 'Int?' in coercion}}
+  _ = (optStr ?? "") as Int? // expected-error {{'String' is not convertible to 'Int?'}}
+  // expected-note@-1 {{did you mean to use 'as!' to force downcast?}} {{22-24=as!}}
 
   _ = (str ^^^ "") as Int // expected-error {{cannot convert value of type 'String' to type 'Int' in coercion}}
   _ = (optStr ^^^ "") as Int // expected-error {{cannot convert value of type 'String' to type 'Int' in coercion}}
-  _ = (optStr ^^^ "") as Int? // expected-error {{cannot convert value of type 'String' to type 'Int?' in coercion}}
+  _ = (optStr ^^^ "") as Int? // expected-error {{'String' is not convertible to 'Int?'}}
+  // expected-note@-1 {{did you mean to use 'as!' to force downcast?}} {{23-25=as!}}
 
   _ = ([] ?? []) as String // expected-error {{cannot convert value of type '[Any]' to type 'String' in coercion}}
   _ = ([""] ?? []) as [Int: Int] // expected-error {{cannot convert value of type '[String]' to type '[Int : Int]' in coercion}}
@@ -290,7 +292,8 @@ func test_compatibility_coercions(_ arr: [Int], _ optArr: [Int]?, _ dict: [Strin
   // expected-note@-1 {{arguments to generic parameter 'Element' ('Int' and 'String') are expected to be equal}}
   _ = dict as [String: String] // expected-error {{cannot convert value of type '[String : Int]' to type '[String : String]' in coercion}}
   // expected-note@-1 {{arguments to generic parameter 'Value' ('Int' and 'String') are expected to be equal}}
-  _ = dict as [String: String]? // expected-error {{cannot convert value of type '[String : Int]' to type '[String : String]?' in coercion}}
+  _ = dict as [String: String]? // expected-error {{'[String : Int]' is not convertible to '[String : String]?'}}
+  // expected-note@-1 {{did you mean to use 'as!' to force downcast?}} {{12-14=as!}}
   _ = (dict as [String: Int]?) as [String: Int] // expected-error {{value of optional type '[String : Int]?' must be unwrapped to a value of type '[String : Int]'}}
   // expected-note@-1 {{coalesce using '??' to provide a default when the optional value contains 'nil'}}
   // expected-note@-2 {{force-unwrap using '!' to abort execution if the optional value contains 'nil'}}
@@ -335,3 +338,194 @@ func test_compatibility_coercions(_ arr: [Int], _ optArr: [Int]?, _ dict: [Strin
   // The array can also be inferred to be [Any].
   _ = ([] ?? []) as Array // expected-warning {{left side of nil coalescing operator '??' has non-optional type '[Any]', so the right side is never used}}
 }
+
+// SR-13088
+protocol JSON { }
+protocol JSONLeaf: JSON {}
+extension Int: JSONLeaf { }
+extension Array: JSON where Element: JSON { }
+
+protocol SR13035Error: Error {}
+class ChildError: SR13035Error {}
+
+protocol AnyC {
+  func foo()
+}
+
+protocol AnyEvent {}
+
+protocol A {
+  associatedtype C: AnyC
+}
+
+protocol EventA: A {
+  associatedtype Event
+}
+
+typealias Container<Namespace>
+  = (event: Namespace.Event, c: Namespace.C) where Namespace: EventA
+
+enum ConcreteA: EventA {
+  struct C: AnyC {
+    func foo() {}
+  }
+
+  enum Event: AnyEvent {
+    case test
+  }
+}
+
+protocol ProtocolP1 {}
+protocol ProtocolQ1 {}
+typealias Composition = ProtocolP1 & ProtocolQ1
+
+protocol ProtocolP {}
+protocol ProtocolQ {}
+
+class ConcreteP: ProtocolP {}
+class ConcreteQ: ProtocolQ {}
+class ConcretePQ: ProtocolP, ProtocolQ {}
+class ConcreteCPQ: ConcreteP, ProtocolQ {}
+
+class ConcreteP1: ProtocolP1 {}
+class ConcretePQ1: ProtocolP1, ProtocolQ1 {}
+
+class ConcretePPQ1: ProtocolP, ProtocolP1, ProtocolQ1 {}
+class NotConforms {}
+struct StructNotComforms {}
+final class NotConformsFinal {}
+
+func tests_SR13088_false_positive_always_fail_casts() {
+  // SR-13081
+  let x: JSON = [4] // [4]
+  _ = x as? [Any] // Ok
+
+  // SR-13035
+  func SR13035<SomeError: SR13035Error>(_ child: Result<String, ChildError>, _: Result<String, SomeError>) {
+    let _ = child as? Result<String, SomeError> // Ok
+  }
+
+  func SR13035_1<SomeError: SR13035Error, Child: ChildError>(_ child: Result<String, Child>, parent: Result<String, SomeError>) {
+    _ = child as? Result<String, SomeError> // Ok
+    _ = parent as? Result<String, Child> // OK
+  }
+
+  // SR-11434 and SR-12321
+  func encodable(_ value: Encodable) {
+    _ = value as! [String : Encodable] // Ok
+    _ = value as? [String: Encodable] // Ok
+  }   
+
+  // SR-13025
+  func coordinate(_ event: AnyEvent, from c: AnyC) {
+    switch (event, c) {
+    case let container as Container<ConcreteA>: // OK
+      container.c.foo()
+    default:
+      break
+    }
+  }
+
+  // SR-7187
+  let a: [Any] = [String?.some("hello") as Any, String?.none as Any]
+  let b: [AnyObject] = [String?.some("hello") as AnyObject, String?.none as AnyObject]
+
+  _ = a is [String?] // Ok
+  _ = a as? [String?] as Any // OK
+  _ = b is [String?] // Ok
+  _ = b as? [String?] as AnyObject // OK
+
+  // SR-6192
+  let items = [String]()
+  let dict = [String: Any]()
+  let set = Set<String>()
+
+  _ = items is [Int] // Ok
+  _ = items as? [Int] as Any // Ok
+  _ = items as! [Int] // Ok
+
+  _ = dict is [Int: Any] // Ok
+  _ = dict as? [Int: Any] as Any // Ok
+  _ = dict as! [Int: Any] as Any // Ok
+
+  _ = set is Set<Int> // Ok
+  _ = set as? Set<Int> as Any // Ok
+  _ = set as! Set<Int> // Ok
+
+}
+
+// Protocol composition
+func protocol_composition(_ c: ProtocolP & ProtocolQ, _ c1: ProtocolP & Composition) {
+  _ = c as? ConcretePQ // Ok
+  _ = c as? ConcreteCPQ // Ok
+  _ = c as? ConcreteP // Ok
+  _ = c as? NotConforms // Ok
+  _ = c as? StructNotComforms // expected-warning {{cast from 'ProtocolP & ProtocolQ' to unrelated type 'StructNotComforms' always fails}}
+  _ = c as? NotConformsFinal // expected-warning {{cast from 'ProtocolP & ProtocolQ' to unrelated type 'NotConformsFinal' always fails}}
+  _ = c1 as? ConcreteP // Ok
+  _ = c1 as? ConcreteP1 // OK
+  _ = c1 as? ConcretePQ1 // OK
+  _ = c1 as? ConcretePPQ1 // Ok
+  _ = c1 as? NotConforms // Ok
+  _ = c1 as? StructNotComforms // expected-warning {{cast from 'ProtocolP & Composition' (aka 'ProtocolP & ProtocolP1 & ProtocolQ1') to unrelated type 'StructNotComforms' always fails}}
+  _ = c1 as? NotConformsFinal // expected-warning {{cast from 'ProtocolP & Composition' (aka 'ProtocolP & ProtocolP1 & ProtocolQ1') to unrelated type 'NotConformsFinal' always fails}}
+}
+
+// SR-13899
+class SR13899_Base {}
+class SR13899_Derived: SR13899_Base {}
+
+protocol SR13899_P {}
+class SR13899_A: SR13899_P {}
+
+typealias DA = SR13899_Derived
+typealias BA = SR13899_Base
+typealias ClosureType = (SR13899_Derived) -> Void
+
+let blockp = { (_: SR13899_A) in }
+let block = { (_: SR13899_Base) in }
+let derived = { (_: SR13899_Derived) in }
+
+let blockalias =  { (_: BA) in  }
+let derivedalias =  { (_: DA) in  }
+
+let _ = block is ClosureType // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to 'ClosureType' (aka '(SR13899_Derived) -> ()') is not supported; 'is' test always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-17=as}}
+let _ = blockalias is (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(SR13899_Base) -> ()') to '(SR13899_Derived) -> Void' is not supported; 'is' test always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{20-22=as}}
+let _ = block is (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; 'is' test always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-17=as}}
+let _ = block is (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; 'is' test always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-17=as}}
+
+let _ = block as! ClosureType // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to 'ClosureType' (aka '(SR13899_Derived) -> ()') is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+let _ = blockalias as! (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(SR13899_Base) -> ()') to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{20-23=as}}
+let _ = block as! (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+let _ = block as! (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+
+let _ = block as? ClosureType // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to 'ClosureType' (aka '(SR13899_Derived) -> ()') is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+let _ = blockalias as? (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(BA) -> ()' (aka '(SR13899_Base) -> ()') to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{20-23=as}}
+let _ = block as? (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+let _ = block as? (SR13899_Derived) -> Void // expected-warning{{runtime conversion from '(SR13899_Base) -> ()' to '(SR13899_Derived) -> Void' is not supported; cast always fails}}
+// expected-note@-1 {{consider using 'as' coercion instead}} {{15-18=as}}
+
+
+let _ = derived is (SR13899_Base) -> Void // expected-warning{{always fails}}
+let _ = blockp is (SR13899_P) -> Void // expected-warning{{always fails}}
+
+// Types are trivially equal.
+let _ = block is (SR13899_Base) -> Void // expected-warning{{'is' test is always true}}
+let _ = block is (SR13899_Base) throws -> Void // expected-warning{{'is' test is always true}}
+let _ = derivedalias is (SR13899_Derived) -> Void // expected-warning{{'is' test is always true}}
+let _ = derivedalias is (SR13899_Derived) throws -> Void // expected-warning{{'is' test is always true}}
+let _ = derived is (SR13899_Derived) -> Void // expected-warning{{'is' test is always true}}
+let _ = derived is (SR13899_Derived) throws -> Void // expected-warning{{'is' test is always true}}
+let _ = blockp is (SR13899_A) -> Void //expected-warning{{'is' test is always true}}
+let _ = blockp is (SR13899_A) throws -> Void //expected-warning{{'is' test is always true}}

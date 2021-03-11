@@ -112,8 +112,8 @@ ERROR(lex_single_quote_string,none,
 ERROR(lex_invalid_curly_quote,none,
       "unicode curly quote found, replace with '\"'", ())
 NOTE(lex_confusable_character,none,
-      "unicode character '%0' looks similar to '%1'; did you mean to use '%1'?",
-      (StringRef, StringRef))
+      "unicode character '%0' (%1) looks similar to '%2' (%3); did you mean to use '%2' (%3)?",
+      (StringRef, StringRef, StringRef, StringRef))
 WARNING(lex_nonbreaking_space,none,
         "non-breaking space (U+00A0) used instead of regular space", ())
 
@@ -248,6 +248,9 @@ ERROR(computed_property_no_accessors, none,
       "%select{computed property|subscript}0 must have accessors specified", (bool))
 ERROR(expected_getset_in_protocol,none,
       "expected get or set in a protocol property", ())
+ERROR(unexpected_getset_implementation_in_protocol,none,
+      "protocol property %0 cannot have a default implementation specified "
+      "here; use extension instead", (StringRef))
 ERROR(computed_property_missing_type,none,
       "computed property must have an explicit type", ())
 ERROR(getset_nontrivial_pattern,none,
@@ -324,6 +327,8 @@ ERROR(func_decl_expected_arrow,none,
 ERROR(operator_static_in_protocol,none,
       "operator '%0' declared in protocol must be 'static'",
       (StringRef))
+ERROR(async_func_modifier,none,
+      "'async' must be written after the parameter list of a function", ())
 
 // Enum
 ERROR(expected_lbrace_enum,PointsToFirstBadToken,
@@ -626,6 +631,8 @@ ERROR(expected_sil_function_type, none,
       "sil function expected to have SIL function type", ())
 ERROR(sil_dynamically_replaced_func_not_found,none,
       "dynamically replaced function not found %0", (Identifier))
+ERROR(sil_specialize_target_func_not_found,none,
+      "_specialize target function not found %0", (Identifier))
 ERROR(sil_availability_expected_version,none,
       "expected version number in 'available' attribute", ())
 
@@ -672,6 +679,9 @@ ERROR(sil_witness_protocol_conformance_not_found,none,
 // SIL differentiability witnesses
 ERROR(sil_diff_witness_expected_token,PointsToFirstBadToken,
       "expected '%0' in differentiability witness", (StringRef))
+ERROR(sil_diff_witness_unknown_kind,PointsToFirstBadToken,
+      "unknonwn differentiability kind '%0'; expected 'forward', 'reverse', "
+      "'normal', or 'linear'", (StringRef))
 ERROR(sil_diff_witness_serialized_declaration,none,
       "differentiability witness declaration should not be serialized", ())
 ERROR(sil_diff_witness_undefined,PointsToFirstBadToken,
@@ -727,10 +737,11 @@ ERROR(generic_non_function,PointsToFirstBadToken,
 ERROR(rethrowing_function_type,none,
       "only function declarations may be marked 'rethrows'; "
       "did you mean 'throws'?", ())
-ERROR(throws_in_wrong_position,none,
-      "'throws' may only occur before '->'", ())
-ERROR(rethrows_in_wrong_position,none,
-      "'rethrows' may only occur before '->'", ())
+ERROR(reasync_function_type,none,
+      "only function declarations may be marked 'reasync'; "
+      "did you mean 'async'?", ())
+ERROR(async_or_throws_in_wrong_position,none,
+      "'%0' may only occur before '->'", (StringRef))
 ERROR(throw_in_function_type,none,
       "expected throwing specifier; did you mean 'throws'?", ())
 ERROR(expected_type_before_arrow,none,
@@ -742,6 +753,12 @@ ERROR(function_type_argument_label,none,
       (Identifier))
 ERROR(expected_dynamic_func_attr,none,
       "expected a dynamically_replaceable function", ())
+ERROR(async_after_throws,none,
+      "%select{'async'|'reasync'}0 must precede %select{'throws'|'rethrows'}1",
+      (bool, bool))
+ERROR(async_init,none, "initializer cannot be marked 'async'", ())
+ERROR(duplicate_effects_specifier,none,
+      "'%0' has already been specified", (StringRef))
 
 // Enum Types
 ERROR(expected_expr_enum_case_raw_value,PointsToFirstBadToken,
@@ -784,6 +801,8 @@ ERROR(protocol_method_argument_init,none,
       "default argument not permitted in a protocol method", ())
 ERROR(protocol_init_argument_init,none,
       "default argument not permitted in a protocol initializer", ())
+ERROR(protocol_subscript_argument_init,none,
+      "default argument not permitted in a protocol subscript", ())
 ERROR(tuple_type_multiple_labels,none,
       "tuple element cannot have two labels", ())
 
@@ -880,8 +899,6 @@ ERROR(expected_parameter_colon,PointsToFirstBadToken,
       "expected ':' following argument label and parameter name", ())
 ERROR(expected_assignment_instead_of_comparison_operator,none,
       "expected '=' instead of '==' to assign default value for parameter", ())
-ERROR(multiple_parameter_ellipsis,none,
-      "only a single variadic parameter '...' is permitted", ())
 ERROR(parameter_vararg_default,none,
       "variadic parameter cannot have a default value", ())
 ERROR(parameter_specifier_as_attr_disallowed,none,
@@ -914,6 +931,8 @@ ERROR(initializer_as_typed_pattern,none,
 
 ERROR(unlabeled_parameter_following_variadic_parameter,none,
       "a parameter following a variadic parameter requires a label", ())
+ERROR(closure_unlabeled_parameter_following_variadic_parameter,none,
+      "no parameters may follow a variadic parameter in a closure", ())
 
 ERROR(enum_element_empty_arglist,none,
       "enum element with associated values must have at least one "
@@ -951,7 +970,6 @@ ERROR(snake_case_deprecated,none,
       "%0 has been replaced with %1 in Swift 3",
       (StringRef, StringRef))
 
-
 // Assignment statement
 ERROR(expected_expr_assignment,none,
       "expected expression in assignment", ())
@@ -978,6 +996,10 @@ NOTE(indent_expression_to_silence,none,
 // Throw Statement
 ERROR(expected_expr_throw,PointsToFirstBadToken,
       "expected expression in 'throw' statement", ())
+
+// Await/Async
+ERROR(expected_await_not_async,none,
+      "found 'async' in expression; did you mean 'await'?", ())
 
 // Yield Statment
 ERROR(expected_expr_yield,PointsToFirstBadToken,
@@ -1030,8 +1052,6 @@ ERROR(expected_else_after_guard,PointsToFirstBadToken,
       "expected 'else' after 'guard' condition", ())
 ERROR(expected_lbrace_after_guard,PointsToFirstBadToken,
       "expected '{' after 'guard' else", ())
-ERROR(bound_var_guard_body,none,
-      "variable declared in 'guard' condition is not usable in its body", ())
 
 // While Statement
 ERROR(expected_condition_while,PointsToFirstBadToken,
@@ -1216,6 +1236,8 @@ ERROR(super_in_closure_with_capture,none,
 NOTE(super_in_closure_with_capture_here,none,
      "'self' explicitly captured here", ())
 
+WARNING(await_before_try,none, "'try' must precede 'await'", ())
+
 // Tuples and parenthesized expressions
 ERROR(expected_expr_in_expr_list,none,
       "expected expression in list of expressions", ())
@@ -1254,6 +1276,10 @@ ERROR(expected_colon_after_if_question,none,
       "expected ':' after '? ...' in ternary expression", ())
 ERROR(expected_expr_after_if_colon,none,
       "expected expression after '? ... :' in ternary expression", ())
+ERROR(expected_expr_after_try, none,
+      "expected expression after 'try'", ())
+ERROR(expected_expr_after_await, none,
+      "expected expression after 'await'", ())
 
 // Cast expressions
 ERROR(expected_type_after_is,none,
@@ -1318,8 +1344,6 @@ ERROR(replace_equal_with_colon_for_value,none,
       "'=' has been replaced with ':' in attribute arguments", ())
 ERROR(expected_attribute_name,none,
       "expected an attribute name", ())
-ERROR(unknown_attribute,none,
-      "unknown attribute '%0'", (StringRef))
 ERROR(unexpected_lparen_in_attribute,none,
       "unexpected '(' in attribute '%0'", (StringRef))
 ERROR(duplicate_attribute,none,
@@ -1351,6 +1375,12 @@ ERROR(attr_expected_comma,none,
 
 ERROR(attr_expected_string_literal,none,
 "expected string literal in '%0' attribute", (StringRef))
+
+ERROR(attr_expected_option_such_as,none,
+      "expected '%0' option such as '%1'", (StringRef, StringRef))
+
+ERROR(attr_unknown_option,none,
+      "unknown option '%0' for attribute '%1'", (StringRef, StringRef))
 
 ERROR(attr_missing_label,PointsToFirstBadToken,
       "missing label '%0:' in '@%1' attribute", (StringRef, StringRef))
@@ -1427,6 +1457,22 @@ WARNING(attr_availability_nonspecific_platform_unexpected_version,none,
       "unexpected version number in '%0' attribute for non-specific platform "
       "'*'", (StringRef))
 
+// availability macro
+ERROR(attr_availability_wildcard_in_macro, none,
+      "future platforms identified by '*' cannot be used in "
+      "an availability macro definition", ())
+ERROR(attr_availability_missing_macro_name,none,
+      "expected an identifier to begin an availability macro definition", ())
+ERROR(attr_availability_expected_colon_macro,none,
+      "expected ':' after '%0' in availability macro definition",
+      (StringRef))
+ERROR(attr_availability_unknown_version,none,
+      "reference to undefined version '%0' for availability macro '%1'",
+      (StringRef, StringRef))
+ERROR(attr_availability_duplicate,none,
+      "duplicate definition of availability macro '%0' for version '%1'",
+      (StringRef, StringRef))
+
 // originallyDefinedIn
 ERROR(originally_defined_in_missing_rparen,none,
       "expected ')' in @_originallyDefinedIn argument list", ())
@@ -1452,6 +1498,14 @@ WARNING(originally_defined_in_major_minor_only,none,
 
 WARNING(originally_defined_in_missing_platform_name,none,
         "* as platform name has no effect", ())
+
+WARNING(originally_defined_in_swift_version, none,
+        "Swift language version checks has no effect "
+        "in @_originallyDefinedIn", ())
+
+WARNING(originally_defined_in_package_description, none,
+        "PackageDescription version checks has no effect "
+        "in @_originallyDefinedIn", ())
 
 // convention
 ERROR(convention_attribute_expected_lparen,none,
@@ -1511,17 +1565,9 @@ ERROR(opened_attribute_id_value,none,
 ERROR(opened_attribute_expected_rparen,none,
       "expected ')' after id value for 'opened' attribute", ())
 
-// inline, optimize
-ERROR(optimization_attribute_expect_option,none,
-      "expected '%0' option such as '%1'", (StringRef, StringRef))
-ERROR(optimization_attribute_unknown_option,none,
-      "unknown option '%0' for attribute '%1'", (StringRef, StringRef))
-
 // effects
 ERROR(effects_attribute_expect_option,none,
       "expected '%0' option (readnone, readonly, readwrite)", (StringRef))
-ERROR(effects_attribute_unknown_option,none,
-      "unknown option '%0' for attribute '%1'", (StringRef, StringRef))
 
 // unowned
 ERROR(attr_unowned_invalid_specifier,none,
@@ -1548,9 +1594,6 @@ ERROR(attr_specialize_unknown_parameter_name,none,
 ERROR(attr_specialize_expected_bool_value,none,
       "expected a boolean true or false value in '_specialize' attribute", ())
 
-WARNING(attr_specialize_export_true_no_op,none,
-        "'exported: true' has no effect in '_specialize' attribute", ())
-
 ERROR(attr_specialize_missing_parameter_label_or_where_clause,none,
       "expected a parameter label or a where clause in '_specialize' attribute", ())
 
@@ -1559,20 +1602,29 @@ ERROR(attr_specialize_parameter_already_defined,none,
 
 ERROR(attr_specialize_expected_partial_or_full,none,
       "expected 'partial' or 'full' as values of the 'kind' parameter in '_specialize' attribute", ())
+ERROR(attr_specialize_expected_function,none,
+      "expected a function name as the value of the 'target' parameter in '_specialize' attribute", ())
+ERROR(attr_specialize_expected_spi_name,none,
+      "expected an SPI identifier as the value of the 'spi' parameter in '_specialize' attribute", ())
 
 // _implements
 ERROR(attr_implements_expected_member_name,PointsToFirstBadToken,
       "expected a member name as second parameter in '_implements' attribute", ())
 
 // differentiable
+WARNING(attr_differentiable_expected_reverse,PointsToFirstBadToken,
+        "'@differentiable' has been renamed to '@differentiable(reverse)' and "
+        "will be removed in the next release", ())
+ERROR(attr_differentiable_kind_not_supported,PointsToFirstBadToken,
+      "unsupported differentiability kind '%0'; only 'reverse' is supported", (StringRef))
+ERROR(attr_differentiable_unknown_kind,PointsToFirstBadToken,
+      "unknown differentiability kind '%0'; only 'reverse' is supported", (StringRef))
 ERROR(attr_differentiable_expected_parameter_list,PointsToFirstBadToken,
       "expected a list of parameters to differentiate with respect to", ())
 ERROR(attr_differentiable_use_wrt_not_withrespectto,none,
       "use 'wrt:' to specify parameters to differentiate with respect to", ())
 ERROR(attr_differentiable_expected_label,none,
       "expected 'wrt:' or 'where' in '@differentiable' attribute", ())
-ERROR(attr_differentiable_unexpected_argument,none,
-      "unexpected argument '%0' in '@differentiable' attribute", (StringRef))
 
 // differentiation `wrt` parameters clause
 ERROR(expected_colon_after_label,PointsToFirstBadToken,
@@ -1622,6 +1674,11 @@ ERROR(sil_inst_autodiff_invalid_witness_generic_signature,PointsToFirstBadToken,
       "expected witness_generic signature '%0' does not have same generic "
       "parameters as original function generic signature '%1'",
       (StringRef, StringRef))
+
+// hasAsyncAlternative
+ERROR(has_async_alternative_invalid_name, none,
+      "argument of '%0' attribute must be an identifier or full function name",
+      (StringRef))
 
 //------------------------------------------------------------------------------
 // MARK: Generics parsing diagnostics
@@ -1744,11 +1801,27 @@ ERROR(pound_available_package_description_not_allowed, none,
 ERROR(availability_query_repeated_platform, none,
       "version for '%0' already specified", (StringRef))
 
+ERROR(attr_requires_concurrency,none,
+      "'%0' %select{attribute|modifier}1 is only valid when experimental "
+      "concurrency is enabled",
+      (StringRef, bool))
+
 //------------------------------------------------------------------------------
 // MARK: syntax parsing diagnostics
 //------------------------------------------------------------------------------
 ERROR(unknown_syntax_entity, PointsToFirstBadToken,
       "unknown %0 syntax exists in the source", (StringRef))
+
+//------------------------------------------------------------------------------
+// MARK: multiple trailing closures diagnostics
+//------------------------------------------------------------------------------
+ERROR(expected_argument_label_followed_by_closure_literal,none,
+      "expected an argument label followed by a closure literal", ())
+ERROR(expected_closure_literal,none,
+      "expected a closure literal", ())
+
+ERROR(expected_multiple_closures_block_rbrace,none,
+      "expected '}' at the end of a trailing closures block", ())
 
 #define UNDEFINE_DIAGNOSTIC_MACROS
 #include "DefineDiagnosticMacros.h"

@@ -45,9 +45,9 @@ namespace autodiff {
 
 /// Stores `apply` instruction information calculated by VJP generation.
 struct NestedApplyInfo {
-  /// The differentiation indices that are used to differentiate this `apply`
+  /// The differentiation config that is used to differentiate this `apply`
   /// instruction.
-  SILAutoDiffIndices indices;
+  AutoDiffConfig config;
   /// The original pullback type before reabstraction. `None` if the pullback
   /// type is not reabstracted.
   Optional<CanSILFunctionType> originalPullbackType;
@@ -73,6 +73,9 @@ private:
   llvm::SmallVector<DifferentiableFunctionInst *, 32>
       differentiableFunctionInsts;
 
+  /// The worklist (stack) of `linear_function` instructions to be processed.
+  llvm::SmallVector<LinearFunctionInst *, 32> linearFunctionInsts;
+
   /// The set of `differentiable_function` instructions that have been
   /// processed. Used to avoid reprocessing invalidated instructions.
   /// NOTE(TF-784): if we use `CanonicalizeInstruction` subclass to replace
@@ -80,14 +83,17 @@ private:
   llvm::SmallPtrSet<DifferentiableFunctionInst *, 32>
       processedDifferentiableFunctionInsts;
 
+  /// The set of `linear_function` instructions that have been processed. Used
+  /// to avoid reprocessing invalidated instructions.
+  /// NOTE(TF-784): if we use `CanonicalizeInstruction` subclass to replace
+  /// `ADContext::processLinearFunctionInst`, this field may be removed.
+  llvm::SmallPtrSet<LinearFunctionInst *, 32> processedLinearFunctionInsts;
+
   /// Mapping from witnesses to invokers.
   /// `SmallMapVector` is used for deterministic insertion order iteration.
   llvm::SmallMapVector<SILDifferentiabilityWitness *, DifferentiationInvoker,
                        32>
       invokers;
-
-  /// Mapping from `differentiable_function` instructions to result indices.
-  llvm::DenseMap<DifferentiableFunctionInst *, unsigned> resultIndices;
 
   /// Mapping from original `apply` instructions to their corresponding
   /// `NestedApplyInfo`s.
@@ -109,10 +115,15 @@ private:
   mutable FuncDecl *cachedPlusFn = nullptr;
   /// `AdditiveArithmetic.+=` declaration.
   mutable FuncDecl *cachedPlusEqualFn = nullptr;
+  /// `AdditiveArithmetic.zero` declaration.
+  mutable AccessorDecl *cachedZeroGetter = nullptr;
 
 public:
   /// Construct an ADContext for the given module.
   explicit ADContext(SILModuleTransform &transform);
+
+  // No copying.
+  ADContext(const ADContext &) = delete;
 
   //--------------------------------------------------------------------------//
   // General utilities
@@ -124,30 +135,19 @@ public:
   SILPassManager &getPassManager() const { return passManager; }
   Lowering::TypeConverter &getTypeConverter() { return module.Types; }
 
+  llvm::SmallVectorImpl<DifferentiableFunctionInst *> &
+  getDifferentiableFunctionInstWorklist() {
+    return differentiableFunctionInsts;
+  }
+
+  llvm::SmallVectorImpl<LinearFunctionInst *> &getLinearFunctionInstWorklist() {
+    return linearFunctionInsts;
+  }
+
   /// Get or create the synthesized file for the given `SILFunction`.
   /// Used by `LinearMapInfo` for adding generated linear map struct and
   /// branching trace enum declarations.
   SynthesizedFileUnit &getOrCreateSynthesizedFile(SILFunction *original);
-
-  /// Returns true if the `differentiable_function` instruction worklist is
-  /// empty.
-  bool isDifferentiableFunctionInstsWorklistEmpty() const {
-    return differentiableFunctionInsts.empty();
-  }
-
-  /// Pops and returns a `differentiable_function` instruction from the
-  /// worklist. Returns nullptr if the worklist is empty.
-  DifferentiableFunctionInst *popDifferentiableFunctionInstFromWorklist() {
-    if (differentiableFunctionInsts.empty())
-      return nullptr;
-    return differentiableFunctionInsts.pop_back_val();
-  }
-
-  /// Adds the given `differentiable_function` instruction to the worklist.
-  void
-  addDifferentiableFunctionInstToWorklist(DifferentiableFunctionInst *dfi) {
-    differentiableFunctionInsts.push_back(dfi);
-  }
 
   /// Returns true if the given `differentiable_function` instruction has
   /// already been processed.
@@ -162,6 +162,17 @@ public:
     processedDifferentiableFunctionInsts.insert(dfi);
   }
 
+  /// Returns true if the given `linear_function` instruction has already been
+  /// processed.
+  bool isLinearFunctionInstProcessed(LinearFunctionInst *lfi) const {
+    return processedLinearFunctionInsts.count(lfi);
+  }
+
+  /// Adds the given `linear_function` instruction to the worklist.
+  void markLinearFunctionInstAsProcessed(LinearFunctionInst *lfi) {
+    processedLinearFunctionInsts.insert(lfi);
+  }
+
   const llvm::SmallMapVector<SILDifferentiabilityWitness *,
                              DifferentiationInvoker, 32> &
   getInvokers() const {
@@ -172,17 +183,6 @@ public:
     assert(!invokers.count(witness) &&
            "Differentiability witness already has an invoker");
     invokers.insert({witness, DifferentiationInvoker(witness)});
-  }
-
-  /// Returns the result index for `dfi` if found in this context. Otherwise,
-  /// sets the result index to zero and returns it.
-  unsigned getResultIndex(DifferentiableFunctionInst *dfi) {
-    return resultIndices[dfi];
-  }
-
-  /// Sets the result index for `dfi`.
-  void setResultIndex(DifferentiableFunctionInst *dfi, unsigned index) {
-    resultIndices[dfi] = index;
   }
 
   llvm::DenseMap<ApplyInst *, NestedApplyInfo> &getNestedApplyInfo() {
@@ -203,6 +203,7 @@ public:
 
   FuncDecl *getPlusDecl() const;
   FuncDecl *getPlusEqualDecl() const;
+  AccessorDecl *getAdditiveArithmeticZeroGetter() const;
 
   /// Cleans up all the internal state.
   void cleanUp();
@@ -215,14 +216,28 @@ public:
   /// `CanonicalizeInstruction` may get rid of the need for this workaround.
   DifferentiableFunctionInst *createDifferentiableFunction(
       SILBuilder &builder, SILLocation loc, IndexSubset *parameterIndices,
-      SILValue original,
+      IndexSubset *resultIndices, SILValue original,
       Optional<std::pair<SILValue, SILValue>> derivativeFunctions = None);
 
-  // Given an `differentiable_function` instruction, finds the corresponding
+  /// Creates a `linear_function` instruction using the given builder
+  /// and arguments. Erase the newly created instruction from the processed set,
+  /// if it exists - it may exist in the processed set if it has the same
+  /// pointer value as a previously processed and deleted instruction.
+  LinearFunctionInst *
+  createLinearFunction(SILBuilder &builder, SILLocation loc,
+                       IndexSubset *parameterIndices, SILValue original,
+                       Optional<SILValue> transposeFunction = None);
+
+  // Given a `differentiable_function` instruction, finds the corresponding
   // differential operator used in the AST. If no differential operator is
   // found, return nullptr.
   DifferentiableFunctionExpr *
   findDifferentialOperator(DifferentiableFunctionInst *inst);
+
+  // Given a `linear_function` instruction, finds the corresponding differential
+  // operator used in the AST. If no differential operator is found, return
+  // nullptr.
+  LinearFunctionExpr *findDifferentialOperator(LinearFunctionInst *inst);
 
   template <typename... T, typename... U>
   InFlightDiagnostic diagnose(SourceLoc loc, Diag<T...> diag,
@@ -257,6 +272,10 @@ public:
                                 Diag<T...> diag, U &&... args);
 };
 
+raw_ostream &getADDebugStream();
+SILLocation getValidLocation(SILValue v);
+SILLocation getValidLocation(SILInstruction *inst);
+
 template <typename... T, typename... U>
 InFlightDiagnostic
 ADContext::emitNondifferentiabilityError(SILValue value,
@@ -264,14 +283,13 @@ ADContext::emitNondifferentiabilityError(SILValue value,
                                          Diag<T...> diag, U &&... args) {
   LLVM_DEBUG({
     getADDebugStream() << "Diagnosing non-differentiability.\n";
-    getADDebugStream() << "For value:\n" << value;
+    auto &s = getADDebugStream() << "For value:\n";
+    value->printInContext(s);
     getADDebugStream() << "With invoker:\n" << invoker << '\n';
   });
-  auto valueLoc = value.getLoc().getSourceLoc();
   // If instruction does not have a valid location, use the function location
   // as a fallback. Improves diagnostics in some cases.
-  if (valueLoc.isInvalid())
-    valueLoc = value->getFunction()->getLocation().getSourceLoc();
+  auto valueLoc = getValidLocation(value).getSourceLoc();
   return emitNondifferentiabilityError(valueLoc, invoker, diag,
                                        std::forward<U>(args)...);
 }
@@ -283,15 +301,14 @@ ADContext::emitNondifferentiabilityError(SILInstruction *inst,
                                          Diag<T...> diag, U &&... args) {
   LLVM_DEBUG({
     getADDebugStream() << "Diagnosing non-differentiability.\n";
-    getADDebugStream() << "For instruction:\n" << *inst;
+    auto &s = getADDebugStream() << "For instruction:\n";
+    inst->printInContext(s);
     getADDebugStream() << "With invoker:\n" << invoker << '\n';
   });
-  auto instLoc = inst->getLoc().getSourceLoc();
   // If instruction does not have a valid location, use the function location
   // as a fallback. Improves diagnostics for `ref_element_addr` generated in
   // synthesized stored property getters.
-  if (instLoc.isInvalid())
-    instLoc = inst->getFunction()->getLocation().getSourceLoc();
+  auto instLoc = getValidLocation(inst).getSourceLoc();
   return emitNondifferentiabilityError(instLoc, invoker, diag,
                                        std::forward<U>(args)...);
 }
@@ -309,6 +326,21 @@ ADContext::emitNondifferentiabilityError(SourceLoc loc,
   // non-differentiation operation.
   case DifferentiationInvoker::Kind::DifferentiableFunctionInst: {
     auto *inst = invoker.getDifferentiableFunctionInst();
+    if (auto *expr = findDifferentialOperator(inst)) {
+      diagnose(expr->getLoc(), diag::autodiff_function_not_differentiable_error)
+          .highlight(expr->getSubExpr()->getSourceRange());
+      return diagnose(loc, diag, std::forward<U>(args)...);
+    }
+    diagnose(loc, diag::autodiff_expression_not_differentiable_error);
+    return diagnose(loc, diag, std::forward<U>(args)...);
+  }
+
+  // For `linear_function` instructions: if the `linear_function` instruction
+  // comes from a differential operator, emit an error on the expression and a
+  // note on the non-differentiable operation. Otherwise, emit both an error and
+  // note on the non-differentiation operation.
+  case DifferentiationInvoker::Kind::LinearFunctionInst: {
+    auto *inst = invoker.getLinearFunctionInst();
     if (auto *expr = findDifferentialOperator(inst)) {
       diagnose(expr->getLoc(), diag::autodiff_function_not_differentiable_error)
           .highlight(expr->getSubExpr()->getSourceRange());
@@ -375,7 +407,7 @@ ADContext::emitNondifferentiabilityError(SourceLoc loc,
     return diagnose(loc, diag::autodiff_when_differentiating_function_call);
   }
   }
-  llvm_unreachable("invalid invoker");
+  llvm_unreachable("Invalid invoker kind"); // silences MSVC C4715
 }
 
 } // end namespace autodiff

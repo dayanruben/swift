@@ -1,15 +1,15 @@
 // RUN: %target-swift-frontend -enable-library-evolution -emit-ir %s | %FileCheck %s -DINT=i%target-ptrsize -DALIGNMENT=%target-alignment
 
-// REQUIRES: OS=macosx || OS=ios || OS=tvos || OS=watchos || OS=linux-gnu
+// REQUIRES: VENDOR=apple || OS=linux-gnu
 // UNSUPPORTED: CPU=i386 && OS=ios
 // UNSUPPORTED: CPU=armv7 && OS=ios
 // UNSUPPORTED: CPU=armv7s && OS=ios
 
 
-//      CHECK: [[EXTRA_DATA_PATTERN:@[0-9]+]] = internal constant { [[INT]] } { 
+//      CHECK: [[EXTRA_DATA_PATTERN:@[0-9]+]] = internal constant <{ [[INT]] }> <{ 
 // The payload size is 8: the larger payload is the size of an Int64.
 // CHECK-SAME:   [[INT]] 8
-// CHECK-SAME: }, align [[ALIGNMENT]]
+// CHECK-SAME: }>, align [[ALIGNMENT]]
 
 
 //      CHECK: @"$s4main6EitherOMP" = internal constant <{ 
@@ -55,7 +55,7 @@
 //           :   i32 trunc (
 // CHECK-SAME:     [[INT]] sub (
 // CHECK-SAME:       [[INT]] ptrtoint (
-// CHECK-SAME:         { [[INT]] }* [[EXTRA_DATA_PATTERN]] to [[INT]]
+// CHECK-SAME:         <{ [[INT]] }>* [[EXTRA_DATA_PATTERN]] to [[INT]]
 // CHECK-SAME:       ), 
 // CHECK-SAME:       [[INT]] ptrtoint (
 // CHECK-SAME:         i32* getelementptr inbounds (

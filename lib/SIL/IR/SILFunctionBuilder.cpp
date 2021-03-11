@@ -16,8 +16,7 @@
 using namespace swift;
 
 SILFunction *SILFunctionBuilder::getOrCreateFunction(
-    SILLocation loc, StringRef name, SILLinkage linkage,
-    CanSILFunctionType type, IsBare_t isBareSILFunction,
+    SILLocation loc, StringRef name, SILLinkage linkage, CanSILFunctionType type, IsBare_t isBareSILFunction,
     IsTransparent_t isTransparent, IsSerialized_t isSerialized,
     IsDynamicallyReplaceable_t isDynamic, ProfileCounter entryCount,
     IsThunk_t isThunk, SubclassScope subclassScope) {
@@ -53,9 +52,36 @@ void SILFunctionBuilder::addFunctionAttributes(
         SA->getSpecializationKind() == SpecializeAttr::SpecializationKind::Full
             ? SILSpecializeAttr::SpecializationKind::Full
             : SILSpecializeAttr::SpecializationKind::Partial;
-    F->addSpecializeAttr(
-        SILSpecializeAttr::create(M, SA->getSpecializedSgnature(),
-                                  SA->isExported(), kind));
+    assert(!constant.isNull());
+    SILFunction *targetFunction = nullptr;
+    auto *attributedFuncDecl = constant.getDecl();
+    auto *targetFunctionDecl = SA->getTargetFunctionDecl(attributedFuncDecl);
+    // Filter out _spi.
+    auto spiGroups = SA->getSPIGroups();
+    bool hasSPI = !spiGroups.empty();
+    if (hasSPI) {
+      if (attributedFuncDecl->getModuleContext() != M.getSwiftModule() &&
+          !M.getSwiftModule()->isImportedAsSPI(SA, attributedFuncDecl)) {
+        continue;
+      }
+    }
+    assert(spiGroups.size() <= 1 && "SIL does not support multiple SPI groups");
+    Identifier spiGroupIdent;
+    if (hasSPI) {
+      spiGroupIdent = spiGroups[0];
+    }
+    if (targetFunctionDecl) {
+      SILDeclRef declRef(targetFunctionDecl, constant.kind, false);
+      targetFunction = getOrCreateDeclaration(targetFunctionDecl, declRef);
+      F->addSpecializeAttr(SILSpecializeAttr::create(
+          M, SA->getSpecializedSignature(), SA->isExported(), kind,
+          targetFunction, spiGroupIdent,
+          attributedFuncDecl->getModuleContext()));
+    } else {
+      F->addSpecializeAttr(SILSpecializeAttr::create(
+          M, SA->getSpecializedSignature(), SA->isExported(), kind, nullptr,
+          spiGroupIdent, attributedFuncDecl->getModuleContext()));
+    }
   }
 
   if (auto *OA = Attrs.getAttribute<OptimizeAttr>()) {
@@ -91,7 +117,10 @@ void SILFunctionBuilder::addFunctionAttributes(
   auto *decl = constant.getDecl();
 
   // Only emit replacements for the objc entry point of objc methods.
-  if (decl->isObjC() &&
+  // There is one exception: @_dynamicReplacement(for:) of @objc methods in
+  // generic classes. In this special case we use native replacement instead of
+  // @objc categories.
+  if (decl->isObjC() && !decl->isNativeMethodReplacement() &&
       F->getLoweredFunctionType()->getExtInfo().getRepresentation() !=
           SILFunctionTypeRepresentation::ObjCMethod)
     return;
@@ -103,7 +132,10 @@ void SILFunctionBuilder::addFunctionAttributes(
   if (!replacedDecl)
     return;
 
-  if (decl->isObjC()) {
+  // For @objc method replacement we normally use categories to perform the
+  // replacement. Except for methods in generic class where we can't. Instead,
+  // we special case this and use the native swift replacement mechanism.
+  if (decl->isObjC() && !decl->isNativeMethodReplacement()) {
     F->setObjCReplacement(replacedDecl);
     return;
   }

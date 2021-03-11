@@ -72,7 +72,10 @@ ToolChain::InvocationInfo toolchains::GenericUnix::constructInvocation(
 
   addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
                          file_types::TY_Object);
+  addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
+                         file_types::TY_LLVM_BC);
   addInputsOfType(Arguments, context.InputActions, file_types::TY_Object);
+  addInputsOfType(Arguments, context.InputActions, file_types::TY_LLVM_BC);
 
   Arguments.push_back("-o");
   Arguments.push_back(
@@ -104,10 +107,6 @@ std::string toolchains::GenericUnix::getDefaultLinker() const {
     // Otherwise, use the default BFD linker.
     return "";
   }
-}
-
-std::string toolchains::GenericUnix::getTargetForLinker() const {
-  return getTriple().str();
 }
 
 bool toolchains::GenericUnix::addRuntimeRPath(const llvm::Triple &T,
@@ -144,12 +143,6 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
 
   ArgStringList Arguments;
 
-  std::string Target = getTargetForLinker();
-  if (!Target.empty()) {
-    Arguments.push_back("-target");
-    Arguments.push_back(context.Args.MakeArgString(Target));
-  }
-
   switch (job.getKind()) {
   case LinkKind::None:
     llvm_unreachable("invalid link kind");
@@ -165,9 +158,18 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
 
   // Select the linker to use.
   std::string Linker;
+  if (context.OI.LTOVariant != OutputInfo::LTOKind::None) {
+    // Force to use lld for LTO on Unix-like platform (not including Darwin)
+    // because we don't support gold LTO or something else except for lld LTO
+    // at this time.
+    Linker = "lld";
+  }
+
   if (const Arg *A = context.Args.getLastArg(options::OPT_use_ld)) {
     Linker = A->getValue();
-  } else {
+  }
+
+  if (Linker.empty()) {
     Linker = getDefaultLinker();
   }
   if (!Linker.empty()) {
@@ -181,30 +183,8 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
   }
 
   // Configure the toolchain.
-  //
-  // By default use the system `clang` to perform the link.  We use `clang` for
-  // the driver here because we do not wish to select a particular C++ runtime.
-  // Furthermore, until C++ interop is enabled, we cannot have a dependency on
-  // C++ code from pure Swift code.  If linked libraries are C++ based, they
-  // should properly link C++.  In the case of static linking, the user can
-  // explicitly specify the C++ runtime to link against.  This is particularly
-  // important for platforms like android where as it is a Linux platform, the
-  // default C++ runtime is `libstdc++` which is unsupported on the target but
-  // as the builds are usually cross-compiled from Linux, libstdc++ is going to
-  // be present.  This results in linking the wrong version of libstdc++
-  // generating invalid binaries.  It is also possible to use different C++
-  // runtimes than the default C++ runtime for the platform (e.g. libc++ on
-  // Windows rather than msvcprt).  When C++ interop is enabled, we will need to
-  // surface this via a driver flag.  For now, opt for the simpler approach of
-  // just using `clang` and avoid a dependency on the C++ runtime.
-  const char *Clang = "clang";
   if (const Arg *A = context.Args.getLastArg(options::OPT_tools_directory)) {
     StringRef toolchainPath(A->getValue());
-
-    // If there is a clang in the toolchain folder, use that instead.
-    if (auto tool = llvm::sys::findProgramByName("clang", {toolchainPath})) {
-      Clang = context.Args.MakeArgString(tool.get());
-    }
 
     // Look for binutils in the toolchain folder.
     Arguments.push_back("-B");
@@ -216,6 +196,17 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
       !context.Args.hasFlag(options::OPT_static_executable,
                             options::OPT_no_static_executable, false)) {
     Arguments.push_back("-pie");
+  }
+
+  switch (context.OI.LTOVariant) {
+  case OutputInfo::LTOKind::LLVMThin:
+    Arguments.push_back("-flto=thin");
+    break;
+  case OutputInfo::LTOKind::LLVMFull:
+    Arguments.push_back("-flto=full");
+    break;
+  case OutputInfo::LTOKind::None:
+    break;
   }
 
   bool staticExecutable = false;
@@ -253,7 +244,10 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
 
   addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
                          file_types::TY_Object);
+  addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
+                         file_types::TY_LLVM_BC);
   addInputsOfType(Arguments, context.InputActions, file_types::TY_Object);
+  addInputsOfType(Arguments, context.InputActions, file_types::TY_LLVM_BC);
 
   for (const Arg *arg :
        context.Args.filtered(options::OPT_F, options::OPT_Fsystem)) {
@@ -307,6 +301,13 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
     }
   }
 
+  // Link against the desired C++ standard library.
+  if (const Arg *A =
+          context.Args.getLastArg(options::OPT_experimental_cxx_stdlib)) {
+    Arguments.push_back(
+        context.Args.MakeArgString(Twine("-stdlib=") + A->getValue()));
+  }
+
   // Explicitly pass the target to the linker
   Arguments.push_back(
       context.Args.MakeArgString("--target=" + getTriple().str()));
@@ -337,7 +338,7 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
         Twine("-u", llvm::getInstrProfRuntimeHookVarName())));
   }
 
-  // Run clang++ in verbose mode if "-v" is set
+  // Run clang in verbose mode if "-v" is set
   if (context.Args.hasArg(options::OPT_v)) {
     Arguments.push_back("-v");
   }
@@ -352,7 +353,7 @@ toolchains::GenericUnix::constructInvocation(const DynamicLinkJobAction &job,
   Arguments.push_back(
       context.Args.MakeArgString(context.Output.getPrimaryOutputFilename()));
 
-  InvocationInfo II{Clang, Arguments};
+  InvocationInfo II{getClangLinkerDriver(context.Args), Arguments};
   II.allowsResponseFiles = true;
 
   return II;
@@ -368,7 +369,8 @@ toolchains::GenericUnix::constructInvocation(const StaticLinkJobAction &job,
   ArgStringList Arguments;
 
   // Configure the toolchain.
-  const char *AR = "ar";
+  const char *AR =
+      context.OI.LTOVariant != OutputInfo::LTOKind::None ? "llvm-ar" : "ar";
   Arguments.push_back("crs");
 
   Arguments.push_back(
@@ -376,39 +378,20 @@ toolchains::GenericUnix::constructInvocation(const StaticLinkJobAction &job,
 
   addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
                          file_types::TY_Object);
+  addPrimaryInputsOfType(Arguments, context.Inputs, context.Args,
+                         file_types::TY_LLVM_BC);
   addInputsOfType(Arguments, context.InputActions, file_types::TY_Object);
+  addInputsOfType(Arguments, context.InputActions, file_types::TY_LLVM_BC);
 
   InvocationInfo II{AR, Arguments};
 
   return II;
 }
 
-std::string toolchains::Android::getTargetForLinker() const {
-  const llvm::Triple &T = getTriple();
-  switch (T.getArch()) {
-  default:
-    // FIXME: we should just abort on an unsupported target
-    return T.str();
-  case llvm::Triple::arm:
-  case llvm::Triple::thumb:
-    // Current Android NDK versions only support ARMv7+.  Always assume ARMv7+
-    // for the arm/thumb target.
-    return "armv7-unknown-linux-androideabi";
-  case llvm::Triple::aarch64:
-    return "aarch64-unknown-linux-android";
-  case llvm::Triple::x86:
-    return "i686-unknown-linux-android";
-  case llvm::Triple::x86_64:
-    return "x86_64-unknown-linux-android";
-  }
-}
-
 std::string toolchains::Cygwin::getDefaultLinker() const {
   // Cygwin uses the default BFD linker, even on ARM.
   return "";
 }
-
-std::string toolchains::Cygwin::getTargetForLinker() const { return ""; }
 
 std::string toolchains::OpenBSD::getDefaultLinker() const {
   return "lld";

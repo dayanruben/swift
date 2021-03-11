@@ -41,6 +41,7 @@
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/Path.h"
 #include <set>
@@ -135,11 +136,19 @@ enum class ImportTypeKind {
 
   /// Import the type of a function parameter.
   ///
-  /// This provides special treatment for C++ references (which become
-  /// [inout] parameters) and C pointers (which become magic [inout]-able types),
-  /// among other things, and enables the conversion of bridged types.
+  /// Special handling:
+  /// * C and C++ pointers become `UnsafePointer?` or `UnsafeMutablePointer?`
+  /// * C++ references become `UnsafePointer` or `UnsafeMutablePointer`
+  /// * Bridging that requires type conversions is allowed.
   /// Parameters are always considered CF-audited.
   Parameter,
+
+  /// Import the type of a parameter to a completion handler that can indicate
+  /// a thrown error.
+  ///
+  /// Special handling:
+  /// * _Nullable_result is treated as _Nonnull rather than _Nullable_result.
+  CompletionHandlerResultParameter,
 
   /// Import the type of a parameter declared with
   /// \c CF_RETURNS_RETAINED.
@@ -248,13 +257,18 @@ public:
   /// should be inlucded in the cutoff of imported deprecated APIs marked
   /// unavailable.
   bool treatDeprecatedAsUnavailable(const clang::Decl *clangDecl,
-                                    const llvm::VersionTuple &version) const;
+                                    const llvm::VersionTuple &version,
+                                    bool isAsync) const;
 
   /// The message to embed for implicitly unavailability if a deprecated
   /// API is now unavailable.
   std::string deprecatedAsUnavailableMessage;
 
-  PlatformAvailability(LangOptions &opts);
+  /// The message to embed for implicit async unavailability based on
+  /// deprecation.
+  std::string asyncDeprecatedAsUnavailableMessage;
+
+  PlatformAvailability(const LangOptions &opts);
 
 private:
   PlatformAvailability(const PlatformAvailability&) = delete;
@@ -312,7 +326,7 @@ class LLVM_LIBRARY_VISIBILITY ClangImporter::Implementation
   using Version = importer::ImportNameVersion;
 
 public:
-  Implementation(ASTContext &ctx, const ClangImporterOptions &opts,
+  Implementation(ASTContext &ctx,
                  DWARFImporterDelegate *dwarfImporterDelegate);
   ~Implementation();
 
@@ -389,6 +403,21 @@ private:
   /// Clang parser, which is used to load textual headers.
   std::unique_ptr<clang::MangleContext> Mangler;
 
+  /// Clang arguments used to create the Clang invocation.
+  std::vector<std::string> ClangArgs;
+
+  /// The main actor type, populated the first time we look for it.
+  Optional<Type> MainActorType;
+
+  /// Mapping from Clang swift_attr attribute text to the Swift source buffer
+  /// IDs that contain that attribute text. These are re-used when parsing the
+  /// Swift attributes on import.
+  llvm::StringMap<unsigned> ClangSwiftAttrSourceBuffers;
+
+  /// Mapping from modules in which a Clang swift_attr attribute occurs, to be
+  /// used when parsing the attribute text.
+  llvm::SmallDenseMap<ModuleDecl *, SourceFile *> ClangSwiftAttrSourceFiles;
+
 public:
   /// Mapping of already-imported declarations.
   llvm::DenseMap<std::pair<const clang::Decl *, Version>, Decl *> ImportedDecls;
@@ -437,12 +466,6 @@ public:
   // Mapping from macro to value for macros that expand to constant values.
   llvm::DenseMap<const clang::MacroInfo *, std::pair<clang::APValue, Type>>
     ImportedMacroConstants;
-
-  /// Keeps track of active selector-based lookups, so that we don't infinitely
-  /// recurse when checking whether a method with a given selector has already
-  /// been imported.
-  llvm::DenseMap<std::pair<ObjCSelector, char>, unsigned>
-    ActiveSelectors;
 
   // Mapping from imported types to their raw value types.
   llvm::DenseMap<const NominalTypeDecl *, Type> RawTypes;
@@ -624,17 +647,17 @@ private:
 
   /// Load a module using the clang::CompilerInstance.
   ModuleDecl *loadModuleClang(SourceLoc importLoc,
-                              ArrayRef<Located<Identifier>> path);
+                              ImportPath::Module path);
   
   /// "Load" a module from debug info. Because debug info types are read on
   /// demand, this doesn't really do any work.
   ModuleDecl *loadModuleDWARF(SourceLoc importLoc,
-                              ArrayRef<Located<Identifier>> path);
+                              ImportPath::Module path);
 
 public:
   /// Load a module using either method.
   ModuleDecl *loadModule(SourceLoc importLoc,
-                         ArrayRef<Located<Identifier>> path);
+                         ImportPath::Module path);
 
   void recordImplicitUnwrapForDecl(ValueDecl *decl, bool isIUO) {
     if (!isIUO)
@@ -762,6 +785,17 @@ public:
 
   /// Map a Clang identifier name to its imported Swift equivalent.
   StringRef getSwiftNameFromClangName(StringRef name);
+
+  /// Look for the MainActor type in the _Concurrency library.
+  Type getMainActorType();
+
+  /// Retrieve the Swift source buffer ID that corresponds to the given
+  /// swift_attr attribute text, creating one if necessary.
+  unsigned getClangSwiftAttrSourceBuffer(StringRef attributeText);
+
+  /// Retrieve the placeholder source file for use in parsing Swift attributes
+  /// in the given module.
+  SourceFile &getClangSwiftAttrSourceFile(ModuleDecl &module);
 
   /// Import attributes from the given Clang declaration to its Swift
   /// equivalent.
@@ -923,14 +957,17 @@ public:
   /// into the ASTContext.
   ModuleDecl *tryLoadFoundationModule();
 
+  /// Returns whether or not the "Foundation" module can be imported, without loading it.
+  bool canImportFoundationModule();
+
   /// Retrieves the Swift wrapper for the given Clang module, creating
   /// it if necessary.
-  ClangModuleUnit *getWrapperForModule(const clang::Module *underlying);
+  ClangModuleUnit *getWrapperForModule(const clang::Module *underlying,
+                                       SourceLoc importLoc = SourceLoc());
 
   /// Constructs a Swift module for the given Clang module.
-  ModuleDecl *finishLoadingClangModule(SourceLoc importLoc,
-                                       const clang::Module *clangModule,
-                                       bool preferOverlay);
+  ModuleDecl *finishLoadingClangModule(const clang::Module *clangModule,
+                                       SourceLoc importLoc);
 
   /// Call finishLoadingClangModule on each deferred import collected
   /// while scanning a bridging header or PCH.
@@ -1035,7 +1072,8 @@ public:
   importType(clang::QualType type, ImportTypeKind kind,
              bool allowNSUIntegerAsInt, Bridgeability topLevelBridgeability,
              OptionalTypeKind optional = OTK_ImplicitlyUnwrappedOptional,
-             bool resugarNSErrorPointer = true);
+             bool resugarNSErrorPointer = true,
+             Optional<unsigned> completionHandlerErrorParamIndex = None);
 
   /// Import the given Clang type into Swift.
   ///
@@ -1079,13 +1117,11 @@ public:
   ///   to system APIs.
   /// \param name The name of the function.
   /// \param[out] parameterList The parameters visible inside the function body.
-  ImportedType
-  importFunctionParamsAndReturnType(DeclContext *dc,
-                                    const clang::FunctionDecl *clangDecl,
-                                    ArrayRef<const clang::ParmVarDecl *> params,
-                                    bool isVariadic, bool isFromSystemModule,
-                                    DeclName name,
-                                    ParameterList *&parameterList);
+  ImportedType importFunctionParamsAndReturnType(
+      DeclContext *dc, const clang::FunctionDecl *clangDecl,
+      ArrayRef<const clang::ParmVarDecl *> params, bool isVariadic,
+      bool isFromSystemModule, DeclName name, ParameterList *&parameterList,
+      ArrayRef<GenericTypeParamDecl *> genericParams);
 
   /// Import the given function return type.
   ///
@@ -1112,12 +1148,11 @@ public:
   /// \param argNames The argument names
   ///
   /// \returns The imported parameter list on success, or null on failure
-  ParameterList *
-  importFunctionParameterList(DeclContext *dc,
-                              const clang::FunctionDecl *clangDecl,
-                              ArrayRef<const clang::ParmVarDecl *> params,
-                              bool isVariadic, bool allowNSUIntegerAsInt,
-                              ArrayRef<Identifier> argNames);
+  ParameterList *importFunctionParameterList(
+      DeclContext *dc, const clang::FunctionDecl *clangDecl,
+      ArrayRef<const clang::ParmVarDecl *> params, bool isVariadic,
+      bool allowNSUIntegerAsInt, ArrayRef<Identifier> argNames,
+      ArrayRef<GenericTypeParamDecl *> genericParams);
 
   ImportedType importPropertyType(const clang::ObjCPropertyDecl *clangDecl,
                                   bool isFromSystemModule);
@@ -1161,6 +1196,7 @@ public:
                                   bool isFromSystemModule,
                                   ParameterList **bodyParams,
                                   importer::ImportedName importedName,
+                                  Optional<ForeignAsyncConvention> &asyncConv,
                                   Optional<ForeignErrorConvention> &errorConv,
                                   SpecialMethodKind kind);
 
@@ -1301,6 +1337,11 @@ public:
     llvm_unreachable("unimplemented for ClangImporter");
   }
 
+  ValueDecl *loadTargetFunctionDecl(const SpecializeAttr *attr,
+                                    uint64_t contextData) override {
+    llvm_unreachable("unimplemented for ClangImporter");
+  }
+
   void loadRequirementSignature(const ProtocolDecl *decl, uint64_t contextData,
                                 SmallVectorImpl<Requirement> &reqs) override {
     llvm_unreachable("unimplemented for ClangImporter");
@@ -1421,6 +1462,10 @@ public:
 
 namespace importer {
 
+/// Whether this is a forward declaration of a type. We ignore forward
+/// declarations in certain cases, and instead process the real declarations.
+bool isForwardDeclOfType(const clang::Decl *decl);
+
 /// Whether we should suppress the import of the given Clang declaration.
 bool shouldSuppressDeclImport(const clang::Decl *decl);
 
@@ -1428,15 +1473,17 @@ bool shouldSuppressDeclImport(const clang::Decl *decl);
 /// but are now renamed using the swift_name attribute.
 bool isSpecialUIKitStructZeroProperty(const clang::NamedDecl *decl);
 
+/// \returns true if this operator should be made a static function
+/// even if imported as a non-static member function.
+bool isImportedAsStatic(clang::OverloadedOperatorKind op);
+
 /// Add command-line arguments for a normal import of Clang code.
 void getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
-                                  ASTContext &ctx,
-                                  const ClangImporterOptions &importerOpts);
+                                  ASTContext &ctx);
 
 /// Add command-line arguments common to all imports of Clang code.
 void addCommonInvocationArguments(std::vector<std::string> &invocationArgStrs,
-                                  ASTContext &ctx,
-                                  const ClangImporterOptions &importerOpts);
+                                  ASTContext &ctx);
 
 /// Finds a particular kind of nominal by looking through typealiases.
 template <typename T>

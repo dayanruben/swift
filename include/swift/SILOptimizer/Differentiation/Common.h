@@ -17,32 +17,33 @@
 #ifndef SWIFT_SILOPTIMIZER_UTILS_DIFFERENTIATION_COMMON_H
 #define SWIFT_SILOPTIMIZER_UTILS_DIFFERENTIATION_COMMON_H
 
+#include "swift/AST/DiagnosticsSIL.h"
+#include "swift/AST/Expr.h"
+#include "swift/AST/SemanticAttrs.h"
 #include "swift/SIL/SILDifferentiabilityWitness.h"
 #include "swift/SIL/SILFunction.h"
+#include "swift/SIL/Projection.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeSubstCloner.h"
+#include "swift/SILOptimizer/Analysis/ArraySemantic.h"
 #include "swift/SILOptimizer/Analysis/DifferentiableActivityAnalysis.h"
+#include "swift/SILOptimizer/Differentiation/ADContext.h"
+#include "swift/SILOptimizer/Differentiation/DifferentiationInvoker.h"
+#include "swift/SILOptimizer/Differentiation/TangentBuilder.h"
 
 namespace swift {
+
+namespace autodiff {
+
+class ADContext;
 
 //===----------------------------------------------------------------------===//
 // Helpers
 //===----------------------------------------------------------------------===//
 
-namespace autodiff {
-
 /// Prints an "[AD] " prefix to `llvm::dbgs()` and returns the debug stream.
 /// This is being used to print short debug messages within the AD pass.
 raw_ostream &getADDebugStream();
-
-/// Returns true if this is an full apply site whose callee has
-/// `array.uninitialized_intrinsic` semantics.
-bool isArrayLiteralIntrinsic(FullApplySite applySite);
-
-/// If the given value `v` corresponds to an `ApplyInst` with
-/// `array.uninitialized_intrinsic` semantics, returns the corresponding
-/// `ApplyInst`. Otherwise, returns `nullptr`.
-ApplyInst *getAllocateUninitializedArrayIntrinsic(SILValue v);
 
 /// Given an element address from an `array.uninitialized_intrinsic` `apply`
 /// instruction, returns the `apply` instruction. The element address is either
@@ -55,11 +56,30 @@ ApplyInst *getAllocateUninitializedArrayIntrinsic(SILValue v);
 ///     %index_1 = integer_literal $Builtin.Word, 1
 ///     %elt1 = index_addr %elt0, %index_1           // element address
 ///     ...
+// TODO(SR-12894): Find a better name and move this general utility to
+// ArraySemantic.h.
 ApplyInst *getAllocateUninitializedArrayIntrinsicElementAddress(SILValue v);
 
 /// Given a value, finds its single `destructure_tuple` user if the value is
 /// tuple-typed and such a user exists.
 DestructureTupleInst *getSingleDestructureTupleUser(SILValue value);
+
+/// Returns true if the given original function is a "semantic member accessor".
+///
+/// "Semantic member accessors" are attached to member properties that have a
+/// corresponding tangent stored property in the parent `TangentVector` type.
+/// These accessors have special-case pullback generation based on their
+/// semantic behavior.
+///
+/// "Semantic member accessors" currently include:
+/// - Stored property accessors. These are implicitly generated.
+/// - Property wrapper wrapped value accessors. These are implicitly generated
+///   and internally call `var wrappedValue`.
+bool isSemanticMemberAccessor(SILFunction *original);
+
+/// Returns true if the given apply site has a "semantic member accessor"
+/// callee.
+bool hasSemanticMemberAccessorCallee(ApplySite applySite);
 
 /// Given a full apply site, apply the given callback to each of its
 /// "direct results".
@@ -101,7 +121,7 @@ void collectAllActualResultsInTypeOrder(
 /// - The set of minimal parameter and result indices for differentiating the
 ///   `apply` instruction.
 void collectMinimalIndicesForFunctionCall(
-    ApplyInst *ai, SILAutoDiffIndices parentIndices,
+    ApplyInst *ai, AutoDiffConfig parentConfig,
     const DifferentiableActivityInfo &activityInfo,
     SmallVectorImpl<SILValue> &results, SmallVectorImpl<unsigned> &paramIndices,
     SmallVectorImpl<unsigned> &resultIndices);
@@ -124,6 +144,42 @@ template <class Inst> Inst *peerThroughFunctionConversions(SILValue value) {
   return nullptr;
 }
 
+Optional<std::pair<SILDebugLocation, SILDebugVariable>>
+findDebugLocationAndVariable(SILValue originalValue);
+
+//===----------------------------------------------------------------------===//
+// Diagnostic utilities
+//===----------------------------------------------------------------------===//
+
+// Returns `v`'s location if it is valid. Otherwise, returns `v`'s function's
+// location as as a fallback. Used for diagnostics.
+SILLocation getValidLocation(SILValue v);
+
+// Returns `inst`'s location if it is valid. Otherwise, returns `inst`'s
+// function's location as as a fallback. Used for diagnostics.
+SILLocation getValidLocation(SILInstruction *inst);
+
+//===----------------------------------------------------------------------===//
+// Tangent property lookup utilities
+//===----------------------------------------------------------------------===//
+
+/// Returns the tangent stored property of the given original stored property
+/// and base type. On error, emits diagnostic and returns nullptr.
+VarDecl *getTangentStoredProperty(ADContext &context, VarDecl *originalField,
+                                  CanType baseType, SILLocation loc,
+                                  DifferentiationInvoker invoker);
+
+/// Returns the tangent stored property of the original stored property
+/// referenced by the given projection instruction with the given base type.
+/// On error, emits diagnostic and returns nullptr.
+///
+/// NOTE: Asserts if \p projectionInst is not one of: struct_extract,
+/// struct_element_addr, or ref_element_addr.
+VarDecl *getTangentStoredProperty(ADContext &context,
+                                  SingleValueInstruction *projectionInst,
+                                  CanType baseType,
+                                  DifferentiationInvoker invoker);
+
 //===----------------------------------------------------------------------===//
 // Code emission utilities
 //===----------------------------------------------------------------------===//
@@ -139,11 +195,15 @@ SILValue joinElements(ArrayRef<SILValue> elements, SILBuilder &builder,
 void extractAllElements(SILValue value, SILBuilder &builder,
                         SmallVectorImpl<SILValue> &results);
 
-/// Emit a zero value into the given buffer access by calling
-/// `AdditiveArithmetic.zero`. The given type must conform to
-/// `AdditiveArithmetic`.
-void emitZeroIntoBuffer(SILBuilder &builder, CanType type,
-                        SILValue bufferAccess, SILLocation loc);
+/// Emit a `Builtin.Word` value that represents the given type's memory layout
+/// size.
+SILValue emitMemoryLayoutSize(
+    SILBuilder &builder, SILLocation loc, CanType type);
+
+/// Emit a projection of the top-level subcontext from the context object.
+SILValue emitProjectTopLevelSubcontext(
+    SILBuilder &builder, SILLocation loc, SILValue context,
+    SILType subcontextType);
 
 //===----------------------------------------------------------------------===//
 // Utilities for looking up derivatives of functions
@@ -189,8 +249,8 @@ findMinimalDerivativeConfiguration(AbstractFunctionDecl *original,
 /// \param parameterIndices must be lowered to SIL.
 /// \param resultIndices must be lowered to SIL.
 SILDifferentiabilityWitness *getOrCreateMinimalASTDifferentiabilityWitness(
-    SILModule &module, SILFunction *original, IndexSubset *parameterIndices,
-    IndexSubset *resultIndices);
+    SILModule &module, SILFunction *original, DifferentiabilityKind kind,
+    IndexSubset *parameterIndices, IndexSubset *resultIndices);
 
 } // end namespace autodiff
 
@@ -211,73 +271,18 @@ inline void createEntryArguments(SILFunction *f) {
     decl->setSpecifier(ParamDecl::Specifier::Default);
     entry->createFunctionArgument(type, decl);
   };
-  // f->getLoweredFunctionType()->remap
-  for (auto indResTy : conv.getIndirectSILResultTypes()) {
+  for (auto indResTy :
+       conv.getIndirectSILResultTypes(f->getTypeExpansionContext())) {
     if (indResTy.hasArchetype())
       indResTy = indResTy.mapTypeOutOfContext();
     createFunctionArgument(f->mapTypeIntoContext(indResTy).getAddressType());
-    // createFunctionArgument(indResTy.getAddressType());
   }
-  for (auto paramTy : conv.getParameterSILTypes()) {
+  for (auto paramTy : conv.getParameterSILTypes(f->getTypeExpansionContext())) {
     if (paramTy.hasArchetype())
       paramTy = paramTy.mapTypeOutOfContext();
     createFunctionArgument(f->mapTypeIntoContext(paramTy));
-    // createFunctionArgument(paramTy);
   }
 }
-
-/// Helper class for visiting basic blocks in post-order post-dominance order,
-/// based on a worklist algorithm.
-class PostOrderPostDominanceOrder {
-  SmallVector<DominanceInfoNode *, 16> buffer;
-  PostOrderFunctionInfo *postOrderInfo;
-  size_t srcIdx = 0;
-
-public:
-  /// Constructor.
-  /// \p root The root of the post-dominator tree.
-  /// \p postOrderInfo The post-order info of the function.
-  /// \p capacity Should be the number of basic blocks in the dominator tree to
-  ///             reduce memory allocation.
-  PostOrderPostDominanceOrder(DominanceInfoNode *root,
-                              PostOrderFunctionInfo *postOrderInfo,
-                              int capacity = 0)
-      : postOrderInfo(postOrderInfo) {
-    buffer.reserve(capacity);
-    buffer.push_back(root);
-  }
-
-  /// Get the next block from the worklist.
-  DominanceInfoNode *getNext() {
-    if (srcIdx == buffer.size())
-      return nullptr;
-    return buffer[srcIdx++];
-  }
-
-  /// Pushes the dominator children of a block onto the worklist in post-order.
-  void pushChildren(DominanceInfoNode *node) {
-    pushChildrenIf(node, [](SILBasicBlock *) { return true; });
-  }
-
-  /// Conditionally pushes the dominator children of a block onto the worklist
-  /// in post-order.
-  template <typename Pred>
-  void pushChildrenIf(DominanceInfoNode *node, Pred pred) {
-    SmallVector<DominanceInfoNode *, 4> children;
-    for (auto *child : *node)
-      children.push_back(child);
-    llvm::sort(children.begin(), children.end(),
-               [&](DominanceInfoNode *n1, DominanceInfoNode *n2) {
-                 return postOrderInfo->getPONumber(n1->getBlock()) <
-                        postOrderInfo->getPONumber(n2->getBlock());
-               });
-    for (auto *child : children) {
-      SILBasicBlock *childBB = child->getBlock();
-      if (pred(childBB))
-        buffer.push_back(child);
-    }
-  }
-};
 
 /// Cloner that remaps types using the target function's generic environment.
 class BasicTypeSubstCloner final

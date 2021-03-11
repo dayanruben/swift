@@ -1,5 +1,4 @@
 // RUN: %target-build-swift -g %s
-// REQUIRES: asserts
 
 // TF-1232: IRGenDebugInfo crash due to lack of proper mangling for
 // AutoDiff-generated declarations: linear map structs and branching trace
@@ -21,7 +20,7 @@ extension Float {
   }
 }
 
-@differentiable
+@differentiable(reverse)
 func foo(_ x: Float) -> Float {
   let y = Float.add(x, x)
   return y

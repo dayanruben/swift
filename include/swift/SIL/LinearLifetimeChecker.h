@@ -17,9 +17,12 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILInstruction.h"
+#include "swift/SIL/SILBasicBlock.h"
+#include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILValue.h"
+#include "swift/SIL/BasicBlockUtils.h"
+#include "swift/SIL/BasicBlockBits.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 
 namespace swift {
 
@@ -27,7 +30,6 @@ class SILBasicBlock;
 class SILInstruction;
 class SILModule;
 class SILValue;
-class DeadEndBlocks;
 class SILOwnershipVerifier;
 class SILValueOwnershipChecker;
 
@@ -51,16 +53,15 @@ public:
   class ErrorBuilder;
 
 private:
+  friend class ReborrowVerifier;
   friend class SILOwnershipVerifier;
   friend class SILValueOwnershipChecker;
 
-  SmallPtrSetImpl<SILBasicBlock *> &visitedBlocks;
   DeadEndBlocks &deadEndBlocks;
 
 public:
-  LinearLifetimeChecker(SmallPtrSetImpl<SILBasicBlock *> &visitedBlocks,
-                        DeadEndBlocks &deadEndBlocks)
-      : visitedBlocks(visitedBlocks), deadEndBlocks(deadEndBlocks) {}
+  LinearLifetimeChecker(DeadEndBlocks &deadEndBlocks)
+      : deadEndBlocks(deadEndBlocks) {}
 
   /// Returns true that \p value forms a linear lifetime with consuming uses \p
   /// consumingUses, non consuming uses \p nonConsumingUses. Returns false
@@ -78,6 +79,14 @@ public:
   bool completeConsumingUseSet(
       SILValue value, Operand *consumingUse,
       function_ref<void(SILBasicBlock::iterator insertPt)> visitor);
+
+  /// Given a linear lifetime defined by \p value and \p consumingUses, return
+  /// true if all uses in \p usesToTest are strictly not contained within the
+  /// region where the Linear Lifetime defined by \p value and \p consumingUses
+  /// is live. Otherwise, returns false.
+  bool usesNotContainedWithinLifetime(SILValue value,
+                                      ArrayRef<Operand *> consumingUses,
+                                      ArrayRef<Operand *> usesToTest);
 
 private:
   /// Returns true if:
@@ -108,7 +117,9 @@ private:
   Error checkValueImpl(
       SILValue value, ArrayRef<Operand *> consumingUses,
       ArrayRef<Operand *> nonConsumingUses, ErrorBuilder &errorBuilder,
-      Optional<function_ref<void(SILBasicBlock *)>> leakingBlockCallback);
+      Optional<function_ref<void(SILBasicBlock *)>> leakingBlockCallback,
+      Optional<function_ref<void(Operand *)>>
+          nonConsumingUsesOutsideLifetimeCallback);
 };
 
 } // namespace swift

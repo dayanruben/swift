@@ -68,6 +68,14 @@ public struct ClosedRange<Bound: Comparable> {
   /// The range's upper bound.
   public let upperBound: Bound
 
+  // This works around _debugPrecondition() impacting the performance of
+  // optimized code. (rdar://72246338)
+  @_alwaysEmitIntoClient @inline(__always)
+  internal init(_uncheckedBounds bounds: (lower: Bound, upper: Bound)) {
+    self.lowerBound = bounds.lower
+    self.upperBound = bounds.upper
+  }
+
   /// Creates an instance with the given bounds.
   ///
   /// Because this initializer does not perform any checks, it should be used
@@ -78,8 +86,9 @@ public struct ClosedRange<Bound: Comparable> {
   /// - Parameter bounds: A tuple of the lower and upper bounds of the range.
   @inlinable
   public init(uncheckedBounds bounds: (lower: Bound, upper: Bound)) {
-    self.lowerBound = bounds.lower
-    self.upperBound = bounds.upper
+    _debugPrecondition(bounds.lower <= bounds.upper,
+      "ClosedRange requires lowerBound <= upperBound")
+    self.init(_uncheckedBounds: (lower: bounds.lower, upper: bounds.upper))
   }
 }
 
@@ -100,8 +109,9 @@ extension ClosedRange: RangeExpression {
   public func relative<C: Collection>(to collection: C) -> Range<Bound>
   where C.Index == Bound {
     return Range(
-      uncheckedBounds: (
-        lower: lowerBound, upper: collection.index(after: self.upperBound)))
+      _uncheckedBounds: (
+        lower: lowerBound,
+        upper: collection.index(after: self.upperBound)))
   }
 
   /// Returns a Boolean value indicating whether the given element is contained
@@ -330,11 +340,13 @@ extension Comparable {
   /// - Parameters:
   ///   - minimum: The lower bound for the range.
   ///   - maximum: The upper bound for the range.
+  ///
+  /// - Precondition: `minimum <= maximum`.
   @_transparent
   public static func ... (minimum: Self, maximum: Self) -> ClosedRange<Self> {
     _precondition(
-      minimum <= maximum, "Can't form Range with upperBound < lowerBound")
-    return ClosedRange(uncheckedBounds: (lower: minimum, upper: maximum))
+      minimum <= maximum, "Range requires lowerBound <= upperBound")
+    return ClosedRange(_uncheckedBounds: (lower: minimum, upper: maximum))
   }
 }
 
@@ -421,7 +433,7 @@ extension ClosedRange {
       limits.upperBound < self.upperBound ? limits.upperBound
           : limits.lowerBound > self.upperBound ? limits.lowerBound
           : self.upperBound
-    return ClosedRange(uncheckedBounds: (lower: lower, upper: upper))
+    return ClosedRange(_uncheckedBounds: (lower: lower, upper: upper))
   }
 }
 
@@ -437,7 +449,7 @@ extension ClosedRange where Bound: Strideable, Bound.Stride: SignedInteger {
   public init(_ other: Range<Bound>) {
     _precondition(!other.isEmpty, "Can't form an empty closed range")
     let upperBound = other.upperBound.advanced(by: -1)
-    self.init(uncheckedBounds: (lower: other.lowerBound, upper: upperBound))
+    self.init(_uncheckedBounds: (lower: other.lowerBound, upper: upperBound))
   }
 }
 
@@ -474,7 +486,7 @@ extension ClosedRange: Decodable where Bound: Decodable {
           codingPath: decoder.codingPath,
           debugDescription: "Cannot initialize \(ClosedRange.self) with a lowerBound (\(lowerBound)) greater than upperBound (\(upperBound))"))
     }
-    self.init(uncheckedBounds: (lower: lowerBound, upper: upperBound))
+    self.init(_uncheckedBounds: (lower: lowerBound, upper: upperBound))
   }
 }
 
@@ -485,3 +497,6 @@ extension ClosedRange: Encodable where Bound: Encodable {
     try container.encode(self.upperBound)
   }
 }
+
+extension ClosedRange: ConcurrentValue where Bound: ConcurrentValue { }
+extension ClosedRange.Index: ConcurrentValue where Bound: ConcurrentValue { }

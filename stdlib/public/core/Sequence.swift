@@ -98,7 +98,7 @@
 ///         }
 ///     }
 ///     print(longestAnimal)
-///     // Prints "Butterfly"
+///     // Prints Optional("Butterfly")
 ///
 /// Using Multiple Iterators
 /// ========================
@@ -1159,7 +1159,9 @@ extension IteratorSequence: IteratorProtocol, Sequence {
   }
 }
 
-/* FIXME: ideally for compatability we would declare
+extension IteratorSequence: ConcurrentValue where Base: ConcurrentValue { }
+
+/* FIXME: ideally for compatibility we would declare
 extension Sequence {
   @available(swift, deprecated: 5, message: "")
   public typealias SubSequence = AnySequence<Element>

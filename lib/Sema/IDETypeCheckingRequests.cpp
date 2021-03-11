@@ -15,11 +15,10 @@
 #include "swift/AST/NameLookup.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Frontend/Frontend.h"
+#include "swift/Sema/ConstraintSystem.h"
 #include "swift/Sema/IDETypeCheckingRequests.h"
 #include "swift/Subsystems.h"
 #include "TypeChecker.h"
-#include "ConstraintGraph.h"
-#include "ConstraintSystem.h"
 
 using namespace swift;
 
@@ -65,6 +64,9 @@ static bool isExtensionAppliedInternal(const DeclContext *DC, Type BaseTy,
 
 static bool isMemberDeclAppliedInternal(const DeclContext *DC, Type BaseTy,
                                         const ValueDecl *VD) {
+  if (BaseTy->isExistentialType() && VD->isStatic())
+    return false;
+
   // We can't leak type variables into another constraint system.
   // We can't do anything if the base type has unbound generic parameters.
   if (BaseTy->hasTypeVariable() || BaseTy->hasUnboundGenericType()||

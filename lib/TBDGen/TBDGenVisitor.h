@@ -40,7 +40,9 @@ class DataLayout;
 
 namespace swift {
 
+class TBDGenDescriptor;
 struct TBDGenOptions;
+class SymbolSource;
 
 namespace tbdgen {
 
@@ -59,16 +61,45 @@ struct InstallNameStore {
   void remark(ASTContext &Ctx, StringRef ModuleName) const;
 };
 
-class TBDGenVisitor : public ASTVisitor<TBDGenVisitor> {
+/// A set of callbacks for recording APIs.
+class APIRecorder {
 public:
-  llvm::MachO::InterfaceFile &Symbols;
-  llvm::MachO::TargetList Targets;
-  StringSet *StringSymbols;
-  const llvm::DataLayout &DataLayout;
+  virtual ~APIRecorder() {}
 
-  const UniversalLinkageInfo &UniversalLinkInfo;
+  virtual void addSymbol(StringRef name, llvm::MachO::SymbolKind kind,
+                         SymbolSource source) {}
+  virtual void addObjCInterface(const ClassDecl *decl) {}
+  virtual void addObjCMethod(const ClassDecl *cls, SILDeclRef method) {}
+};
+
+class SimpleAPIRecorder final : public APIRecorder {
+public:
+  using SymbolCallbackFn = llvm::function_ref<void(
+      StringRef, llvm::MachO::SymbolKind, SymbolSource)>;
+
+  SimpleAPIRecorder(SymbolCallbackFn func) : func(func) {}
+
+  void addSymbol(StringRef symbol, llvm::MachO::SymbolKind kind,
+                 SymbolSource source) override {
+    func(symbol, kind, source);
+  }
+private:
+  SymbolCallbackFn func;
+};
+
+class TBDGenVisitor : public ASTVisitor<TBDGenVisitor> {
+#ifndef NDEBUG
+  /// Tracks the symbols emitted to ensure we don't emit any duplicates.
+  llvm::StringSet<> DuplicateSymbolChecker;
+#endif
+
+  const llvm::DataLayout &DataLayout;
+  UniversalLinkageInfo UniversalLinkInfo;
   ModuleDecl *SwiftModule;
   const TBDGenOptions &Opts;
+  APIRecorder &recorder;
+
+  using SymbolKind = llvm::MachO::SymbolKind;
 
   /// A set of original function and derivative configuration pairs for which
   /// derivative symbols have been emitted.
@@ -78,24 +109,24 @@ public:
   llvm::DenseSet<std::pair<AbstractFunctionDecl *, AutoDiffConfig>>
       AddedDerivatives;
 
-private:
   std::vector<Decl*> DeclStack;
   std::unique_ptr<std::map<std::string, InstallNameStore>>
     previousInstallNameMap;
   std::unique_ptr<std::map<std::string, InstallNameStore>>
     parsePreviousModuleInstallNameMap();
   void addSymbolInternal(StringRef name, llvm::MachO::SymbolKind kind,
-                         bool isLinkerDirective = false);
+                         SymbolSource source);
   void addLinkerDirectiveSymbolsLdHide(StringRef name, llvm::MachO::SymbolKind kind);
   void addLinkerDirectiveSymbolsLdPrevious(StringRef name, llvm::MachO::SymbolKind kind);
-  void addSymbol(StringRef name, llvm::MachO::SymbolKind kind =
-                                     llvm::MachO::SymbolKind::GlobalSymbol);
+  void addSymbol(StringRef name, SymbolSource source,
+                 SymbolKind kind = SymbolKind::GlobalSymbol);
 
   void addSymbol(SILDeclRef declRef);
+  void addAsyncFunctionPointerSymbol(AbstractFunctionDecl *AFD);
 
   void addSymbol(LinkEntity entity);
 
-  void addConformances(DeclContext *DC);
+  void addConformances(const IterableDeclContext *IDC);
 
   void addDispatchThunk(SILDeclRef declRef);
 
@@ -125,25 +156,30 @@ private:
   /// given original function, AST parameter indices, result indices, and
   /// derivative generic signature.
   void addDifferentiabilityWitness(AbstractFunctionDecl *original,
+                                   DifferentiabilityKind kind,
                                    IndexSubset *astParameterIndices,
                                    IndexSubset *resultIndices,
                                    GenericSignature derivativeGenericSignature);
 
   /// Adds symbols associated with the given original function and
   /// derivative function configuration.
-  void addDerivativeConfiguration(AbstractFunctionDecl *original,
+  void addDerivativeConfiguration(DifferentiabilityKind diffKind,
+                                  AbstractFunctionDecl *original,
                                   AutoDiffConfig config);
 
 public:
-  TBDGenVisitor(llvm::MachO::InterfaceFile &symbols,
-                llvm::MachO::TargetList targets, StringSet *stringSymbols,
-                const llvm::DataLayout &dataLayout,
-                const UniversalLinkageInfo &universalLinkInfo,
-                ModuleDecl *swiftModule, const TBDGenOptions &opts)
-      : Symbols(symbols), Targets(targets), StringSymbols(stringSymbols),
-        DataLayout(dataLayout), UniversalLinkInfo(universalLinkInfo),
-        SwiftModule(swiftModule), Opts(opts),
-        previousInstallNameMap(parsePreviousModuleInstallNameMap())  {}
+  TBDGenVisitor(const llvm::Triple &target, const llvm::DataLayout &dataLayout,
+                ModuleDecl *swiftModule, const TBDGenOptions &opts,
+                APIRecorder &recorder)
+      : DataLayout(dataLayout),
+        UniversalLinkInfo(target, opts.HasMultipleIGMs, /*forcePublic*/ false),
+        SwiftModule(swiftModule), Opts(opts), recorder(recorder),
+        previousInstallNameMap(parsePreviousModuleInstallNameMap()) {}
+
+  /// Create a new visitor using the target and layout information from a
+  /// TBDGenDescriptor.
+  TBDGenVisitor(const TBDGenDescriptor &desc, APIRecorder &recorder);
+
   ~TBDGenVisitor() { assert(DeclStack.empty()); }
   void addMainIfNecessary(FileUnit *file) {
     // HACK: 'main' is a special symbol that's always emitted in SILGen if
@@ -152,8 +188,10 @@ public:
     //
     // Make sure to only add the main symbol for the module that we're emitting
     // TBD for, and not for any statically linked libraries.
+    // FIXME: We should have a SymbolSource for main.
     if (file->hasEntryPoint() && file->getParentModule() == SwiftModule)
-      addSymbol("main");
+      addSymbol(SwiftModule->getASTContext().getEntryPointFunctionName(),
+                SymbolSource::forUnknown());
   }
 
   /// Adds the global symbols associated with the first file.
@@ -190,6 +228,12 @@ public:
   void visitDecl(Decl *D) {}
 
   void visit(Decl *D);
+
+  /// Visit the symbols in a given file unit.
+  void visitFile(FileUnit *file);
+
+  /// Visit the files specified by a given TBDGenDescriptor.
+  void visit(const TBDGenDescriptor &desc);
 };
 } // end namespace tbdgen
 } // end namespace swift

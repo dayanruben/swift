@@ -4,20 +4,21 @@ final class Final<T> {
     var x: T
     init(x: T) { self.x = x }
 }
+
 // CHECK-LABEL: final class Final<T> {
 // CHECK:   @_hasStorage final var x: T { get set }
 // CHECK:   init(x: T)
-// CHECK:   deinit
 // CHECK:   enum CodingKeys : CodingKey {
 // CHECK:     case x
 // CHECK:     @_implements(Equatable, ==(_:_:)) static func __derived_enum_equals(_ a: Final<T>.CodingKeys, _ b: Final<T>.CodingKeys) -> Bool
-// CHECK:     var hashValue: Int { get }
 // CHECK:     func hash(into hasher: inout Hasher)
-// CHECK:     var stringValue: String { get }
 // CHECK:     init?(stringValue: String)
-// CHECK:     var intValue: Int? { get }
 // CHECK:     init?(intValue: Int)
+// CHECK:     var hashValue: Int { get }
+// CHECK:     var intValue: Int? { get }
+// CHECK:     var stringValue: String { get }
 // CHECK:   }
+// CHECK:   deinit
 // CHECK: }
 
 class Nonfinal<T> {
@@ -27,17 +28,17 @@ class Nonfinal<T> {
 // CHECK-LABEL: class Nonfinal<T> {
 // CHECK:   @_hasStorage var x: T { get set }
 // CHECK:   init(x: T)
-// CHECK:   deinit
 // CHECK:   enum CodingKeys : CodingKey {
 // CHECK:     case x
 // CHECK:     @_implements(Equatable, ==(_:_:)) static func __derived_enum_equals(_ a: Nonfinal<T>.CodingKeys, _ b: Nonfinal<T>.CodingKeys) -> Bool
-// CHECK:     var hashValue: Int { get }
 // CHECK:     func hash(into hasher: inout Hasher)
-// CHECK:     var stringValue: String { get }
 // CHECK:     init?(stringValue: String)
-// CHECK:     var intValue: Int? { get }
 // CHECK:     init?(intValue: Int)
+// CHECK:     var hashValue: Int { get }
+// CHECK:     var intValue: Int? { get }
+// CHECK:     var stringValue: String { get }
 // CHECK:   }
+// CHECK:   deinit
 // CHECK: }
 
 // CHECK-LABEL: extension Final : Encodable where T : Encodable {
@@ -50,6 +51,16 @@ class Nonfinal<T> {
 // CHECK-LABEL: extension Nonfinal : Encodable where T : Encodable {
 // CHECK:   func encode(to encoder: Encoder) throws
 // CHECK: }
+
+// Make sure that CodingKeys members are actually emitted.
+
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}21__derived_enum_equalsySbAFyx_G_AHtFZ : $@convention(method) <T> (Final<T>.CodingKeys, Final<T>.CodingKeys, @thin Final<T>.CodingKeys.Type) -> Bool {
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}9hashValueSivg : $@convention(method) <T> (Final<T>.CodingKeys) -> Int {
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}4hash4intoys6HasherVz_tF : $@convention(method) <T> (@inout Hasher, Final<T>.CodingKeys) -> () {
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}11stringValueSSvg : $@convention(method) <T> (Final<T>.CodingKeys) -> @owned String {
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}11stringValueAFyx_GSgSS_tcfC : $@convention(method) <T> (@owned String, @thin Final<T>.CodingKeys.Type) -> Optional<Final<T>.CodingKeys> {
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}8intValueSiSgvg : $@convention(method) <T> (Final<T>.CodingKeys) -> Optional<Int> {
+// CHECK-LABEL: sil private [ossa] @$s29synthesized_conformance_class5FinalC10CodingKeys{{.*}}8intValueAFyx_GSgSi_tcfC : $@convention(method) <T> (Int, @thin Final<T>.CodingKeys.Type) -> Optional<Final<T>.CodingKeys> {
 
 extension Final: Encodable where T: Encodable {}
 // CHECK-LABEL: // Final<A>.encode(to:)

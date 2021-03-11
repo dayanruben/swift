@@ -26,6 +26,7 @@
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SIL/BasicBlockBits.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/SILOptFunctionBuilder.h"
@@ -295,11 +296,7 @@ CanSILFunctionType BridgedProperty::getOutlinedFunctionType(SILModule &M) {
   Results.push_back(SILResultInfo(
                       switchInfo.Br->getArg(0)->getType().getASTType(),
                       ResultConvention::Owned));
-  auto ExtInfo =
-      SILFunctionType::ExtInfo(SILFunctionType::Representation::Thin,
-                               /*pseudogeneric*/ false, /*noescape*/ false,
-                               DifferentiabilityKind::NonDifferentiable,
-                               /*clangFunctionType*/ nullptr);
+  auto ExtInfo = SILFunctionType::ExtInfo::getThin();
   auto FunctionType = SILFunctionType::get(
       nullptr, ExtInfo, SILCoroutineKind::None,
       ParameterConvention::Direct_Unowned, Parameters, /*yields*/ {},
@@ -382,11 +379,10 @@ BridgedProperty::outline(SILModule &M) {
   Fun->setInlineStrategy(NoInline);
 
   // Move the blocks into the new function.
-  auto &FromBlockList = OutlinedEntryBB->getParent()->getBlocks();
-  Fun->getBlocks().splice(Fun->begin(), FromBlockList, OldMergeBB);
-  Fun->getBlocks().splice(Fun->begin(), FromBlockList, switchInfo.NoneBB);
-  Fun->getBlocks().splice(Fun->begin(), FromBlockList, switchInfo.SomeBB);
-  Fun->getBlocks().splice(Fun->begin(), FromBlockList, OutlinedEntryBB);
+  Fun->moveBlockFromOtherFunction(OldMergeBB, Fun->begin());
+  Fun->moveBlockFromOtherFunction(switchInfo.NoneBB, Fun->begin());
+  Fun->moveBlockFromOtherFunction(switchInfo.SomeBB, Fun->begin());
+  Fun->moveBlockFromOtherFunction(OutlinedEntryBB, Fun->begin());
 
   // Create the function argument and return.
   auto *Load = dyn_cast<LoadInst>(FirstInst);
@@ -489,7 +485,7 @@ static bool matchSwitch(SwitchInfo &SI, SILInstruction *Inst,
 
   // Check that we call the _unconditionallyBridgeFromObjectiveC witness.
   auto NativeType = Apply->getType().getASTType();
-  auto *BridgeFun = FunRef->getInitiallyReferencedFunction();
+  auto *BridgeFun = FunRef->getReferencedFunction();
   auto *SwiftModule = BridgeFun->getModule().getSwiftModule();
   // Not every type conforms to the ObjectiveCBridgeable protocol in such a case
   // getBridgeFromObjectiveC returns SILDeclRef().
@@ -825,7 +821,7 @@ BridgedArgument BridgedArgument::match(unsigned ArgIdx, SILValue Arg,
 
   // Make sure we are calling the actual bridge witness.
   auto NativeType = BridgedValue->getType().getASTType();
-  auto *BridgeFun = FunRef->getInitiallyReferencedFunction();
+  auto *BridgeFun = FunRef->getReferencedFunction();
   auto *SwiftModule = BridgeFun->getModule().getSwiftModule();
   // Not every type conforms to the ObjectiveCBridgeable protocol in such a case
   // getBridgeToObjectiveC returns SILDeclRef().
@@ -923,13 +919,12 @@ void BridgedReturn::outline(SILFunction *Fun, ApplyInst *NewOutlinedCall) {
   assert(Fun->begin() != Fun->end() &&
          "The entry block must already have been created");
   SILBasicBlock *EntryBB = &*Fun->begin();
-  auto &FromBlockList = OutlinedEntryBB->getParent()->getBlocks();
-  Fun->getBlocks().splice(Fun->begin(), FromBlockList, OldMergeBB);
-  OldMergeBB->moveAfter(EntryBB);
+  Fun->moveBlockFromOtherFunction(OldMergeBB, Fun->begin());
+  Fun->moveBlockAfter(OldMergeBB, EntryBB);
 	auto InsertPt = SILFunction::iterator(OldMergeBB);
-  Fun->getBlocks().splice(InsertPt, FromBlockList, OutlinedEntryBB);
-  Fun->getBlocks().splice(InsertPt, FromBlockList, switchInfo.NoneBB);
-  Fun->getBlocks().splice(InsertPt, FromBlockList, switchInfo.SomeBB);
+  Fun->moveBlockFromOtherFunction(OutlinedEntryBB, InsertPt);
+  Fun->moveBlockFromOtherFunction(switchInfo.NoneBB, InsertPt);
+  Fun->moveBlockFromOtherFunction(switchInfo.SomeBB, InsertPt);
 
 	SILBuilder Builder (EntryBB);
   Builder.createBranch(Loc, OutlinedEntryBB);
@@ -1010,7 +1005,7 @@ ObjCMethodCall::outline(SILModule &M) {
         // Otherwise, use the original type convention.
         Args.push_back(Arg);
       }
-      OrigSigIdx++;
+      ++OrigSigIdx;
     }
     OutlinedCall = Builder.createApply(Loc, FunRef, SubstitutionMap(), Args);
     if (!BridgedCall->use_empty() && !BridgedReturn)
@@ -1059,7 +1054,7 @@ ObjCMethodCall::outline(SILModule &M) {
       BridgedCall->setArgument(OrigSigIdx, FunArg);
       LastArg = FunArg;
     }
-    OrigSigIdx++;
+    ++OrigSigIdx;
   }
 
   // Set the method lookup's target.
@@ -1173,15 +1168,10 @@ CanSILFunctionType ObjCMethodCall::getOutlinedFunctionType(SILModule &M) {
       // Otherwise, use the original type convention.
       Parameters.push_back(ParamInfo);
     }
-    OrigSigIdx++;
+    ++OrigSigIdx;
   }
 
-  auto ExtInfo = SILFunctionType::ExtInfo(
-      SILFunctionType::Representation::Thin,
-      /*pseudogeneric*/ false,
-      /*noescape*/ false,
-      DifferentiabilityKind::NonDifferentiable,
-      /*clangFunctionType*/ nullptr);
+  auto ExtInfo = SILFunctionType::ExtInfo::getThin();
 
   SmallVector<SILResultInfo, 4> Results;
   // If we don't have a bridged return we changed from @autoreleased to @owned
@@ -1244,18 +1234,12 @@ public:
 /// functions.
 bool tryOutline(SILOptFunctionBuilder &FuncBuilder, SILFunction *Fun,
                 SmallVectorImpl<SILFunction *> &FunctionsAdded) {
-  SmallPtrSet<SILBasicBlock *, 32> Visited;
-  SmallVector<SILBasicBlock *, 128> Worklist;
+  BasicBlockWorklist<128> Worklist(Fun->getEntryBlock());
   OutlinePatterns patterns(FuncBuilder);
   bool changed = false;
 
   // Traverse the function.
-  Worklist.push_back(&*Fun->begin());
-  while (!Worklist.empty()) {
-
-    SILBasicBlock *CurBlock = Worklist.pop_back_val();
-    if (!Visited.insert(CurBlock).second) continue;
-
+  while (SILBasicBlock *CurBlock = Worklist.pop()) {
     SILBasicBlock::iterator CurInst = CurBlock->begin();
 
     // Go over the instructions trying to match and replace patterns.
@@ -1270,8 +1254,9 @@ bool tryOutline(SILOptFunctionBuilder &FuncBuilder, SILFunction *Fun,
          assert(LastInst->getParent() == CurBlock);
          changed = true;
        } else if (isa<TermInst>(CurInst)) {
-         std::copy(CurBlock->succ_begin(), CurBlock->succ_end(),
-                   std::back_inserter(Worklist));
+         for (SILBasicBlock *succ : CurBlock->getSuccessors()) {
+           Worklist.pushIfNotVisited(succ);
+         }
          ++CurInst;
        } else {
          ++CurInst;
@@ -1300,7 +1285,7 @@ public:
 
     // Dump function if requested.
     if (DumpFuncsBeforeOutliner.size() &&
-        Fun->getName().find(DumpFuncsBeforeOutliner, 0) != StringRef::npos) {
+        Fun->getName().contains(DumpFuncsBeforeOutliner)) {
       Fun->dump();
     }
 

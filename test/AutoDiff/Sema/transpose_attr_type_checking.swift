@@ -1,4 +1,5 @@
 // RUN: %target-swift-frontend-typecheck -verify %s
+// RUN: %target-swift-frontend-typecheck -enable-testing -verify %s
 
 import _Differentiation
 
@@ -174,12 +175,13 @@ func missingSelfRequirementT<T: Differentiable>(x: T) -> T {
   return x
 }
 
+// expected-note @+1 {{candidate global function does not have type equal to or less constrained than '<T where T : Differentiable, T == T.TangentVector> (T) -> T'}}
 func differentGenericConstraint<T: Differentiable & BinaryFloatingPoint>(x: T)
 -> T where T == T.TangentVector {
   return x
 }
 
-// expected-error @+1 {{could not find function 'differentGenericConstraint' with expected type '<T where T : Differentiable, T == T.TangentVector> (T) -> T'}}
+// expected-error @+1 {{referenced declaration 'differentGenericConstraint' could not be resolved}}
 @transpose(of: differentGenericConstraint, wrt: 0)
 func differentGenericConstraintT<T: Differentiable>(x: T)
 -> T where T == T.TangentVector {
@@ -400,7 +402,7 @@ struct level1 {
     static func + (_: Self, _: Self) -> Self { Self() }
     static func - (_: Self, _: Self) -> Self { Self() }
     typealias TangentVector = Self
-    mutating func move(along: TangentVector) {}
+    mutating func move(by: TangentVector) {}
     func foo(x: Float) -> Float {
       return x
     }
@@ -480,7 +482,7 @@ where T: Differentiable & AdditiveArithmetic {
   static func + (_: Self, _: Self) -> Self { Self() }
   static func - (_: Self, _: Self) -> Self { Self() }
   typealias TangentVector = Self
-  mutating func move(along: TangentVector) {}
+  mutating func move(by: TangentVector) {}
 }
 
 // Test computed properties.
@@ -496,6 +498,7 @@ extension Struct where T: Differentiable & AdditiveArithmetic {
 
 // Test initializers.
 extension Struct {
+  // expected-note @+1 {{original function 'init(_:)' is a 'static' method}}
   init(_ x: Float) {}
   init(_ x: T, y: Float) {}
 }
@@ -511,10 +514,10 @@ extension Struct where T: Differentiable, T == T.TangentVector {
     fatalError()
   }
 
-  // Test instance transpose for static original intializer.
-  // TODO(TF-1015): Add improved instance/static member mismatch error.
-  // expected-error @+1 {{could not find function 'init' with expected type '<T where T : Differentiable, T == T.TangentVector> (Struct<T>) -> (Float) -> Struct<T>'}}
+  // Test instance transpose for static original initializer.
+  // expected-error @+1 {{unexpected transpose function declaration; 'init(_:)' requires the transpose function 'vjpInitStaticMismatch' to be a 'static' method}}
   @transpose(of: init, wrt: 0)
+  // expected-note @+1 {{make transpose function 'vjpInitStaticMismatch' a 'static' method}}{{3-3=static }}
   func vjpInitStaticMismatch(_ x: Self) -> Float {
     fatalError()
   }
@@ -550,6 +553,7 @@ extension Struct where T: Differentiable & AdditiveArithmetic {
 // Check that `@transpose` attribute rejects stored property original declarations.
 
 struct StoredProperty: Differentiable & AdditiveArithmetic {
+  // expected-note @+1 {{candidate getter does not have expected type '(StoredProperty) -> () -> StoredProperty'}}
   var stored: Float
   typealias TangentVector = StoredProperty
   static var zero: StoredProperty { StoredProperty(stored: 0) }
@@ -563,7 +567,7 @@ struct StoredProperty: Differentiable & AdditiveArithmetic {
   // Note: `@transpose` support for instance members is currently too limited
   // to properly register a transpose for a non-`Self`-typed member.
 
-  // expected-error @+1 {{could not find function 'stored' with expected type '(StoredProperty) -> () -> StoredProperty'}}
+  // expected-error @+1 {{referenced declaration 'stored' could not be resolved}}
   @transpose(of: stored, wrt: self)
   static func vjpStored(v: Self) -> Self {
     fatalError()

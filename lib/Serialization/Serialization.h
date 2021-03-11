@@ -34,6 +34,10 @@ namespace clang {
 namespace swift {
   class SILModule;
 
+  namespace fine_grained_dependencies {
+    class SourceFileDepGraph;
+  }
+
 namespace serialization {
 
 using FilenamesTy = ArrayRef<std::string>;
@@ -100,6 +104,8 @@ class Serializer : public SerializerBase {
   /// IdentifierIDs, except that 0 will always represent the empty identifier.
   uint32_t /*IdentifierID*/ LastUniquedStringID =
       serialization::NUM_SPECIAL_IDS - 1;
+
+  SmallVector<DeclID, 16> exportedPrespecializationDecls;
 
   /// Helper for serializing entities in the AST block object graph.
   ///
@@ -273,6 +279,11 @@ public:
       Identifier,
       llvm::SmallSetVector<std::pair<Identifier, GenericSignature>, 4>>;
 
+  // In-memory representation of what will eventually be an on-disk
+  // hash table of the fingerprint associated with a serialized
+  // iterable decl context. It is keyed by that context's decl ID.
+  using DeclFingerprintsTable = llvm::MapVector<uint32_t, Fingerprint>;
+
 private:
   /// A map from identifiers to methods and properties with the given name.
   ///
@@ -389,14 +400,21 @@ private:
   /// Top-level entry point for serializing a module.
   void writeAST(ModuleOrSourceFile DC);
 
+  /// Serializes the given dependnecy graph into the incremental information
+  /// section of this swift module.
+  void writeIncrementalInfo(
+      const fine_grained_dependencies::SourceFileDepGraph *DepGraph);
+
   using SerializerBase::SerializerBase;
   using SerializerBase::writeToStream;
 
 public:
   /// Serialize a module to the given stream.
-  static void writeToStream(raw_ostream &os, ModuleOrSourceFile DC,
-                            const SILModule *M,
-                            const SerializationOptions &options);
+  static void
+  writeToStream(raw_ostream &os, ModuleOrSourceFile DC,
+                const SILModule *M,
+                const SerializationOptions &options,
+                const fine_grained_dependencies::SourceFileDepGraph *DepGraph);
 
   /// Records the use of the given Type.
   ///
@@ -492,6 +510,9 @@ public:
   /// special module codes defined above.
   /// \see FileUnit::getExportedModuleName
   IdentifierID addContainingModuleRef(const DeclContext *DC);
+
+  /// Records the module \m.
+  IdentifierID addModuleRef(const ModuleDecl *m);
 
   /// Write a normal protocol conformance.
   void writeASTBlockEntity(const NormalProtocolConformance *conformance);

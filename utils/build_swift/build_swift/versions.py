@@ -95,7 +95,7 @@ def _try_cast(obj, cls):
 def _split_version(version):
     """Splits a version string into a tuple of components using similar rules
     to distutils.version.LooseVersion. All version strings are valid, but the
-    outcome will only split on boundries between:
+    outcome will only split on boundaries between:
 
         * lowercase alpha characters
         * uppercase alpha characters
@@ -168,7 +168,7 @@ class InvalidVersionError(Exception):
 
 @functools.total_ordering
 class Version(object):
-    """Similar to the standard distutils.versons.LooseVersion, but with a
+    """Similar to the standard distutils.version.LooseVersion, but with a
     little more wiggle-room for alpha characters.
     """
 

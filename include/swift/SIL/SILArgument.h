@@ -15,14 +15,15 @@
 
 #include "swift/Basic/Compiler.h"
 #include "swift/SIL/SILArgumentConvention.h"
-#include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILValue.h"
+#include "swift/SIL/SILFunctionConventions.h"
 
 namespace swift {
 
 class SILBasicBlock;
 class SILModule;
 class SILUndef;
+class TermInst;
 
 // Map an argument index onto a SILArgumentConvention.
 inline SILArgumentConvention
@@ -72,17 +73,12 @@ protected:
               SILType type, ValueOwnershipKind ownershipKind,
               const ValueDecl *inputDecl = nullptr);
 
-  SILArgument(ValueKind subClassKind, SILBasicBlock *inputParentBlock,
-              SILBasicBlock::arg_iterator positionInArgumentArray, SILType type,
-              ValueOwnershipKind ownershipKind,
-              const ValueDecl *inputDecl = nullptr);
-
   // A special constructor, only intended for use in
   // SILBasicBlock::replacePHIArg and replaceFunctionArg.
   explicit SILArgument(ValueKind subClassKind, SILType type,
                        ValueOwnershipKind ownershipKind,
                        const ValueDecl *inputDecl = nullptr)
-      : ValueBase(subClassKind, type, IsRepresentative::Yes),
+      : ValueBase(subClassKind, type),
         parentBlock(nullptr), decl(inputDecl) {
     Bits.SILArgument.VOKind = static_cast<unsigned>(ownershipKind);
   }
@@ -99,8 +95,7 @@ public:
     Bits.SILArgument.VOKind = static_cast<unsigned>(newKind);
   }
 
-  SILBasicBlock *getParent() { return parentBlock; }
-  const SILBasicBlock *getParent() const { return parentBlock; }
+  SILBasicBlock *getParent() const { return parentBlock; }
 
   SILFunction *getFunction();
   const SILFunction *getFunction() const;
@@ -111,19 +106,12 @@ public:
 
   static bool classof(const SILInstruction *) = delete;
   static bool classof(const SILUndef *) = delete;
-  static bool classof(const SILNode *node) {
+  static bool classof(SILNodePointer node) {
     return node->getKind() >= SILNodeKind::First_SILArgument &&
            node->getKind() <= SILNodeKind::Last_SILArgument;
   }
 
-  unsigned getIndex() const {
-    for (auto p : llvm::enumerate(getParent()->getArguments())) {
-      if (p.value() == this) {
-        return p.index();
-      }
-    }
-    llvm_unreachable("SILArgument not argument of its parent BB");
-  }
+  unsigned getIndex() const;
 
   /// Return true if this block argument is actually a phi argument as
   /// opposed to a cast or projection.
@@ -148,6 +136,14 @@ public:
   /// each predecessor block associated with an incoming value.
   bool
   getIncomingPhiOperands(SmallVectorImpl<Operand *> &returnedPhiOperands) const;
+
+  /// If this argument is a true phi, for each operand in each predecessor block
+  /// associated with an incoming value, call visitor(op). Visitor must return
+  /// true for iteration to continue. False to stop it.
+  ///
+  /// Returns false if this is not a true phi or that a visitor signaled error
+  /// by returning false.
+  bool visitIncomingPhiOperands(function_ref<bool(Operand *)> visitor) const;
 
   /// Returns true if we were able to find a single terminator operand value for
   /// each predecessor of this arguments basic block. The found values are
@@ -201,14 +197,6 @@ class SILPhiArgument : public SILArgument {
                  const ValueDecl *decl = nullptr)
       : SILArgument(ValueKind::SILPhiArgument, parentBlock, type, ownershipKind,
                     decl) {}
-
-  SILPhiArgument(SILBasicBlock *parentBlock,
-                 SILBasicBlock::arg_iterator argArrayInsertPt, SILType type,
-                 ValueOwnershipKind ownershipKind,
-                 const ValueDecl *decl = nullptr)
-      : SILArgument(ValueKind::SILPhiArgument, parentBlock, argArrayInsertPt,
-                    type, ownershipKind, decl) {}
-
   // A special constructor, only intended for use in
   // SILBasicBlock::replacePHIArg.
   explicit SILPhiArgument(SILType type, ValueOwnershipKind ownershipKind,
@@ -226,6 +214,12 @@ public:
   /// FIXME: Once SILPhiArgument actually implies that it is a phi argument,
   /// this will be guaranteed to return a valid SILValue.
   SILValue getIncomingPhiValue(SILBasicBlock *predBlock) const;
+
+  /// If this argument is a true phi, return the operand in the \p predBLock
+  /// associated with an incoming value.
+  ///
+  /// \returns the operand or nullptr if this is not a true phi.
+  Operand *getIncomingPhiOperand(SILBasicBlock *predBlock) const;
 
   /// If this argument is a phi, populate `OutArray` with the incoming phi
   /// values for each predecessor BB. If this argument is not a phi, return
@@ -248,6 +242,13 @@ public:
   /// each predecessor block associated with an incoming value.
   bool
   getIncomingPhiOperands(SmallVectorImpl<Operand *> &returnedPhiOperands) const;
+
+  /// If this argument is a phi, call visitor for each passing the operand for
+  /// each incoming phi values for each predecessor BB. If this argument is not
+  /// a phi, return false.
+  ///
+  /// If visitor returns false, iteration is stopped and we return false.
+  bool visitIncomingPhiOperands(function_ref<bool(Operand *)> visitor) const;
 
   /// Returns true if we were able to find a single terminator operand value for
   /// each predecessor of this arguments basic block. The found values are
@@ -284,7 +285,7 @@ public:
 
   static bool classof(const SILInstruction *) = delete;
   static bool classof(const SILUndef *) = delete;
-  static bool classof(const SILNode *node) {
+  static bool classof(SILNodePointer node) {
     return node->getKind() == SILNodeKind::SILPhiArgument;
   }
 };
@@ -297,13 +298,6 @@ class SILFunctionArgument : public SILArgument {
                       const ValueDecl *decl = nullptr)
       : SILArgument(ValueKind::SILFunctionArgument, parentBlock, type,
                     ownershipKind, decl) {}
-  SILFunctionArgument(SILBasicBlock *parentBlock,
-                      SILBasicBlock::arg_iterator argArrayInsertPt,
-                      SILType type, ValueOwnershipKind ownershipKind,
-                      const ValueDecl *decl = nullptr)
-      : SILArgument(ValueKind::SILFunctionArgument, parentBlock,
-                    argArrayInsertPt, type, ownershipKind, decl) {}
-
   // A special constructor, only intended for use in
   // SILBasicBlock::replaceFunctionArg.
   explicit SILFunctionArgument(SILType type, ValueOwnershipKind ownershipKind,
@@ -312,22 +306,14 @@ class SILFunctionArgument : public SILArgument {
   }
 
 public:
-  bool isIndirectResult() const {
-    auto numIndirectResults =
-        getFunction()->getConventions().getNumIndirectSILResults();
-    return getIndex() < numIndirectResults;
-  }
+  bool isIndirectResult() const;
 
-  SILArgumentConvention getArgumentConvention() const {
-    return getFunction()->getConventions().getSILArgumentConvention(getIndex());
-  }
+  SILArgumentConvention getArgumentConvention() const;
 
   /// Given that this is an entry block argument, and given that it does
   /// not correspond to an indirect result, return the corresponding
   /// SILParameterInfo.
-  SILParameterInfo getKnownParameterInfo() const {
-    return getFunction()->getConventions().getParamInfoForSILArg(getIndex());
-  }
+  SILParameterInfo getKnownParameterInfo() const;
 
   /// Returns true if this SILArgument is the self argument of its
   /// function. This means that this will return false always for SILArguments
@@ -342,7 +328,7 @@ public:
 
   static bool classof(const SILInstruction *) = delete;
   static bool classof(const SILUndef *) = delete;
-  static bool classof(const SILNode *node) {
+  static bool classof(SILNodePointer node) {
     return node->getKind() == SILNodeKind::SILFunctionArgument;
   }
 };
@@ -437,6 +423,17 @@ inline bool SILArgument::getIncomingPhiOperands(
   case SILArgumentKind::SILPhiArgument:
     return cast<SILPhiArgument>(this)->getIncomingPhiOperands(
         returnedPhiOperands);
+  case SILArgumentKind::SILFunctionArgument:
+    return false;
+  }
+  llvm_unreachable("Covered switch is not covered?!");
+}
+
+inline bool SILArgument::visitIncomingPhiOperands(
+    function_ref<bool(Operand *)> visitor) const {
+  switch (getKind()) {
+  case SILArgumentKind::SILPhiArgument:
+    return cast<SILPhiArgument>(this)->visitIncomingPhiOperands(visitor);
   case SILArgumentKind::SILFunctionArgument:
     return false;
   }

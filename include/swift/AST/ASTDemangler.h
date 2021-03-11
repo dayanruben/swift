@@ -26,6 +26,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "swift/AST/Types.h"
 #include "swift/Demangling/Demangler.h"
+#include "swift/Demangling/NamespaceMacros.h"
 #include "swift/Demangling/TypeDecoder.h"
 
 namespace swift {
@@ -33,6 +34,7 @@ namespace swift {
 class TypeDecl;
 
 namespace Demangle {
+SWIFT_BEGIN_INLINE_NAMESPACE
 
 Type getTypeForMangling(ASTContext &ctx,
                         llvm::StringRef mangling);
@@ -64,6 +66,7 @@ public:
 
   Demangle::NodeFactory &getNodeFactory() { return Factory; }
 
+  Type decodeMangledType(NodePointer node);
   Type createBuiltinType(StringRef builtinName, StringRef mangledName);
 
   TypeDecl *createTypeDecl(NodePointer node);
@@ -90,8 +93,7 @@ public:
   Type createBoundGenericType(GenericTypeDecl *decl, ArrayRef<Type> args,
                               Type parent);
 
-  Type createTupleType(ArrayRef<Type> eltTypes, StringRef labels,
-                       bool isVariadic);
+  Type createTupleType(ArrayRef<Type> eltTypes, StringRef labels);
 
   Type createFunctionType(ArrayRef<Demangle::FunctionParam<Type>> params,
                           Type output, FunctionTypeFlags flags);
@@ -125,6 +127,18 @@ public:
 #include "swift/AST/ReferenceStorage.def"
 
   Type createSILBoxType(Type base);
+  using BuiltSILBoxField = llvm::PointerIntPair<Type, 1>;
+  using BuiltSubstitution = std::pair<Type, Type>;
+  using BuiltRequirement = swift::Requirement;
+  using BuiltLayoutConstraint = swift::LayoutConstraint;
+  Type createSILBoxTypeWithLayout(ArrayRef<BuiltSILBoxField> Fields,
+                                  ArrayRef<BuiltSubstitution> Substitutions,
+                                  ArrayRef<BuiltRequirement> Requirements);
+
+  bool isExistential(Type type) {
+    return type->isExistentialType();
+  }
+
 
   Type createObjCClassType(StringRef name);
 
@@ -147,6 +161,11 @@ public:
   Type createDictionaryType(Type key, Type value);
 
   Type createParenType(Type base);
+
+  LayoutConstraint getLayoutConstraint(LayoutConstraintKind kind);
+  LayoutConstraint getLayoutConstraintWithSizeAlign(LayoutConstraintKind kind,
+                                                    unsigned size,
+                                                    unsigned alignment);
 
 private:
   bool validateParentType(TypeDecl *decl, Type parent);
@@ -178,6 +197,7 @@ private:
                                               Demangle::Node::Kind kind);
 };
 
+SWIFT_END_INLINE_NAMESPACE
 }  // namespace Demangle
 
 }  // namespace swift

@@ -23,7 +23,7 @@
 
 namespace llvm {
   class Triple;
-  class FileCollector;
+  class FileCollectorBase;
   template<typename Fn> class function_ref;
 }
 
@@ -43,6 +43,12 @@ namespace clang {
   class Type;
   class VisibleDeclConsumer;
   class DeclarationName;
+  class CompilerInvocation;
+namespace tooling {
+namespace dependencies {
+  struct FullDependenciesResult;
+}
+}
 }
 
 namespace swift {
@@ -109,7 +115,7 @@ public:
 private:
   Implementation &Impl;
 
-  ClangImporter(ASTContext &ctx, const ClangImporterOptions &clangImporterOpts,
+  ClangImporter(ASTContext &ctx,
                 DependencyTracker *tracker,
                 DWARFImporterDelegate *dwarfImporterDelegate);
 
@@ -131,8 +137,6 @@ public:
   /// \param ctx The ASTContext into which the module will be imported.
   /// The ASTContext's SearchPathOptions will be used for the Clang importer.
   ///
-  /// \param importerOpts The options to use for the Clang importer.
-  ///
   /// \param swiftPCHHash A hash of Swift's various options in a compiler
   /// invocation, used to create a unique Bridging PCH if requested.
   ///
@@ -144,10 +148,18 @@ public:
   /// \returns a new Clang module importer, or null (with a diagnostic) if
   /// an error occurred.
   static std::unique_ptr<ClangImporter>
-  create(ASTContext &ctx, const ClangImporterOptions &importerOpts,
+  create(ASTContext &ctx,
          std::string swiftPCHHash = "", DependencyTracker *tracker = nullptr,
          DWARFImporterDelegate *dwarfImporterDelegate = nullptr);
 
+  static std::vector<std::string>
+  getClangArguments(ASTContext &ctx);
+
+  static std::unique_ptr<clang::CompilerInvocation>
+  createClangInvocation(ClangImporter *importer,
+                        const ClangImporterOptions &importerOpts,
+                        ArrayRef<std::string> invocationArgStrs,
+                        std::vector<std::string> *CC1Args = nullptr);
   ClangImporter(const ClangImporter &) = delete;
   ClangImporter(ClangImporter &&) = delete;
   ClangImporter &operator=(const ClangImporter &) = delete;
@@ -160,9 +172,9 @@ public:
 
   /// Create a new clang::DependencyCollector customized to
   /// ClangImporter's specific uses.
-  static std::shared_ptr<clang::DependencyCollector>
-  createDependencyCollector(bool TrackSystemDeps,
-                            std::shared_ptr<llvm::FileCollector> FileCollector);
+  static std::shared_ptr<clang::DependencyCollector> createDependencyCollector(
+      IntermoduleDepTrackingMode Mode,
+      std::shared_ptr<llvm::FileCollectorBase> FileCollector);
 
   /// Append visible module names to \p names. Note that names are possibly
   /// duplicated, and not guaranteed to be ordered in any way.
@@ -174,7 +186,7 @@ public:
   ///
   /// Note that even if this check succeeds, errors may still occur if the
   /// module is loaded in full.
-  virtual bool canImportModule(Located<Identifier> named) override;
+  virtual bool canImportModule(ImportPath::Element named) override;
 
   /// Import a module with the given module path.
   ///
@@ -190,7 +202,7 @@ public:
   /// emits a diagnostic and returns NULL.
   virtual ModuleDecl *loadModule(
                         SourceLoc importLoc,
-                        ArrayRef<Located<Identifier>> path)
+                        ImportPath::Module path)
                       override;
 
   /// Determine whether \c overlayDC is within an overlay module for the
@@ -227,6 +239,10 @@ public:
   lookupRelatedEntity(StringRef clangName, ClangTypeKind kind,
                       StringRef relatedEntityKind,
                       llvm::function_ref<void(TypeDecl *)> receiver) override;
+
+  StructDecl *
+  instantiateCXXClassTemplate(clang::ClassTemplateDecl *decl,
+                      ArrayRef<clang::TemplateArgument> arguments) override;
 
   /// Just like Decl::getClangNode() except we look through to the 'Code'
   /// enum of an error wrapper struct.
@@ -364,13 +380,19 @@ public:
   /// construction of the replica.
   bool dumpPrecompiledModule(StringRef modulePath, StringRef outputPath);
 
+  bool runPreprocessor(StringRef inputPath, StringRef outputPath);
   const clang::Module *getClangOwningModule(ClangNode Node) const;
   bool hasTypedef(const clang::Decl *typeDecl) const;
 
   void verifyAllModules() override;
 
+  void recordModuleDependencies(
+      ModuleDependenciesCache &cache,
+      const clang::tooling::dependencies::FullDependenciesResult &clangDependencies);
+
   Optional<ModuleDependencies> getModuleDependencies(
-      StringRef moduleName, ModuleDependenciesCache &cache) override;
+      StringRef moduleName, ModuleDependenciesCache &cache,
+      InterfaceSubContextDelegate &delegate) override;
 
   /// Add dependency information for the bridging header.
   ///
@@ -422,7 +444,7 @@ public:
   /// Given the path of a Clang module, collect the names of all its submodules.
   /// Calling this function does not load the module.
   void collectSubModuleNames(
-      ArrayRef<Located<Identifier>> path,
+      ImportPath::Module path,
       std::vector<std::string> &names) const;
 
   /// Given a Clang module, decide whether this module is imported already.
@@ -454,10 +476,24 @@ public:
 
   bool isSerializable(const clang::Type *type,
                       bool checkCanonical) const override;
+
+  clang::FunctionDecl *
+  instantiateCXXFunctionTemplate(ASTContext &ctx,
+                                 clang::FunctionTemplateDecl *func,
+                                 SubstitutionMap subst) override;
 };
 
 ImportDecl *createImportDecl(ASTContext &Ctx, DeclContext *DC, ClangNode ClangN,
                              ArrayRef<clang::Module *> Exported);
+
+/// Extract the specified-or-defaulted -module-cache-path that winds up in
+/// the clang importer, for reuse as the .swiftmodule cache path when
+/// building a ModuleInterfaceLoader.
+std::string
+getModuleCachePathFromClang(const clang::CompilerInstance &Instance);
+
+/// Whether the given parameter name identifies a completion handler.
+bool isCompletionHandlerParamName(StringRef paramName);
 
 } // end namespace swift
 

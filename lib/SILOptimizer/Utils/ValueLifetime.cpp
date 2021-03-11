@@ -11,84 +11,99 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SILOptimizer/Utils/ValueLifetime.h"
+#include "swift/Basic/STLExtras.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
 
 using namespace swift;
 
 void ValueLifetimeAnalysis::propagateLiveness() {
+  bool defIsInstruction = defValue.is<SILInstruction *>();
   assert(liveBlocks.empty() && "frontier computed twice");
-  assert(!userSet.count(defValue) && "definition cannot be its own use");
+  assert(
+      (!defIsInstruction || !userSet.count(defValue.get<SILInstruction *>())) &&
+      "definition cannot be its own use");
 
-  auto defBB = defValue->getParentBlock();
-  llvm::SmallVector<SILBasicBlock *, 64> worklist;
+  // Compute the def block only if we have a SILInstruction. If we have a
+  // SILArgument, this will be nullptr.
+  auto *defBB = getDefValueParentBlock();
   int numUsersBeforeDef = 0;
 
   // Find the initial set of blocks where the value is live, because
   // it is used in those blocks.
   for (SILInstruction *user : userSet) {
     SILBasicBlock *userBlock = user->getParent();
-    if (liveBlocks.insert(userBlock))
-      worklist.push_back(userBlock);
+    if (!inLiveBlocks.testAndSet(userBlock))
+      liveBlocks.push_back(userBlock);
 
-    // A user in the defBB could potentially be located before the defValue.
-    if (userBlock == defBB)
-      numUsersBeforeDef++;
+    // A user in the defBB could potentially be located before the defValue. If
+    // we had a SILArgument, defBB will be nullptr, so we should always have
+    // numUsersBeforeDef is 0. We assert this at the end of the loop.
+    if (defIsInstruction && userBlock == defBB)
+      ++numUsersBeforeDef;
   }
-  // Don't count any users in the defBB which are actually located _after_
-  // the defValue.
-  auto instIter = defValue->getIterator();
-  while (numUsersBeforeDef > 0 && ++instIter != defBB->end()) {
-    if (userSet.count(&*instIter))
-      numUsersBeforeDef--;
+  assert((defValue.is<SILInstruction *>() || (numUsersBeforeDef == 0)) &&
+         "Non SILInstruction defValue with users before the def?!");
+
+  // Don't count any users in the defBB which are actually located _after_ the
+  // defValue.
+  if (defIsInstruction) {
+    auto instIter = defValue.get<SILInstruction *>()->getIterator();
+    while (numUsersBeforeDef > 0 && ++instIter != defBB->end()) {
+      if (userSet.count(&*instIter))
+        --numUsersBeforeDef;
+    }
   }
 
   // Initialize the hasUsersBeforeDef field.
   hasUsersBeforeDef = numUsersBeforeDef > 0;
+  assert(defIsInstruction || !hasUsersBeforeDef);
 
   // Now propagate liveness backwards until we hit the block that defines the
   // value.
-  while (!worklist.empty()) {
-    auto *bb = worklist.pop_back_val();
+  unsigned workIdx = 0;
+  while (workIdx < liveBlocks.size()) {
+    auto *bb = liveBlocks[workIdx++];
 
     // Don't go beyond the definition.
     if (bb == defBB && !hasUsersBeforeDef)
       continue;
 
-    for (SILBasicBlock *Pred : bb->getPredecessorBlocks()) {
+    for (auto *predBB : bb->getPredecessorBlocks()) {
       // If it's already in the set, then we've already queued and/or
       // processed the predecessors.
-      if (liveBlocks.insert(Pred))
-        worklist.push_back(Pred);
+      if (!inLiveBlocks.testAndSet(predBB))
+        liveBlocks.push_back(predBB);
     }
   }
 }
 
 SILInstruction *ValueLifetimeAnalysis::findLastUserInBlock(SILBasicBlock *bb) {
   // Walk backwards in bb looking for last use of the value.
-  for (auto ii = bb->rbegin(); ii != bb->rend(); ++ii) {
-    assert(defValue != &*ii && "Found def before finding use!");
+  for (auto &inst : llvm::reverse(*bb)) {
+    assert(defValue.dyn_cast<SILInstruction *>() != &inst &&
+           "Found def before finding use!");
 
-    if (userSet.count(&*ii))
-      return &*ii;
+    if (userSet.count(&inst))
+      return &inst;
   }
   llvm_unreachable("Expected to find use of value in block!");
 }
 
-bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
+bool ValueLifetimeAnalysis::computeFrontier(FrontierImpl &frontier, Mode mode,
                                             DeadEndBlocks *deBlocks) {
-  assert(!isAliveAtBeginOfBlock(defValue->getFunction()->getEntryBlock())
-         && "Can't compute frontier for def which does not dominate all uses");
+  assert(!isAliveAtBeginOfBlock(getFunction()->getEntryBlock()) &&
+         "Can't compute frontier for def which does not dominate all uses");
 
   bool noCriticalEdges = true;
 
   // Exit-blocks from the lifetime region. The value is live at the end of
   // a predecessor block but not in the frontier block itself.
-  llvm::SmallSetVector<SILBasicBlock *, 16> frontierBlocks;
+  BasicBlockSetVector<16> frontierBlocks(getFunction());
 
   // Blocks where the value is live at the end of the block and which have
   // a frontier block as successor.
-  llvm::SmallSetVector<SILBasicBlock *, 16> liveOutBlocks;
+  BasicBlockSetVector<16> liveOutBlocks(getFunction());
 
   /// The lifetime ends if we have a live block and a not-live successor.
   for (SILBasicBlock *bb : liveBlocks) {
@@ -101,10 +116,16 @@ bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
     for (const SILSuccessor &succ : bb->getSuccessors()) {
       if (isAliveAtBeginOfBlock(succ)) {
         liveInSucc = true;
-        if (succ == defValue->getParent()) {
+        if (succ == getDefValueParentBlock()) {
           // Here, the basic block bb uses the value but also redefines the
           // value inside bb. The new value could be used by the successors
           // of succ and therefore could be live at the end of succ as well.
+          //
+          // This should never happen if we have a SILArgument since the
+          // SILArgument can not have any uses before it in a block.
+          assert(defValue.is<SILInstruction *>() &&
+                 "SILArguments dominate all instructions in their defining "
+                 "blocks");
           usedAndRedefinedInSucc = true;
         }
       } else if (!deBlocks || !deBlocks->isDeadEnd(succ)) {
@@ -115,7 +136,10 @@ bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
       // Here, the basic block bb uses the value and later redefines the value.
       // Therefore, this value's lifetime ends after its last use preceding the
       // re-definition of the value.
-      auto ii = defValue->getReverseIterator();
+      //
+      // We know that we can not have a SILArgument here since the SILArgument
+      // dominates all instructions in the same block.
+      auto ii = defValue.get<SILInstruction *>()->getReverseIterator();
       for (; ii != bb->rend(); ++ii) {
         if (userSet.count(&*ii)) {
           frontier.push_back(&*std::next(ii));
@@ -162,14 +186,15 @@ bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
     }
   }
   // Handle "exit" edges from the lifetime region.
-  llvm::SmallPtrSet<SILBasicBlock *, 16> unhandledFrontierBlocks;
+  BasicBlockSet unhandledFrontierBlocks(getFunction());
+  bool unhandledFrontierBlocksFound = false;
   for (SILBasicBlock *frontierBB : frontierBlocks) {
     assert(mode != UsersMustPostDomDef);
     bool needSplit = false;
     // If the value is live only in part of the predecessor blocks we have to
     // split those predecessor edges.
     for (SILBasicBlock *Pred : frontierBB->getPredecessorBlocks()) {
-      if (!liveOutBlocks.count(Pred)) {
+      if (!liveOutBlocks.contains(Pred)) {
         needSplit = true;
         break;
       }
@@ -177,12 +202,13 @@ bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
     if (needSplit) {
       // We need to split the critical edge to create a frontier instruction.
       unhandledFrontierBlocks.insert(frontierBB);
+      unhandledFrontierBlocksFound = true;
     } else {
       // The first instruction of the exit-block is part of the frontier.
       frontier.push_back(&*frontierBB->begin());
     }
   }
-  if (unhandledFrontierBlocks.size() == 0) {
+  if (!unhandledFrontierBlocksFound) {
     return true;
   }
 
@@ -198,7 +224,7 @@ bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
       succBlocks.push_back(succ);
 
     for (unsigned i = 0, e = succBlocks.size(); i != e; ++i) {
-      if (unhandledFrontierBlocks.count(succBlocks[i])) {
+      if (unhandledFrontierBlocks.contains(succBlocks[i])) {
         assert((isCriticalEdge(term, i) || userSet.count(term)) &&
                "actually not a critical edge?");
         noCriticalEdges = false;
@@ -220,7 +246,7 @@ bool ValueLifetimeAnalysis::computeFrontier(Frontier &frontier, Mode mode,
 bool ValueLifetimeAnalysis::isWithinLifetime(SILInstruction *inst) {
   SILBasicBlock *bb = inst->getParent();
   // Check if the value is not live anywhere in inst's block.
-  if (!liveBlocks.count(bb))
+  if (!inLiveBlocks.get(bb))
     return false;
   for (const SILSuccessor &succ : bb->getSuccessors()) {
     // If the value is live at the beginning of any successor block it is also
@@ -245,22 +271,26 @@ bool ValueLifetimeAnalysis::isWithinLifetime(SILInstruction *inst) {
 // Searches \p bb backwards from the instruction before \p frontierInst
 // to the beginning of the list and returns true if we find a dealloc_ref
 // /before/ we find \p defValue (the instruction that defines our target value).
-static bool blockContainsDeallocRef(SILBasicBlock *bb, SILInstruction *defValue,
-                                    SILInstruction *frontierInst) {
+static bool
+blockContainsDeallocRef(SILBasicBlock *bb,
+                        PointerUnion<SILInstruction *, SILArgument *> defValue,
+                        SILInstruction *frontierInst) {
   SILBasicBlock::reverse_iterator End = bb->rend();
   SILBasicBlock::reverse_iterator iter = frontierInst->getReverseIterator();
   for (++iter; iter != End; ++iter) {
     SILInstruction *inst = &*iter;
     if (isa<DeallocRefInst>(inst))
       return true;
-    if (inst == defValue)
+    // We know that inst is not a nullptr, so if we have a SILArgument, this
+    // will always fail as we want.
+    if (inst == defValue.dyn_cast<SILInstruction *>())
       return false;
   }
   return false;
 }
 
-bool ValueLifetimeAnalysis::containsDeallocRef(const Frontier &frontier) {
-  SmallPtrSet<SILBasicBlock *, 8> frontierBlocks;
+bool ValueLifetimeAnalysis::containsDeallocRef(const FrontierImpl &frontier) {
+  BasicBlockSet frontierBlocks(getFunction());
   // Search in live blocks where the value is not alive until the end of the
   // block, i.e. the live range is terminated by a frontier instruction.
   for (SILInstruction *frontierInst : frontier) {
@@ -272,7 +302,7 @@ bool ValueLifetimeAnalysis::containsDeallocRef(const Frontier &frontier) {
   // Search in all other live blocks where the value is alive until the end of
   // the block.
   for (SILBasicBlock *bb : liveBlocks) {
-    if (frontierBlocks.count(bb) == 0) {
+    if (frontierBlocks.contains(bb) == 0) {
       if (blockContainsDeallocRef(bb, defValue, bb->getTerminator()))
         return true;
     }
@@ -281,9 +311,14 @@ bool ValueLifetimeAnalysis::containsDeallocRef(const Frontier &frontier) {
 }
 
 void ValueLifetimeAnalysis::dump() const {
-  llvm::errs() << "lifetime of def: " << *defValue;
-  for (SILInstruction *Use : userSet) {
-    llvm::errs() << "  use: " << *Use;
+  llvm::errs() << "lifetime of def: ";
+  if (auto *ii = defValue.dyn_cast<SILInstruction *>()) {
+    llvm::errs() << *ii;
+  } else {
+    llvm::errs() << *defValue.get<SILArgument *>();
+  }
+  for (SILInstruction *use : userSet) {
+    llvm::errs() << "  use: " << *use;
   }
   llvm::errs() << "  live blocks:";
   for (SILBasicBlock *bb : liveBlocks) {
@@ -293,16 +328,14 @@ void ValueLifetimeAnalysis::dump() const {
 }
 
 void swift::endLifetimeAtFrontier(
-    SILValue valueOrStackLoc, const ValueLifetimeAnalysis::Frontier &frontier,
-    SILBuilderContext &builderCtxt) {
+    SILValue valueOrStackLoc,
+    const ValueLifetimeAnalysis::FrontierImpl &frontier,
+    SILBuilderContext &builderCtxt, InstModCallbacks callbacks) {
   for (SILInstruction *endPoint : frontier) {
     SILBuilderWithScope builder(endPoint, builderCtxt);
-    SILLocation loc = RegularLocation(endPoint->getLoc().getSourceLoc());
-    if (valueOrStackLoc->getType().isObject()) {
-      builder.emitDestroyValueOperation(loc, valueOrStackLoc);
-    } else {
-      assert(isa<AllocStackInst>(valueOrStackLoc));
-      builder.createDestroyAddr(loc, valueOrStackLoc);
+    SILLocation loc = RegularLocation(endPoint->getLoc());
+    emitDestroyOperation(builder, loc, valueOrStackLoc, callbacks);
+    if (isa<AllocStackInst>(valueOrStackLoc)) {
       builder.createDeallocStack(loc, valueOrStackLoc);
     }
   }

@@ -81,6 +81,23 @@ extension DefaultIndices: Collection {
   public var indices: Indices {
     return self
   }
+  
+  @_alwaysEmitIntoClient
+  public func index(_ i: Index, offsetBy distance: Int) -> Index {
+    return _elements.index(i, offsetBy: distance)
+  }
+
+  @_alwaysEmitIntoClient
+  public func index(
+    _ i: Index, offsetBy distance: Int, limitedBy limit: Index
+  ) -> Index? {
+    return _elements.index(i, offsetBy: distance, limitedBy: limit)
+  }
+
+  @_alwaysEmitIntoClient
+  public func distance(from start: Index, to end: Index) -> Int {
+    return _elements.distance(from: start, to: end)
+  }
 }
 
 extension DefaultIndices: BidirectionalCollection
@@ -127,3 +144,6 @@ extension Collection where Indices == DefaultIndices<Self> {
       endIndex: self.endIndex)
   }
 }
+
+extension DefaultIndices: ConcurrentValue
+  where Elements: ConcurrentValue, Elements.Index: ConcurrentValue { }

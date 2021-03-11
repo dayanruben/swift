@@ -18,6 +18,7 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/Types.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PointerUnion.h"
@@ -51,6 +52,20 @@ public:
     } else {
       return cast<AbstractClosureExpr>(dc);
     }
+  }
+
+  /// Construct an AnyFunctionRef from a decl context that might be
+  /// some sort of function.
+  static Optional<AnyFunctionRef> fromDeclContext(DeclContext *dc) {
+    if (auto fn = dyn_cast<AbstractFunctionDecl>(dc)) {
+      return AnyFunctionRef(fn);
+    }
+
+    if (auto ace = dyn_cast<AbstractClosureExpr>(dc)) {
+      return AnyFunctionRef(ace);
+    }
+
+    return None;
   }
 
   CaptureInfo getCaptureInfo() const {
@@ -89,6 +104,18 @@ public:
     return TheFunction.get<AbstractClosureExpr *>()->getSingleExpressionBody();
   }
 
+  ParameterList *getParameters() const {
+    if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>())
+      return AFD->getParameters();
+    return TheFunction.get<AbstractClosureExpr *>()->getParameters();
+  }
+
+  bool hasPropertyWrapperParameters() const {
+    return llvm::any_of(*getParameters(), [](const ParamDecl *param) {
+      return param->hasAttachedPropertyWrapper();
+    });
+  }
+
   Type getType() const {
     if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>())
       return AFD->getInterfaceType();
@@ -123,6 +150,21 @@ public:
     return cast<AutoClosureExpr>(ACE)->getBody();
   }
 
+  void setTypecheckedBody(BraceStmt *stmt, bool isSingleExpression) {
+    if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>()) {
+      AFD->setBody(stmt, AbstractFunctionDecl::BodyKind::TypeChecked);
+      AFD->setHasSingleExpressionBody(isSingleExpression);
+      return;
+    }
+
+    auto *ACE = TheFunction.get<AbstractClosureExpr *>();
+    if (auto *CE = dyn_cast<ClosureExpr>(ACE)) {
+      return CE->setBody(stmt, isSingleExpression);
+    }
+
+    llvm_unreachable("autoclosures don't have statement bodies");
+  }
+
   DeclContext *getAsDeclContext() const {
     if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>())
       return AFD;
@@ -149,6 +191,17 @@ public:
   bool isKnownNoEscape() const {
     if (hasType() && !getType()->hasError())
       return getType()->castTo<AnyFunctionType>()->isNoEscape();
+    return false;
+  }
+
+  /// Whether this function is @concurrent.
+  bool isConcurrent() const {
+    if (!hasType())
+      return false;
+
+    if (auto *fnType = getType()->getAs<AnyFunctionType>())
+      return fnType->isConcurrent();
+
     return false;
   }
 

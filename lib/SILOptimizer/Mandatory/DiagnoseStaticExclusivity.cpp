@@ -154,17 +154,17 @@ public:
     }
 
     if (BAI->getAccessKind() == SILAccessKind::Read)
-      Reads++;
+      ++Reads;
     else
-      NonReads++;
+      ++NonReads;
   }
 
   /// Decrement the count for given access.
   void endAccess(EndAccessInst *EAI) {
     if (EAI->getBeginAccess()->getAccessKind() == SILAccessKind::Read)
-      Reads--;
+      --Reads;
     else
-      NonReads--;
+      --NonReads;
 
     // If all open accesses are now ended, forget the location of the
     // first access.
@@ -583,16 +583,6 @@ static void diagnoseExclusivityViolation(const ConflictingAccess &Violation,
       .highlight(NoteAccess.getAccessLoc().getSourceRange());
 }
 
-/// Look through a value to find the underlying storage accessed.
-static AccessedStorage findValidAccessedStorage(SILValue Source) {
-  const AccessedStorage &Storage = findAccessedStorage(Source);
-  if (!Storage) {
-    llvm::dbgs() << "Bad memory access source: " << Source;
-    llvm_unreachable("Unexpected access source.");
-  }
-  return Storage;
-}
-
 /// Returns true when the apply calls the Standard Library swap().
 /// Used for fix-its to suggest replacing with Collection.swapAt()
 /// on exclusivity violations.
@@ -700,7 +690,7 @@ struct AccessState {
 
 // Find conflicting access on each argument using AccessSummaryAnalysis.
 static void
-checkCaptureAccess(ApplySite Apply, AccessState &State,
+checkAccessSummary(ApplySite Apply, AccessState &State,
                    const AccessSummaryAnalysis::FunctionSummary &FS) {
   for (unsigned ArgumentIndex : range(Apply.getNumArguments())) {
 
@@ -721,7 +711,8 @@ checkCaptureAccess(ApplySite Apply, AccessState &State,
 
     // A valid AccessedStorage should always be found because Unsafe accesses
     // are not tracked by AccessSummaryAnalysis.
-    const AccessedStorage &Storage = findValidAccessedStorage(Argument);
+    auto Storage = AccessedStorage::computeInScope(Argument);
+    assert(Storage && "captured address must have valid storage");
     auto AccessIt = State.Accesses->find(Storage);
 
     // Are there any accesses in progress at the time of the call?
@@ -743,7 +734,7 @@ static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
   // dynamically replaceable.
   SILFunction *Callee = Apply.getCalleeFunction();
   if (Callee && !Callee->empty()) {
-    checkCaptureAccess(Apply, State, State.ASA->getOrCreateSummary(Callee));
+    checkAccessSummary(Apply, State, State.ASA->getOrCreateSummary(Callee));
     return;
   }
   // In the absence of AccessSummaryAnalysis, conservatively assume by-address
@@ -755,7 +746,8 @@ static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
 
     // A valid AccessedStorage should always be found because Unsafe accesses
     // are not tracked by AccessSummaryAnalysis.
-    const AccessedStorage &Storage = findValidAccessedStorage(argOper.get());
+    auto Storage = AccessedStorage::computeInScope(argOper.get());
+    assert(Storage && "captured address must have valid storage");
 
     // Are there any accesses in progress at the time of the call?
     auto AccessIt = State.Accesses->find(Storage);
@@ -764,7 +756,7 @@ static void checkCaptureAccess(ApplySite Apply, AccessState &State) {
 
     // The unknown argument access is considered a modify of the root subpath.
     auto argAccess = RecordedAccess(SILAccessKind::Modify, Apply.getLoc(),
-                                    State.ASA->getSubPathTrieRoot());
+                                    Apply.getModule().getIndexTrieRoot());
 
     // Construct a conflicting RecordedAccess if one doesn't already exist.
     const AccessInfo &info = AccessIt->getSecond();
@@ -845,8 +837,8 @@ static void checkForViolationsAtInstruction(SILInstruction &I,
       return;
 
     SILAccessKind Kind = BAI->getAccessKind();
-    const AccessedStorage &Storage =
-      findValidAccessedStorage(BAI->getSource());
+    const AccessedStorage &Storage = identifyFormalAccess(BAI);
+    assert(Storage && "unidentified formal access");
     // Storage may be associated with a nested access where the outer access is
     // "unsafe". That's ok because the outer access can itself be treated like a
     // valid source, as long as we don't ask for its source.
@@ -862,14 +854,15 @@ static void checkForViolationsAtInstruction(SILInstruction &I,
   }
 
   if (auto *EAI = dyn_cast<EndAccessInst>(&I)) {
-    if (EAI->getBeginAccess()->getEnforcement() == SILAccessEnforcement::Unsafe)
+    BeginAccessInst *BAI = EAI->getBeginAccess();
+    if (BAI->getEnforcement() == SILAccessEnforcement::Unsafe)
       return;
 
-    auto It =
-      State.Accesses->find(findValidAccessedStorage(EAI->getSource()));
+    const AccessedStorage &Storage = identifyFormalAccess(BAI);
+    assert(Storage && "unidentified formal access");
+    auto It = State.Accesses->find(identifyFormalAccess(BAI));
     AccessInfo &Info = It->getSecond();
 
-    BeginAccessInst *BAI = EAI->getBeginAccess();
     const IndexTrieNode *SubPath = State.ASA->findSubPathAccessed(BAI);
     Info.endAccess(EAI, SubPath);
 
@@ -973,17 +966,32 @@ static void checkStaticExclusivity(SILFunction &Fn, PostOrderFunctionInfo *PO,
 // Check that the given address-type operand is guarded by begin/end access
 // markers.
 static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
-  SILValue address = memOper->get();
+  SILValue accessBegin = getAccessScope(memOper->get());
   SILInstruction *memInst = memOper->getUser();
 
-  auto error = [address, memInst]() {
+  auto error = [accessBegin, memInst]() {
     llvm::dbgs() << "Memory access not protected by begin_access:\n";
     memInst->printInContext(llvm::dbgs());
-    llvm::dbgs() << "Accessing: " << address;
+    llvm::dbgs() << "Accessing: " << accessBegin;
     llvm::dbgs() << "In function:\n";
     memInst->getFunction()->print(llvm::dbgs());
     abort();
   };
+
+  // Check if this address is guarded by an access.
+  if (auto *BAI = dyn_cast<BeginAccessInst>(accessBegin)) {
+    if (BAI->getEnforcement() == SILAccessEnforcement::Unsafe)
+      return;
+
+    const AccessedStorage &Storage = identifyFormalAccess(BAI);
+    assert(Storage && "unidentified formal access");
+    AccessInfo &Info = Accesses[Storage];
+    if (Info.hasAccessesInProgress())
+      return;
+
+    error();
+  }
+  // --- This address is not guarded by a begin_access.
 
   // If the memory instruction is only used for initialization, it doesn't need
   // an access marker.
@@ -1011,14 +1019,12 @@ static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
       return;
   }
 
-  // Strip off address projections, but not ref_element_addr.
-  const AccessedStorage &storage = findAccessedStorage(address);
-  // findAccessedStorage may return an invalid storage object if the address
-  // producer is not recognized by its whitelist. For the purpose of
-  // verification, we assume that this can only happen for local
-  // initialization, not a formal memory access. The strength of
-  // verification rests on the completeness of the opcode list inside
-  // findAccessedStorage.
+  auto storage = AccessedStorage::compute(accessBegin);
+  // AccessedStorage::compute may return an invalid storage object if the
+  // address producer is not recognized by its allowlist. For the purpose of
+  // verification, we assume that this can only happen for local initialization,
+  // not a formal memory access. The strength of verification rests on the
+  // completeness of the opcode list inside AccessedStorage::compute.
   //
   // For the purpose of verification, an unidentified access is
   // unenforced. These occur in cases like global addressors and local buffers
@@ -1040,18 +1046,6 @@ static void checkAccessedAddress(Operand *memOper, StorageMap &Accesses) {
     return;
   }
 
-  // Otherwise, the address base should be an in-scope begin_access.
-  if (storage.getKind() == AccessedStorage::Nested) {
-    auto *BAI = cast<BeginAccessInst>(storage.getValue());
-    if (BAI->getEnforcement() == SILAccessEnforcement::Unsafe)
-      return;
-
-    const AccessedStorage &Storage = findValidAccessedStorage(BAI->getSource());
-    AccessInfo &Info = Accesses[Storage];
-    if (!Info.hasAccessesInProgress())
-      error();
-    return;
-  }
   error();
 }
 

@@ -83,24 +83,30 @@ import resilient_objc_class
 
 // -- Categories reference the stubs
 
-// CHECK-LABEL: @"_CATEGORY__TtC31class_update_callback_with_stub17ResilientSubclass_$_class_update_callback_with_stub" = private constant
+// CHECK-LABEL: @"_CATEGORY__TtC31class_update_callback_with_stub17ResilientSubclass_$_class_update_callback_with_stub" = internal constant
 // CHECK-SAME:  @"$s31class_update_callback_with_stub17ResilientSubclassCMs"
 
-// CHECK-LABEL: @"_CATEGORY__TtC31class_update_callback_with_stub25ResilientNSObjectSubclass_$_class_update_callback_with_stub" = private constant
+// CHECK-LABEL: @"_CATEGORY__TtC31class_update_callback_with_stub25ResilientNSObjectSubclass_$_class_update_callback_with_stub" = internal constant
 // CHECK-SAME:  @"$s31class_update_callback_with_stub25ResilientNSObjectSubclassCMs"
 
-// CHECK-LABEL: @"_CATEGORY__TtC31class_update_callback_with_stub27FixedLayoutNSObjectSubclass_$_class_update_callback_with_stub" = private constant
+// CHECK-LABEL: @"_CATEGORY__TtC31class_update_callback_with_stub27FixedLayoutNSObjectSubclass_$_class_update_callback_with_stub" = internal constant
 // CHECK-SAME:  @"$s31class_update_callback_with_stub27FixedLayoutNSObjectSubclassCMs"
 
 // -- But not if the entire inheritance chain is in a single module
 
-// CHECK-LABEL: @"_CATEGORY__TtC15resilient_class22ResilientOutsideParent_$_class_update_callback_with_stub" = private constant
+// CHECK-LABEL: @"_CATEGORY__TtC15resilient_class22ResilientOutsideParent_$_class_update_callback_with_stub" = internal constant
 // CHECK-SAME:  @"$s15resilient_class22ResilientOutsideParentCN"
 
 
 // -- Class stubs do not appear in the class list
 
 // NEGATIVE-NOT: @objc_classes =
+
+// -- ... but they do appear in the stub list
+
+// CHECK-LABEL: @objc_class_stubs = internal global
+// CHECK-SAME: @"$s31class_update_callback_with_stub25ResilientNSObjectSubclassCMt"
+// CHECK-SAME: , section "__DATA,__objc_stublist,regular,no_dead_strip"
 
 // -- The category list
 
@@ -122,7 +128,7 @@ import resilient_objc_class
 
 
 // -- Class symbol for NSObject-derived class points at the class stub
-// CHECK: @"OBJC_CLASS_$__TtC31class_update_callback_with_stub25ResilientNSObjectSubclass" = alias %objc_class_stub, %objc_class_stub* @"$s31class_update_callback_with_stub25ResilientNSObjectSubclassCMs"
+// CHECK: @"OBJC_CLASS_$__TtC31class_update_callback_with_stub25ResilientNSObjectSubclass" = alias %objc_class_stub, {{.*}} @"$s31class_update_callback_with_stub25ResilientNSObjectSubclassCMt"
 
 
 // -- Metadata update callbacks referenced from class stubs

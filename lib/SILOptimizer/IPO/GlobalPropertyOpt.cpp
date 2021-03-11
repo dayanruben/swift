@@ -269,6 +269,7 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
     ArraySemanticsCall semCall(AI);
     switch (semCall.getKind()) {
       case ArrayCallKind::kArrayInit:
+      case ArrayCallKind::kArrayInitEmpty:
       case ArrayCallKind::kArrayUninitialized:
       case ArrayCallKind::kMutateUnknown:
       case ArrayCallKind::kMakeMutable:
@@ -466,7 +467,7 @@ void GlobalPropertyOpt::replacePropertyCalls() {
       AI->replaceAllUsesWith(TrueStruct);
       
       semCall.removeCall();
-      NumPropertiesReplaced++;
+      ++NumPropertiesReplaced;
     }
   }
 }

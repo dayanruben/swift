@@ -109,11 +109,11 @@ class ClassWithInheritance9 : FooClass, BarClass, FooProtocol, BarProtocol, FooN
 //===--- Inheritance list in enums.
 //===---
 
-enum EnumWithInheritance1 : FooNonExistentProtocol {} // expected-error {{cannot find type 'FooNonExistentProtocol' in scope}} expected-error {{raw type}} expected-error {{an enum with no cases}}
+enum EnumWithInheritance1 : FooNonExistentProtocol {} // expected-error {{cannot find type 'FooNonExistentProtocol' in scope}} expected-error {{an enum with no cases}}
 // NO-TYREPR: {{^}}enum EnumWithInheritance1 : <<error type>> {{{$}}
 // TYREPR: {{^}}enum EnumWithInheritance1 : FooNonExistentProtocol {{{$}}
 
-enum EnumWithInheritance2 : FooNonExistentProtocol, BarNonExistentProtocol {} // expected-error {{cannot find type 'FooNonExistentProtocol' in scope}} expected-error {{cannot find type 'BarNonExistentProtocol' in scope}} expected-error {{raw type}} expected-error {{an enum with no cases}}
+enum EnumWithInheritance2 : FooNonExistentProtocol, BarNonExistentProtocol {} // expected-error {{cannot find type 'FooNonExistentProtocol' in scope}} expected-error {{cannot find type 'BarNonExistentProtocol' in scope}} expected-error {{an enum with no cases}}
 // NO-TYREPR: {{^}}enum EnumWithInheritance2 : <<error type>>, <<error type>> {{{$}}
 // TYREPR: {{^}}enum EnumWithInheritance2 : FooNonExistentProtocol, BarNonExistentProtocol {{{$}}
 
@@ -192,7 +192,7 @@ protocol AssociatedType1 {
 // TYREPR: {{^}}  associatedtype AssociatedTypeDecl4 : FooNonExistentProtocol, BarNonExistentProtocol{{$}}
 
   associatedtype AssociatedTypeDecl5 : FooClass
-// CHECK: {{^}}  associatedtype AssociatedTypeDecl5 : FooClass{{$}}
+// CHECK: {{^}}  associatedtype AssociatedTypeDecl5{{$}}
 }
 
 //===---

@@ -219,6 +219,29 @@ FunctionSideEffects::getMemBehavior(RetainObserveKind ScanKind) const {
   return Behavior;
 }
 
+MemoryBehavior
+FunctionSideEffects::getArgumentBehavior(FullApplySite applySite,
+                                         unsigned argIdx) {
+  // The overall argument effect is the combination of the argument and the
+  // global effects.
+  MemoryBehavior behavior =
+    GlobalEffects.getMemBehavior(RetainObserveKind::IgnoreRetains);
+  MemoryBehavior argBehavior =
+    ParamEffects[argIdx].getMemBehavior(RetainObserveKind::IgnoreRetains);
+
+  behavior = combineMemoryBehavior(behavior, argBehavior);
+
+  if (behavior > MemoryBehavior::MayRead &&
+      applySite.getArgumentConvention(applySite.getArgumentRef(argIdx)) ==
+        SILArgumentConvention::Indirect_In_Guaranteed) {
+    // Even if side-effect analysis doesn't know anything about the called
+    // called function, the in_guaranteed convention guarantees that the
+    // argument is never written to.
+    return MemoryBehavior::MayRead;
+  }
+  return behavior;
+}
+
 bool FunctionSideEffects::mergeFrom(const FunctionSideEffects &RHS) {
   bool Changed = mergeFlags(RHS);
   Changed |= GlobalEffects.mergeFrom(RHS.GlobalEffects);
@@ -516,12 +539,29 @@ void FunctionSideEffects::analyzeInstruction(SILInstruction *I) {
         true;
     Traps = true;
     return;
-  case SILInstructionKind::LoadInst:
-    getEffectsOn(cast<LoadInst>(I)->getOperand())->Reads = true;
+  case SILInstructionKind::LoadBorrowInst: {
+    auto *effects = getEffectsOn(cast<LoadBorrowInst>(I)->getOperand());
+    effects->Reads = true;
     return;
-  case SILInstructionKind::StoreInst:
-    getEffectsOn(cast<StoreInst>(I)->getDest())->Writes = true;
+  }
+  case SILInstructionKind::LoadInst: {
+    auto *li = cast<LoadInst>(I);
+    auto *effects = getEffectsOn(cast<LoadInst>(I)->getOperand());
+    effects->Reads = true;
+    if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Take)
+      effects->Writes = true;
+    if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Copy)
+      effects->Retains = true;
     return;
+  }
+  case SILInstructionKind::StoreInst: {
+    auto *si = cast<StoreInst>(I);
+    auto *effects = getEffectsOn(si->getDest());
+    effects->Writes = true;
+    if (si->getOwnershipQualifier() == StoreOwnershipQualifier::Assign)
+      effects->Releases = true;
+    return;
+  }
   case SILInstructionKind::CondFailInst:
     Traps = true;
     return;

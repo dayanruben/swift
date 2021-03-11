@@ -1,6 +1,9 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
 
+// Would fail due to unavailability of swift_autoDiffCreateLinearMapContext.
+// UNSUPPORTED: use_os_stdlib
+
 import _Differentiation
 import StdlibUnittest
 
@@ -12,9 +15,9 @@ SIMDTests.test("init(repeating:)") {
   func foo1(x: Float) -> SIMD4<Float> {
     return SIMD4<Float>(repeating: 2 * x)
   }
-  let (val1, bp1) = valueWithPullback(at: 5, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: 5, of: foo1)
   expectEqual(SIMD4<Float>(10, 10, 10, 10), val1)
-  expectEqual(8, bp1(g))
+  expectEqual(8, pb1(g))
 }
 
 // FIXME(TF-1103): Derivative registration does not yet support
@@ -26,9 +29,9 @@ SIMDTests.test("Sum") {
   func foo1(x: SIMD4<Float>) -> Float {
     return x.sum()
   }
-  let (val1, bp1) = valueWithPullback(at: a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, of: foo1)
   expectEqual(10, val1)
-  expectEqual(SIMD4<Float>(3, 3, 3, 3), bp1(3))
+  expectEqual(SIMD4<Float>(3, 3, 3, 3), pb1(3))
 }
 */
 
@@ -39,9 +42,9 @@ SIMDTests.test("Identity") {
   func foo1(x: SIMD4<Float>) -> SIMD4<Float> {
     return x
   }
-  let (val1, bp1) = valueWithPullback(at: a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, of: foo1)
   expectEqual(a, val1)
-  expectEqual(g, bp1(g))
+  expectEqual(g, pb1(g))
 }
 
 SIMDTests.test("Negate") {
@@ -51,21 +54,50 @@ SIMDTests.test("Negate") {
   func foo1(x: SIMD4<Float>) -> SIMD4<Float> {
     return -x
   }
-  let (val1, bp1) = valueWithPullback(at: a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, of: foo1)
   expectEqual(-a, val1)
-  expectEqual(-g, bp1(g))
+  expectEqual(-g, pb1(g))
 }
 
-SIMDTests.test("subscript") {
+SIMDTests.test("Subscript") {
   let a = SIMD4<Float>(1, 2, 3, 4)
 
   func foo1(x: SIMD4<Float>) -> Float {
     return x[3]
   }
 
-  let (val1, bp1) = valueWithPullback(at: a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, of: foo1)
   expectEqual(4, val1)
-  expectEqual(SIMD4<Float>(0, 0, 0, 7), bp1(7))
+  expectEqual(SIMD4<Float>(0, 0, 0, 7), pb1(7))
+}
+
+SIMDTests.test("SubscriptSetter") {
+  let a = SIMD4<Float>(1, 2, 3, 4)
+  let ones = SIMD4<Float>(1, 1, 1, 1)
+
+  // A wrapper around `subscript(_: Int).set`.
+  func subscriptSet(
+    _ simd: SIMD4<Float>, index: Int, newScalar: Float
+  ) -> SIMD4<Float> {
+    var result = simd
+    result[index] = newScalar
+    return result
+  }
+
+  let (val1, pb1) = valueWithPullback(at: a, 5, of: { subscriptSet($0, index: 2, newScalar: $1) })
+  expectEqual(SIMD4<Float>(1, 2, 5, 4), val1)
+  expectEqual((SIMD4<Float>(1, 1, 0, 1), 1), pb1(ones))
+
+  func doubled(_ x: SIMD4<Float>) -> SIMD4<Float> {
+    var result = x
+    for i in withoutDerivative(at: x.indices) {
+      result[i] = x[i] * 2
+    }
+    return result
+  }
+  let (val2, pb2) = valueWithPullback(at: a, of: doubled)
+  expectEqual(SIMD4<Float>(2, 4, 6, 8), val2)
+  expectEqual(SIMD4<Float>(2, 2, 2, 2), pb2(ones))
 }
 
 SIMDTests.test("Addition") {
@@ -76,25 +108,25 @@ SIMDTests.test("Addition") {
   func foo1(x: SIMD4<Float>, y: SIMD4<Float>) -> SIMD4<Float> {
     return x + y
   }
-  let (val1, bp1) = valueWithPullback(at: a, a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, a, of: foo1)
   expectEqual(SIMD4<Float>(2, 4, 6, 8), val1)
-  expectEqual((g, g), bp1(g))
+  expectEqual((g, g), pb1(g))
 
   // SIMD + Scalar
   func foo2(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
     return x + y
   }
-  let (val2, bp2) = valueWithPullback(at: a, 5, in: foo2)
+  let (val2, pb2) = valueWithPullback(at: a, 5, of: foo2)
   expectEqual(SIMD4<Float>(6, 7, 8, 9), val2)
-  expectEqual((g, 4), bp2(g))
+  expectEqual((g, 4), pb2(g))
 
   // Scalar + SIMD
   func foo3(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
     return y + x
   }
-  let (val3, bp3) = valueWithPullback(at: a, 5, in: foo3)
+  let (val3, pb3) = valueWithPullback(at: a, 5, of: foo3)
   expectEqual(SIMD4<Float>(6, 7, 8, 9), val3)
-  expectEqual((g, 4), bp3(g))
+  expectEqual((g, 4), pb3(g))
 }
 
 SIMDTests.test("Subtraction") {
@@ -105,25 +137,25 @@ SIMDTests.test("Subtraction") {
   func foo1(x: SIMD4<Float>, y: SIMD4<Float>) -> SIMD4<Float> {
     return x - y
   }
-  let (val1, bp1) = valueWithPullback(at: a, a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, a, of: foo1)
   expectEqual(SIMD4<Float>(0, 0, 0, 0), val1)
-  expectEqual((g, -g), bp1(g))
+  expectEqual((g, -g), pb1(g))
 
   // SIMD - Scalar
   func foo2(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
     return x - y
   }
-  let (val2, bp2) = valueWithPullback(at: a, 5, in: foo2)
+  let (val2, pb2) = valueWithPullback(at: a, 5, of: foo2)
   expectEqual(SIMD4<Float>(-4, -3, -2, -1), val2)
-  expectEqual((g, -4), bp2(g))
+  expectEqual((g, -4), pb2(g))
 
   // Scalar - SIMD
   func foo3(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
     return y - x
   }
-  let (val3, bp3) = valueWithPullback(at: a, 5, in: foo3)
+  let (val3, pb3) = valueWithPullback(at: a, 5, of: foo3)
   expectEqual(SIMD4<Float>(4, 3, 2, 1), val3)
-  expectEqual((-g, 4), bp3(g))
+  expectEqual((-g, 4), pb3(g))
 }
 
 SIMDTests.test("Multiplication") {
@@ -134,25 +166,25 @@ SIMDTests.test("Multiplication") {
   func foo1(x: SIMD4<Float>, y: SIMD4<Float>) -> SIMD4<Float> {
     return x * y
   }
-  let (val1, bp1) = valueWithPullback(at: a, a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, a, of: foo1)
   expectEqual(a * a, val1)
-  expectEqual((a, a), bp1(g))
+  expectEqual((a, a), pb1(g))
 
   // SIMD * Scalar
   func foo2(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
     return x * y
   }
-  let (val2, bp2) = valueWithPullback(at: a, 5, in: foo2)
+  let (val2, pb2) = valueWithPullback(at: a, 5, of: foo2)
   expectEqual(a * 5, val2)
-  expectEqual((SIMD4<Float>(5, 5, 5, 5), 10), bp2(g))
+  expectEqual((SIMD4<Float>(5, 5, 5, 5), 10), pb2(g))
 
   // Scalar * SIMD
   func foo3(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
     return y * x
   }
-  let (val3, bp3) = valueWithPullback(at: a, 5, in: foo3)
+  let (val3, pb3) = valueWithPullback(at: a, 5, of: foo3)
   expectEqual(a * 5, val3)
-  expectEqual((SIMD4<Float>(5, 5, 5, 5), 10), bp3(g))
+  expectEqual((SIMD4<Float>(5, 5, 5, 5), 10), pb3(g))
 }
 
 SIMDTests.test("Division") {
@@ -165,9 +197,9 @@ SIMDTests.test("Division") {
   }
   let dlhs1 = g / a
   let drhs1 = -1 / a
-  let (val1, bp1) = valueWithPullback(at: a, a, in: foo1)
+  let (val1, pb1) = valueWithPullback(at: a, a, of: foo1)
   expectEqual(a / a, val1)
-  expectEqual((dlhs1, drhs1), bp1(g))
+  expectEqual((dlhs1, drhs1), pb1(g))
 
   // SIMD / Scalar
   func foo2(x: SIMD4<Float>, y: Float) -> SIMD4<Float> {
@@ -175,9 +207,9 @@ SIMDTests.test("Division") {
   }
   let dlhs2 = g / 5
   let drhs2 = (-a / 25 * g).sum()
-  let (val2, bp2) = valueWithPullback(at: a, 5, in: foo2)
+  let (val2, pb2) = valueWithPullback(at: a, 5, of: foo2)
   expectEqual(a / 5, val2)
-  expectEqual((dlhs2, drhs2), bp2(g))
+  expectEqual((dlhs2, drhs2), pb2(g))
 
   // Scalar / SIMD
   func foo3(x: Float, y: SIMD4<Float>) -> SIMD4<Float> {
@@ -185,9 +217,9 @@ SIMDTests.test("Division") {
   }
   let dlhs3 = (g / a).sum()
   let drhs3 = -5 / (a*a) * g
-  let (val3, bp3) = valueWithPullback(at: 5, a, in: foo3)
+  let (val3, pb3) = valueWithPullback(at: 5, a, of: foo3)
   expectEqual(5 / a, val3)
-  expectEqual((dlhs3, drhs3), bp3(g))
+  expectEqual((dlhs3, drhs3), pb3(g))
 }
 
 SIMDTests.test("Generics") {
@@ -203,9 +235,9 @@ SIMDTests.test("Generics") {
     return SIMDType.init(repeating: x)
   }
   func simd3Init(x: Double) -> SIMD3<Double> { testInit(x: x) }
-  let (val1, bp1) = valueWithPullback(at: 10, in: simd3Init)
+  let (val1, pb1) = valueWithPullback(at: 10, of: simd3Init)
   expectEqual(SIMD3<Double>(10, 10, 10), val1)
-  expectEqual(3, bp1(g))
+  expectEqual(3, pb1(g))
 
   // SIMDType + SIMDType
   func testAddition<Scalar, SIMDType: SIMD>(lhs: SIMDType, rhs: SIMDType)
@@ -220,9 +252,9 @@ SIMDTests.test("Generics") {
   func simd3Add(lhs: SIMD3<Double>, rhs: SIMD3<Double>) -> SIMD3<Double> {
     return testAddition(lhs: lhs, rhs: rhs)
   }
-  let (val2, bp2) = valueWithPullback(at: a, a, in: simd3Add)
+  let (val2, pb2) = valueWithPullback(at: a, a, of: simd3Add)
   expectEqual(SIMD3<Double>(2, 4, 6), val2)
-  expectEqual((g, g), bp2(g))
+  expectEqual((g, g), pb2(g))
 
   // Scalar - SIMDType
   func testSubtraction<Scalar, SIMDType: SIMD>(lhs: Scalar, rhs: SIMDType)
@@ -237,12 +269,12 @@ SIMDTests.test("Generics") {
   func simd3Subtract(lhs: Double, rhs: SIMD3<Double>) -> SIMD3<Double> {
     return testSubtraction(lhs: lhs, rhs: rhs)
   }
-  let (val3, bp3) = valueWithPullback(at: 5, a, in: simd3Subtract)
+  let (val3, pb3) = valueWithPullback(at: 5, a, of: simd3Subtract)
   expectEqual(SIMD3<Double>(4, 3, 2), val3)
-  expectEqual((3, SIMD3<Double>(-1, -1, -1)), bp3(g))
+  expectEqual((3, SIMD3<Double>(-1, -1, -1)), pb3(g))
 
   // SIMDType * Scalar
-  func testMultipication<Scalar, SIMDType: SIMD>(lhs: SIMDType, rhs: Scalar)
+  func testMultiplication<Scalar, SIMDType: SIMD>(lhs: SIMDType, rhs: Scalar)
     -> SIMDType
     where SIMDType.Scalar == Scalar,
       SIMDType : Differentiable,
@@ -252,13 +284,14 @@ SIMDTests.test("Generics") {
     return lhs * rhs
   }
   func simd3Multiply(lhs: SIMD3<Double>, rhs: Double) -> SIMD3<Double> {
-    return testMultipication(lhs: lhs, rhs: rhs)
+    return testMultiplication(lhs: lhs, rhs: rhs)
   }
-  let (val4, bp4) = valueWithPullback(at: a, 5, in: simd3Multiply)
+  let (val4, pb4) = valueWithPullback(at: a, 5, of: simd3Multiply)
   expectEqual(SIMD3<Double>(5, 10, 15), val4)
-  expectEqual((SIMD3<Double>(5, 5, 5), 6), bp4(g))
+  expectEqual((SIMD3<Double>(5, 5, 5), 6), pb4(g))
 
   // FIXME(TF-1103): Derivative registration does not yet support
+  // `@_alwaysEmitIntoClient` original functions like `SIMD.sum()`.
   /*
   func testSum<Scalar, SIMDType: SIMD>(x: SIMDType) -> Scalar
     where SIMDType.Scalar == Scalar,
@@ -269,9 +302,9 @@ SIMDTests.test("Generics") {
     return x.sum()
   }
   func simd3Sum(x: SIMD3<Double>) -> Double { testSum(x: x) }
-  let (val5, bp5) = valueWithPullback(at: a, in: simd3Sum)
+  let (val5, pb5) = valueWithPullback(at: a, of: simd3Sum)
   expectEqual(6, val5)
-  expectEqual(SIMD3<Double>(7, 7, 7), bp5(7))
+  expectEqual(SIMD3<Double>(7, 7, 7), pb5(7))
   */
 }
 

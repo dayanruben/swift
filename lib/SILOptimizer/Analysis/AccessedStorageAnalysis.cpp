@@ -230,14 +230,17 @@ transformCalleeStorage(const StorageAccessInfo &storage,
   case AccessedStorage::Global:
     // Global accesses is universal.
     return storage;
-  case AccessedStorage::Class: {
+  case AccessedStorage::Class:
+  case AccessedStorage::Tail: {
     // If the object's value is an argument, translate it into a value on the
     // caller side.
     SILValue obj = storage.getObject();
     if (auto *arg = dyn_cast<SILFunctionArgument>(obj)) {
       SILValue argVal = getCallerArg(fullApply, arg->getIndex());
       if (argVal) {
-        unsigned idx = storage.getPropertyIndex();
+        unsigned idx = (storage.getKind() == AccessedStorage::Class)
+                           ? storage.getPropertyIndex()
+                           : AccessedStorage::TailIndex;
         // Remap this storage info. The argument source value is now the new
         // object. The old storage info is inherited.
         return StorageAccessInfo(AccessedStorage::forClass(argVal, idx),
@@ -253,8 +256,7 @@ transformCalleeStorage(const StorageAccessInfo &storage,
     SILValue argVal = getCallerArg(fullApply, storage.getParamIndex());
     if (argVal) {
       // Remap the argument source value and inherit the old storage info.
-      auto calleeStorage = findAccessedStorageNonNested(argVal);
-      if (calleeStorage)
+      if (auto calleeStorage = AccessedStorage::compute(argVal))
         return StorageAccessInfo(calleeStorage, storage);
     }
     // If the argument can't be transformed, demote it to an unidentified
@@ -262,7 +264,7 @@ transformCalleeStorage(const StorageAccessInfo &storage,
     //
     // This is an untested bailout. It is only reachable if the call graph
     // contains an edge that getCallerArg is unable to analyze OR if
-    // findAccessedStorageNonNested returns an invalid SILValue, which won't
+    // AccessedStorage::compute returns an invalid SILValue, which won't
     // pass SIL verification.
     //
     // FIXME: In case argVal is invalid, support Unidentified access for invalid
@@ -298,8 +300,7 @@ void AccessedStorageResult::visitBeginAccess(B *beginAccess) {
   if (beginAccess->getEnforcement() != SILAccessEnforcement::Dynamic)
     return;
 
-  const AccessedStorage &storage =
-      findAccessedStorageNonNested(beginAccess->getSource());
+  auto storage = AccessedStorage::compute(beginAccess->getSource());
 
   if (storage.getKind() == AccessedStorage::Unidentified) {
     // This also catches invalid storage.

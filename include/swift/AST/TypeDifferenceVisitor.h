@@ -107,17 +107,11 @@ public:
   // non-identical types.
 
   // These types are singleton and can't actually differ.
-#define SINGLETON_TYPE(TYPE)                                  \
-  bool visit##TYPE(Can##TYPE type1, Can##TYPE type2) {        \
+#define SINGLETON_TYPE(SHORT_ID, ID)                               \
+  bool visit##ID##Type(Can##ID##Type type1, Can##ID##Type type2) {\
     llvm_unreachable("singleton type that wasn't identical"); \
   }
-  SINGLETON_TYPE(BuiltinIntegerLiteralType)
-  SINGLETON_TYPE(BuiltinRawPointerType)
-  SINGLETON_TYPE(BuiltinNativeObjectType)
-  SINGLETON_TYPE(BuiltinBridgeObjectType)
-  SINGLETON_TYPE(BuiltinUnsafeValueBufferType)
-  SINGLETON_TYPE(SILTokenType)
-#undef SINGLETON_TYPE
+#include "swift/AST/TypeNodes.def"
 
   bool visitBuiltinIntegerType(CanBuiltinIntegerType type1,
                                CanBuiltinIntegerType type2) {
@@ -214,7 +208,7 @@ public:
 
   bool visitAnyFunctionType(CanAnyFunctionType type1,
                             CanAnyFunctionType type2) {
-    if (type1->getExtInfo() != type2->getExtInfo())
+    if (!type1->hasSameExtInfoAs(type2))
       return asImpl().visitDifferentTypeStructure(type1, type2);
 
     if (asImpl().visit(type1.getResult(), type2.getResult()))
@@ -242,10 +236,10 @@ public:
 
   bool visitSILFunctionTypeStructure(CanSILFunctionType type1,
                                      CanSILFunctionType type2) {
-    if (type1->getExtInfo() != type2->getExtInfo() ||
+    if (!type1->hasSameExtInfoAs(type2) ||
         type1->getCoroutineKind() != type2->getCoroutineKind() ||
-        type1->getInvocationGenericSignature()
-          != type2->getInvocationGenericSignature())
+        type1->getInvocationGenericSignature() !=
+            type2->getInvocationGenericSignature())
       return asImpl().visitDifferentTypeStructure(type1, type2);
     return false;
   }

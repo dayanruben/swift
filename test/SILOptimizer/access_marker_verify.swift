@@ -333,8 +333,9 @@ func testInitGenericEnum<T>(t: T) -> GenericEnum<T>? {
 // CHECK:   copy_addr %1 to [initialization] [[ADR1]] : $*T
 // CHECK:   [[STK:%.*]] = alloc_stack $GenericEnum<T>
 // CHECK:   [[ENUMDATAADDR:%.*]] = init_enum_data_addr [[STK]]
-// CHECK-NOT: begin_access
-// CHECK:   copy_addr [take] [[ADR1]] to [initialization] [[ENUMDATAADDR]] : $*T
+// CHECK:   [[ACCESSENUM:%.*]] = begin_access [modify] [unsafe] [[ENUMDATAADDR]] : $*T
+// CHECK:   copy_addr [take] [[ADR1]] to [initialization] [[ACCESSENUM]] : $*T
+// CHECK:   end_access [[ACCESSENUM]] : $*T
 // CHECK:   inject_enum_addr
 // CHECK:   [[ACCESS:%.*]] = begin_access [modify] [unknown] [[PROJ]]
 // CHECK:   copy_addr [take] %{{.*}} to [[ACCESS]] : $*GenericEnum<T>
@@ -627,17 +628,17 @@ func testShims() -> UInt32 {
 
 // --- global variable initialization.
 var globalString1 = "⓪" // start non-empty
-// CHECK-LABEL: sil private [ossa] @globalinit_33_{{.*}}_func0 : $@convention(c) () -> () {
+// CHECK-LABEL: sil private [global_init_once_fn] [ossa] @{{.*}}WZ : $@convention(c) () -> () {
 // CHECK: alloc_global @$s20access_marker_verify13globalString1SSvp
 // CHECK: [[GA:%.*]] = global_addr @$s20access_marker_verify13globalString1SSvp : $*String
 // CHECK: apply
 // CHECK: [[ACCESS:%.*]] = begin_access [modify] [unsafe] [[GA]] : $*String
 // CHECK: store %{{.*}} to [init] [[ACCESS]] : $*String
 // CHECK: end_access
-// CHECK-LABEL: } // end sil function 'globalinit_33_180BF7B9126DB0C8C6C26F15ACD01908_func0'
+// CHECK-LABEL: } // end sil function '{{.*}}WZ'
 
 var globalString2 = globalString1
-// CHECK-LABEL: sil private [ossa] @globalinit_33_180BF7B9126DB0C8C6C26F15ACD01908_func1 : $@convention(c) () -> () {
+// CHECK-LABEL: sil private [global_init_once_fn] [ossa] @{{.*}}WZ : $@convention(c) () -> () {
 // CHECK: alloc_global @$s20access_marker_verify13globalString2SSvp
 // CHECK: [[GA:%.*]] = global_addr @$s20access_marker_verify13globalString2SSvp : $*String
 // CHECK: apply
@@ -648,7 +649,7 @@ var globalString2 = globalString1
 // CHECK: end_access [[INIT]] : $*String
 // CHECK: end_access [[ACCESS]] : $*String
 // CHECK-NOT: end_access
-// CHECK-LABEL: } // end sil function 'globalinit_33_180BF7B9126DB0C8C6C26F15ACD01908_func1'
+// CHECK-LABEL: } // end sil function '{{.*}}WZ'
 
 
 // --- getter.
@@ -1037,13 +1038,13 @@ func testPointerInit(x: Int, y: UnsafeMutablePointer<Int>) {
 class testInitExistentialGlobal {
   static var testProperty: P = StructP()
 }
-// CHECK-LABEL: sil private [ossa] @globalinit{{.*}} : $@convention(c) () -> () {
+// CHECK-LABEL: sil private [global_init_once_fn] [ossa] @{{.*}}WZ : $@convention(c) () -> () {
 // CHECK:   alloc_global @$s20access_marker_verify25testInitExistentialGlobalC0D8PropertyAA1P_pvpZ
 // CHECK:   [[GADR:%.*]] = global_addr @$s20access_marker_verify25testInitExistentialGlobalC0D8PropertyAA1P_pvpZ : $*P
 // CHECK:   %{{.*}} = apply %{{.*}}({{.*}}) : $@convention(method) (@thin StructP.Type) -> StructP
 // CHECK:   [[EADR:%.*]] = init_existential_addr [[GADR]] : $*P, $StructP
 // CHECK:   store %{{.*}} to [trivial] [[EADR]] : $*StructP
-// CHECK-LABEL: } // end sil function 'globalinit
+// CHECK-LABEL: } // end sil function '{{.*}}WZ
 
 public enum SomeError: Swift.Error {
     case error

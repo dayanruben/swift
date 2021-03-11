@@ -27,7 +27,6 @@
 #include "swift/SIL/SILValue.h"
 #include "swift/SILOptimizer/Analysis/ClassHierarchyAnalysis.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Casting.h"
@@ -89,13 +88,6 @@ static bool isEffectivelyFinalMethod(FullApplySite applySite, CanType classType,
   if (cd && cd->isFinal())
     return true;
 
-  const DeclContext *dc = applySite.getModule().getAssociatedContext();
-
-  // Without an associated context we cannot perform any
-  // access-based optimizations.
-  if (!dc)
-    return false;
-
   auto *cmi = cast<MethodInst>(applySite.getCallee());
 
   if (!calleesAreStaticallyKnowable(applySite.getModule(), cmi->getMember()))
@@ -149,18 +141,11 @@ static bool isEffectivelyFinalMethod(FullApplySite applySite, CanType classType,
 ///   it is a whole-module compilation.
 static bool isKnownFinalClass(ClassDecl *cd, SILModule &module,
                               ClassHierarchyAnalysis *cha) {
-  const DeclContext *dc = module.getAssociatedContext();
-
   if (cd->isFinal())
     return true;
 
-  // Without an associated context we cannot perform any
-  // access-based optimizations.
-  if (!dc)
-    return false;
-
   // Only handle classes defined within the SILModule's associated context.
-  if (!cd->isChildContextOf(dc))
+  if (!cd->isChildContextOf(module.getAssociatedContext()))
     return false;
 
   if (!cd->hasAccess())
@@ -410,8 +395,9 @@ getSubstitutionsForCallee(SILModule &module, CanSILFunctionType baseCalleeType,
     return SubstitutionMap();
 
   // Add any generic substitutions for the base class.
-  Type baseSelfType = baseCalleeType->getSelfParameter()
-                                    .getArgumentType(module, baseCalleeType);
+  Type baseSelfType = baseCalleeType->getSelfParameter().getArgumentType(
+      module, baseCalleeType,
+      applySite.getFunction()->getTypeExpansionContext());
   if (auto metatypeType = baseSelfType->getAs<MetatypeType>())
     baseSelfType = metatypeType->getInstanceType();
 
@@ -436,8 +422,9 @@ getSubstitutionsForCallee(SILModule &module, CanSILFunctionType baseCalleeType,
   SubstitutionMap origSubMap = applySite.getSubstitutionMap();
 
   Type calleeSelfType =
-      applySite.getOrigCalleeType()->getSelfParameter()
-               .getArgumentType(module, applySite.getOrigCalleeType());
+      applySite.getOrigCalleeType()->getSelfParameter().getArgumentType(
+          module, applySite.getOrigCalleeType(),
+          applySite.getFunction()->getTypeExpansionContext());
   if (auto metatypeType = calleeSelfType->getAs<MetatypeType>())
     calleeSelfType = metatypeType->getInstanceType();
   auto *calleeClassDecl = calleeSelfType->getClassOrBoundGenericClass();
@@ -466,7 +453,8 @@ replaceApplyInst(SILBuilder &builder, SILLocation loc, ApplyInst *oldAI,
                  SILValue newFn, SubstitutionMap newSubs,
                  ArrayRef<SILValue> newArgs, ArrayRef<SILValue> newArgBorrows) {
   auto *newAI =
-      builder.createApply(loc, newFn, newSubs, newArgs, oldAI->isNonThrowing());
+      builder.createApply(loc, newFn, newSubs, newArgs,
+                          oldAI->getApplyOptions());
 
   if (!newArgBorrows.empty()) {
     for (SILValue arg : newArgBorrows) {
@@ -474,9 +462,11 @@ replaceApplyInst(SILBuilder &builder, SILLocation loc, ApplyInst *oldAI,
     }
   }
 
-  // Check if any casting is required for the return value.
+  // Check if any casting is required for the return value.  newAI cannot be a
+  // guaranteed value, so this cast cannot generate borrow scopes and it can be
+  // used anywhere the original oldAI was used.
   auto castRes = castValueToABICompatibleType(
-      &builder, loc, newAI, newAI->getType(), oldAI->getType());
+    &builder, loc, newAI, newAI->getType(), oldAI->getType(), /*usePoints*/ {});
 
   oldAI->replaceAllUsesWith(castRes.first);
   return {newAI, castRes.second};
@@ -491,7 +481,8 @@ replaceTryApplyInst(SILBuilder &builder, SILLocation loc, TryApplyInst *oldTAI,
   SILBasicBlock *normalBB = oldTAI->getNormalBB();
   SILBasicBlock *resultBB = nullptr;
 
-  SILType newResultTy = conv.getSILResultType();
+  SILType newResultTy =
+      conv.getSILResultType(builder.getTypeExpansionContext());
 
   // Does the result value need to be casted?
   auto oldResultTy = normalBB->getArgument(0)->getType();
@@ -503,7 +494,7 @@ replaceTryApplyInst(SILBuilder &builder, SILLocation loc, TryApplyInst *oldTAI,
     resultBB = normalBB;
   } else {
     resultBB = builder.getFunction().createBasicBlockBefore(normalBB);
-    resultBB->createPhiArgument(newResultTy, ValueOwnershipKind::Owned);
+    resultBB->createPhiArgument(newResultTy, OwnershipKind::Owned);
   }
 
   // We can always just use the original error BB because we'll be
@@ -514,7 +505,8 @@ replaceTryApplyInst(SILBuilder &builder, SILLocation loc, TryApplyInst *oldTAI,
   // Note that this makes this block temporarily double-terminated!
   // We won't fix that until deleteDevirtualizedApply.
   auto newTAI =
-      builder.createTryApply(loc, newFn, newSubs, newArgs, resultBB, errorBB);
+      builder.createTryApply(loc, newFn, newSubs, newArgs, resultBB, errorBB,
+                             oldTAI->getApplyOptions());
 
   if (!newArgBorrows.empty()) {
     builder.setInsertionPoint(normalBB->begin());
@@ -531,8 +523,11 @@ replaceTryApplyInst(SILBuilder &builder, SILLocation loc, TryApplyInst *oldTAI,
     builder.setInsertionPoint(resultBB);
 
     SILValue resultValue = resultBB->getArgument(0);
+    // resultValue cannot be a guaranteed value, so this cast cannot generate
+    // borrow scopes and it can be used anywhere the original oldAI was
+    // used--usePoints are not required.
     std::tie(resultValue, std::ignore) = castValueToABICompatibleType(
-        &builder, loc, resultValue, newResultTy, oldResultTy);
+        &builder, loc, resultValue, newResultTy, oldResultTy, /*usePoints*/ {});
     builder.createBranch(loc, normalBB, {resultValue});
   }
 
@@ -548,7 +543,7 @@ replaceBeginApplyInst(SILBuilder &builder, SILLocation loc,
                       ArrayRef<SILValue> newArgBorrows) {
   bool changedCFG = false;
   auto *newBAI = builder.createBeginApply(loc, newFn, newSubs, newArgs,
-                                          oldBAI->isNonThrowing());
+                                          oldBAI->getApplyOptions());
 
   // Forward the token.
   oldBAI->getTokenResult()->replaceAllUsesWith(newBAI->getTokenResult());
@@ -560,8 +555,12 @@ replaceBeginApplyInst(SILBuilder &builder, SILLocation loc,
   for (auto i : indices(oldYields)) {
     auto oldYield = oldYields[i];
     auto newYield = newYields[i];
+    // Insert any end_borrow if the yielded value before the token's uses.
+    SmallVector<SILInstruction *, 4> users(
+      makeUserIteratorRange(oldBAI->getTokenResult()->getUses()));
     auto yieldCastRes = castValueToABICompatibleType(
-        &builder, loc, newYield, newYield->getType(), oldYield->getType());
+      &builder, loc, newYield, newYield->getType(), oldYield->getType(),
+      users);
     oldYield->replaceAllUsesWith(yieldCastRes.first);
     changedCFG |= yieldCastRes.second;
   }
@@ -596,8 +595,11 @@ replacePartialApplyInst(SILBuilder &builder, SILLocation loc,
       builder.createPartialApply(loc, newFn, newSubs, newArgs, convention);
 
   // Check if any casting is required for the partially-applied function.
+  // A non-guaranteed cast needs no usePoints.
+  assert(newPAI->getOwnershipKind() != OwnershipKind::Guaranteed);
   auto castRes = castValueToABICompatibleType(
-      &builder, loc, newPAI, newPAI->getType(), oldPAI->getType());
+    &builder, loc, newPAI, newPAI->getType(), oldPAI->getType(),
+    /*usePoints*/ {});
   oldPAI->replaceAllUsesWith(castRes.first);
 
   return {newPAI, castRes.second};
@@ -776,10 +778,11 @@ swift::devirtualizeClassMethod(FullApplySite applySite,
   SmallVector<SILValue, 8> newArgBorrows;
 
   auto indirectResultArgIter = applySite.getIndirectSILResults().begin();
-  for (auto resultTy : substConv.getIndirectSILResultTypes()) {
+  for (auto resultTy : substConv.getIndirectSILResultTypes(
+           applySite.getFunction()->getTypeExpansionContext())) {
     auto castRes = castValueToABICompatibleType(
         &builder, loc, *indirectResultArgIter, indirectResultArgIter->getType(),
-        resultTy);
+        resultTy, {applySite.getInstruction()});
     newArgs.push_back(castRes.first);
     changedCFG |= castRes.second;
     ++indirectResultArgIter;
@@ -788,17 +791,20 @@ swift::devirtualizeClassMethod(FullApplySite applySite,
   auto paramArgIter = applySite.getArgumentsWithoutIndirectResults().begin();
   // Skip the last parameter, which is `self`. Add it below.
   for (auto param : substConv.getParameters()) {
-    auto paramType = substConv.getSILType(param);
+    auto paramType =
+        substConv.getSILType(param, builder.getTypeExpansionContext());
     SILValue arg = *paramArgIter;
-    if (builder.hasOwnership() && arg->getType().isObject()
-        && arg.getOwnershipKind() == ValueOwnershipKind::Owned
-        && param.isGuaranteed()) {
+    if (builder.hasOwnership() && arg->getType().isObject() &&
+        arg.getOwnershipKind() == OwnershipKind::Owned &&
+        param.isGuaranteed()) {
       SILBuilderWithScope borrowBuilder(applySite.getInstruction(), builder);
       arg = borrowBuilder.createBeginBorrow(loc, arg);
       newArgBorrows.push_back(arg);
     }
-    auto argCastRes = castValueToABICompatibleType(&builder, loc, arg,
-                                       paramArgIter->getType(), paramType);
+    auto argCastRes =
+      castValueToABICompatibleType(&builder, loc, arg,
+                                   paramArgIter->getType(), paramType,
+                                   {applySite.getInstruction()});
 
     newArgs.push_back(argCastRes.first);
     changedCFG |= argCastRes.second;
@@ -820,7 +826,7 @@ swift::devirtualizeClassMethod(FullApplySite applySite,
                           *applySite.getInstruction())
              << "Devirtualized call to class method " << NV("Method", f);
     });
-  NumClassDevirt++;
+  ++NumClassDevirt;
 
   return {newAI, changedCFG};
 }
@@ -961,8 +967,12 @@ swift::getWitnessMethodSubstitutions(SILModule &module, ApplySite applySite,
 
   auto *mod = module.getSwiftModule();
   bool isSelfAbstract =
-    witnessFnTy->getSelfInstanceType(module)->is<GenericTypeParamType>();
-  auto *classWitness = witnessFnTy->getWitnessMethodClass(module);
+      witnessFnTy
+          ->getSelfInstanceType(
+              module, applySite.getFunction()->getTypeExpansionContext())
+          ->is<GenericTypeParamType>();
+  auto *classWitness = witnessFnTy->getWitnessMethodClass(
+      module, applySite.getFunction()->getTypeExpansionContext());
 
   return ::getWitnessMethodSubstitutions(mod, cRef, requirementSig,
                                          witnessThunkSig, origSubs,
@@ -992,10 +1002,11 @@ devirtualizeWitnessMethod(ApplySite applySite, SILFunction *f,
 
   // Figure out the exact bound type of the function to be called by
   // applying all substitutions.
-  auto calleeCanType = f->getLoweredFunctionTypeInContext(
-      TypeExpansionContext(*applySite.getFunction()));
-  auto substCalleeCanType = calleeCanType->substGenericArgs(
-      module, subMap, TypeExpansionContext(*applySite.getFunction()));
+  auto typeExpansionContext =
+      applySite.getFunction()->getTypeExpansionContext();
+  auto calleeCanType = f->getLoweredFunctionTypeInContext(typeExpansionContext);
+  auto substCalleeCanType =
+      calleeCanType->substGenericArgs(module, subMap, typeExpansionContext);
 
   // Collect arguments from the apply instruction.
   SmallVector<SILValue, 4> arguments;
@@ -1008,20 +1019,22 @@ devirtualizeWitnessMethod(ApplySite applySite, SILFunction *f,
   unsigned substArgIdx = applySite.getCalleeArgIndexOfFirstAppliedArg();
   for (auto arg : applySite.getArguments()) {
     auto paramInfo = substConv.getSILArgumentConvention(substArgIdx);
-    auto paramType = substConv.getSILArgumentType(substArgIdx++);
+    auto paramType =
+        substConv.getSILArgumentType(substArgIdx++, typeExpansionContext);
     if (arg->getType() != paramType) {
-      if (argBuilder.hasOwnership()
-          && applySite.getKind() != ApplySiteKind::PartialApplyInst
-          && arg->getType().isObject()
-          && arg.getOwnershipKind() == ValueOwnershipKind::Owned
-          && paramInfo.isGuaranteedConvention()) {
+      if (argBuilder.hasOwnership() &&
+          applySite.getKind() != ApplySiteKind::PartialApplyInst &&
+          arg->getType().isObject() &&
+          arg.getOwnershipKind() == OwnershipKind::Owned &&
+          paramInfo.isGuaranteedConvention()) {
         SILBuilderWithScope borrowBuilder(applySite.getInstruction(),
                                           argBuilder);
         arg = borrowBuilder.createBeginBorrow(applySite.getLoc(), arg);
         borrowedArgs.push_back(arg);
       }
       auto argCastRes = castValueToABICompatibleType(
-          &argBuilder, applySite.getLoc(), arg, arg->getType(), paramType);
+        &argBuilder, applySite.getLoc(), arg, arg->getType(), paramType,
+        applySite.getInstruction());
       arg = argCastRes.first;
       changedCFG |= argCastRes.second;
     }
@@ -1049,7 +1062,7 @@ devirtualizeWitnessMethod(ApplySite applySite, SILFunction *f,
                           *applySite.getInstruction())
              << "Devirtualized call to " << NV("Method", f);
     });
-  NumWitnessDevirt++;
+  ++NumWitnessDevirt;
   return {newApplySite, changedCFG};
 }
 

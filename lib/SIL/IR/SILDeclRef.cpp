@@ -11,20 +11,24 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SIL/SILDeclRef.h"
-#include "swift/SIL/SILLocation.h"
-#include "swift/AST/AnyFunctionRef.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTMangler.h"
+#include "swift/AST/AnyFunctionRef.h"
 #include "swift/AST/Initializer.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/SILLinkage.h"
-#include "llvm/Support/Compiler.h"
-#include "llvm/Support/raw_ostream.h"
+#include "swift/SIL/SILLocation.h"
+#include "swift/SILOptimizer/Utils/SpecializationMangler.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/AST/Mangle.h"
+#include "llvm/Support/Compiler.h"
+#include "llvm/Support/raw_ostream.h"
 using namespace swift;
 
 /// Get the method dispatch mechanism for a method.
@@ -41,7 +45,7 @@ swift::getMethodDispatch(AbstractFunctionDecl *method) {
   auto dc = method->getDeclContext();
 
   if (dc->getSelfClassDecl()) {
-    if (method->isObjCDynamic()) {
+    if (method->shouldUseObjCDispatch()) {
       return MethodDispatch::Class;
     }
 
@@ -88,7 +92,7 @@ bool swift::requiresForeignToNativeThunk(ValueDecl *vd) {
 bool swift::requiresForeignEntryPoint(ValueDecl *vd) {
   assert(!isa<AbstractStorageDecl>(vd));
 
-  if (vd->isObjCDynamic()) {
+  if (vd->shouldUseObjCDispatch()) {
     return true;
   }
 
@@ -116,10 +120,11 @@ bool swift::requiresForeignEntryPoint(ValueDecl *vd) {
 SILDeclRef::SILDeclRef(ValueDecl *vd, SILDeclRef::Kind kind, bool isForeign,
                        AutoDiffDerivativeFunctionIdentifier *derivativeId)
     : loc(vd), kind(kind), isForeign(isForeign), defaultArgIndex(0),
-      derivativeFunctionIdentifier(derivativeId) {}
+      pointer(derivativeId) {}
 
 SILDeclRef::SILDeclRef(SILDeclRef::Loc baseLoc, bool asForeign)
-    : defaultArgIndex(0), derivativeFunctionIdentifier(nullptr) {
+    : defaultArgIndex(0),
+      pointer((AutoDiffDerivativeFunctionIdentifier *)nullptr) {
   if (auto *vd = baseLoc.dyn_cast<ValueDecl*>()) {
     if (auto *fd = dyn_cast<FuncDecl>(vd)) {
       // Map FuncDecls directly to Func SILDeclRefs.
@@ -156,6 +161,12 @@ SILDeclRef::SILDeclRef(SILDeclRef::Loc baseLoc, bool asForeign)
   }
 
   isForeign = asForeign;
+}
+
+SILDeclRef::SILDeclRef(SILDeclRef::Loc baseLoc,
+                       GenericSignature prespecializedSig)
+    : SILDeclRef(baseLoc, false) {
+  pointer = prespecializedSig.getPointer();
 }
 
 Optional<AnyFunctionRef> SILDeclRef::getAnyFunctionRef() const {
@@ -221,6 +232,12 @@ bool SILDeclRef::isImplicit() const {
 }
 
 SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
+
+  // Prespecializations are public.
+  if (getSpecializedSignature()) {
+    return SILLinkage::Public;
+  }
+
   if (getAbstractClosureExpr()) {
     return isSerialized() ? SILLinkage::Shared : SILLinkage::Private;
   }
@@ -231,13 +248,18 @@ SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
     return forDefinition ? linkage : addExternalToLinkage(linkage);
   };
 
-  // Native function-local declarations have shared linkage.
-  // FIXME: @objc declarations should be too, but we currently have no way
-  // of marking them "used" other than making them external. 
   ValueDecl *d = getDecl();
+
+  // Property wrapper generators of public functions have PublicNonABI linkage
+  if (isPropertyWrapperBackingInitializer() && isa<ParamDecl>(d)) {
+    if (isSerialized())
+      return maybeAddExternal(SILLinkage::PublicNonABI);
+  }
+
+  // Function-local declarations have private linkage, unless serialized.
   DeclContext *moduleContext = d->getDeclContext();
   while (!moduleContext->isModuleScopeContext()) {
-    if (!isForeign && moduleContext->isLocalContext()) {
+    if (moduleContext->isLocalContext()) {
       return isSerialized() ? SILLinkage::Shared : SILLinkage::Private;
     }
     moduleContext = moduleContext->getParent();
@@ -245,11 +267,6 @@ SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
 
   // Calling convention thunks have shared linkage.
   if (isForeignToNativeThunk())
-    return SILLinkage::Shared;
-
-  // If a function declares a @_cdecl name, its native-to-foreign thunk
-  // is exported with the visibility of the function.
-  if (isNativeToForeignThunk() && !d->getAttrs().hasAttribute<CDeclAttr>())
     return SILLinkage::Shared;
 
   // Declarations imported from Clang modules have shared linkage.
@@ -327,12 +344,24 @@ SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
     }
   }
 
-  // Forced-static-dispatch functions are created on-demand and have
-  // at best shared linkage.
   if (auto fn = dyn_cast<FuncDecl>(d)) {
+    // Forced-static-dispatch functions are created on-demand and have
+    // at best shared linkage.
     if (fn->hasForcedStaticDispatch()) {
       limit = Limit::OnDemand;
     }
+
+    // Native-to-foreign thunks for top-level decls are created on-demand,
+    // unless they are marked @_cdecl, in which case they expose a dedicated
+    // entry-point with the visibility of the function.
+    if (isNativeToForeignThunk() && !fn->getAttrs().hasAttribute<CDeclAttr>()) {
+      if (fn->getDeclContext()->isModuleScopeContext())
+        limit = Limit::OnDemand;
+    }
+  }
+
+  if (isEnumElement()) {
+    limit = Limit::OnDemand;
   }
 
   auto effectiveAccess = d->getEffectiveAccess();
@@ -425,8 +454,15 @@ bool SILDeclRef::isTransparent() const {
 
   if (hasAutoClosureExpr()) {
     auto *ace = getAutoClosureExpr();
-    if (ace->getThunkKind() == AutoClosureExpr::Kind::None)
+    switch (ace->getThunkKind()) {
+    case AutoClosureExpr::Kind::None:
       return true;
+
+    case AutoClosureExpr::Kind::AsyncLet:
+    case AutoClosureExpr::Kind::DoubleCurryThunk:
+    case AutoClosureExpr::Kind::SingleCurryThunk:
+      break;
+    }
   }
 
   if (hasDecl()) {
@@ -442,12 +478,9 @@ bool SILDeclRef::isTransparent() const {
 
 /// True if the function should have its body serialized.
 IsSerialized_t SILDeclRef::isSerialized() const {
-  DeclContext *dc;
   if (auto closure = getAbstractClosureExpr()) {
-    dc = closure->getLocalContext();
-
-    // Otherwise, ask the AST if we're inside an @inlinable context.
-    if (dc->getResilienceExpansion() == ResilienceExpansion::Minimal) {
+    // Ask the AST if we're inside an @inlinable context.
+    if (closure->getResilienceExpansion() == ResilienceExpansion::Minimal) {
       if (isForeign)
         return IsSerializable;
 
@@ -462,9 +495,23 @@ IsSerialized_t SILDeclRef::isSerialized() const {
 
   auto *d = getDecl();
 
-  // Default argument generators are serialized if the containing
-  // declaration is public.
-  if (isDefaultArgGenerator()) {
+  // Default and property wrapper argument generators are serialized if the
+  // containing declaration is public.
+  if (isDefaultArgGenerator() || (isPropertyWrapperBackingInitializer() &&
+                                  isa<ParamDecl>(d))) {
+    if (isPropertyWrapperBackingInitializer()) {
+      if (auto *func = dyn_cast_or_null<ValueDecl>(d->getDeclContext()->getAsDecl())) {
+        d = func;
+      }
+    }
+
+    // Ask the AST if we're inside an @inlinable context.
+    if (d->getDeclContext()->getResilienceExpansion()
+          == ResilienceExpansion::Minimal) {
+      return IsSerialized;
+    }
+
+    // Otherwise, check if the owning declaration is public.
     auto scope =
       d->getFormalAccessScope(/*useDC=*/nullptr,
                               /*treatUsableFromInlineAsPublic=*/true);
@@ -476,7 +523,8 @@ IsSerialized_t SILDeclRef::isSerialized() const {
 
   // Stored property initializers are inlinable if the type is explicitly
   // marked as @frozen.
-  if (isStoredPropertyInitializer() || isPropertyWrapperBackingInitializer()) {
+  if (isStoredPropertyInitializer() || (isPropertyWrapperBackingInitializer() &&
+                                        d->getDeclContext()->isTypeContext())) {
     auto *nominal = cast<NominalTypeDecl>(d->getDeclContext());
     auto scope =
       nominal->getFormalAccessScope(/*useDC=*/nullptr,
@@ -490,7 +538,7 @@ IsSerialized_t SILDeclRef::isSerialized() const {
 
   // Note: if 'd' is a function, then 'dc' is the function itself, not
   // its parent context.
-  dc = d->getInnermostDeclContext();
+  auto *dc = d->getInnermostDeclContext();
 
   // Local functions are serializable if their parent function is
   // serializable.
@@ -504,6 +552,11 @@ IsSerialized_t SILDeclRef::isSerialized() const {
   // Anything else that is not public is not serializable.
   if (d->getEffectiveAccess() < AccessLevel::Public)
     return IsNotSerialized;
+
+  // Enum element constructors are serializable if the enum is
+  // @usableFromInline or public.
+  if (isEnumElement())
+    return IsSerializable;
 
   // 'read' and 'modify' accessors synthesized on-demand are serialized if
   // visible outside the module.
@@ -603,34 +656,42 @@ EffectsKind SILDeclRef::getEffectsAttribute() const {
 }
 
 bool SILDeclRef::isForeignToNativeThunk() const {
+  // If this isn't a native entry-point, it's not a foreign-to-native thunk.
+  if (isForeign)
+    return false;
+
   // Non-decl entry points are never natively foreign, so they would never
   // have a foreign-to-native thunk.
   if (!hasDecl())
     return false;
   if (requiresForeignToNativeThunk(getDecl()))
-    return !isForeign;
+    return true;
   // ObjC initializing constructors and factories are foreign.
   // We emit a special native allocating constructor though.
   if (isa<ConstructorDecl>(getDecl())
       && (kind == Kind::Initializer
           || cast<ConstructorDecl>(getDecl())->isFactoryInit())
       && getDecl()->hasClangNode())
-    return !isForeign;
+    return true;
   return false;
 }
 
 bool SILDeclRef::isNativeToForeignThunk() const {
+  // If this isn't a foreign entry-point, it's not a native-to-foreign thunk.
+  if (!isForeign)
+    return false;
+
   // We can have native-to-foreign thunks over closures.
   if (!hasDecl())
-    return isForeign;
-  // We can have native-to-foreign thunks over global or local native functions.
-  // TODO: Static functions too.
-  if (auto func = dyn_cast<FuncDecl>(getDecl())) {
-    if (!func->getDeclContext()->isTypeContext()
-        && !func->hasClangNode())
-      return isForeign;
-  }
-  return false;
+    return true;
+
+  // A decl with a clang node doesn't have a native entry-point to forward onto.
+  if (getDecl()->hasClangNode())
+    return false;
+
+  // Only certain kinds of SILDeclRef can expose native-to-foreign thunks.
+  return kind == Kind::Func || kind == Kind::Initializer ||
+         kind == Kind::Deallocator;
 }
 
 /// Use the Clang importer to mangle a Clang declaration.
@@ -645,19 +706,19 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
   using namespace Mangle;
   ASTMangler mangler;
 
-  if (derivativeFunctionIdentifier) {
+  if (auto *derivativeFunctionIdentifier = getDerivativeFunctionIdentifier()) {
     std::string originalMangled = asAutoDiffOriginalFunction().mangle(MKind);
     auto *silParameterIndices = autodiff::getLoweredParameterIndices(
         derivativeFunctionIdentifier->getParameterIndices(),
         getDecl()->getInterfaceType()->castTo<AnyFunctionType>());
-    auto &ctx = getDecl()->getASTContext();
-    auto *resultIndices = IndexSubset::get(ctx, 1, {0});
+    auto *resultIndices = IndexSubset::get(getDecl()->getASTContext(), 1, {0});
     AutoDiffConfig silConfig(
         silParameterIndices, resultIndices,
         derivativeFunctionIdentifier->getDerivativeGenericSignature());
-    auto derivativeFnKind = derivativeFunctionIdentifier->getKind();
-    return mangler.mangleAutoDiffDerivativeFunctionHelper(
-        originalMangled, derivativeFnKind, silConfig);
+    return mangler.mangleAutoDiffDerivativeFunction(
+        asAutoDiffOriginalFunction().getAbstractFunctionDecl(),
+        derivativeFunctionIdentifier->getKind(),
+        silConfig);
   }
 
   // As a special case, Clang functions and globals don't get mangled at all.
@@ -677,9 +738,31 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
             return SS.str();
           }
           return namedClangDecl->getName().str();
+        } else if (auto objcDecl = dyn_cast<clang::ObjCMethodDecl>(clangDecl)) {
+          if (objcDecl->isDirectMethod()) {
+            std::string storage;
+            llvm::raw_string_ostream SS(storage);
+            clang::ASTContext &ctx = clangDecl->getASTContext();
+            std::unique_ptr<clang::MangleContext> mangler(ctx.createMangleContext());
+            mangler->mangleObjCMethodName(objcDecl, SS, /*includePrefixByte=*/true,
+                                          /*includeCategoryNamespace=*/false);
+            return SS.str();
+          }
         }
       }
     }
+  }
+
+  // Mangle prespecializations.
+  if (getSpecializedSignature()) {
+    SILDeclRef nonSpecializedDeclRef = *this;
+    nonSpecializedDeclRef.pointer =
+        (AutoDiffDerivativeFunctionIdentifier *)nullptr;
+    auto mangledNonSpecializedString = nonSpecializedDeclRef.mangle();
+    auto *funcDecl = cast<AbstractFunctionDecl>(getDecl());
+    auto genericSig = funcDecl->getGenericSignature();
+    return GenericSpecializationMangler::manglePrespecialization(
+        mangledNonSpecializedString, genericSig, getSpecializedSignature());
   }
 
   ASTMangler::SymbolKind SKind = ASTMangler::SymbolKind::Default;
@@ -693,6 +776,9 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
       break;
     case SILDeclRef::ManglingKind::DynamicThunk:
       SKind = ASTMangler::SymbolKind::DynamicThunk;
+      break;
+    case SILDeclRef::ManglingKind::AsyncHandlerBody:
+      SKind = ASTMangler::SymbolKind::AsyncHandlerBody;
       break;
   }
 
@@ -766,15 +852,19 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
   case SILDeclRef::Kind::PropertyWrapperBackingInitializer:
     return mangler.mangleBackingInitializerEntity(cast<VarDecl>(getDecl()),
                                                   SKind);
+
+  case SILDeclRef::Kind::PropertyWrapperInitFromProjectedValue:
+    return mangler.mangleInitFromProjectedValueEntity(cast<VarDecl>(getDecl()),
+                                                      SKind);
   }
 
   llvm_unreachable("bad entity kind!");
 }
 
 // Returns true if the given JVP/VJP SILDeclRef requires a new vtable entry.
-// FIXME(TF-1213): Also consider derived declaration `@derivative` attributes.
+// FIXME(SR-14131): Also consider derived declaration `@derivative` attributes.
 static bool derivativeFunctionRequiresNewVTableEntry(SILDeclRef declRef) {
-  assert(declRef.derivativeFunctionIdentifier &&
+  assert(declRef.getDerivativeFunctionIdentifier() &&
          "Expected a derivative function SILDeclRef");
   auto overridden = declRef.getOverridden();
   if (!overridden)
@@ -784,7 +874,7 @@ static bool derivativeFunctionRequiresNewVTableEntry(SILDeclRef declRef) {
       declRef.getDecl()->getAttrs().getAttributes<DifferentiableAttr>(),
       [&](const DifferentiableAttr *derivedDiffAttr) {
         return derivedDiffAttr->getParameterIndices() ==
-               declRef.derivativeFunctionIdentifier->getParameterIndices();
+               declRef.getDerivativeFunctionIdentifier()->getParameterIndices();
       });
   assert(derivedDiffAttr && "Expected `@differentiable` attribute");
   // Otherwise, if the base `@differentiable` attribute specifies a derivative
@@ -794,7 +884,7 @@ static bool derivativeFunctionRequiresNewVTableEntry(SILDeclRef declRef) {
       overridden.getDecl()->getAttrs().getAttributes<DifferentiableAttr>();
   for (auto *baseDiffAttr : baseDiffAttrs) {
     if (baseDiffAttr->getParameterIndices() ==
-        declRef.derivativeFunctionIdentifier->getParameterIndices())
+        declRef.getDerivativeFunctionIdentifier()->getParameterIndices())
       return false;
   }
   // Otherwise, if there is no base `@differentiable` attribute exists, then a
@@ -803,10 +893,15 @@ static bool derivativeFunctionRequiresNewVTableEntry(SILDeclRef declRef) {
 }
 
 bool SILDeclRef::requiresNewVTableEntry() const {
-  if (derivativeFunctionIdentifier)
+  if (getDerivativeFunctionIdentifier())
     if (derivativeFunctionRequiresNewVTableEntry(*this))
       return true;
-  if (cast<AbstractFunctionDecl>(getDecl())->needsNewVTableEntry())
+  if (!hasDecl())
+    return false;
+  auto fnDecl = dyn_cast<AbstractFunctionDecl>(getDecl());
+  if (!fnDecl)
+    return false;
+  if (fnDecl->needsNewVTableEntry())
     return true;
   return false;
 }
@@ -859,15 +954,15 @@ SILDeclRef SILDeclRef::getNextOverriddenVTableEntry() const {
     }
 
     // Overrides of @objc dynamic declarations are not in the vtable.
-    if (overridden.getDecl()->isObjCDynamic()) {
+    if (overridden.getDecl()->shouldUseObjCDispatch()) {
       return SILDeclRef();
     }
-    
+
     if (auto *accessor = dyn_cast<AccessorDecl>(overridden.getDecl())) {
       auto *asd = accessor->getStorage();
       if (asd->hasClangNode())
         return SILDeclRef();
-      if (asd->isObjCDynamic()) {
+      if (asd->shouldUseObjCDispatch()) {
         return SILDeclRef();
       }
     }
@@ -879,15 +974,16 @@ SILDeclRef SILDeclRef::getNextOverriddenVTableEntry() const {
 
     // JVPs/VJPs are overridden only if the base declaration has a
     // `@differentiable` attribute with the same parameter indices.
-    if (derivativeFunctionIdentifier) {
+    if (getDerivativeFunctionIdentifier()) {
       auto overriddenAttrs =
           overridden.getDecl()->getAttrs().getAttributes<DifferentiableAttr>();
       for (const auto *attr : overriddenAttrs) {
         if (attr->getParameterIndices() !=
-            derivativeFunctionIdentifier->getParameterIndices())
+            getDerivativeFunctionIdentifier()->getParameterIndices())
           continue;
-        auto *overriddenDerivativeId = overridden.derivativeFunctionIdentifier;
-        overridden.derivativeFunctionIdentifier =
+        auto *overriddenDerivativeId =
+            overridden.getDerivativeFunctionIdentifier();
+        overridden.pointer =
             AutoDiffDerivativeFunctionIdentifier::get(
                 overriddenDerivativeId->getKind(),
                 overriddenDerivativeId->getParameterIndices(),
@@ -1098,6 +1194,10 @@ static bool isDesignatedConstructorForClass(ValueDecl *decl) {
 }
 
 bool SILDeclRef::canBeDynamicReplacement() const {
+  // The foreign entry of a @dynamicReplacement(for:) of @objc method in a
+  // generic class can't be a dynamic replacement.
+  if (isForeign && hasDecl() && getDecl()->isNativeMethodReplacement())
+    return false;
   if (kind == SILDeclRef::Kind::Destroyer ||
       kind == SILDeclRef::Kind::DefaultArgGenerator)
     return false;
@@ -1109,6 +1209,11 @@ bool SILDeclRef::canBeDynamicReplacement() const {
 }
 
 bool SILDeclRef::isDynamicallyReplaceable() const {
+  // The non-foreign entry of a @dynamicReplacement(for:) of @objc method in a
+  // generic class can't be a dynamically replaced.
+  if (!isForeign && hasDecl() && getDecl()->isNativeMethodReplacement())
+    return false;
+
   if (kind == SILDeclRef::Kind::DefaultArgGenerator)
     return false;
   if (isStoredPropertyInitializer() || isPropertyWrapperBackingInitializer())
@@ -1130,5 +1235,25 @@ bool SILDeclRef::isDynamicallyReplaceable() const {
     return false;
 
   auto decl = getDecl();
-  return decl->isNativeDynamic();
+
+  if (isForeign)
+    return false;
+
+  // We can't generate categories for generic classes. So the standard mechanism
+  // for replacing @objc dynamic methods in generic classes does not work.
+  // Instead we mark the non @objc entry dynamically replaceable and replace
+  // that.
+  // For now, we only support this behavior if -enable-implicit-dynamic is
+  // enabled.
+  return decl->shouldUseNativeMethodReplacement();
+}
+
+bool SILDeclRef::hasAsync() const {
+  if (hasDecl()) {
+    if (auto afd = dyn_cast<AbstractFunctionDecl>(getDecl())) {
+      return afd->hasAsync();
+    }
+    return false;
+  }
+  return getAbstractClosureExpr()->isBodyAsync();
 }

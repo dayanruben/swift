@@ -48,6 +48,9 @@ protected:
   void addDeploymentTargetArgs(llvm::opt::ArgStringList &Arguments,
                                const JobContext &context) const;
 
+  void addLTOLibArgs(llvm::opt::ArgStringList &Arguments,
+                     const JobContext &context) const;
+
   void addCommonFrontendArgs(
       const OutputInfo &OI, const CommandOutput &output,
       const llvm::opt::ArgList &inputArgs,
@@ -127,11 +130,6 @@ protected:
   /// and to not provide a specific linker otherwise.
   virtual std::string getDefaultLinker() const;
 
-  /// The target to be passed to the compiler invocation. By default, this
-  /// is the target triple, but this may be overridden to accommodate some
-  /// platforms.
-  virtual std::string getTargetForLinker() const;
-
   bool addRuntimeRPath(const llvm::Triple &T,
                        const llvm::opt::ArgList &Args) const;
 
@@ -149,9 +147,6 @@ public:
 };
 
 class LLVM_LIBRARY_VISIBILITY Android : public GenericUnix {
-protected:
-  std::string getTargetForLinker() const override;
-
 public:
   Android(const Driver &D, const llvm::Triple &Triple)
       : GenericUnix(D, Triple) {}
@@ -161,8 +156,6 @@ public:
 class LLVM_LIBRARY_VISIBILITY Cygwin : public GenericUnix {
 protected:
   std::string getDefaultLinker() const override;
-
-  std::string getTargetForLinker() const override;
 
 public:
   Cygwin(const Driver &D, const llvm::Triple &Triple)

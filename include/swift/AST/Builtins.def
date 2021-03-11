@@ -429,6 +429,29 @@ BUILTIN_SIL_OPERATION(IsUnique, "isUnique", Special)
 /// BridgeObject to be treated as a native object by the runtime.
 BUILTIN_SIL_OPERATION(IsUnique_native, "isUnique_native", Special)
 
+/// beginCOWMutation<T : AnyObject>(inout T) -> Int1
+///
+/// Begins a copy-on-write mutation for a buffer reference which is passed as
+/// inout argument. It returns a true if the buffer is uniquely referenced.
+/// In this case the buffer may be mutated after calling this builtin.
+///
+/// The beginCOWMutation builtin is very similar to isUnique. It just translates
+/// to a different SIL instruction (begin_cow_mutation), which is the preferred
+/// representation of COW in SIL.
+BUILTIN_SIL_OPERATION(BeginCOWMutation, "beginCOWMutation", Special)
+
+/// beginCOWMutation_native<T : AnyObject>(inout T) -> Int1
+///
+/// Like beginCOWMutation, but it's assumed that T has native Swift reference
+/// counting.
+BUILTIN_SIL_OPERATION(BeginCOWMutation_native, "beginCOWMutation_native", Special)
+
+/// endCOWMutation<T : AnyObject>(inout T)
+///
+/// Ends a copy-on-write mutation for a buffer reference which is passed as
+/// inout argument. After calling this builtin, the buffer must not be mutated.
+BUILTIN_SIL_OPERATION(EndCOWMutation, "endCOWMutation", Special)
+
 /// bindMemory : <T> (Builtin.RawPointer, Builtin.Word, T.Type) -> ()
 BUILTIN_SIL_OPERATION(BindMemory, "bindMemory", Special)
 
@@ -475,11 +498,19 @@ BUILTIN_SIL_OPERATION(ApplyDerivative, "applyDerivative", Special)
 /// applyTranspose
 BUILTIN_SIL_OPERATION(ApplyTranspose, "applyTranspose", Special)
 
-/// differentiableFunction
-BUILTIN_SIL_OPERATION(DifferentiableFunction, "differentiableFunction", Special)
+/// withUnsafeContinuation<T> : (Builtin.RawUnsafeContinuation -> ()) async -> T
+///
+/// Unsafely capture the current continuation and pass it to the given
+/// function value. Returns a value of type T when the continuation is
+/// resumed.
+BUILTIN_SIL_OPERATION(WithUnsafeContinuation, "withUnsafeContinuation", Special)
 
-/// linearFunction
-BUILTIN_SIL_OPERATION(LinearFunction, "linearFunction", Special)
+/// withUnsafeThrowingContinuation<T> : (Builtin.RawUnsafeContinuation -> ()) async throws -> T
+///
+/// Unsafely capture the current continuation and pass it to the given
+/// function value. Returns a value of type T or throws an error when
+/// the continuation is resumed.
+BUILTIN_SIL_OPERATION(WithUnsafeThrowingContinuation, "withUnsafeThrowingContinuation", Special)
 
 #undef BUILTIN_SIL_OPERATION
 
@@ -584,6 +615,11 @@ BUILTIN_MISC_OPERATION(AtomicStore, "atomicstore", "", Special)
 /// AtomicRMW has type (Builtin.RawPointer, T) -> T.
 BUILTIN_MISC_OPERATION(AtomicRMW, "atomicrmw", "", IntegerOrRawPointer)
 
+/// convertTaskToJob : (Builtin.NativePointer) -> Builtin.Job
+///
+/// Convert a task pointer into a job pointer.
+BUILTIN_MISC_OPERATION(ConvertTaskToJob, "convertTaskToJob", "n", Special)
+
 /// ExtractElement has type (Vector<N, T>, Int32) -> T
 BUILTIN_MISC_OPERATION(ExtractElement, "extractelement", "n", Special)
 
@@ -651,6 +687,12 @@ BUILTIN_MISC_OPERATION(AssignCopyArrayFrontToBack, "assignCopyArrayFrontToBack",
 BUILTIN_MISC_OPERATION(AssignCopyArrayBackToFront, "assignCopyArrayBackToFront", "", Special)
 BUILTIN_MISC_OPERATION(AssignTakeArray, "assignTakeArray", "", Special)
 
+/// COWBufferForReading has type <T: AnyObject> T -> T
+///
+/// Returns the buffer reference which is passed as argument.
+/// This builtin indicates to the optimizer that the buffer is not mutable.
+BUILTIN_MISC_OPERATION(COWBufferForReading, "COWBufferForReading", "n", Special)
+
 // unsafeGuaranteed has type <T: AnyObject> T -> (T, Builtin.Int8)
 BUILTIN_MISC_OPERATION(UnsafeGuaranteed, "unsafeGuaranteed", "", Special)
 
@@ -672,6 +714,15 @@ BUILTIN_MISC_OPERATION(PoundAssert, "poundAssert", "", Special)
 // TypePtrAuthDiscriminator has type <T> (T.Type) -> Int64
 BUILTIN_MISC_OPERATION(TypePtrAuthDiscriminator, "typePtrAuthDiscriminator", "n", Special)
 
+//  int_instrprof_increment has type (Builtin.RawPointer, Builtin.Int64, Builtin.Int32, Builtin.Int32) -> ().
+BUILTIN_MISC_OPERATION(IntInstrprofIncrement, "int_instrprof_increment", "", Special)
+
+/// Initialize the default-actor instance in a default actor object.
+BUILTIN_MISC_OPERATION(InitializeDefaultActor, "initializeDefaultActor", "", Special)
+
+/// Destroy the default-actor instance in a default actor object.
+BUILTIN_MISC_OPERATION(DestroyDefaultActor, "destroyDefaultActor", "", Special)
+
 // BUILTIN_MISC_OPERATION_WITH_SILGEN - Miscellaneous operations that are
 // specially emitted during SIL generation.
 //
@@ -685,12 +736,53 @@ BUILTIN_MISC_OPERATION(TypePtrAuthDiscriminator, "typePtrAuthDiscriminator", "n"
   BUILTIN_MISC_OPERATION(Id, Name, Attrs, Overload)
 #endif
 
+// getCurrentAsyncTask: () -> Builtin.NativeObject
+//
+// Retrieve the pointer to the task in which the current asynchronous
+// function is executing.
+BUILTIN_MISC_OPERATION_WITH_SILGEN(GetCurrentAsyncTask, "getCurrentAsyncTask", "n", Special)
+
+/// cancelAsyncTask(): (Builtin.NativeObject) -> Void
+///
+/// Cancel the given asynchronous task.
+BUILTIN_MISC_OPERATION_WITH_SILGEN(CancelAsyncTask, "cancelAsyncTask", "", Special)
+
+/// createAsyncTaskFuture(): (
+///     Int, Builtin.NativeObject?, @escaping () async throws -> T
+/// ) -> Builtin.NativeObject
+///
+/// Create a new asynchronous task future, given flags, an (optional) parent
+/// task and a function to execute.
+BUILTIN_MISC_OPERATION_WITH_SILGEN(CreateAsyncTaskFuture,
+    "createAsyncTaskFuture", "", Special)
+
+/// createAsyncTaskGroupFuture(): (
+///     Int, // flags
+///     Builtin.NativeObject?, // parent
+///     Builtin.RawPointer?, // group
+///     @escaping () async throws -> T
+/// ) -> Builtin.NativeObject
+///
+/// Create a new asynchronous task future, given flags, a parent task,
+/// task group and a function to execute.
+BUILTIN_MISC_OPERATION_WITH_SILGEN(CreateAsyncTaskGroupFuture,
+    "createAsyncTaskGroupFuture", "", Special)
+
 /// globalStringTablePointer has type String -> Builtin.RawPointer.
 /// It returns an immortal, global string table pointer for strings constructed
 /// from string literals. We consider it effects as readnone meaning that it
 /// does not read any memory (note that even though it reads from a string, it
 /// is a pure value and therefore we can consider it as readnone).
 BUILTIN_MISC_OPERATION_WITH_SILGEN(GlobalStringTablePointer, "globalStringTablePointer", "n", Special)
+
+// autoDiffCreateLinearMapContext: (Builtin.Word) -> Builtin.NativeObject
+BUILTIN_MISC_OPERATION_WITH_SILGEN(AutoDiffCreateLinearMapContext, "autoDiffCreateLinearMapContext", "n", Special)
+
+// autoDiffProjectTopLevelSubcontext: (Builtin.NativeObject) -> Builtin.RawPointer
+BUILTIN_MISC_OPERATION_WITH_SILGEN(AutoDiffProjectTopLevelSubcontext, "autoDiffProjectTopLevelSubcontext", "n", Special)
+
+// autoDiffAllocateSubcontext: (Builtin.NativeObject, Builtin.Word) -> Builtin.RawPointer
+BUILTIN_MISC_OPERATION_WITH_SILGEN(AutoDiffAllocateSubcontext, "autoDiffAllocateSubcontext", "", Special)
 
 #undef BUILTIN_MISC_OPERATION_WITH_SILGEN
 

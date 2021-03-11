@@ -134,7 +134,7 @@ public:
   /// Returns the number of bit words used to store the index subset.
   // Note: Use `getCapacity()` to get the total index subset capacity.
   // This is public only for unit testing
-  // (in unittests/AST/SILAutoDiffIndices.cpp).
+  // (in unittests/AST/IndexSubsetTests.cpp).
   unsigned getNumBitWords() const {
     return numBitWords;
   }
@@ -207,7 +207,7 @@ public:
   }
 
   void print(llvm::raw_ostream &s = llvm::outs()) const;
-  SWIFT_DEBUG_DUMPER(dump(llvm::raw_ostream &s = llvm::errs()));
+  SWIFT_DEBUG_DUMPER(dump());
 
   int findNext(int startIndex) const;
   int findFirst() const { return findNext(-1); }

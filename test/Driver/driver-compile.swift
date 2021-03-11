@@ -46,7 +46,7 @@
 // RUN: %swiftc_driver -driver-print-jobs -c -target x86_64-apple-macosx10.9 %s %S/../Inputs/empty.swift -module-name main -driver-filelist-threshold=0 2>&1 | %FileCheck -check-prefix=FILELIST %s
 
 // RUN: %empty-directory(%t)/DISTINCTIVE-PATH/usr/bin/
-// RUN: %hardlink-or-copy(from: %swift_driver_plain, to: %t/DISTINCTIVE-PATH/usr/bin/swiftc)
+// RUN: %hardlink-or-copy(from: %swift_frontend_plain, to: %t/DISTINCTIVE-PATH/usr/bin/swiftc)
 // RUN: ln -s "swiftc" %t/DISTINCTIVE-PATH/usr/bin/swift-update
 // RUN: %t/DISTINCTIVE-PATH/usr/bin/swiftc -driver-print-jobs -c -update-code -target x86_64-apple-macosx10.9 %s 2>&1 > %t.upd.txt
 // RUN: %FileCheck -check-prefix UPDATE-CODE %s < %t.upd.txt
@@ -78,7 +78,7 @@
 // COMPLEX-DAG: -F /path/to/frameworks -Fsystem /path/to/systemframeworks -F /path/to/more/frameworks
 // COMPLEX-DAG: -I /path/to/headers -I path/to/more/headers
 // COMPLEX-DAG: -module-cache-path /tmp/modules
-// COMPLEX-DAG: -emit-reference-dependencies-path {{(.*(/|\\))?driver-compile[^ /]+}}.swiftdeps
+// COMPLEX-DAG: -emit-reference-dependencies-path {{(.*(/|\\))?driver-compile[^ /]*}}.swiftdeps
 // COMPLEX: -o {{.+}}.o
 
 

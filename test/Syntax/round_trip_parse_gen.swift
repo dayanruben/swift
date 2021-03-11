@@ -73,6 +73,7 @@ class C {
 
   func foo3() {
     _ = [Any]()
+    _ = (@convention(c) (Int) -> Void).self
     _ = a.a.a
     _ = a.b
     _ = 1.a
@@ -93,7 +94,7 @@ class C {
   func implictMember() {
     _ = .foo
     _ = .foo(x: 12)
-    _ = .foo { 12 }
+    _ = .foo() { 12 }
     _ = .foo[12]
     _ = .foo.bar
   }
@@ -103,12 +104,14 @@ class C {
   init!(a: Int) {}
   init?(a: Int) {}
   public init(a: Int) throws {}
+  init(a: Int..., b: Double...) {}
 
   @objc deinit {}
   private deinit {}
 
   internal subscript(x: Int) -> Int { get {} set {} }
   subscript() -> Int { return 1 }
+  subscript(x: Int..., y y: String...) -> Int { return 1 }
 
   var x: Int {
     address { fatalError() }
@@ -197,7 +200,8 @@ func foo(_ _: Int,
          d _: Int = true ? 2: 3,
          @objc e: X = true,
          f: inout Int,
-         g: Int...) throws -> [Int: String] {}
+         g: Int...,
+         h: Bool...) throws -> [Int: String] {}
 
 func foo(_ a: Int) throws -> Int {}
 func foo( a: Int) rethrows -> Int {}
@@ -258,13 +262,21 @@ func postfix() {
   foo()
   foo() {}
   foo {}
+  foo { }
+    arg2: {}
+  foo {}
   foo.bar()
   foo.bar() {}
+  foo.bar() {}
+    arg2: {}
+    in: {}
   foo.bar {}
   foo[]
   foo[1]
   foo[] {}
   foo[1] {}
+  foo[1] {}
+    arg2: {}
   foo[1][2,x:3]
   foo?++.bar!(baz).self
   foo().0

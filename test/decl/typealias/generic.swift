@@ -35,8 +35,8 @@ typealias BadA<T : Int> = MyType<String, T>  // expected-error {{type 'T' constr
 typealias BadB<T where T == Int> = MyType<String, T>  // expected-error {{associated types must not have a generic parameter list}}
 // expected-error@-1 {{same-type requirement makes generic parameter 'T' non-generic}}
 
-typealias BadC<T,T> = MyType<String, T>  // expected-error {{definition conflicts with previous value}}
-// expected-note @-1 {{previous definition of 'T' is here}}
+typealias BadC<T,T> = MyType<String, T>  // expected-error {{invalid redeclaration of 'T'}}
+// expected-note @-1 {{'T' previously declared here}}
 
 typealias Tuple2<T1, T2> = (T1, T2)
 
@@ -68,7 +68,7 @@ typealias E<T1, T2> = Int  // expected-note {{generic type 'E' declared here}}
 // expected-note@-1 {{'T1' declared as parameter to type 'E'}}
 // expected-note@-2 {{'T2' declared as parameter to type 'E'}}
 
-typealias F<T1, T2> = (T1) -> T2 // expected-note {{'T1' declared as parameter to type 'F'}}
+typealias F<T1, T2> = (T1) -> T2
 
 // Type alias of type alias.
 typealias G<S1, S2> = A<S1, S2>
@@ -94,7 +94,7 @@ let _ : D<Int, Int, Float> = D(a: 1, b: 2)
 
 let _ : F = { (a : Int) -> Int in a }  // Infer the types of F
 
-let _ : F = { a in a } // expected-error {{generic parameter 'T1' could not be inferred}}
+let _ : F = { a in a } // expected-error {{unable to infer type of a closure parameter 'a' in the current context}}
 
 _ = MyType(a: "foo", b: 42)
 _ = A(a: "foo", b: 42)
@@ -103,7 +103,7 @@ _ = A<String, Int>(a: "foo", // expected-error {{cannot convert value of type 'S
   b: 42) // expected-error {{cannot convert value of type 'Int' to expected argument type 'String'}}
 _ = B(a: 12, b: 42)
 _ = B(a: 12, b: 42 as Float)
-_ = B(a: "foo", b: 42)     // expected-error {{cannot convert value of type 'Int' to expected argument type 'String'}}
+_ = B(a: "foo", b: 42)     // expected-error {{conflicting arguments to generic parameter 'T1' ('Int' vs. 'String')}}
 _ = C(a: "foo", b: 42)
 _ = C(a: 42,        // expected-error {{cannot convert value of type 'Int' to expected argument type 'String'}}
   b: 42)

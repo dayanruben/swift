@@ -114,6 +114,14 @@ private:
   /// The offset in bytes from the start of the struct.
   unsigned ByteOffset;
 
+  /// The offset in bytes from the start of the struct, except EmptyFields are
+  /// placed at the current byte offset instead of 0. For the purpose of the
+  /// final layout empty fields are placed at offset 0, that however creates a
+  /// whole slew of special cases to deal with. Instead of dealing with these
+  /// special cases during layout, we pretend that empty fields are placed
+  /// just like any other field at the current offset.
+  unsigned ByteOffsetForLayout;
+
   /// The index of this element, either in the LLVM struct (if fixed)
   /// or in the non-fixed elements array (if non-fixed).
   unsigned Index : 28;
@@ -142,13 +150,15 @@ public:
     TheKind = other.TheKind;
     IsPOD = other.IsPOD;
     ByteOffset = other.ByteOffset;
+    ByteOffsetForLayout = other.ByteOffsetForLayout;
     Index = other.Index;
   }
 
-  void completeEmpty(IsPOD_t isPOD) {
+  void completeEmpty(IsPOD_t isPOD, Size byteOffset) {
     TheKind = unsigned(Kind::Empty);
     IsPOD = unsigned(isPOD);
     ByteOffset = 0;
+    ByteOffsetForLayout = byteOffset.getValue();
     Index = 0; // make a complete write of the bitfield
   }
 
@@ -156,6 +166,7 @@ public:
     TheKind = unsigned(Kind::InitialNonFixedSize);
     IsPOD = unsigned(isPOD);
     ByteOffset = 0;
+    ByteOffsetForLayout = ByteOffset;
     Index = 0; // make a complete write of the bitfield
   }
 
@@ -163,6 +174,7 @@ public:
     TheKind = unsigned(Kind::Fixed);
     IsPOD = unsigned(isPOD);
     ByteOffset = byteOffset.getValue();
+    ByteOffsetForLayout = ByteOffset;
     Index = structIndex;
 
     assert(getByteOffset() == byteOffset);
@@ -172,6 +184,7 @@ public:
     TheKind = unsigned(Kind::EmptyTailAllocatedCType);
     IsPOD = unsigned(isPOD);
     ByteOffset = byteOffset.getValue();
+    ByteOffsetForLayout = ByteOffset;
     Index = 0;
 
     assert(getByteOffset() == byteOffset);
@@ -228,6 +241,17 @@ public:
     return Size(ByteOffset);
   }
 
+  /// The offset in bytes from the start of the struct, except EmptyFields are
+  /// placed at the current byte offset instead of 0. For the purpose of the
+  /// final layout empty fields are placed at offset 0, that however creates a
+  /// whole slew of special cases to deal with. Instead of dealing with these
+  /// special cases during layout, we pretend that empty fields are placed
+  /// just like any other field at the current offset.
+  Size getByteOffsetDuringLayout() const {
+    assert(isCompleted() && hasByteOffset());
+    return Size(ByteOffsetForLayout);
+  }
+
   /// Given that this element has a fixed offset, return the index in
   /// the LLVM struct.
   unsigned getStructIndex() const {
@@ -271,6 +295,9 @@ public:
   /// Add the NSObject object header to the layout. This must be the first
   /// thing added to the layout.
   void addNSObjectHeader();
+  /// Add the default-actor header to the layout.  This must be the second
+  /// thing added to the layout, following the Swift heap header.
+  void addDefaultActorHeader(ElementLayout &elt);
   
   /// Add a number of fields to the layout.  The field layouts need
   /// only have the TypeInfo set; the rest will be filled out.
@@ -430,6 +457,8 @@ public:
   Address emitCastTo(IRGenFunction &IGF, llvm::Value *ptr,
                      const llvm::Twine &name = "") const;
 };
+
+Size getDefaultActorStorageFieldOffset(IRGenModule &IGM);
 
 } // end namespace irgen
 } // end namespace swift

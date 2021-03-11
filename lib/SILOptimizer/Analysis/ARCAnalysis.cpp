@@ -474,6 +474,10 @@ mayGuaranteedUseValue(SILInstruction *User, SILValue Ptr, AliasAnalysis *AA) {
       // FIXME: this is overly conservative. It should return true only of the
       // RC identity of the single operand matches Ptr.
       return true;
+    case SILInstructionKind::BeginCOWMutationInst:
+      // begin_cow_mutation takes the argument as owned and produces a new
+      // owned result.
+      return false;
     default:
       llvm_unreachable("Unexpected check-ref-count instruction.");
     }
@@ -693,7 +697,7 @@ findMatchingRetains(SILBasicBlock *BB) {
         SA = nullptr;
 
       for (auto X : R.first->getPredecessorBlocks()) {
-        if (HandledBBs.find(X) != HandledBBs.end())
+        if (HandledBBs.contains(X))
           continue;
         // Try to use the predecessor edge-value.
         if (SA && SA->getIncomingPhiValue(X)) {
@@ -908,7 +912,7 @@ void ConsumedArgToEpilogueReleaseMatcher::collectMatchingReleases(
     // If we do not have a release_value or strong_release. We can continue
     if (!isa<ReleaseValueInst>(inst) && !isa<StrongReleaseInst>(inst)) {
       // We cannot match a final release if it is followed by a dealloc_ref.
-      if (isa<DeallocRefInst>(inst))
+      if (isa<DeallocRefInst>(inst) || isa<DeallocPartialRefInst>(inst))
         break;
 
       // We do not know what this instruction is, do a simple check to make sure
@@ -1080,11 +1084,11 @@ swift::getSingleUnsafeGuaranteedValueResult(BuiltinInst *BI) {
     if (!TE || TE->getOperand() != BI)
       return Failed;
 
-    if (TE->getFieldNo() == 0 && !GuaranteedValue) {
+    if (TE->getFieldIndex() == 0 && !GuaranteedValue) {
       GuaranteedValue = TE;
       continue;
     }
-    if (TE->getFieldNo() == 1 && !Token) {
+    if (TE->getFieldIndex() == 1 && !Token) {
       Token = TE;
       continue;
     }

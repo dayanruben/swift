@@ -90,7 +90,7 @@ class JobStats(JobData):
                                     else max(a, b)),
                "max": lambda a, b: max(a, b)}
         op = ops[merge_by]
-        for k, v in self.stats.items() + other.stats.items():
+        for k, v in list(self.stats.items()) + list(other.stats.items()):
             if k in merged_stats:
                 merged_stats[k] = op(v, merged_stats[k])
             else:
@@ -317,8 +317,7 @@ def load_stats_dir(path, select_module=[], select_stat=[],
             jobargs = [mg["input"], mg["triple"], mg["out"], mg["opt"]]
 
             if platform.system() == 'Windows':
-                p = unicode(u"\\\\?\\%s" % os.path.abspath(os.path.join(root,
-                                                                        f)))
+                p = str(u"\\\\?\\%s" % os.path.abspath(os.path.join(root, f)))
             else:
                 p = os.path.join(root, f)
 
@@ -329,11 +328,12 @@ def load_stats_dir(path, select_module=[], select_stat=[],
             for (k, v) in j.items():
                 if sre.search(k) is None:
                     continue
+                if k.startswith('time.'):
+                    v = int(1000000.0 * float(v))
                 if k.startswith('time.') and exclude_timers:
                     continue
                 tm = match_timerpat(k)
                 if tm:
-                    v = int(1000000.0 * float(v))
                     if tm['jobkind'] == jobkind and \
                        tm['timerkind'] == 'wall':
                         dur_usec = v

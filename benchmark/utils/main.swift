@@ -48,6 +48,7 @@ import Chars
 import ClassArrayGetter
 import Codable
 import Combos
+import CreateObjects
 import DataBenchmarks
 import DeadArray
 import DevirtualizeProtocolComposition
@@ -68,6 +69,9 @@ import DictionaryOfAnyHashableStrings
 import DictionaryRemove
 import DictionarySubscriptDefault
 import DictionarySwap
+#if canImport(_Differentiation)
+import Differentiation
+#endif
 import Diffing
 import DiffingMyers
 import DropFirst
@@ -79,12 +83,14 @@ import ExistentialPerformance
 import Fibonacci
 import FindStringNaive
 import FlattenList
+import FloatingPointConversion
 import FloatingPointParsing
 import FloatingPointPrinting
 import Hanoi
 import Hash
 import Histogram
 import HTTP2StateMachine
+import IndexPathTest
 import InsertCharacter
 import IntegerParsing
 import Integrate
@@ -96,18 +102,19 @@ import LuhnAlgoEager
 import LuhnAlgoLazy
 import MapReduce
 import Memset
+import Mirror
 import MonteCarloE
 import MonteCarloPi
 import NibbleSort
 import NIOChannelPipeline
 import NSDictionaryCastToSwift
 import NSError
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 import NSStringConversion
 #endif
 import NopDeinit
 import ObjectAllocation
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 import ObjectiveCBridging
 import ObjectiveCBridgingStubs
 #if !(SWIFT_PACKAGE || Xcode)
@@ -130,6 +137,7 @@ import PrefixWhile
 import Prims
 import PrimsNonStrongRef
 import PrimsSplit
+import ProtocolConformance
 import ProtocolDispatch
 import ProtocolDispatch2
 import Queue
@@ -169,6 +177,8 @@ import StringInterpolation
 import StringMatch
 import StringRemoveDupes
 import StringReplaceSubrange
+import StringSplitting
+import StringSwitch
 import StringTests
 import StringWalk
 import Substring
@@ -232,6 +242,7 @@ registerBenchmark(Chars)
 registerBenchmark(Codable)
 registerBenchmark(Combos)
 registerBenchmark(ClassArrayGetter)
+registerBenchmark(CreateObjects)
 registerBenchmark(DataBenchmarks)
 registerBenchmark(DeadArray)
 registerBenchmark(DevirtualizeProtocolComposition)
@@ -252,6 +263,9 @@ registerBenchmark(DictionaryOfAnyHashableStrings)
 registerBenchmark(DictionaryRemove)
 registerBenchmark(DictionarySubscriptDefault)
 registerBenchmark(DictionarySwap)
+#if canImport(_Differentiation)
+registerBenchmark(Differentiation)
+#endif
 registerBenchmark(Diffing)
 registerBenchmark(DiffingMyers)
 registerBenchmark(DropFirst)
@@ -264,12 +278,14 @@ registerBenchmark(Fibonacci)
 registerBenchmark(FindStringNaive)
 registerBenchmark(FlattenListLoop)
 registerBenchmark(FlattenListFlatMap)
+registerBenchmark(FloatingPointConversion)
 registerBenchmark(FloatingPointParsing)
 registerBenchmark(FloatingPointPrinting)
 registerBenchmark(Hanoi)
 registerBenchmark(HashTest)
 registerBenchmark(Histogram)
 registerBenchmark(HTTP2StateMachine)
+registerBenchmark(IndexPathTest)
 registerBenchmark(InsertCharacter)
 registerBenchmark(IntegerParsing)
 registerBenchmark(IntegrateTest)
@@ -281,18 +297,19 @@ registerBenchmark(LuhnAlgoEager)
 registerBenchmark(LuhnAlgoLazy)
 registerBenchmark(MapReduce)
 registerBenchmark(Memset)
+registerBenchmark(MirrorDefault)
 registerBenchmark(MonteCarloE)
 registerBenchmark(MonteCarloPi)
 registerBenchmark(NSDictionaryCastToSwift)
 registerBenchmark(NSErrorTest)
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 registerBenchmark(NSStringConversion)
 #endif
 registerBenchmark(NibbleSort)
 registerBenchmark(NIOChannelPipeline)
 registerBenchmark(NopDeinit)
 registerBenchmark(ObjectAllocation)
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 registerBenchmark(ObjectiveCBridging)
 registerBenchmark(ObjectiveCBridgingStubs)
 #if !(SWIFT_PACKAGE || Xcode)
@@ -315,6 +332,7 @@ registerBenchmark(PrefixWhile)
 registerBenchmark(Prims)
 registerBenchmark(PrimsNonStrongRef)
 registerBenchmark(PrimsSplit)
+registerBenchmark(ProtocolConformance)
 registerBenchmark(ProtocolDispatch)
 registerBenchmark(ProtocolDispatch2)
 registerBenchmark(QueueGeneric)
@@ -359,6 +377,12 @@ registerBenchmark(StringMatch)
 registerBenchmark(StringNormalization)
 registerBenchmark(StringRemoveDupes)
 registerBenchmark(StringReplaceSubrange)
+
+if #available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *) {
+  registerBenchmark(StringSplitting)
+}
+
+registerBenchmark(StringSwitch)
 registerBenchmark(StringTests)
 registerBenchmark(StringWalk)
 registerBenchmark(SubstringTest)
@@ -366,6 +390,7 @@ registerBenchmark(Suffix)
 registerBenchmark(SuperChars)
 registerBenchmark(TwoSum)
 registerBenchmark(TypeFlood)
+registerBenchmark(TypeName)
 registerBenchmark(UTF8Decode)
 registerBenchmark(Walsh)
 registerBenchmark(WordCount)

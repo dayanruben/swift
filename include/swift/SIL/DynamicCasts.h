@@ -158,17 +158,14 @@ public:
   SILDynamicCastInst(ID *i) : inst(i) {}
 #include "swift/SIL/SILNodes.def"
 
-  static SILDynamicCastInst getAs(SILNode *node) {
-    auto *i = dyn_cast<SILInstruction>(node);
-    if (!i)
-      return SILDynamicCastInst();
-    auto kind = SILDynamicCastKind::fromNodeKind(i->getKind());
+  static SILDynamicCastInst getAs(SILInstruction *inst) {
+    auto kind = SILDynamicCastKind::fromNodeKind(inst->getKind());
     if (!kind)
       return SILDynamicCastInst();
     switch (kind.getValue()) {
 #define DYNAMICCAST_INST(ID, PARENT)                                           \
   case SILDynamicCastKind::ID:                                                 \
-    return SILDynamicCastInst(cast<ID>(node));
+    return SILDynamicCastInst(cast<ID>(inst));
 #include "swift/SIL/SILNodes.def"
     }
   }
@@ -432,6 +429,9 @@ public:
     auto SourceIsBridgeable = getSourceFormalType()->isBridgeableObjectType();
     return TargetIsBridgeable != SourceIsBridgeable;
   }
+
+  /// Returns true if this dynamic cast can release its source operand.
+  bool isRCIdentityPreserving() const;
 
   /// If getSourceType() is a Swift type that can bridge to an ObjC type, return
   /// the ObjC type it bridges to. If the source type is an objc type, an empty

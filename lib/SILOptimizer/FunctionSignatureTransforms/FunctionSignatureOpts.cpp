@@ -535,7 +535,7 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   }
 
   // Then we transfer the body of F to NewF.
-  NewF->spliceBody(F);
+  NewF->moveAllBlocksFromOtherFunction(F);
 
   // Array semantic clients rely on the signature being as in the original
   // version.
@@ -583,7 +583,8 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
 
   SILValue ReturnValue;
   SILType LoweredType = NewF->getLoweredType();
-  SILType ResultType = NewF->getConventions().getSILResultType();
+  SILType ResultType = NewF->getConventions().getSILResultType(
+      Builder.getTypeExpansionContext());
   auto GenCalleeType = NewF->getLoweredFunctionType();
   auto SubstCalleeSILType = LoweredType;
   SubstitutionMap Subs;
@@ -596,7 +597,7 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
         M, Subs, Builder.getTypeExpansionContext());
     SubstCalleeSILType = SILType::getPrimitiveObjectType(SubstCalleeType);
     SILFunctionConventions Conv(SubstCalleeType, M);
-    ResultType = Conv.getSILResultType();
+    ResultType = Conv.getSILResultType(Builder.getTypeExpansionContext());
   }
   auto FunctionTy = LoweredType.castTo<SILFunctionType>();
   if (FunctionTy->hasErrorResult()) {
@@ -604,12 +605,11 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
     SILFunction *Thunk = ThunkBody->getParent();
     SILBasicBlock *NormalBlock = Thunk->createBasicBlock();
     ReturnValue =
-        NormalBlock->createPhiArgument(ResultType, ValueOwnershipKind::Owned);
+        NormalBlock->createPhiArgument(ResultType, OwnershipKind::Owned);
     SILBasicBlock *ErrorBlock = Thunk->createBasicBlock();
     SILType Error =
         SILType::getPrimitiveObjectType(FunctionTy->getErrorResult().getInterfaceType());
-    auto *ErrorArg =
-        ErrorBlock->createPhiArgument(Error, ValueOwnershipKind::Owned);
+    auto *ErrorArg = ErrorBlock->createPhiArgument(Error, OwnershipKind::Owned);
     Builder.createTryApply(Loc, FRI, Subs, ThunkArgs, NormalBlock, ErrorBlock);
 
     Builder.setInsertionPoint(ErrorBlock);
@@ -620,7 +620,7 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   }
 
   // Set up the return results.
-  if (NewF->isNoReturnFunction()) {
+  if (NewF->isNoReturnFunction(Builder.getTypeExpansionContext())) {
     Builder.createUnreachable(Loc);
   } else {
     Builder.createReturn(Loc, ReturnValue);
@@ -641,13 +641,22 @@ bool FunctionSignatureTransform::run(bool hasCaller) {
       TransformDescriptor.hasOnlyDirectInModuleCallers;
   SILFunction *F = TransformDescriptor.OriginalFunction;
 
-
   // If we are asked to assume a caller for testing purposes, set the flag.
   hasCaller |= FSOOptimizeIfNotCalled;
 
   if (!hasCaller && (F->getDynamicallyReplacedFunction() ||
                      canBeCalledIndirectly(F->getRepresentation()))) {
     LLVM_DEBUG(llvm::dbgs() << "  function has no caller -> abort\n");
+    return false;
+  }
+
+  // Bail if we have a pseudo-generic function. We do not handle these today. If
+  // we let it through here we crash when attempting to compute the optimized
+  // function type.
+  //
+  // TODO: Add support for this.
+  if (F->getLoweredFunctionType()->isPseudogeneric()) {
+    LLVM_DEBUG(llvm::dbgs() << "  function is pseudo-generic -> abort\n");
     return false;
   }
 

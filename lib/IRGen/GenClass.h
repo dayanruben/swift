@@ -51,6 +51,9 @@ namespace irgen {
   enum class ClassDeallocationKind : unsigned char;
   enum class FieldAccess : uint8_t;
 
+  /// Return the lowered type for the class's 'self' type within its context.
+  SILType getSelfType(const ClassDecl *base);
+
   OwnedAddress projectPhysicalClassMemberAddress(
       IRGenFunction &IGF, llvm::Value *base,
       SILType baseType, SILType fieldType, VarDecl *field);
@@ -81,6 +84,11 @@ namespace irgen {
                                             llvm::ArrayRef<SILType> tailTypes);
 
   ClassDecl *getRootClassForMetaclass(IRGenModule &IGM, ClassDecl *theClass);
+
+  ClassDecl *getSuperclassDeclForMetadata(IRGenModule &IGM, ClassDecl *theClass);
+  CanType getSuperclassForMetadata(IRGenModule &IGM, ClassDecl *theClass);
+  CanType getSuperclassForMetadata(IRGenModule &IGM, CanType theClass,
+                                   bool useArchetypes = true);
 
   enum class ClassMetadataStrategy {
     /// Does the given class have resilient ancestry, or is the class itself
@@ -118,6 +126,11 @@ namespace irgen {
                              ClassDecl *cls);
   
   llvm::Constant *emitClassPrivateData(IRGenModule &IGM, ClassDecl *theClass);
+
+  llvm::Constant *emitSpecializedGenericClassPrivateData(IRGenModule &IGM,
+                                                         ClassDecl *theClass,
+                                                         CanType theType);
+
   void emitGenericClassPrivateDataTemplate(IRGenModule &IGM,
                                       ClassDecl *theClass,
                                       llvm::SmallVectorImpl<llvm::Constant*> &fields,

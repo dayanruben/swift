@@ -21,7 +21,6 @@
 #define SWIFT_AST_CONFORMANCE_LOOKUP_TABLE_H
 
 #include "swift/AST/DeclContext.h"
-#include "swift/AST/TypeLoc.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
@@ -328,8 +327,8 @@ class ConformanceLookupTable {
 
   /// Add the protocols from the given list.
   void addInheritedProtocols(
-                         llvm::PointerUnion<TypeDecl *, ExtensionDecl *> decl,
-                         ConformanceSource source);
+      llvm::PointerUnion<const TypeDecl *, const ExtensionDecl *> decl,
+      ConformanceSource source);
 
   /// Expand the implied conformances for the given DeclContext.
   void expandImpliedConformances(NominalTypeDecl *nominal, DeclContext *dc);
@@ -438,9 +437,7 @@ public:
   /// Look for all of the conformances within the given declaration context.
   void lookupConformances(NominalTypeDecl *nominal,
                           DeclContext *dc,
-                          ConformanceLookupKind lookupKind,
-                          SmallVectorImpl<ProtocolDecl *> *protocols,
-                          SmallVectorImpl<ProtocolConformance *> *conformances,
+                          std::vector<ProtocolConformance *> *conformances,
                           SmallVectorImpl<ConformanceDiagnostic> *diagnostics);
 
   /// Retrieve the complete set of protocols to which this nominal

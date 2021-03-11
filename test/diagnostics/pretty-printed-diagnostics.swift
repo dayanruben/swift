@@ -1,4 +1,4 @@
-// RUN: not %target-swift-frontend -enable-experimental-diagnostic-formatting -typecheck %s 2>&1 | %FileCheck %s
+// RUN: not %target-swift-frontend -diagnostic-style=swift -typecheck %/s 2>&1 | %FileCheck %s
 
 1 + 2
 
@@ -136,8 +136,6 @@ foo(b:
 // CHECK: [[#LINE]]   | struct B: Decodable {
 // CHECK:             |        ^ error: type 'B' does not conform to protocol 'Decodable'
 // CHECK: [[#LINE+1]] |   let a: Foo
-// CHECK:             |       ^ note: cannot automatically synthesize 'Decodable' because 'Foo' does not conform to 'Decodable'
-// CHECK: [[#LINE+2]] | }
 // CHECK: Swift.Decodable:2:5
 // CHECK: 1 | public protocol Decodable {
 // CHECK: 2 |     init(from decoder: Decoder) throws

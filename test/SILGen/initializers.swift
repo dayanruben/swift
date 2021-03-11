@@ -580,13 +580,11 @@ class ThrowDerivedClass : ThrowBaseClass {
   // CHECK:   store {{%.*}} to [init] [[PROJ]]
   //
   // Then initialize the canary with nil. We are able to borrow the initialized self to avoid retain/release overhead.
-  // CHECK:   [[CANARY_FUNC:%.*]] = function_ref @$s21failable_initializers17ThrowDerivedClassC6canaryAA6CanaryCSgvpfi :
-  // CHECK:   [[OPT_CANARY:%.*]] = apply [[CANARY_FUNC]]()
   // CHECK:   [[SELF:%.*]] = load_borrow [[PROJ]]
   // CHECK:   [[CANARY_ADDR:%.*]] = ref_element_addr [[SELF]]
-  // CHECK:   [[CANARY_ACCESS:%.*]] = begin_access [modify] [dynamic] [[CANARY_ADDR]]
-  // CHECK:   assign [[OPT_CANARY]] to [[CANARY_ACCESS]]
-  // CHECK:   end_access [[CANARY_ACCESS]]
+  // CHECK:   [[CANARY_FUNC:%.*]] = function_ref @$s21failable_initializers17ThrowDerivedClassC6canaryAA6CanaryCSgvpfi :
+  // CHECK:   [[OPT_CANARY:%.*]] = apply [[CANARY_FUNC]]()
+  // CHECK:   store [[OPT_CANARY]] to [init] [[CANARY_ADDR]]
   // CHECK:   end_borrow [[SELF]]
   //
   // Now we perform the unwrap.
@@ -624,13 +622,11 @@ class ThrowDerivedClass : ThrowBaseClass {
   // CHECK:   store {{%.*}} to [init] [[PROJ]]
   //
   // Then initialize the canary with nil. We are able to borrow the initialized self to avoid retain/release overhead.
-  // CHECK:   [[CANARY_FUNC:%.*]] = function_ref @$s21failable_initializers17ThrowDerivedClassC6canaryAA6CanaryCSgvpfi :
-  // CHECK:   [[OPT_CANARY:%.*]] = apply [[CANARY_FUNC]]()
   // CHECK:   [[SELF:%.*]] = load_borrow [[PROJ]]
   // CHECK:   [[CANARY_ADDR:%.*]] = ref_element_addr [[SELF]]
-  // CHECK:   [[CANARY_ACCESS:%.*]] = begin_access [modify] [dynamic] [[CANARY_ADDR]]
-  // CHECK:   assign [[OPT_CANARY]] to [[CANARY_ACCESS]]
-  // CHECK:   end_access [[CANARY_ACCESS]]
+  // CHECK:   [[CANARY_FUNC:%.*]] = function_ref @$s21failable_initializers17ThrowDerivedClassC6canaryAA6CanaryCSgvpfi :
+  // CHECK:   [[OPT_CANARY:%.*]] = apply [[CANARY_FUNC]]()
+  // CHECK:   store [[OPT_CANARY]] to [init] [[CANARY_ADDR]]
   // CHECK:   end_borrow [[SELF]]
   //
   // Now we begin argument emission where we perform the unwrap.
@@ -1140,7 +1136,7 @@ class MemberInitsHelper<T> { }
 
 extension MemberInits {
   // CHECK-LABEL: sil [ossa] @$s21failable_initializers11MemberInitsVyACySayqd__GGSayACyqd__GGcADRszSQRd__lufC : $@convention(method) <Value><T where Value == Array<T>, T : Equatable> (@owned Array<MemberInits<T>>, @thin MemberInits<Array<T>>.Type) -> @owned MemberInits<Array<T>> {
-  public init<T>(_ array: [MemberInits<T>]) where Value == [T] {
+  public init<T>(_ array: Array<MemberInits<T>>) where Value == Array<T> {
     box = nil
 
     // CHECK: [[INIT_FN:%.*]] = function_ref @$s21failable_initializers11MemberInitsV5value33_4497B2E9306011E5BAC13C07BEAC2557LLSSvpfi : $@convention(thin) <τ_0_0 where τ_0_0 : Equatable> () -> @owned String

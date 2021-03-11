@@ -57,8 +57,8 @@ static void emitStoreToForeignErrorSlot(SILGenFunction &SGF,
 
     // If we have the slot, emit a store to it.
     SGF.B.emitBlock(hasSlotBB);
-    SILValue slot = hasSlotBB->createPhiArgument(errorPtrObjectTy,
-                                                 ValueOwnershipKind::Owned);
+    SILValue slot =
+        hasSlotBB->createPhiArgument(errorPtrObjectTy, OwnershipKind::Owned);
     emitStoreToForeignErrorSlot(SGF, loc, slot, errorSrc);
     SGF.B.createBranch(loc, contBB);
 
@@ -80,7 +80,7 @@ static void emitStoreToForeignErrorSlot(SILGenFunction &SGF,
   CanType bridgedErrorProto =
     CanType(bridgedErrorPtrType->getAnyPointerElementType(ptrKind));
 
-  FullExpr scope(SGF.Cleanups, CleanupLocation::get(loc));
+  FullExpr scope(SGF.Cleanups, CleanupLocation(loc));
   FormalEvaluationScope writebacks(SGF);
 
   // Convert the error to a bridged form.
@@ -170,7 +170,7 @@ emitBridgeErrorForForeignError(SILLocation loc,
                                SILType bridgedResultType,
                                SILValue foreignErrorSlot,
                                const ForeignErrorConvention &foreignError) {
-  FullExpr scope(Cleanups, CleanupLocation::get(loc));
+  FullExpr scope(Cleanups, CleanupLocation(loc));
 
   // Store the error to the foreign error slot.
   emitStoreToForeignErrorSlot(*this, loc, foreignErrorSlot,
@@ -202,7 +202,7 @@ emitBridgeReturnValueForForeignError(SILLocation loc,
                                      SILType bridgedType,
                                      SILValue foreignErrorSlot,
                                const ForeignErrorConvention &foreignError) {
-  FullExpr scope(Cleanups, CleanupLocation::get(loc));
+  FullExpr scope(Cleanups, CleanupLocation(loc));
 
   switch (foreignError.getKind()) {
   // If an error is signalled by a zero result, return non-zero.
@@ -254,7 +254,7 @@ void SILGenFunction::emitForeignErrorBlock(SILLocation loc,
                                            Optional<ManagedValue> errorSlot) {
   SILGenSavedInsertionPoint savedIP(*this, errorBB,
                                     FunctionSection::Postmatter);
-  Scope scope(Cleanups, CleanupLocation::get(loc));
+  Scope scope(Cleanups, CleanupLocation(loc));
 
   // Load the error (taking responsibility for it).  In theory, this
   // is happening within conditional code, so we need to be only
@@ -278,7 +278,7 @@ void SILGenFunction::emitForeignErrorBlock(SILLocation loc,
   error = scope.popPreservingValue(emitBridgedToNativeError(loc, error));
 
   // Propagate.
-  FullExpr throwScope(Cleanups, CleanupLocation::get(loc));
+  FullExpr throwScope(Cleanups, CleanupLocation(loc));
   emitThrow(loc, error, true);
 }
 
@@ -357,7 +357,7 @@ emitResultIsNilErrorCheck(SILGenFunction &SGF, SILLocation loc,
   // result value.
   SGF.B.emitBlock(contBB);
   SILValue objectResult =
-      contBB->createPhiArgument(resultObjectType, ValueOwnershipKind::Owned);
+      contBB->createPhiArgument(resultObjectType, OwnershipKind::Owned);
   return SGF.emitManagedRValueWithCleanup(objectResult);
 }
 
@@ -376,7 +376,7 @@ emitErrorIsNonNilErrorCheck(SILGenFunction &SGF, SILLocation loc,
   // Switch on the optional error.
   SILBasicBlock *errorBB = SGF.createBasicBlock(FunctionSection::Postmatter);
   errorBB->createPhiArgument(optionalError->getType().unwrapOptionalType(),
-                             ValueOwnershipKind::Owned);
+                             OwnershipKind::Owned);
   SILBasicBlock *contBB = SGF.createBasicBlock();
   SGF.B.createSwitchEnum(loc, optionalError, /*default*/ nullptr,
                          { { ctx.getOptionalSomeDecl(), errorBB },

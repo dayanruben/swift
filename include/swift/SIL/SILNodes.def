@@ -413,6 +413,7 @@ ABSTRACT_VALUE(SILArgument, ValueBase)
 
 ABSTRACT_VALUE(MultipleValueInstructionResult, ValueBase)
   MULTIPLE_VALUE_INST_RESULT(BeginApplyResult, MultipleValueInstructionResult)
+  MULTIPLE_VALUE_INST_RESULT(BeginCOWMutationResult, MultipleValueInstructionResult)
   MULTIPLE_VALUE_INST_RESULT(DestructureStructResult, MultipleValueInstructionResult)
   MULTIPLE_VALUE_INST_RESULT(DestructureTupleResult, MultipleValueInstructionResult)
   VALUE_RANGE(MultipleValueInstructionResult, BeginApplyResult, DestructureTupleResult)
@@ -457,6 +458,8 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
                       LiteralInst, None, DoesNotRelease)
     SINGLE_VALUE_INST(GlobalAddrInst, global_addr,
                       LiteralInst, None, DoesNotRelease)
+    SINGLE_VALUE_INST(BaseAddrForOffsetInst, base_addr_for_offset,
+                      LiteralInst, None, DoesNotRelease)
     SINGLE_VALUE_INST(GlobalValueInst, global_value,
                       LiteralInst, None, DoesNotRelease)
     SINGLE_VALUE_INST(IntegerLiteralInst, integer_literal,
@@ -496,6 +499,8 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
     SINGLE_VALUE_INST(UncheckedTrivialBitCastInst, unchecked_trivial_bit_cast,
                       ConversionInst, None, DoesNotRelease)
     SINGLE_VALUE_INST(UncheckedBitwiseCastInst, unchecked_bitwise_cast,
+                      ConversionInst, None, DoesNotRelease)
+    SINGLE_VALUE_INST(UncheckedValueCastInst, unchecked_value_cast,
                       ConversionInst, None, DoesNotRelease)
     SINGLE_VALUE_INST(RefToRawPointerInst, ref_to_raw_pointer,
                       ConversionInst, None, DoesNotRelease)
@@ -570,7 +575,7 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
                     SingleValueInstruction, MayHaveSideEffects, DoesNotRelease)
 #include "swift/AST/ReferenceStorage.def"
   SINGLE_VALUE_INST(UncheckedOwnershipConversionInst, unchecked_ownership_conversion,
-                    SingleValueInstruction, MayHaveSideEffects, MayRelease)
+                    SingleValueInstruction, None, MayRelease)
 
   // IsUnique does not actually write to memory but should be modeled
   // as such. Its operand is a pointer to an object reference. The
@@ -579,12 +584,15 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
   SINGLE_VALUE_INST(IsUniqueInst, is_unique,
                     SingleValueInstruction, MayHaveSideEffects, DoesNotRelease)
 
+  SINGLE_VALUE_INST(EndCOWMutationInst, end_cow_mutation,
+                    SingleValueInstruction, None, DoesNotRelease)
+
   SINGLE_VALUE_INST(IsEscapingClosureInst, is_escaping_closure,
                     SingleValueInstruction, MayRead, DoesNotRelease)
 
   // Accessing memory
   SINGLE_VALUE_INST(LoadInst, load,
-                    SingleValueInstruction, MayRead, DoesNotRelease)
+                    SingleValueInstruction, MayHaveSideEffects, DoesNotRelease)
   SINGLE_VALUE_INST(LoadBorrowInst, load_borrow,
                     SingleValueInstruction, MayRead, DoesNotRelease)
   SINGLE_VALUE_INST(BeginBorrowInst, begin_borrow,
@@ -705,6 +713,18 @@ ABSTRACT_VALUE_AND_INST(SingleValueInstruction, ValueBase, SILInstruction)
   SINGLE_VALUE_INST(DifferentiabilityWitnessFunctionInst,
                     differentiability_witness_function,
                     SingleValueInstruction, None, DoesNotRelease)
+  
+  // Async
+  // TODO: The side effects declarations on this instruction could likely
+  // be tightened, though we want to be careful that passes that try to do
+  // code motion or eliminate this instruction don't do so without awareness of
+  // its structural requirements.
+  ABSTRACT_SINGLE_VALUE_INST(GetAsyncContinuationInstBase, SingleValueInstruction)
+    SINGLE_VALUE_INST(GetAsyncContinuationInst, get_async_continuation,
+                      GetAsyncContinuationInstBase, MayHaveSideEffects, MayRelease)
+    SINGLE_VALUE_INST(GetAsyncContinuationAddrInst, get_async_continuation_addr,
+                      GetAsyncContinuationInstBase, MayHaveSideEffects, MayRelease)
+    SINGLE_VALUE_INST_RANGE(GetAsyncContinuationInstBase, GetAsyncContinuationInst, GetAsyncContinuationAddrInst)
 
   // Key paths
   // TODO: The only "side effect" is potentially retaining the returned key path
@@ -742,6 +762,8 @@ ABSTRACT_INST(TermInst, SILInstruction)
              TermInst, MayRead, DoesNotRelease)
   TERMINATOR(DynamicMethodBranchInst, dynamic_method_br,
              TermInst, None, DoesNotRelease)
+  TERMINATOR(AwaitAsyncContinuationInst, await_async_continuation,
+             TermInst, MayHaveSideEffects, MayRelease)
   DYNAMICCAST_TERMINATOR(CheckedCastBranchInst, checked_cast_br,
              TermInst, None, DoesNotRelease)
   DYNAMICCAST_TERMINATOR(CheckedCastAddrBranchInst, checked_cast_addr_br,
@@ -812,6 +834,9 @@ NON_VALUE_INST(BindMemoryInst, bind_memory,
 NON_VALUE_INST(FixLifetimeInst, fix_lifetime,
                SILInstruction, MayHaveSideEffects, DoesNotRelease)
 
+NON_VALUE_INST(HopToExecutorInst, hop_to_executor,
+               SILInstruction, MayHaveSideEffects, DoesNotRelease)
+
 NON_VALUE_INST(DestroyValueInst, destroy_value,
                SILInstruction, MayHaveSideEffects, MayRelease)
 NON_VALUE_INST(EndBorrowInst, end_borrow,
@@ -827,7 +852,7 @@ NON_VALUE_INST(BeginUnpairedAccessInst, begin_unpaired_access,
 NON_VALUE_INST(EndUnpairedAccessInst, end_unpaired_access,
                SILInstruction, MayHaveSideEffects, DoesNotRelease)
 NON_VALUE_INST(StoreInst, store,
-               SILInstruction, MayWrite, DoesNotRelease)
+               SILInstruction, MayHaveSideEffects, MayRelease)
 NON_VALUE_INST(AssignInst, assign,
                SILInstruction, MayWrite, DoesNotRelease)
 NON_VALUE_INST(AssignByWrapperInst, assign_by_wrapper,
@@ -876,11 +901,19 @@ NODE_RANGE(NonValueInstruction, UnreachableInst, CondFailInst)
 ABSTRACT_INST(MultipleValueInstruction, SILInstruction)
 FULLAPPLYSITE_MULTIPLE_VALUE_INST(BeginApplyInst, begin_apply,
                                   MultipleValueInstruction, MayHaveSideEffects, MayRelease)
+                                  
+// begin_cow_mutation is defined to have side effects, because it has
+// dependencies with instructions which retain the buffer operand. This prevents
+// optimizations from moving begin_cow_mutation instructions across such retain
+// instructions.
+MULTIPLE_VALUE_INST(BeginCOWMutationInst, begin_cow_mutation,
+                    MultipleValueInstruction, MayHaveSideEffects, DoesNotRelease)
 MULTIPLE_VALUE_INST(DestructureStructInst, destructure_struct,
                     MultipleValueInstruction, None, DoesNotRelease)
 MULTIPLE_VALUE_INST(DestructureTupleInst, destructure_tuple,
                     MultipleValueInstruction, None, DoesNotRelease)
 INST_RANGE(MultipleValueInstruction, BeginApplyInst, DestructureTupleInst)
+NODE_RANGE(NonSingleValueInstruction, UnreachableInst, DestructureTupleInst)
 
 NODE_RANGE(SILInstruction, AllocStackInst, DestructureTupleInst)
 NODE_RANGE(SILNode, SILPhiArgument, DestructureTupleInst)

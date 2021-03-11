@@ -115,7 +115,7 @@ bool PartialApplyCombiner::copyArgsToTemporaries(
 
     // Destroy the argument value (either as SSA value or in the stack-
     // allocated temporary) at the end of the partial_apply's lifetime.
-    endLifetimeAtFrontier(tmp, partialApplyFrontier, builderCtxt);
+    endLifetimeAtFrontier(tmp, partialApplyFrontier, builderCtxt, callbacks);
   }
   return true;
 }
@@ -153,8 +153,7 @@ void PartialApplyCombiner::processSingleApply(FullApplySite paiAI) {
         auto *ASI = builder.createAllocStack(pai->getLoc(), arg->getType());
         builder.createCopyAddr(pai->getLoc(), arg, ASI, IsTake_t::IsNotTake,
                                IsInitialization_t::IsInitialization);
-        paiAI.insertAfterFullEvaluation([&](SILBasicBlock::iterator insertPt) {
-          SILBuilderWithScope builder(insertPt);
+        paiAI.insertAfterFullEvaluation([&](SILBuilder &builder) {
           builder.createDeallocStack(destroyloc, ASI);
         });
         arg = ASI;
@@ -174,18 +173,18 @@ void PartialApplyCombiner::processSingleApply(FullApplySite paiAI) {
 
   if (auto *tai = dyn_cast<TryApplyInst>(paiAI)) {
     builder.createTryApply(paiAI.getLoc(), callee, subs, argList,
-                           tai->getNormalBB(), tai->getErrorBB());
+                           tai->getNormalBB(), tai->getErrorBB(),
+                           tai->getApplyOptions());
   } else {
     auto *apply = cast<ApplyInst>(paiAI);
     auto *newAI = builder.createApply(paiAI.getLoc(), callee, subs, argList,
-                                      apply->isNonThrowing());
+                                      apply->getApplyOptions());
     callbacks.replaceValueUsesWith(apply, newAI);
   }
   // We also need to destroy the partial_apply instruction itself because it is
   // consumed by the apply_instruction.
   if (!pai->hasCalleeGuaranteedContext()) {
-    paiAI.insertAfterFullEvaluation([&](SILBasicBlock::iterator insertPt) {
-      SILBuilderWithScope builder(insertPt);
+    paiAI.insertAfterFullEvaluation([&](SILBuilder &builder) {
       builder.emitDestroyValueOperation(destroyloc, pai);
     });
   }
@@ -216,6 +215,13 @@ bool PartialApplyCombiner::combine() {
   while (!worklist.empty()) {
     auto *use = worklist.pop_back_val();
     auto *user = use->getUser();
+
+    // Recurse through copy_value
+    if (auto *cvi = dyn_cast<CopyValueInst>(user)) {
+      for (auto *copyUse : cvi->getUses())
+        worklist.push_back(copyUse);
+      continue;
+    }
 
     // Recurse through conversions.
     if (auto *cfi = dyn_cast<ConvertEscapeToNoEscapeInst>(user)) {

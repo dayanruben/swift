@@ -1388,7 +1388,7 @@ SILArgument *LoadableStorageAllocation::replaceArgType(SILBuilder &argBuilder,
                    arg) == pass.largeLoadableArgs.end());
 
   arg = arg->getParent()->replaceFunctionArgument(
-      arg->getIndex(), newSILType, ValueOwnershipKind::None, arg->getDecl());
+      arg->getIndex(), newSILType, OwnershipKind::None, arg->getDecl());
 
   for (auto *use : useList) {
     use->set(arg);
@@ -1407,7 +1407,8 @@ void LoadableStorageAllocation::insertIndirectReturnArgs() {
     canType = genEnv->mapTypeIntoContext(canType)->getCanonicalType();
   }
   resultStorageType = SILType::getPrimitiveObjectType(canType);
-  auto newResultStorageType = pass.getNewSILType(loweredTy, resultStorageType);
+  auto newResultStorageType =
+      pass.F->getLoweredType(pass.getNewSILType(loweredTy, resultStorageType));
 
   auto &ctx = pass.F->getModule().getASTContext();
   auto var = new (ctx) ParamDecl(
@@ -1417,7 +1418,7 @@ void LoadableStorageAllocation::insertIndirectReturnArgs() {
       pass.F->getDeclContext());
   var->setSpecifier(ParamSpecifier::InOut);
   pass.F->begin()->insertFunctionArgument(
-      0, newResultStorageType.getAddressType(), ValueOwnershipKind::None, var);
+      0, newResultStorageType.getAddressType(), OwnershipKind::None, var);
 }
 
 void LoadableStorageAllocation::convertIndirectFunctionArgs() {
@@ -1510,7 +1511,8 @@ void LoadableStorageAllocation::convertApplyResults() {
         continue;
       }
       auto resultContextTy = origSILFunctionType->substInterfaceType(
-                                       pass.F->getModule(), resultStorageType);
+          pass.F->getModule(), resultStorageType,
+          pass.F->getTypeExpansionContext());
       auto newSILType = pass.getNewSILType(origSILFunctionType,
                                            resultContextTy);
       auto *newVal = allocateForApply(currIns, newSILType.getObjectType());
@@ -1543,7 +1545,7 @@ void LoadableStorageAllocation::
                                             storageType);
     if (pass.containsDifferentFunctionSignature(pass.F->getLoweredFunctionType(),
                                                 storageType)) {
-      auto *castInstr = argBuilder.createUncheckedBitCast(
+      auto *castInstr = argBuilder.createUncheckedReinterpretCast(
           RegularLocation(const_cast<ValueDecl *>(arg->getDecl())), arg,
           newSILType);
       arg->replaceAllUsesWith(castInstr);
@@ -1623,7 +1625,7 @@ void LoadableStorageAllocation::allocateForArg(SILValue value) {
   SILInstruction *FirstNonAllocStack = &*BBIter;
   while (isa<AllocStackInst>(FirstNonAllocStack) &&
          BBIter != pass.F->begin()->end()) {
-    BBIter++;
+    ++BBIter;
     FirstNonAllocStack = &*BBIter;
   }
   SILBuilderWithScope allocBuilder(&*pass.F->begin()->begin(),
@@ -1911,8 +1913,8 @@ static void castTupleInstr(SingleValueInstruction *instr, IRGenModule &Mod,
   switch (instr->getKind()) {
   // Add cast to the new sil function type:
   case SILInstructionKind::TupleExtractInst: {
-    castInstr = castBuilder.createUncheckedBitCast(instr->getLoc(), instr,
-                                                   newSILType.getObjectType());
+    castInstr = castBuilder.createUncheckedReinterpretCast(
+        instr->getLoc(), instr, newSILType.getObjectType());
     break;
   }
   case SILInstructionKind::TupleElementAddrInst: {
@@ -2285,7 +2287,7 @@ static void rewriteFunction(StructLoweringState &pass,
   while (!pass.modReturnInsts.empty()) {
     auto *instr = pass.modReturnInsts.pop_back_val();
     auto loc = instr->getLoc(); // SILLocation::RegularKind
-    auto regLoc = RegularLocation(loc.getSourceLoc());
+    auto regLoc = RegularLocation(loc);
     SILBuilderWithScope retBuilder(instr);
     assert(modNonFuncTypeResultType(pass.F, pass.Mod) &&
            "Expected a regular type");
@@ -2470,8 +2472,8 @@ getOperandTypeWithCastIfNecessary(SILInstruction *containingInstr, SILValue op,
     }
     assert(currSILType.isObject() && "Expected an object type");
     if (newSILType != currSILType) {
-      auto castInstr = builder.createUncheckedBitCast(containingInstr->getLoc(),
-                                                      op, newSILType);
+      auto castInstr = builder.createUncheckedReinterpretCast(
+          containingInstr->getLoc(), op, newSILType);
       return castInstr;
     }
   }
@@ -2528,7 +2530,8 @@ void LoadableByAddress::recreateSingleApply(
     SILValue newApply =
       applyBuilder.createApply(castedApply->getLoc(), callee,
                                applySite.getSubstitutionMap(),
-                               callArgs, castedApply->isNonThrowing());
+                               callArgs,
+                               castedApply->getApplyOptions());
     castedApply->replaceAllUsesWith(newApply);
     break;
   }
@@ -2545,7 +2548,7 @@ void LoadableByAddress::recreateSingleApply(
     auto newApply =
       applyBuilder.createBeginApply(oldApply->getLoc(), callee,
                                     applySite.getSubstitutionMap(), callArgs,
-                                    oldApply->isNonThrowing());
+                                    oldApply->getApplyOptions());
 
     // Use the new token result.
     oldApply->getTokenResult()->replaceAllUsesWith(newApply->getTokenResult());
@@ -2652,8 +2655,8 @@ bool LoadableByAddress::recreateUncheckedEnumDataInstr(
     auto *takeEnum = enumBuilder.createUncheckedEnumData(
         enumInstr->getLoc(), enumInstr->getOperand(), enumInstr->getElement(),
         caseTy);
-    newInstr = enumBuilder.createUncheckedBitCast(enumInstr->getLoc(), takeEnum,
-                                                  newType);
+    newInstr = enumBuilder.createUncheckedReinterpretCast(enumInstr->getLoc(),
+                                                          takeEnum, newType);
   } else {
     newInstr = enumBuilder.createUncheckedEnumData(
         enumInstr->getLoc(), enumInstr->getOperand(), enumInstr->getElement(),
@@ -2707,7 +2710,7 @@ bool LoadableByAddress::fixStoreToBlockStorageInstr(
   if (destType.getObjectType() != srcType) {
     // Add cast to destType
     SILBuilderWithScope castBuilder(instr);
-    auto *castInstr = castBuilder.createUncheckedBitCast(
+    auto *castInstr = castBuilder.createUncheckedReinterpretCast(
         instr->getLoc(), src, destType.getObjectType());
     instr->setOperand(StoreInst::Src, castInstr);
   }
@@ -2763,7 +2766,8 @@ bool LoadableByAddress::recreateTupleInstr(
   for (auto elem : tupleInstr->getElements()) {
     elems.push_back(elem);
   }
-  auto *newTuple = tupleBuilder.createTuple(tupleInstr->getLoc(), elems);
+  auto *newTuple = tupleBuilder.createTuple(tupleInstr->getLoc(), newResultTy,
+                                            elems);
   tupleInstr->replaceAllUsesWith(newTuple);
   Delete.push_back(tupleInstr);
   return true;
@@ -2840,7 +2844,7 @@ bool LoadableByAddress::recreateConvInstr(SILInstruction &I,
     auto instr = cast<DifferentiableFunctionInst>(convInstr);
     newInstr = convBuilder.createDifferentiableFunction(
         instr->getLoc(), instr->getParameterIndices(),
-        instr->getOriginalFunction(),
+        instr->getResultIndices(), instr->getOriginalFunction(),
         instr->getOptionalDerivativeFunctionPair());
     break;
   }
@@ -2861,7 +2865,7 @@ bool LoadableByAddress::recreateConvInstr(SILInstruction &I,
   case SILInstructionKind::LinearFunctionExtractInst: {
     auto instr = cast<LinearFunctionExtractInst>(convInstr);
     newInstr = convBuilder.createLinearFunctionExtract(
-        instr->getLoc(), instr->getExtractee(), instr->getFunctionOperand());
+        instr->getLoc(), instr->getExtractee(), instr->getOperand());
     break;
   }
   default:

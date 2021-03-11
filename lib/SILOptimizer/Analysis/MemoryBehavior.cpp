@@ -66,15 +66,10 @@ class MemoryBehaviorVisitor
   /// The SILType of the value.
   Optional<SILType> TypedAccessTy;
 
-  /// Should we treat instructions that increment ref counts as None instead of
-  /// MayHaveSideEffects.
-  RetainObserveKind InspectionMode;
-
 public:
   MemoryBehaviorVisitor(AliasAnalysis *AA, SideEffectAnalysis *SEA,
-                        EscapeAnalysis *EA, SILValue V,
-                        RetainObserveKind IgnoreRefCountIncs)
-      : AA(AA), SEA(SEA), EA(EA), V(V), InspectionMode(IgnoreRefCountIncs) {}
+                        EscapeAnalysis *EA, SILValue V)
+      : AA(AA), SEA(SEA), EA(EA), V(V) {}
 
   SILType getValueTBAAType() {
     if (!TypedAccessTy)
@@ -83,11 +78,14 @@ public:
   }
 
   /// If 'V' is an address projection within a formal access, return the
-  /// canonical address of the formal access. Otherwise, return 'V' itself,
-  /// which is either a reference or unknown pointer or address.
+  /// canonical address of the formal access if possible without looking past
+  /// any storage casts. Otherwise, a "best-effort" address
+  ///
+  /// If 'V' is an address, then the returned value is also an address.
   SILValue getValueAddress() {
     if (!cachedValueAddress) {
-      cachedValueAddress = V->getType().isAddress() ? getAccessedAddress(V) : V;
+      cachedValueAddress =
+          V->getType().isAddress() ? getTypedAccessAddress(V) : V;
     }
     return cachedValueAddress;
   }
@@ -152,7 +150,7 @@ public:
 
     case SILAccessKind::Modify:
       if (isLetValue()) {
-        assert(stripAccessMarkers(beginAccess) != getValueAddress()
+        assert(getAccessBase(beginAccess) != getValueAddress()
                && "let modification not allowed");
         return MemBehavior::None;
       }
@@ -174,12 +172,19 @@ public:
 
   MemBehavior visitLoadInst(LoadInst *LI);
   MemBehavior visitStoreInst(StoreInst *SI);
+  MemBehavior visitCopyAddrInst(CopyAddrInst *CAI);
   MemBehavior visitApplyInst(ApplyInst *AI);
   MemBehavior visitTryApplyInst(TryApplyInst *AI);
+  MemBehavior visitBeginApplyInst(BeginApplyInst *AI);
+  MemBehavior visitEndApplyInst(EndApplyInst *EAI);
+  MemBehavior visitAbortApplyInst(AbortApplyInst *AAI);
+  MemBehavior getApplyBehavior(FullApplySite AS);
   MemBehavior visitBuiltinInst(BuiltinInst *BI);
   MemBehavior visitStrongReleaseInst(StrongReleaseInst *BI);
   MemBehavior visitReleaseValueInst(ReleaseValueInst *BI);
+  MemBehavior visitDestroyValueInst(DestroyValueInst *DVI);
   MemBehavior visitSetDeallocatingInst(SetDeallocatingInst *BI);
+  MemBehavior visitBeginCOWMutationInst(BeginCOWMutationInst *BCMI);
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
   MemBehavior visit##Name##ReleaseInst(Name##ReleaseInst *BI);
 #include "swift/AST/ReferenceStorage.def"
@@ -214,19 +219,14 @@ public:
   SIMPLE_MEMBEHAVIOR_INST(CondFailInst, None)
 #undef SIMPLE_MEMBEHAVIOR_INST
 
-  // If we are asked to treat ref count increments as being inert, return None
-  // for these.
-  //
-  // FIXME: Once we separate the notion of ref counts from reading/writing
-  // memory this will be unnecessary.
+  // Incrementing reference counts doesn't have an observable memory effect.
 #define REFCOUNTINC_MEMBEHAVIOR_INST(Name)                                     \
   MemBehavior visit##Name(Name *I) {                                           \
-    if (InspectionMode == RetainObserveKind::IgnoreRetains)          \
-      return MemBehavior::None;                                                \
-    return I->getMemoryBehavior();                                             \
+    return MemBehavior::None;                                                \
   }
   REFCOUNTINC_MEMBEHAVIOR_INST(StrongRetainInst)
   REFCOUNTINC_MEMBEHAVIOR_INST(RetainValueInst)
+  REFCOUNTINC_MEMBEHAVIOR_INST(CopyValueInst)
 #define UNCHECKED_REF_STORAGE(Name, ...)                                       \
   REFCOUNTINC_MEMBEHAVIOR_INST(Name##RetainValueInst)                          \
   REFCOUNTINC_MEMBEHAVIOR_INST(StrongCopy##Name##ValueInst)
@@ -245,26 +245,62 @@ MemBehavior MemoryBehaviorVisitor::visitLoadInst(LoadInst *LI) {
     return MemBehavior::None;
 
   LLVM_DEBUG(llvm::dbgs() << "  Could not prove that load inst does not alias "
-                             "pointer. Returning may read.\n");
+                             "pointer. ");
+
+  if (LI->getOwnershipQualifier() == LoadOwnershipQualifier::Take) {
+    LLVM_DEBUG(llvm::dbgs() << "Is a take so return MayReadWrite.\n");
+    return MemBehavior::MayReadWrite;
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << "Not a take so returning MayRead.\n");
   return MemBehavior::MayRead;
 }
 
 MemBehavior MemoryBehaviorVisitor::visitStoreInst(StoreInst *SI) {
   // No store besides the initialization of a "let"-variable
   // can have any effect on the value of this "let" variable.
-  if (isLetValue()
-      && (getAccessedAddress(SI->getDest()) != getValueAddress())) {
+  if (isLetValue() && (getAccessBase(SI->getDest()) != getValueAddress())) {
     return MemBehavior::None;
   }
-  // If the store dest cannot alias the pointer in question, then the
-  // specified value cannot be modified by the store.
-  if (!mayAlias(SI->getDest()))
+  // If the store dest cannot alias the pointer in question and we are not
+  // releasing anything due to an assign, then the specified value cannot be
+  // modified by the store.
+  if (!mayAlias(SI->getDest()) &&
+      SI->getOwnershipQualifier() != StoreOwnershipQualifier::Assign)
     return MemBehavior::None;
 
   // Otherwise, a store just writes.
   LLVM_DEBUG(llvm::dbgs() << "  Could not prove store does not alias inst. "
-                             "Returning MayWrite.\n");
-  return MemBehavior::MayWrite;
+                             "Returning default mem behavior.\n");
+  return SI->getMemoryBehavior();
+}
+
+MemBehavior MemoryBehaviorVisitor::visitCopyAddrInst(CopyAddrInst *CAI) {
+  // If it's an assign to the destination, a destructor might be called on the
+  // old value. This can have any side effects.
+  // We could also check if it's a trivial type (which cannot have any side
+  // effect on destruction), but such copy_addr instructions are optimized to
+  // load/stores anyway, so it's probably not worth it.
+  if (!CAI->isInitializationOfDest())
+    return MemBehavior::MayHaveSideEffects;
+
+  bool mayWrite = mayAlias(CAI->getDest());
+  bool mayRead = mayAlias(CAI->getSrc());
+  
+  if (mayRead) {
+    if (mayWrite)
+      return MemBehavior::MayReadWrite;
+
+    // A take is modelled as a write. See MemoryBehavior::MayWrite.
+    if (CAI->isTakeOfSrc())
+      return MemBehavior::MayReadWrite;
+
+    return MemBehavior::MayRead;
+  }
+  if (mayWrite)
+    return MemBehavior::MayWrite;
+
+  return MemBehavior::None;
 }
 
 MemBehavior MemoryBehaviorVisitor::visitBuiltinInst(BuiltinInst *BI) {
@@ -299,74 +335,139 @@ MemBehavior MemoryBehaviorVisitor::visitBuiltinInst(BuiltinInst *BI) {
 }
 
 MemBehavior MemoryBehaviorVisitor::visitTryApplyInst(TryApplyInst *AI) {
-  MemBehavior Behavior = MemBehavior::MayHaveSideEffects;
-  // Ask escape analysis.
-  if (!EA->canEscapeTo(V, AI))
-    Behavior = MemBehavior::None;
-
-  // Otherwise be conservative and return that we may have side effects.
-  LLVM_DEBUG(llvm::dbgs() << "  Found tryapply, returning " << Behavior <<'\n');
-  return Behavior;
+  return getApplyBehavior(AI);
 }
 
 MemBehavior MemoryBehaviorVisitor::visitApplyInst(ApplyInst *AI) {
+  return getApplyBehavior(AI);
+}
 
-  FunctionSideEffects ApplyEffects;
-  SEA->getCalleeEffects(ApplyEffects, AI);
+MemBehavior MemoryBehaviorVisitor::visitBeginApplyInst(BeginApplyInst *AI) {
+  return getApplyBehavior(AI);
+}
 
-  MemBehavior Behavior = MemBehavior::None;
+MemBehavior MemoryBehaviorVisitor::visitEndApplyInst(EndApplyInst *EAI) {
+  return getApplyBehavior(EAI->getBeginApply());
+}
 
-  // We can ignore mayTrap().
-  bool any_in_guaranteed_params = false;
-  for (auto op : enumerate(AI->getArgumentOperands())) {
-    if (op.value().get() == V &&
-        AI->getSubstCalleeConv().getSILArgumentConvention(op.index()) == swift::SILArgumentConvention::Indirect_In_Guaranteed) {
-      any_in_guaranteed_params = true;
-      break;
-    }
-  }
+MemBehavior MemoryBehaviorVisitor::visitAbortApplyInst(AbortApplyInst *AAI) {
+  return getApplyBehavior(AAI->getBeginApply());
+}
 
-  if (any_in_guaranteed_params) {
-    // one the parameters in the function call is @in_guaranteed of V, ie. the
-    // callee isn't allowed to modify it.
-    Behavior = MemBehavior::MayRead;
-  } else if (ApplyEffects.mayReadRC() ||
-        (InspectionMode == RetainObserveKind::ObserveRetains &&
-         ApplyEffects.mayAllocObjects())) {
-      Behavior = MemBehavior::MayHaveSideEffects;
-  } else {
-    auto &GlobalEffects = ApplyEffects.getGlobalEffects();
-    Behavior = GlobalEffects.getMemBehavior(InspectionMode);
+/// Returns true if the \p address may have any users which let the address
+/// escape in an unusual way, e.g. with an address_to_pointer instruction.
+static bool hasEscapingUses(SILValue address, int &numChecks) {
+  for (Operand *use : address->getUses()) {
+    SILInstruction *user = use->getUser();
+    
+    // Avoid quadratic complexity in corner cases. A limit of 24 is more than
+    // enough in most cases.
+    if (++numChecks > 24)
+      return true;
 
-    // Check all parameter effects.
-    for (unsigned Idx = 0, End = AI->getNumArguments();
-         Idx < End && Behavior < MemBehavior::MayHaveSideEffects; ++Idx) {
-      auto &ArgEffect = ApplyEffects.getParameterEffects()[Idx];
-      auto ArgBehavior = ArgEffect.getMemBehavior(InspectionMode);
-      if (ArgEffect.mayRelease()) {
-        Behavior = MemBehavior::MayHaveSideEffects;
+    switch (user->getKind()) {
+      case SILInstructionKind::DebugValueAddrInst:
+      case SILInstructionKind::FixLifetimeInst:
+      case SILInstructionKind::LoadInst:
+      case SILInstructionKind::StoreInst:
+      case SILInstructionKind::CopyAddrInst:
+      case SILInstructionKind::DestroyAddrInst:
+      case SILInstructionKind::DeallocStackInst:
+      case SILInstructionKind::EndAccessInst:
+        // Those instructions have no result and cannot escape the address.
         break;
-      }
-      auto NewBehavior = combineMemoryBehavior(Behavior, ArgBehavior);
-      if (NewBehavior != Behavior) {
-        SILValue Arg = AI->getArgument(Idx);
-        // We only consider the argument effects if the argument aliases V.
-        if (!Arg->getType().isAddress() || mayAlias(Arg))
-          Behavior = NewBehavior;
-      }
+      case SILInstructionKind::ApplyInst:
+      case SILInstructionKind::TryApplyInst:
+      case SILInstructionKind::BeginApplyInst:
+        // Apply instructions can not let an address escape either. It's not
+        // possible that an address, passed as an indirect parameter, escapes
+        // the function in any way (which is not unsafe and undefined behavior).
+        break;
+      case SILInstructionKind::BeginAccessInst:
+      case SILInstructionKind::OpenExistentialAddrInst:
+      case SILInstructionKind::UncheckedTakeEnumDataAddrInst:
+      case SILInstructionKind::StructElementAddrInst:
+      case SILInstructionKind::TupleElementAddrInst:
+      case SILInstructionKind::UncheckedAddrCastInst:
+        // Check the uses of address projections.
+        if (hasEscapingUses(cast<SingleValueInstruction>(user), numChecks))
+          return true;
+        break;
+      case SILInstructionKind::AddressToPointerInst:
+        // This is _the_ instruction which can let an address escape.
+        return true;
+      default:
+        // To be conservative, also bail for anything we don't handle here.
+        return true;
+    }
+  }
+  return false;
+}
+
+MemBehavior MemoryBehaviorVisitor::getApplyBehavior(FullApplySite AS) {
+
+  // Do a quick check first: if V is directly passed to an in_guaranteed
+  // argument, we know that the function cannot write to it.
+  for (Operand &argOp : AS.getArgumentOperands()) {
+    if (argOp.get() == V &&
+        AS.getArgumentConvention(argOp) ==
+          swift::SILArgumentConvention::Indirect_In_Guaranteed) {
+      return MemBehavior::MayRead;
     }
   }
 
-  if (Behavior > MemBehavior::None) {
-    if (Behavior > MemBehavior::MayRead && isLetValue())
-      Behavior = MemBehavior::MayRead;
+  SILValue object = getUnderlyingObject(V);
+  int numUsesChecked = 0;
+  
+  // For exclusive/local addresses we can do a quick and good check with alias
+  // analysis. For everything else we use escape analysis (see below).
+  // TODO: The check for not-escaping can probably done easier with the upcoming
+  // API of AccessStorage.
+  bool nonEscapingAddress =
+    (isa<AllocStackInst>(object) || isExclusiveArgument(object)) &&
+    !hasEscapingUses(object, numUsesChecked);
+
+  FunctionSideEffects applyEffects;
+  SEA->getCalleeEffects(applyEffects, AS);
+
+  MemBehavior behavior = MemBehavior::None;
+  MemBehavior globalBehavior = applyEffects.getGlobalEffects().getMemBehavior(
+                           RetainObserveKind::IgnoreRetains);
+
+  // If it's a non-escaping address, we don't care about the "global" effects
+  // of the called function.
+  if (!nonEscapingAddress)
+    behavior = globalBehavior;
+  
+  // Check all parameter effects.
+  for (unsigned argIdx = 0, end = AS.getNumArguments();
+       argIdx < end && behavior < MemBehavior::MayHaveSideEffects;
+       ++argIdx) {
+    SILValue arg = AS.getArgument(argIdx);
+    
+    // In case the argument is not an address, alias analysis will always report
+    // a no-alias. Therefore we have to treat non-address arguments
+    // conservatively here. For example V could be a ref_element_addr of a
+    // reference argument. In this case V clearly "aliases" the argument, but
+    // this is not reported by alias analysis.
+    if ((!nonEscapingAddress && !arg->getType().isAddress()) ||
+         mayAlias(arg)) {
+      MemBehavior argBehavior = applyEffects.getArgumentBehavior(AS, argIdx);
+      behavior = combineMemoryBehavior(behavior, argBehavior);
+    }
+  }
+
+  if (behavior > MemBehavior::None) {
+    if (behavior > MemBehavior::MayRead && isLetValue())
+      behavior = MemBehavior::MayRead;
 
     // Ask escape analysis.
-    if (!EA->canEscapeTo(V, AI))
-      Behavior = MemBehavior::None;
+    if (!EA->canEscapeTo(V, AS))
+      behavior = MemBehavior::None;
   }
-  LLVM_DEBUG(llvm::dbgs() << "  Found apply, returning " << Behavior << '\n');
-  return Behavior;
+  LLVM_DEBUG(llvm::dbgs() << "  Found apply, returning " << behavior << '\n');
+
+  return behavior;
 }
 
 MemBehavior
@@ -391,7 +492,22 @@ MemBehavior MemoryBehaviorVisitor::visitReleaseValueInst(ReleaseValueInst *SI) {
   return MemBehavior::MayHaveSideEffects;
 }
 
+MemBehavior
+MemoryBehaviorVisitor::visitDestroyValueInst(DestroyValueInst *DVI) {
+  if (!EA->canEscapeTo(V, DVI))
+    return MemBehavior::None;
+  return MemBehavior::MayHaveSideEffects;
+}
+
 MemBehavior MemoryBehaviorVisitor::visitSetDeallocatingInst(SetDeallocatingInst *SDI) {
+  return MemBehavior::None;
+}
+
+MemBehavior MemoryBehaviorVisitor::
+visitBeginCOWMutationInst(BeginCOWMutationInst *BCMI) {
+  // begin_cow_mutation is defined to have side effects, because it has
+  // dependencies with instructions which retain the buffer operand.
+  // But it never interferes with any memory address.
   return MemBehavior::None;
 }
 
@@ -400,9 +516,8 @@ MemBehavior MemoryBehaviorVisitor::visitSetDeallocatingInst(SetDeallocatingInst 
 //===----------------------------------------------------------------------===//
 
 MemBehavior
-AliasAnalysis::computeMemoryBehavior(SILInstruction *Inst, SILValue V,
-                                     RetainObserveKind InspectionMode) {
-  MemBehaviorKeyTy Key = toMemoryBehaviorKey(Inst, V, InspectionMode);
+AliasAnalysis::computeMemoryBehavior(SILInstruction *Inst, SILValue V) {
+  MemBehaviorKeyTy Key = toMemoryBehaviorKey(Inst, V);
   // Check if we've already computed this result.
   auto It = MemoryBehaviorCache.find(Key);
   if (It != MemoryBehaviorCache.end()) {
@@ -412,37 +527,29 @@ AliasAnalysis::computeMemoryBehavior(SILInstruction *Inst, SILValue V,
   // Flush the cache if the size of the cache is too large.
   if (MemoryBehaviorCache.size() > MemoryBehaviorAnalysisMaxCacheSize) {
     MemoryBehaviorCache.clear();
-    MemoryBehaviorNodeToIndex.clear();
-
-    // Key is no longer valid as we cleared the MemoryBehaviorNodeToIndex.
-    Key = toMemoryBehaviorKey(Inst, V, InspectionMode);
   }
 
   // Calculate the aliasing result and store it in the cache.
-  auto Result = computeMemoryBehaviorInner(Inst, V, InspectionMode);
+  auto Result = computeMemoryBehaviorInner(Inst, V);
   MemoryBehaviorCache[Key] = Result;
   return Result;
 }
 
 MemBehavior
-AliasAnalysis::computeMemoryBehaviorInner(SILInstruction *Inst, SILValue V,
-                                          RetainObserveKind InspectionMode) {
+AliasAnalysis::computeMemoryBehaviorInner(SILInstruction *Inst, SILValue V) {
   LLVM_DEBUG(llvm::dbgs() << "GET MEMORY BEHAVIOR FOR:\n    " << *Inst << "    "
                           << *V);
   assert(SEA && "SideEffectsAnalysis must be initialized!");
-  return MemoryBehaviorVisitor(this, SEA, EA, V, InspectionMode).visit(Inst);
+  return MemoryBehaviorVisitor(this, SEA, EA, V).visit(Inst);
 }
 
 MemBehaviorKeyTy AliasAnalysis::toMemoryBehaviorKey(SILInstruction *V1,
-                                                    SILValue V2,
-                                                    RetainObserveKind M) {
-  size_t idx1 =
-    MemoryBehaviorNodeToIndex.getIndex(V1->getRepresentativeSILNodeInObject());
+                                                    SILValue V2) {
+  size_t idx1 = InstructionToIndex.getIndex(V1);
   assert(idx1 != std::numeric_limits<size_t>::max() &&
          "~0 index reserved for empty/tombstone keys");
-  size_t idx2 = MemoryBehaviorNodeToIndex.getIndex(
-      V2->getRepresentativeSILNodeInObject());
+  size_t idx2 = ValueToIndex.getIndex(V2);
   assert(idx2 != std::numeric_limits<size_t>::max() &&
          "~0 index reserved for empty/tombstone keys");
-  return {idx1, idx2, M};
+  return {idx1, idx2};
 }

@@ -82,20 +82,20 @@ public:
   /// Find ValueDecls in the module and pass them to the given consumer object.
   ///
   /// This does a simple local lookup, not recursively looking through imports.
-  virtual void lookupVisibleDecls(ModuleDecl::AccessPathTy accessPath,
+  virtual void lookupVisibleDecls(ImportPath::Access accessPath,
                                   VisibleDeclConsumer &consumer,
                                   NLKind lookupKind) const {}
 
   /// Finds all class members defined in this file.
   ///
   /// This does a simple local lookup, not recursively looking through imports.
-  virtual void lookupClassMembers(ModuleDecl::AccessPathTy accessPath,
+  virtual void lookupClassMembers(ImportPath::Access accessPath,
                                   VisibleDeclConsumer &consumer) const {}
 
   /// Finds class members defined in this file with the given name.
   ///
   /// This does a simple local lookup, not recursively looking through imports.
-  virtual void lookupClassMember(ModuleDecl::AccessPathTy accessPath,
+  virtual void lookupClassMember(ImportPath::Access accessPath,
                                  DeclName name,
                                  SmallVectorImpl<ValueDecl*> &results) const {}
 
@@ -107,8 +107,11 @@ public:
   /// Find all SPI names imported from \p importedModule by this module,
   /// collecting the identifiers in \p spiGroups.
   virtual void lookupImportedSPIGroups(
-                               const ModuleDecl *importedModule,
-                               SmallVectorImpl<Identifier> &spiGroups) const {};
+                            const ModuleDecl *importedModule,
+                            SmallSetVector<Identifier, 4> &spiGroups) const {};
+
+  virtual Optional<Fingerprint>
+  loadFingerprint(const IterableDeclContext *IDC) const { return None; }
 
 protected:
   /// Look up an operator declaration. Do not call directly, use
@@ -180,6 +183,9 @@ public:
   /// The order of the results is not guaranteed to be meaningful.
   virtual void getTopLevelDecls(SmallVectorImpl<Decl*> &results) const {}
 
+  virtual void
+  getExportedPrespecializations(SmallVectorImpl<Decl *> &results) const {}
+
   /// Finds top-level decls in this file filtered by their attributes.
   ///
   /// This does a simple local lookup, not recursively looking through imports.
@@ -235,13 +241,13 @@ public:
   /// \p filter controls whether public, private, or any imports are included
   /// in this list.
   virtual void
-  getImportedModules(SmallVectorImpl<ModuleDecl::ImportedModule> &imports,
+  getImportedModules(SmallVectorImpl<ImportedModule> &imports,
                      ModuleDecl::ImportFilter filter) const {}
 
   /// \see ModuleDecl::getImportedModulesForLookup
   virtual void getImportedModulesForLookup(
-      SmallVectorImpl<ModuleDecl::ImportedModule> &imports) const {
-    return getImportedModules(imports, ModuleDecl::ImportFilterKind::Public);
+      SmallVectorImpl<ImportedModule> &imports) const {
+    return getImportedModules(imports, ModuleDecl::ImportFilterKind::Exported);
   }
 
   /// Generates the list of libraries needed to link this file, based on its
@@ -384,6 +390,9 @@ public:
 
   virtual bool isSystemModule() const { return false; }
 
+  /// Checks whether an error was encountered while loading the file.
+  virtual bool hadLoadError() const { return false; }
+
   /// Retrieve the set of generic signatures stored within this module.
   ///
   /// \returns \c true if this module file supports retrieving all of the
@@ -392,6 +401,9 @@ public:
                  SmallVectorImpl<GenericSignature> &genericSignatures) {
     return false;
   }
+
+  virtual void collectBasicSourceFileInfo(
+      llvm::function_ref<void(const BasicSourceFileInfo &)> callback) const {}
 
   static bool classof(const FileUnit *file) {
     return file->getKind() == FileUnitKind::SerializedAST ||

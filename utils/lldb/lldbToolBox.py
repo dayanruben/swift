@@ -6,6 +6,7 @@ Load into LLDB with 'command script import /path/to/lldbToolBox.py'
 This will also import LLVM data formatters as well, assuming that llvm is next
 to the swift checkout.
 """
+from __future__ import print_function
 
 import argparse
 import os
@@ -72,12 +73,26 @@ def disassemble_to_file(debugger, command, exec_ctx, result, internal_dict):
     by the user.
     """
     parser = argparse.ArgumentParser(prog='disassemble-to-file', description="""
-    Dump the disassembly of the current frame to the specified file.
+    Dump the disassembly of the current frame or specified function to the
+    specified file.
     """)
     parser.add_argument('file', type=argparse.FileType('w'),
                         default=sys.stdout)
+    parser.add_argument('-n', dest='func_name', help="""
+    Function name to disassembly. Frame used if unset.""")
     args = parser.parse_args(shlex.split(command))
-    args.file.write(exec_ctx.frame.disassembly)
+    if args.func_name is None:
+        args.file.write(exec_ctx.frame.disassembly)
+    else:
+        name = args.func_name
+        result = exec_ctx.target.FindFunctions(name)
+        if result is None:
+            raise RuntimeError('No function with name: {}'.format(name))
+        if len(result) > 1:
+            errorStr = 'Matched multiple functions to name: {}'
+            raise RuntimeError(errorStr.format(name))
+        f = result[0].GetFunction()
+        args.file.write(str(f.GetInstructions(exec_ctx.target)) + "\n")
 
 
 def sequence(debugger, command, exec_ctx, result, internal_dict):
@@ -108,7 +123,7 @@ def sequence(debugger, command, exec_ctx, result, internal_dict):
         ret = lldb.SBCommandReturnObject()
         interpreter.HandleCommand(subcommand, exec_ctx, ret)
         if ret.GetOutput():
-            print >>result, ret.GetOutput().strip()
+            print(ret.GetOutput().strip(), file=result)
 
         if not ret.Succeeded():
             result.SetError(ret.GetError())

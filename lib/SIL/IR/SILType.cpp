@@ -92,9 +92,10 @@ bool SILType::isReferenceCounted(SILModule &M) const {
     .isReferenceCounted();
 }
 
-bool SILType::isNoReturnFunction(SILModule &M) const {
+bool SILType::isNoReturnFunction(SILModule &M,
+                                 TypeExpansionContext context) const {
   if (auto funcTy = dyn_cast<SILFunctionType>(getASTType()))
-    return funcTy->isNoReturnFunction(M);
+    return funcTy->isNoReturnFunction(M, context);
 
   return false;
 }
@@ -128,6 +129,9 @@ bool SILType::isPointerSizeAndAligned() {
 //
 // TODO: handle casting to a loadable existential by generating
 // init_existential_ref. Until then, only promote to a heap object dest.
+//
+// This cannot allow trivial-to-reference casts, as required by
+// isRCIdentityPreservingCast.
 bool SILType::canRefCast(SILType operTy, SILType resultTy, SILModule &M) {
   auto fromTy = operTy.unwrapOptionalType();
   auto toTy = resultTy.unwrapOptionalType();
@@ -189,6 +193,12 @@ SILType SILType::getEnumElementType(EnumElementDecl *elt, TypeConverter &TC,
 SILType SILType::getEnumElementType(EnumElementDecl *elt, SILModule &M,
                                     TypeExpansionContext context) const {
   return getEnumElementType(elt, M.Types, context);
+}
+
+SILType SILType::getEnumElementType(EnumElementDecl *elt,
+                                    SILFunction *fn) const {
+  return getEnumElementType(elt, fn->getModule(),
+                            fn->getTypeExpansionContext());
 }
 
 bool SILType::isLoadableOrOpaque(const SILFunction &F) const {
@@ -425,20 +435,20 @@ SILResultInfo::getOwnershipKind(SILFunction &F,
                                 CanSILFunctionType FTy) const {
   auto &M = F.getModule();
 
-  bool IsTrivial = getSILStorageType(M, FTy).isTrivial(F);
+  bool IsTrivial =
+      getSILStorageType(M, FTy, TypeExpansionContext::minimal()).isTrivial(F);
   switch (getConvention()) {
   case ResultConvention::Indirect:
-    return SILModuleConventions(M).isSILIndirect(*this)
-               ? ValueOwnershipKind::None
-               : ValueOwnershipKind::Owned;
+    return SILModuleConventions(M).isSILIndirect(*this) ? OwnershipKind::None
+                                                        : OwnershipKind::Owned;
   case ResultConvention::Autoreleased:
   case ResultConvention::Owned:
-    return ValueOwnershipKind::Owned;
+    return OwnershipKind::Owned;
   case ResultConvention::Unowned:
   case ResultConvention::UnownedInnerPointer:
     if (IsTrivial)
-      return ValueOwnershipKind::None;
-    return ValueOwnershipKind::Unowned;
+      return OwnershipKind::None;
+    return OwnershipKind::Unowned;
   }
 
   llvm_unreachable("Unhandled ResultConvention in switch.");
@@ -469,10 +479,10 @@ bool SILModuleConventions::isPassedIndirectlyInSIL(SILType type, SILModule &M) {
   return false;
 }
 
-
-bool SILFunctionType::isNoReturnFunction(SILModule &M) const {
+bool SILFunctionType::isNoReturnFunction(SILModule &M,
+                                         TypeExpansionContext context) const {
   for (unsigned i = 0, e = getNumResults(); i < e; ++i) {
-    if (getResults()[i].getReturnValueType(M, this)->isUninhabited())
+    if (getResults()[i].getReturnValueType(M, this, context)->isUninhabited())
       return true;
   }
 
@@ -627,8 +637,8 @@ bool SILType::isDifferentiable(SILModule &M) const {
 
 Type
 TypeBase::replaceSubstitutedSILFunctionTypesWithUnsubstituted(SILModule &M) const {
-  return Type(const_cast<TypeBase*>(this)).transform([&](Type t) -> Type {
-    if (auto f = t->getAs<SILFunctionType>()) {
+  return Type(const_cast<TypeBase *>(this)).transform([&](Type t) -> Type {
+    if (auto *f = t->getAs<SILFunctionType>()) {
       auto sft = f->getUnsubstitutedType(M);
       
       // Also eliminate substituted function types in the arguments, yields,
@@ -681,4 +691,19 @@ TypeBase::replaceSubstitutedSILFunctionTypesWithUnsubstituted(SILModule &M) cons
     }
     return t;
   });
+}
+
+bool SILType::isEffectivelyExhaustiveEnumType(SILFunction *f) {
+  EnumDecl *decl = getEnumOrBoundGenericEnum();
+  assert(decl && "Called for a non enum type");
+  return decl->isEffectivelyExhaustive(f->getModule().getSwiftModule(),
+                                       f->getResilienceExpansion());
+}
+
+SILType SILType::getSILBoxFieldType(const SILFunction *f, unsigned field) {
+  auto *boxTy = getASTType()->getAs<SILBoxType>();
+  if (!boxTy)
+    return SILType();
+  return ::getSILBoxFieldType(f->getTypeExpansionContext(), boxTy,
+                              f->getModule().Types, field);
 }

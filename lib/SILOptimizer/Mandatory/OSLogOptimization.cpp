@@ -91,6 +91,7 @@
 #include "swift/SIL/SILLocation.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeLowering.h"
+#include "swift/SIL/BasicBlockBits.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
@@ -322,8 +323,9 @@ static bool isFoldableArray(SILValue value, ASTContext &astContext) {
     return true;
   SILFunction *callee = cast<ApplyInst>(constructorInst)->getCalleeFunction();
   return !callee ||
-         (!callee->hasSemanticsAttr("array.init.empty") &&
-          !callee->hasSemanticsAttr("array.uninitialized_intrinsic"));
+         (!callee->hasSemanticsAttr(semantics::ARRAY_INIT_EMPTY) &&
+          !callee->hasSemanticsAttr(semantics::ARRAY_UNINITIALIZED_INTRINSIC) &&
+          !callee->hasSemanticsAttr(semantics::ARRAY_FINALIZE_INTRINSIC));
 }
 
 /// Return true iff the given value is a closure but is not a creation of a
@@ -539,6 +541,18 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
       module.findFunction(allocatorMangledName, SILLinkage::PublicExternal);
   assert(arrayAllocateFun);
 
+  SILFunction *arrayFinalizeFun = nullptr;
+  if (numElements != 0) {
+    if (FuncDecl *arrayFinalizeDecl = astContext.getFinalizeUninitializedArray()) {
+      std::string finalizeMangledName =
+          SILDeclRef(arrayFinalizeDecl, SILDeclRef::Kind::Func).mangle();
+      arrayFinalizeFun =
+          module.findFunction(finalizeMangledName, SILLinkage::SharedExternal);
+      assert(arrayFinalizeFun);
+      module.linkFunction(arrayFinalizeFun);
+    }
+  }
+
   // Call the _allocateUninitializedArray function with numElementsSIL. The
   // call returns a two-element tuple, where the first element is the newly
   // created array and the second element is a pointer to the internal storage
@@ -548,7 +562,7 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
   FunctionRefInst *arrayAllocateRef =
       builder.createFunctionRef(loc, arrayAllocateFun);
   ApplyInst *applyInst = builder.createApply(
-      loc, arrayAllocateRef, subMap, ArrayRef<SILValue>(numElementsSIL), false);
+      loc, arrayAllocateRef, subMap, ArrayRef<SILValue>(numElementsSIL));
 
   // Extract the elements of the tuple returned by the call to the allocator.
   DestructureTupleInst *destructureInst =
@@ -594,7 +608,13 @@ static SILValue emitCodeForConstantArray(ArrayRef<SILValue> elements,
     // element.
     elementTypeLowering.emitStore(builder, loc, elementSIL, currentStorageAddr,
                                   StoreOwnershipQualifier::Init);
-    elementIndex++;
+    ++elementIndex;
+  }
+  if (arrayFinalizeFun) {
+    FunctionRefInst *arrayFinalizeRef =
+        builder.createFunctionRef(loc, arrayFinalizeFun);
+    arraySIL = builder.createApply(loc, arrayFinalizeRef, subMap,
+                                   ArrayRef<SILValue>(arraySIL));
   }
   return arraySIL;
 }
@@ -678,7 +698,7 @@ static SILValue emitCodeForSymbolicValue(SymbolicValue symVal,
     FunctionRefInst *stringInitRef =
         builder.createFunctionRef(loc, stringInfo.getStringInitIntrinsic());
     ApplyInst *applyInst = builder.createApply(
-        loc, stringInitRef, SubstitutionMap(), ArrayRef<SILValue>(args), false);
+        loc, stringInitRef, SubstitutionMap(), ArrayRef<SILValue>(args));
     return applyInst;
   }
   case SymbolicValue::Integer: { // Builtin integer types.
@@ -863,8 +883,7 @@ getEndPointsOfDataDependentChain(SILValue value, SILFunction *fun,
   SILInstruction *valueDefinition = value->getDefiningInstruction();
   SILInstruction *def =
       valueDefinition ? valueDefinition : &(value->getParentBlock()->front());
-  ValueLifetimeAnalysis lifetimeAnalysis =
-      ValueLifetimeAnalysis(def, transitiveUsers);
+  ValueLifetimeAnalysis lifetimeAnalysis(def, transitiveUsers);
   ValueLifetimeAnalysis::Frontier frontier;
   bool hasCriticlEdges = lifetimeAnalysis.computeFrontier(
       frontier, ValueLifetimeAnalysis::DontModifyCFG);
@@ -888,7 +907,7 @@ getEndPointsOfDataDependentChain(SILValue value, SILFunction *fun,
 /// from a guaranteed basic block parameter representing a phi node.
 static Optional<BorrowedValue>
 getUniqueBorrowScopeIntroducingValue(SILValue value) {
-  assert(value.getOwnershipKind() == ValueOwnershipKind::Guaranteed &&
+  assert(value.getOwnershipKind() == OwnershipKind::Guaranteed &&
          "parameter must be a guarenteed value");
   return getSingleBorrowIntroducingValue(value);
 }
@@ -920,10 +939,10 @@ static void replaceAllUsesAndFixLifetimes(SILValue foldedVal,
   }
   assert(!foldedVal->getType().isTrivial(*fun));
   assert(fun->hasOwnership());
-  assert(foldedVal.getOwnershipKind() == ValueOwnershipKind::Owned &&
+  assert(foldedVal.getOwnershipKind() == OwnershipKind::Owned &&
          "constant value must have owned ownership kind");
 
-  if (originalVal.getOwnershipKind() == ValueOwnershipKind::Owned) {
+  if (originalVal.getOwnershipKind() == OwnershipKind::Owned) {
     originalVal->replaceAllUsesWith(foldedVal);
     // Destroy originalVal, which is now unused, immediately after its
     // definition. Note that originalVal's destorys are now transferred to
@@ -941,7 +960,7 @@ static void replaceAllUsesAndFixLifetimes(SILValue foldedVal,
   // Therefore, create a borrow of foldedVal at the beginning of the scope and
   // use the borrow in place of the originalVal. Also, end the borrow and
   // destroy foldedVal at the end of the borrow scope.
-  assert(originalVal.getOwnershipKind() == ValueOwnershipKind::Guaranteed);
+  assert(originalVal.getOwnershipKind() == OwnershipKind::Guaranteed);
 
   Optional<BorrowedValue> originalScopeBegin =
       getUniqueBorrowScopeIntroducingValue(originalVal);
@@ -979,6 +998,14 @@ static void substituteConstants(FoldState &foldState) {
   for (SILValue constantSILValue : foldState.getConstantSILValues()) {
     SymbolicValue constantSymbolicVal =
         evaluator.lookupConstValue(constantSILValue).getValue();
+    // Make sure that the symbolic value tracked in the foldState is a constant.
+    // In the case of ArraySymbolicValue, the array storage could be a non-constant
+    // if some instruction in the array initialization sequence was not evaluated
+    // and skipped.
+    if (!constantSymbolicVal.containsOnlyConstants()) {
+      assert(constantSymbolicVal.getKind() != SymbolicValue::String && "encountered non-constant string symbolic value");
+      continue;
+    }
 
     SILInstruction *definingInst = constantSILValue->getDefiningInstruction();
     assert(definingInst);
@@ -993,7 +1020,7 @@ static void substituteConstants(FoldState &foldState) {
     // other hand, if we are folding an owned value, we can insert the constant
     // value at the point where the owned value is defined.
     SILInstruction *insertionPoint = definingInst;
-    if (constantSILValue.getOwnershipKind() == ValueOwnershipKind::Guaranteed) {
+    if (constantSILValue.getOwnershipKind() == OwnershipKind::Guaranteed) {
       Optional<BorrowedValue> borrowIntroducer =
           getUniqueBorrowScopeIntroducingValue(constantSILValue);
       if (!borrowIntroducer) {
@@ -1385,19 +1412,23 @@ static SILInstruction *beginOfInterpolation(ApplyInst *oslogInit) {
   // formatting and privacy options are literals, all candidate instructions
   // must be in the same basic block. But, this code doesn't rely on that
   // assumption.
-  SmallPtrSet<SILBasicBlock *, 4> candidateBBs;
+  BasicBlockSet candidateBBs(oslogInit->getFunction());
+  SILBasicBlock *candidateBB = nullptr;
+  unsigned numCandidateBBsFound = 0;
   for (auto *candidate: candidateStartInstructions) {
-    SILBasicBlock *candidateBB = candidate->getParent();
-    candidateBBs.insert(candidateBB);
+    candidateBB = candidate->getParent();
+    if (candidateBBs.insert(candidateBB))
+      ++numCandidateBBsFound;
   }
 
   SILBasicBlock *firstBB = nullptr;
-  if (candidateBBs.size() == 1) {
-    firstBB = *candidateBBs.begin();
+  if (numCandidateBBsFound == 1) {
+    assert(candidateBB);
+    firstBB = candidateBB;
   } else {
     SILBasicBlock *entryBB = oslogInit->getFunction()->getEntryBlock();
     for (SILBasicBlock *bb : llvm::breadth_first<SILBasicBlock *>(entryBB)) {
-      if (candidateBBs.count(bb)) {
+      if (candidateBBs.contains(bb)) {
         firstBB = bb;
         break;
       }

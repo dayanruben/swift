@@ -93,7 +93,7 @@ extension String {
 ///   substrings may, therefore, prolong the lifetime of string data that is
 ///   no longer otherwise accessible, which can appear to be memory leakage.
 @frozen
-public struct Substring {
+public struct Substring: ConcurrentValue {
   @usableFromInline
   internal var _slice: Slice<String>
 
@@ -105,7 +105,7 @@ public struct Substring {
 
     self._slice = Slice(
       base: slice.base,
-      bounds: Range(uncheckedBounds: (start, end)))
+      bounds: Range(_uncheckedBounds: (start, end)))
     _invariantCheck()
   }
 
@@ -132,7 +132,7 @@ extension Substring {
   @inlinable @inline(__always)
   internal var _offsetRange: Range<Int> {
     return Range(
-      uncheckedBounds: (startIndex._encodedOffset, endIndex._encodedOffset))
+      _uncheckedBounds: (startIndex._encodedOffset, endIndex._encodedOffset))
   }
 
   #if !INTERNAL_CHECKS_ENABLED
@@ -200,9 +200,8 @@ extension Substring: StringProtocol {
     return _slice.distance(from: start, to: end)
   }
 
-  @inlinable
   public subscript(i: Index) -> Character {
-    @inline(__always) get { return _slice[i] }
+    get { return _slice[i] }
   }
 
   public mutating func replaceSubrange<C>(
@@ -322,15 +321,15 @@ extension Substring: CustomDebugStringConvertible {
 }
 
 extension Substring: LosslessStringConvertible {
-  @inlinable
   public init(_ content: String) {
-    self = content[...]
+    let range = Range(_uncheckedBounds: (content.startIndex, content.endIndex))
+    self.init(Slice(base: content, bounds: range))
   }
 }
 
 extension Substring {
   @frozen
-  public struct UTF8View {
+  public struct UTF8View: ConcurrentValue {
     @usableFromInline
     internal var _slice: Slice<String.UTF8View>
   }
@@ -467,7 +466,7 @@ extension String {
 }
 extension Substring {
   @frozen
-  public struct UTF16View {
+  public struct UTF16View: ConcurrentValue {
     @usableFromInline
     internal var _slice: Slice<String.UTF16View>
   }
@@ -593,7 +592,7 @@ extension String {
 }
 extension Substring {
   @frozen
-  public struct UnicodeScalarView {
+  public struct UnicodeScalarView: ConcurrentValue {
     @usableFromInline
     internal var _slice: Slice<String.UnicodeScalarView>
   }
@@ -729,14 +728,14 @@ extension Substring: RangeReplaceableCollection {
   public init<S: Sequence>(_ elements: S)
   where S.Element == Character {
     if let str = elements as? String {
-      self = str[...]
+      self.init(str)
       return
     }
     if let subStr = elements as? Substring {
       self = subStr
       return
     }
-    self = String(elements)[...]
+    self.init(String(elements))
   }
 
   @inlinable // specialize
@@ -800,7 +799,6 @@ extension Substring: ExpressibleByStringLiteral {
 
 // String/Substring Slicing
 extension String {
-  @inlinable
   @available(swift, introduced: 4)
   public subscript(r: Range<Index>) -> Substring {
     _boundsCheck(r)
@@ -809,7 +807,6 @@ extension String {
 }
 
 extension Substring {
-  @inlinable
   @available(swift, introduced: 4)
   public subscript(r: Range<Index>) -> Substring {
     return Substring(_slice[r])

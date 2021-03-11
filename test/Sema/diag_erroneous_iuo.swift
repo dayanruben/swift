@@ -70,11 +70,11 @@ func genericFunctionSigilArray<T>(
 }
 
 protocol P {
-  associatedtype T // expected-note {{protocol requires nested type 'T'; do you want to add it?}}
-  associatedtype U // expected-note {{protocol requires nested type 'U'; do you want to add it?}}
+  associatedtype T
+  associatedtype U
 }
 
-struct S : P { // expected-error {{type 'S' does not conform to protocol 'P'}}
+struct S : P {
   typealias T = ImplicitlyUnwrappedOptional<Int> // expected-error {{'ImplicitlyUnwrappedOptional' has been renamed to 'Optional'}}{{17-44=Optional}}
   typealias U = Optional<ImplicitlyUnwrappedOptional<Int>> // expected-error {{'ImplicitlyUnwrappedOptional' has been renamed to 'Optional'}}{{26-53=Optional}}
 
@@ -116,7 +116,7 @@ _ = [Int!]() // expected-error {{'!' is not allowed here; perhaps '?' was intend
 let _: [Int!] = [1] // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{12-13=?}}
 _ = Optional<Int!>(nil) // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{17-18=?}}
 let _: Optional<Int!> = nil // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{20-21=?}}
-_ = Int!?(0) // expected-error 3 {{'!' is not allowed here; perhaps '?' was intended?}}{{8-9=?}}
+_ = Int!?(0) // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{8-9=?}}
 let _: Int!? = 0 // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{11-12=?}}
 _ = (
   Int!, // expected-error {{'!' is not allowed here; perhaps '?' was intended?}}{{6-7=?}}
@@ -201,7 +201,7 @@ let y1: Int = (x as Int!)! // expected-error {{using '!' is not allowed here; pe
 let z0: Int = x as! Int! // expected-error {{using '!' is not allowed here; perhaps '?' was intended?}}{{24-25=?}}
 // expected-warning@-1 {{forced cast from 'Int?' to 'Int' only unwraps optionals; did you mean to use '!'?}}
 let z1: Int = (x as! Int!)! // expected-error {{using '!' is not allowed here; perhaps '?' was intended?}}{{25-26=?}}
-// expected-warning@-1 {{forced cast of 'Int?' to same type has no effect}}
+// expected-warning@-1 {{forced cast from 'Int?' to 'Int' only unwraps optionals; did you mean to use '!'?}}
 let w0: Int = (x as? Int!)! // expected-warning {{conditional cast from 'Int?' to 'Int?' always succeeds}}
 // expected-error@-1 {{using '!' is not allowed here; perhaps '?' was intended?}}{{25-26=?}}
 let w1: Int = (x as? Int!)!! // expected-warning {{conditional cast from 'Int?' to 'Int?' always succeeds}}
@@ -211,6 +211,7 @@ func overloadedByOptionality(_ a: inout Int!) {}
 // expected-note@-1 {{'overloadedByOptionality' previously declared here}}
 func overloadedByOptionality(_ a: inout Int?) {}
 // expected-error@-1 {{invalid redeclaration of 'overloadedByOptionality'}}
+// expected-note@-2 {{optional parameter is of same type as implicitly unwrapped optional parameter}}
 
 struct T {
   let i: Int!

@@ -60,8 +60,10 @@ enum class NodeKind {
 /// Used for printing out NodeKinds to dot files, and dumping nodes for
 /// debugging.
 const std::string NodeKindNames[]{
-    "topLevel",      "nominal",        "potentialMember",  "member",
-    "dynamicLookup", "externalDepend", "sourceFileProvide"};
+    "topLevel",          "nominal",
+    "potentialMember",   "member",
+    "dynamicLookup",     "externalDepend",
+    "sourceFileProvide"};
 } // end namespace fine_grained_dependencies
 } // end namespace swift
 

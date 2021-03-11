@@ -144,8 +144,9 @@ auto SILGenFunction::emitSourceLocationArgs(SourceLoc sourceLoc,
   unsigned line = 0;
   unsigned column = 0;
   if (sourceLoc.isValid()) {
-    filename = getMagicFileString(sourceLoc);
-    std::tie(line, column) = ctx.SourceMgr.getLineAndColumn(sourceLoc);
+    filename = getMagicFileIDString(sourceLoc);
+    std::tie(line, column) =
+        ctx.SourceMgr.getPresumedLineAndColumnForLoc(sourceLoc);
   }
   
   bool isASCII = true;
@@ -719,7 +720,7 @@ ManagedValue SILGenFunction::emitExistentialErasure(
       SILValue branchArg;
       {
         // Don't allow cleanups to escape the conditional block.
-        FullExpr presentScope(Cleanups, CleanupLocation::get(loc));
+        FullExpr presentScope(Cleanups, CleanupLocation(loc));
         enterDestroyCleanup(concreteValue.getValue());
 
         // Receive the error value.  It's typed as an 'AnyObject' for
@@ -739,7 +740,7 @@ ManagedValue SILGenFunction::emitExistentialErasure(
       // path again.
       B.emitBlock(isNotPresentBB);
       {
-        FullExpr presentScope(Cleanups, CleanupLocation::get(loc));
+        FullExpr presentScope(Cleanups, CleanupLocation(loc));
         concreteValue = emitManagedRValueWithCleanup(concreteValue.getValue());
         branchArg = emitExistentialErasure(loc, concreteFormalType, concreteTL,
                                            existentialTL, conformances,
@@ -756,7 +757,7 @@ ManagedValue SILGenFunction::emitExistentialErasure(
       B.emitBlock(contBB);
 
       SILValue existentialResult = contBB->createPhiArgument(
-          existentialTL.getLoweredType(), ValueOwnershipKind::Owned);
+          existentialTL.getLoweredType(), OwnershipKind::Owned);
       return emitManagedRValueWithCleanup(existentialResult, existentialTL);
     }
   }
@@ -1353,7 +1354,25 @@ Lowering::canPeepholeConversions(SILGenFunction &SGF,
   switch (outerConversion.getKind()) {
   case Conversion::OrigToSubst:
   case Conversion::SubstToOrig:
-    // TODO: peephole these when the abstraction patterns are the same!
+    switch (innerConversion.getKind()) {
+    case Conversion::OrigToSubst:
+    case Conversion::SubstToOrig:
+      if (innerConversion.getKind() == outerConversion.getKind())
+        break;
+
+      if (innerConversion.getReabstractionOrigType().getCachingKey() !=
+          outerConversion.getReabstractionOrigType().getCachingKey() ||
+          innerConversion.getReabstractionSubstType() !=
+          outerConversion.getReabstractionSubstType()) {
+        break;
+      }
+
+      return ConversionPeepholeHint(ConversionPeepholeHint::Identity, false);
+
+    default:
+      break;
+    }
+
     return None;
 
   case Conversion::AnyErasure:

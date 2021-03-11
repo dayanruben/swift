@@ -1,4 +1,5 @@
 import Submodule
+@_implementationOnly import PrivateSubmodule
 
 private enum PE<T> {
   case A
@@ -130,6 +131,7 @@ extension Int : PrivateProtocol {
 }
 
 @inline(never)
+@_semantics("optimize.no.crossmodule")
 private func printFooExistential(_ p: PrivateProtocol) {
   print(p.foo())
 }
@@ -266,3 +268,11 @@ public func callUnrelated<T>(_ t: T) -> T {
   return t
 }
 
+public func callImplementationOnly<T>(_ t: T) -> T {
+  let p = PrivateStr(i: 27)
+  print(p.test())
+  return t
+}
+
+
+public let globalLet = 529387

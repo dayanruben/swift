@@ -73,7 +73,7 @@ public:
   SymbolicValueBumpAllocator() {}
   ~SymbolicValueBumpAllocator() {}
 
-  void *allocate(unsigned long byteSize, unsigned alignment) {
+  void *allocate(unsigned long byteSize, unsigned alignment) override {
     return bumpAllocator.Allocate(byteSize, alignment);
   }
 };
@@ -603,6 +603,11 @@ public:
   /// Clone this SymbolicValue into the specified Allocator and return the new
   /// version. This only works for valid constants.
   SymbolicValue cloneInto(SymbolicValueAllocator &allocator) const;
+
+  /// Check that all nested SymbolicValues are constant. Symbolic values such as arrays,
+  /// aggregates and pointers can contain non-constant symbolic values, when instructions
+  /// are skipped during evaluation.
+  bool containsOnlyConstants() const;
 
   void print(llvm::raw_ostream &os, unsigned indent = 0) const;
   void dump() const;

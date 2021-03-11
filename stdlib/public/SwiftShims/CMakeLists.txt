@@ -7,8 +7,10 @@ set(sources
   KeyPath.h
   LibcOverlayShims.h
   LibcShims.h
+  MetadataSections.h
   Random.h
   RefCount.h
+  Reflection.h
   RuntimeShims.h
   RuntimeStubs.h
   SwiftStdbool.h
@@ -19,6 +21,7 @@ set(sources
   ThreadLocalStorage.h
   UnicodeShims.h
   Visibility.h
+  _SwiftConcurrency.h
 
   CoreMediaOverlayShims.h
   DispatchOverlayShims.h
@@ -26,6 +29,7 @@ set(sources
   OSOverlayShims.h
   ObjectiveCOverlayShims.h
   SafariServicesOverlayShims.h
+  AppKitOverlayShims.h
   UIKitOverlayShims.h
   XCTestOverlayShims.h
   XPCOverlayShims.h
@@ -55,10 +59,18 @@ set(sources
   module.modulemap
   )
 set(output_dir "${SWIFTLIB_DIR}/shims")
+set(output_dir_static "${SWIFTSTATICLIB_DIR}/shims")
 
 add_custom_command(
     OUTPUT "${output_dir}"
     COMMAND ${CMAKE_COMMAND} "-E" "make_directory" "${output_dir}")
+
+if(SWIFT_BUILD_STATIC_STDLIB)
+  add_custom_command(
+      OUTPUT "${output_dir_static}"
+      COMMAND ${CMAKE_COMMAND} "-E" "make_directory" "${output_dir_static}")
+endif()
+
 set(outputs)
 foreach(input ${sources})
   add_custom_command(
@@ -70,6 +82,18 @@ foreach(input ${sources})
         "${output_dir}/${input}"
       COMMENT "Copying ${input} to ${output_dir}")
   list(APPEND outputs "${output_dir}/${input}")
+
+  if(SWIFT_BUILD_STATIC_STDLIB)
+    add_custom_command(
+        OUTPUT "${output_dir_static}/${input}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${input}"
+        COMMAND
+          "${CMAKE_COMMAND}" "-E" "copy_if_different"
+          "${CMAKE_CURRENT_SOURCE_DIR}/${input}"
+          "${output_dir_static}/${input}"
+        COMMENT "Copying ${input} to ${output_dir_static}")
+    list(APPEND outputs "${output_dir_static}/${input}")
+  endif()
 endforeach()
 # Put the output dir itself last so that it isn't considered the primary output.
 list(APPEND outputs "${output_dir}")
@@ -87,7 +111,8 @@ endif()
 # First extract the "version" used for Clang's resource directory.
 string(REGEX MATCH "[0-9]+\\.[0-9]+(\\.[0-9]+)?" CLANG_VERSION
   "${LLVM_PACKAGE_VERSION}")
-if(NOT SWIFT_INCLUDE_TOOLS AND SWIFT_BUILD_RUNTIME_WITH_HOST_COMPILER)
+if(NOT SWIFT_INCLUDE_TOOLS AND
+   (SWIFT_BUILD_RUNTIME_WITH_HOST_COMPILER OR SWIFT_PREBUILT_CLANG))
   if(SWIFT_COMPILER_IS_MSVC_LIKE)
     execute_process(COMMAND ${CMAKE_C_COMPILER} /clang:-print-resource-dir
       OUTPUT_VARIABLE clang_headers_location
@@ -121,7 +146,24 @@ add_custom_command_target(unused_var
     CUSTOM_TARGET_NAME "symlink_clang_headers"
     OUTPUT "${SWIFTLIB_DIR}/clang"
     COMMENT "Symlinking Clang resource headers into ${SWIFTLIB_DIR}/clang")
+
 add_dependencies(copy_shim_headers symlink_clang_headers)
+
+if(SWIFT_BUILD_STATIC_STDLIB)
+  add_custom_command_target(unused_var
+      COMMAND
+        "${CMAKE_COMMAND}" "-E" "make_directory" "${SWIFTSTATICLIB_DIR}"
+      COMMAND
+        "${CMAKE_COMMAND}" "-E" "${cmake_symlink_option}"
+        "${clang_headers_location}"
+        "${SWIFTSTATICLIB_DIR}/clang"
+
+      CUSTOM_TARGET_NAME "symlink_clang_headers_static"
+      OUTPUT "${SWIFTSTATICLIB_DIR}/clang"
+      COMMENT "Symlinking Clang resource headers into ${SWIFTSTATICLIB_DIR}/clang")
+
+      add_dependencies(copy_shim_headers symlink_clang_headers_static)
+endif()
 
 if(NOT SWIFT_BUILT_STANDALONE)
   if(TARGET clang-resource-headers) # LLVM > 8
@@ -146,6 +188,12 @@ swift_install_in_component(FILES ${sources}
                            DESTINATION "lib/swift/shims"
                            COMPONENT stdlib)
 
+if(SWIFT_BUILD_STATIC_STDLIB)
+  swift_install_in_component(FILES ${sources}
+                             DESTINATION "lib/swift_static/shims"
+                             COMPONENT stdlib)
+endif()
+
 # Install Clang headers under the Swift library so that an installed Swift's
 # module importer can find the compiler headers corresponding to its Clang.
 swift_install_in_component(DIRECTORY "${clang_headers_location}/"
@@ -153,17 +201,32 @@ swift_install_in_component(DIRECTORY "${clang_headers_location}/"
                            COMPONENT clang-builtin-headers
                            PATTERN "*.h")
 
+if(SWIFT_BUILD_STATIC_STDLIB)
+  swift_install_in_component(DIRECTORY "${clang_headers_location}/"
+                             DESTINATION "lib/swift_static/clang"
+                             COMPONENT clang-builtin-headers
+                             PATTERN "*.h")
+endif()
+
+
 swift_install_symlink_component(clang-resource-dir-symlink
   LINK_NAME clang
   TARGET ../clang/${CLANG_VERSION}
   DESTINATION "lib/swift")
 
+if(SWIFT_BUILD_STATIC_STDLIB)
+  swift_install_symlink_component(clang-resource-dir-symlink
+    LINK_NAME clang
+    TARGET ../clang/${CLANG_VERSION}
+    DESTINATION "lib/swift_static")
+endif()
+
 # Possibly install Clang headers under Clang's resource directory in case we
 # need to use a different version of the headers than the installed Clang. This
 # should be used in conjunction with clang-resource-dir-symlink.
 file(TO_CMAKE_PATH "${LLVM_LIBRARY_OUTPUT_INTDIR}"
-  _SWIFT_SHIMS_PATH_TO_CLANG_BUILD)
-swift_install_in_component(DIRECTORY "${_SWIFT_SHIMS_PATH_TO_CLANG_BUILD}/lib/clang"
+  _SWIFT_SHIMS_PATH_TO_CLANG_LIB_BUILD)
+swift_install_in_component(DIRECTORY "${_SWIFT_SHIMS_PATH_TO_CLANG_LIB_BUILD}/clang"
                            DESTINATION "lib"
                            COMPONENT clang-builtin-headers-in-clang-resource-dir
                            PATTERN "*.h")

@@ -24,7 +24,9 @@
 #include "swift/SIL/Projection.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILFunction.h"
+#include "swift/SIL/SILInstruction.h"
 #include "swift/SILOptimizer/Analysis/SimplifyInstruction.h"
+#include "swift/SILOptimizer/Utils/DebugOptUtils.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
@@ -80,35 +82,69 @@ killInstAndIncidentalUses(SingleValueInstruction *inst,
 // intruction that wasn't erased.
 static Optional<SILBasicBlock::iterator>
 simplifyAndReplace(SILInstruction *inst, CanonicalizeInstruction &pass) {
-  // FIXME: temporarily bypass simplification untill all simplifications
-  // preserve ownership SIL.
-  if (inst->getFunction()->hasOwnership())
-    return None;
-
-  SILValue result = simplifyInstruction(inst);
-  if (!result)
-    return None;
-
-  ++NumSimplified;
-
-  LLVM_DEBUG(llvm::dbgs() << "Simplify Old = " << *inst
-                          << "    New = " << *result << '\n');
-
   // Erase the simplified instruction and any instructions that end its
   // scope. Nothing needs to be added to the worklist except for Result,
   // because the instruction and all non-replaced users will be deleted.
-  auto nextII = replaceAllSimplifiedUsesAndErase(
-      inst, result,
-      [&pass](SILInstruction *deleted) { pass.killInstruction(deleted); });
+  pass.callbacks.resetHadCallbackInvocation();
+  auto result = simplifyAndReplaceAllSimplifiedUsesAndErase(
+      inst, pass.callbacks, &pass.deadEndBlocks);
+  if (!pass.callbacks.hadCallbackInvocation())
+    return None;
 
-  // Push the new instruction and any users onto the worklist.
-  pass.notifyHasNewUsers(result);
-  return nextII;
+  return result;
 }
 
 //===----------------------------------------------------------------------===//
 //                        Canonicalize Memory Operations
 //===----------------------------------------------------------------------===//
+
+namespace {
+
+struct LoadOperation {
+  llvm::PointerUnion<LoadInst *, LoadBorrowInst *> value;
+
+  LoadOperation(SILInstruction *input) : value(nullptr) {
+    if (auto *li = dyn_cast<LoadInst>(input)) {
+      value = li;
+      return;
+    }
+
+    if (auto *lbi = dyn_cast<LoadBorrowInst>(input)) {
+      value = lbi;
+      return;
+    }
+  }
+
+  operator bool() const { return !value.isNull(); }
+
+  SingleValueInstruction *operator*() const {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>();
+    return value.get<LoadBorrowInst *>();
+  }
+
+  const SingleValueInstruction *operator->() const {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>();
+    return value.get<LoadBorrowInst *>();
+  }
+
+  SingleValueInstruction *operator->() {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>();
+    return value.get<LoadBorrowInst *>();
+  }
+
+  Optional<LoadOwnershipQualifier> getOwnershipQualifier() const {
+    if (auto *lbi = value.dyn_cast<LoadBorrowInst *>()) {
+      return None;
+    }
+
+    return value.get<LoadInst *>()->getOwnershipQualifier();
+  }
+};
+
+} // anonymous namespace
 
 // Replace all uses of an original struct or tuple extract instruction with the
 // given load instruction. The caller ensures that the load only loads the
@@ -120,27 +156,29 @@ simplifyAndReplace(SILInstruction *inst, CanonicalizeInstruction &pass) {
 // \p loadInst has the form:
 // (load (struct_element_addr %base, #field)
 static void replaceUsesOfExtract(SingleValueInstruction *extract,
-                                 LoadInst *loadInst,
+                                 LoadOperation loadInst,
                                  CanonicalizeInstruction &pass) {
   assert(extract->getType() == loadInst->getType());
 
-  SingleValueInstruction *loadedVal = loadInst;
-  if (loadInst->getOwnershipQualifier() == LoadOwnershipQualifier::Copy) {
-    // Borrow the load-copied subelement, with precisely the same scope as
-    // the aggregate borrow.
-    assert(extract->getNumOperands() == 1);
-    auto *origBorrow = cast<BeginBorrowInst>(extract->getOperand(0));
-    auto *newBorrow = SILBuilderWithScope(origBorrow)
-                          .createBeginBorrow(loadInst->getLoc(), loadInst);
-    pass.notifyNewInstruction(newBorrow);
+  SingleValueInstruction *loadedVal = *loadInst;
+  if (auto qual = loadInst.getOwnershipQualifier()) {
+    if (*qual == LoadOwnershipQualifier::Copy) {
+      // Borrow the load-copied subelement, with precisely the same scope as
+      // the aggregate borrow.
+      assert(extract->getNumOperands() == 1);
+      auto *origBorrow = cast<BeginBorrowInst>(extract->getOperand(0));
+      auto *newBorrow = SILBuilderWithScope(origBorrow)
+                            .createBeginBorrow(loadInst->getLoc(), *loadInst);
+      pass.notifyNewInstruction(newBorrow);
 
-    assert(extract == origBorrow->getSingleNonEndingUse()->getUser());
-    for (auto *origEnd : origBorrow->getEndBorrows()) {
-      auto *endBorrow = SILBuilderWithScope(origEnd).createEndBorrow(
-          origEnd->getLoc(), newBorrow);
-      pass.notifyNewInstruction(endBorrow);
+      assert(extract == origBorrow->getSingleNonEndingUse()->getUser());
+      for (auto *origEnd : origBorrow->getEndBorrows()) {
+        auto *endBorrow = SILBuilderWithScope(origEnd).createEndBorrow(
+            origEnd->getLoc(), newBorrow);
+        pass.notifyNewInstruction(endBorrow);
+      }
+      loadedVal = newBorrow;
     }
-    loadedVal = newBorrow;
   }
   LLVM_DEBUG(llvm::dbgs() << "Replacing " << *extract << "    with "
                           << *loadedVal << "\n");
@@ -156,28 +194,34 @@ static void replaceUsesOfExtract(SingleValueInstruction *extract,
 //
 // TODO: Consider handling LoadBorrowInst.
 static SILBasicBlock::iterator
-splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
+splitAggregateLoad(LoadOperation loadInst, CanonicalizeInstruction &pass) {
   // Keep track of the next iterator after any newly added or to-be-deleted
   // instructions. This must be valid regardless of whether the pass immediately
   // deletes the instructions or simply records them for later deletion.
   auto nextII = std::next(loadInst->getIterator());
 
   bool needsBorrow;
-  switch (loadInst->getOwnershipQualifier()) {
-  case LoadOwnershipQualifier::Unqualified:
-  case LoadOwnershipQualifier::Trivial:
+  if (auto qual = loadInst.getOwnershipQualifier()) {
+    switch (*qual) {
+    case LoadOwnershipQualifier::Unqualified:
+    case LoadOwnershipQualifier::Trivial:
+      needsBorrow = false;
+      break;
+    case LoadOwnershipQualifier::Copy:
+      needsBorrow = true;
+      break;
+    case LoadOwnershipQualifier::Take:
+      // TODO: To handle a "take", we would need to generate additional destroys
+      // for any fields that aren't already extracted. This would be
+      // out-of-place for this transform, and I'm not sure if this a case that
+      // needs to be handled in CanonicalizeInstruction.
+      return nextII;
+    }
+  } else {
+    // If we don't have a qual, we have a borrow.
     needsBorrow = false;
-    break;
-  case LoadOwnershipQualifier::Copy:
-    needsBorrow = true;
-    break;
-  case LoadOwnershipQualifier::Take:
-    // TODO: To handle a "take", we would need to generate additional destroys
-    // for any fields that aren't already extracted. This would be out-of-place
-    // for this transform, and I'm not sure if this a case that needs to be
-    // handled in SILGenCleanup.
-    return nextII;
   }
+
   struct ProjInstPair {
     Projection proj;
     SingleValueInstruction *extract;
@@ -191,12 +235,12 @@ splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
   // Add load projections to a projection list.
   llvm::SmallVector<ProjInstPair, 8> projections;
   llvm::SmallVector<BeginBorrowInst *, 8> borrows;
-  llvm::SmallVector<DestroyValueInst *, 8> destroys;
-  for (auto *use : getNonDebugUses(loadInst)) {
+  llvm::SmallVector<SILInstruction *, 8> lifetimeEndingInsts;
+  for (auto *use : getNonDebugUses(*loadInst)) {
     auto *user = use->getUser();
     if (needsBorrow) {
       if (auto *destroy = dyn_cast<DestroyValueInst>(user)) {
-        destroys.push_back(destroy);
+        lifetimeEndingInsts.push_back(destroy);
         continue;
       }
       auto *borrow = dyn_cast<BeginBorrowInst>(user);
@@ -210,7 +254,14 @@ splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
 
       borrows.push_back(borrow);
       user = borrowedOper->getUser();
+    } else {
+      if (isa<EndBorrowInst>(user) &&
+          !loadInst.getOwnershipQualifier().hasValue()) {
+        lifetimeEndingInsts.push_back(user);
+        continue;
+      }
     }
+
     // If we have any non SEI, TEI instruction, don't do anything here.
     if (!isa<StructExtractInst>(user) && !isa<TupleExtractInst>(user))
       return nextII;
@@ -252,7 +303,7 @@ splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
   // Create a new address projection instruction and load instruction for each
   // unique projection.
   Projection *lastProj = nullptr;
-  LoadInst *lastNewLoad = nullptr;
+  Optional<LoadOperation> lastNewLoad;
   for (auto &pair : projections) {
     auto &proj = pair.proj;
     auto *extract = pair.extract;
@@ -260,7 +311,7 @@ splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
     // If this projection is the same as the last projection we processed, just
     // replace all uses of the projection with the load we created previously.
     if (lastProj && proj == *lastProj) {
-      replaceUsesOfExtract(extract, lastNewLoad, pass);
+      replaceUsesOfExtract(extract, *lastNewLoad, pass);
       nextII = killInstruction(extract, nextII, pass);
       continue;
     }
@@ -268,45 +319,64 @@ splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
     // This is a unique projection. Create the new address projection and load.
     lastProj = &proj;
     // Insert new instructions before the original load.
-    SILBuilderWithScope LoadBuilder(loadInst);
+    SILBuilderWithScope LoadBuilder(*loadInst);
     auto *projInst =
         proj.createAddressProjection(LoadBuilder, loadInst->getLoc(),
-                                     loadInst->getOperand())
+                                     loadInst->getOperand(0))
             .get();
     pass.notifyNewInstruction(projInst);
 
     // When loading a trivial subelement, convert ownership.
-    LoadOwnershipQualifier loadOwnership = loadInst->getOwnershipQualifier();
-    if (loadOwnership != LoadOwnershipQualifier::Unqualified
-        && projInst->getType().isTrivial(*projInst->getFunction())) {
-      loadOwnership = LoadOwnershipQualifier::Trivial;
+    Optional<LoadOwnershipQualifier> loadOwnership =
+        loadInst.getOwnershipQualifier();
+    if (loadOwnership.hasValue()) {
+      if (*loadOwnership != LoadOwnershipQualifier::Unqualified &&
+          projInst->getType().isTrivial(*projInst->getFunction()))
+        loadOwnership = LoadOwnershipQualifier::Trivial;
+    } else {
+      if (projInst->getType().isTrivial(*projInst->getFunction()))
+        loadOwnership = LoadOwnershipQualifier::Trivial;
     }
 
-    lastNewLoad =
-        LoadBuilder.createLoad(loadInst->getLoc(), projInst, loadOwnership);
-    pass.notifyNewInstruction(lastNewLoad);
+    if (loadOwnership) {
+      lastNewLoad =
+          LoadBuilder.createLoad(loadInst->getLoc(), projInst, *loadOwnership);
+    } else {
+      lastNewLoad = LoadBuilder.createLoadBorrow(loadInst->getLoc(), projInst);
+    }
+    pass.notifyNewInstruction(**lastNewLoad);
 
-    if (loadOwnership == LoadOwnershipQualifier::Copy) {
-      // Destroy the loaded value wherever the aggregate load was destroyed.
-      assert(loadInst->getOwnershipQualifier() == LoadOwnershipQualifier::Copy);
-      for (DestroyValueInst *destroy : destroys) {
-        SILBuilderWithScope(destroy).createDestroyValue(destroy->getLoc(),
-                                                        lastNewLoad);
-        pass.notifyNewInstruction(destroy);
+    if (loadOwnership) {
+      if (*loadOwnership == LoadOwnershipQualifier::Copy) {
+        // Destroy the loaded value wherever the aggregate load was destroyed.
+        assert(loadInst.getOwnershipQualifier() ==
+               LoadOwnershipQualifier::Copy);
+        for (SILInstruction *destroy : lifetimeEndingInsts) {
+          auto *newInst = SILBuilderWithScope(destroy).createDestroyValue(
+              destroy->getLoc(), **lastNewLoad);
+          pass.notifyNewInstruction(newInst);
+        }
+      }
+    } else {
+      for (SILInstruction *destroy : lifetimeEndingInsts) {
+        auto *newInst = SILBuilderWithScope(destroy).createEndBorrow(
+            destroy->getLoc(), **lastNewLoad);
+        pass.notifyNewInstruction(newInst);
       }
     }
-    replaceUsesOfExtract(extract, lastNewLoad, pass);
+    replaceUsesOfExtract(extract, *lastNewLoad, pass);
     nextII = killInstruction(extract, nextII, pass);
   }
+
   // Remove the now unused borrows.
   for (auto *borrow : borrows)
     nextII = killInstAndIncidentalUses(borrow, nextII, pass);
 
   // Erase the old load.
-  for (auto *destroy : destroys)
+  for (auto *destroy : lifetimeEndingInsts)
     nextII = killInstruction(destroy, nextII, pass);
 
-  return killInstAndIncidentalUses(loadInst, nextII, pass);
+  return killInstAndIncidentalUses(*loadInst, nextII, pass);
 }
 
 // Given a store within a single property struct, recursively form the parent
@@ -315,6 +385,11 @@ splitAggregateLoad(LoadInst *loadInst, CanonicalizeInstruction &pass) {
 // (store (struct_element_addr %base) object)
 //   ->
 // (store %base (struct object))
+//
+// TODO: supporting enums here would be very easy. The main thing is adding
+// support in `createAggFromFirstLevelProjections`.
+// Note: we will not be able to support tuples because we cannot have a
+// single-element tuple.
 static SILBasicBlock::iterator
 broadenSingleElementStores(StoreInst *storeInst,
                            CanonicalizeInstruction &pass) {
@@ -322,29 +397,14 @@ broadenSingleElementStores(StoreInst *storeInst,
   // instructions. This must be valid regardless of whether the pass immediately
   // deletes the instructions or simply records them for later deletion.
   auto nextII = std::next(storeInst->getIterator());
-
-  // Bail if the store's destination is not a struct_element_addr.
-  auto *sea = dyn_cast<StructElementAddrInst>(storeInst->getDest());
-  if (!sea)
-    return nextII;
-
   auto *f = storeInst->getFunction();
 
-  // Continue up the struct_element_addr chain, as long as each struct only has
-  // a single property, creating StoreInsts along the way.
-  SILBuilderWithScope builder(storeInst);
-
-  SILValue result = storeInst->getSrc();
-  SILValue baseAddr = sea->getOperand();
-  SILValue storeAddr;
-  while (true) {
+  ProjectionPath projections(storeInst->getDest()->getType());
+  SILValue op = storeInst->getDest();
+  while (isa<StructElementAddrInst>(op)) {
+    auto *inst = cast<SingleValueInstruction>(op);
+    SILValue baseAddr = inst->getOperand(0);
     SILType baseAddrType = baseAddr->getType();
-
-    // If our aggregate has unreferenced storage then we can never prove if it
-    // actually has a single field.
-    if (baseAddrType.aggregateHasUnreferenceableStorage())
-      break;
-
     auto *decl = baseAddrType.getStructOrBoundGenericStruct();
     assert(
       !decl->isResilient(f->getModule().getSwiftModule(),
@@ -352,31 +412,38 @@ broadenSingleElementStores(StoreInst *storeInst,
         "This code assumes resilient structs can not have fragile fields. If "
         "this assert is hit, this has been changed. Please update this code.");
 
-    // NOTE: If this is ever changed to support enums, we must check for address
-    // only types here. For structs we do not have to check since a single
-    // element struct with a loadable element can never be address only. We
-    // additionally do not have to worry about our input value being address
-    // only since we are storing into it.
-    if (decl->getStoredProperties().size() != 1)
+    // Bail if the store's destination is not a struct_element_addr or if the
+    // store's destination (%base) is not a loadable type. If %base is not a
+    // loadable type, we can't create it as a struct later on.
+    // If our aggregate has unreferenced storage then we can never prove if it
+    // actually has a single field.
+    if (!baseAddrType.isLoadable(*f) ||
+        baseAddrType.aggregateHasUnreferenceableStorage() ||
+        decl->getStoredProperties().size() != 1)
       break;
 
-    // Update the store location now that we know it is safe.
-    storeAddr = baseAddr;
-
-    // Otherwise, create the struct.
-    result = builder.createStruct(storeInst->getLoc(),
-                                  baseAddrType.getObjectType(), result);
-
-    // See if we have another struct_element_addr we can strip off. If we don't
-    // then this as much as we can promote.
-    sea = dyn_cast<StructElementAddrInst>(sea->getOperand());
-    if (!sea)
-      break;
-    baseAddr = sea->getOperand();
+    projections.push_back(Projection(inst));
+    op = baseAddr;
   }
-  // If we failed to create any structs, bail.
-  if (result == storeInst->getSrc())
+
+  // If we couldn't create a projection, bail.
+  if (projections.empty())
     return nextII;
+
+  // Now work our way back up. At this point we know all operations we are going
+  // to do succeed (cast<SingleValueInst>, createAggFromFirstLevelProjections,
+  // etc.) so we can omit null checks. We should not bail at this point (we
+  // could create a double consume, or worse).
+  SILBuilderWithScope builder(storeInst);
+  SILValue result = storeInst->getSrc();
+  SILValue storeAddr = storeInst->getDest();
+  for (Projection proj : llvm::reverse(projections)) {
+    storeAddr = cast<SingleValueInstruction>(storeAddr)->getOperand(0);
+    result = proj.createAggFromFirstLevelProjections(
+                     builder, storeInst->getLoc(),
+                     storeAddr->getType().getObjectType(), {result})
+                 .get();
+  }
 
   // Store the new struct-wrapped value into the final base address.
   builder.createStore(storeInst->getLoc(), result, storeAddr,
@@ -384,6 +451,94 @@ broadenSingleElementStores(StoreInst *storeInst,
 
   // Erase the original store.
   return killInstruction(storeInst, nextII, pass);
+}
+
+//===----------------------------------------------------------------------===//
+//                            Simple ARC Peepholes
+//===----------------------------------------------------------------------===//
+
+static SILBasicBlock::iterator
+eliminateSimpleCopies(CopyValueInst *cvi, CanonicalizeInstruction &pass) {
+  auto next = std::next(cvi->getIterator());
+
+  // Eliminate copies that only have destroy_value uses.
+  SmallVector<DestroyValueInst *, 8> destroys;
+  for (auto *use : getNonDebugUses(cvi)) {
+    if (auto *dvi = dyn_cast<DestroyValueInst>(use->getUser())) {
+      destroys.push_back(dvi);
+      continue;
+    }
+    return next;
+  }
+
+  while (!destroys.empty()) {
+    next = killInstruction(destroys.pop_back_val(), next, pass);
+  }
+
+  next = killInstAndIncidentalUses(cvi, next, pass);
+  return next;
+}
+
+static SILBasicBlock::iterator
+eliminateSimpleBorrows(BeginBorrowInst *bbi, CanonicalizeInstruction &pass) {
+  auto next = std::next(bbi->getIterator());
+
+  // We know that our borrow is completely within the lifetime of its base value
+  // if the borrow is never reborrowed. We check for reborrows and do not
+  // optimize such cases. Otherwise, we can eliminate our borrow and instead use
+  // our operand.
+  auto base = bbi->getOperand();
+  auto baseOwnership = base.getOwnershipKind();
+  SmallVector<EndBorrowInst *, 8> endBorrows;
+  for (auto *use : getNonDebugUses(bbi)) {
+    if (auto *ebi = dyn_cast<EndBorrowInst>(use->getUser())) {
+      endBorrows.push_back(ebi);
+      continue;
+    }
+
+    // Otherwise, if we have a use that is non-lifetime ending and can accept
+    // our base ownership, continue.
+    if (!use->isLifetimeEnding() && use->canAcceptKind(baseOwnership))
+      continue;
+
+    return next;
+  }
+
+  while (!endBorrows.empty()) {
+    next = killInstruction(endBorrows.pop_back_val(), next, pass);
+  }
+  bbi->replaceAllUsesWith(base);
+  pass.notifyHasNewUsers(base);
+  return killInstruction(bbi, next, pass);
+}
+
+/// Delete any result having forwarding instruction that only has destroy_value
+/// and debug_value uses.
+static SILBasicBlock::iterator
+eliminateUnneededForwardingUnarySingleValueInst(SingleValueInstruction *inst,
+                                                CanonicalizeInstruction &pass) {
+  auto next = std::next(inst->getIterator());
+
+  for (auto *use : getNonDebugUses(inst))
+    if (!isa<DestroyValueInst>(use->getUser()))
+      return next;
+  deleteAllDebugUses(inst, pass.callbacks);
+  SILValue op = inst->getOperand(0);
+  inst->replaceAllUsesWith(op);
+  pass.notifyHasNewUsers(op);
+  return killInstruction(inst, next, pass);
+}
+
+static Optional<SILBasicBlock::iterator>
+tryEliminateUnneededForwardingInst(SILInstruction *i,
+                                   CanonicalizeInstruction &pass) {
+  assert(OwnershipForwardingMixin::isa(i) &&
+         "Must be an ownership forwarding inst");
+  if (auto *svi = dyn_cast<SingleValueInstruction>(i))
+    if (svi->getNumOperands() == 1)
+      return eliminateUnneededForwardingUnarySingleValueInst(svi, pass);
+
+  return None;
 }
 
 //===----------------------------------------------------------------------===//
@@ -395,11 +550,29 @@ CanonicalizeInstruction::canonicalize(SILInstruction *inst) {
   if (auto nextII = simplifyAndReplace(inst, *this))
     return nextII.getValue();
 
-  if (auto *loadInst = dyn_cast<LoadInst>(inst))
-    return splitAggregateLoad(loadInst, *this);
+  if (auto li = LoadOperation(inst)) {
+    return splitAggregateLoad(li, *this);
+  }
 
-  if (auto *storeInst = dyn_cast<StoreInst>(inst))
+  if (auto *storeInst = dyn_cast<StoreInst>(inst)) {
     return broadenSingleElementStores(storeInst, *this);
+  }
+
+  if (auto *cvi = dyn_cast<CopyValueInst>(inst))
+    return eliminateSimpleCopies(cvi, *this);
+
+  if (auto *bbi = dyn_cast<BeginBorrowInst>(inst))
+    return eliminateSimpleBorrows(bbi, *this);
+
+  // If we have ownership and are not in raw SIL, eliminate unneeded forwarding
+  // insts. We don't do this in raw SIL as not to disturb the codegen read by
+  // diagnostics.
+  auto *fn = inst->getFunction();
+  if (fn->hasOwnership() && fn->getModule().getStage() != SILStage::Raw) {
+    if (OwnershipForwardingMixin::isa(inst))
+      if (auto newNext = tryEliminateUnneededForwardingInst(inst, *this))
+        return *newNext;
+  }
 
   // Skip ahead.
   return std::next(inst->getIterator());

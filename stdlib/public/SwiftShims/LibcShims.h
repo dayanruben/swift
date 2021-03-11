@@ -29,27 +29,7 @@
 #endif
 
 #ifdef __cplusplus
-namespace swift { extern "C" {
-#endif
-
-// This declaration might not be universally correct.
-// We verify its correctness for the current platform in the runtime code.
-#if defined(__linux__)
-# if defined(__ANDROID__) && !(defined(__aarch64__) || defined(__x86_64__))
-typedef __swift_uint16_t __swift_mode_t;
-# else
-typedef __swift_uint32_t __swift_mode_t;
-# endif
-#elif defined(__APPLE__)
-typedef __swift_uint16_t __swift_mode_t;
-#elif defined(_WIN32)
-typedef __swift_int32_t __swift_mode_t;
-#elif defined(__wasi__)
-typedef __swift_uint32_t __swift_mode_t;
-#elif defined(__OpenBSD__)
-typedef __swift_uint32_t __swift_mode_t;
-#else  // just guessing
-typedef __swift_uint16_t __swift_mode_t;
+extern "C" {
 #endif
 
 
@@ -63,7 +43,7 @@ __swift_size_t _swift_stdlib_fwrite_stdout(const void *ptr, __swift_size_t size,
 // General utilities <stdlib.h>
 // Memory management functions
 static inline void _swift_stdlib_free(void *_Nullable ptr) {
-  extern void free(void *);
+  extern void free(void *_Nullable);
   free(ptr);
 }
 
@@ -149,7 +129,12 @@ float _stdlib_remainderf(float _self, float _other) {
   
 static inline SWIFT_ALWAYS_INLINE
 float _stdlib_squareRootf(float _self) {
+#if defined(_WIN32) && (defined(_M_IX86) || defined(__i386__))
+  typedef float __m128 __attribute__((__vector_size__(16), __aligned__(16)));
+  return __builtin_ia32_sqrtss(__extension__ (__m128){ _self, 0, 0, 0 })[0];
+#else
   return __builtin_sqrtf(_self);
+#endif
 }
 
 static inline SWIFT_ALWAYS_INLINE
@@ -184,7 +169,7 @@ long double lgammal_r(long double x, int *psigngam);
 #endif // defined(__APPLE__)
 
 #ifdef __cplusplus
-}} // extern "C", namespace swift
+} // extern "C"
 #endif
 
 #if __has_feature(nullability)

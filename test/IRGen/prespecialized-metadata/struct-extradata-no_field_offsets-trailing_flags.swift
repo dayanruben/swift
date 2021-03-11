@@ -1,11 +1,11 @@
 // RUN: %target-swift-frontend -prespecialize-generic-metadata -target %module-target-future -emit-ir %s | %FileCheck %s -DINT=i%target-ptrsize -DALIGNMENT=%target-alignment
 
-// REQUIRES: OS=macosx || OS=ios || OS=tvos || OS=watchos || OS=linux-gnu
+// REQUIRES: VENDOR=apple || OS=linux-gnu
 // UNSUPPORTED: CPU=i386 && OS=ios
 // UNSUPPORTED: CPU=armv7 && OS=ios
 // UNSUPPORTED: CPU=armv7s && OS=ios
 
-// CHECK: [[EXTRA_DATA_PATTERN:@[0-9]+]] = internal constant { i64 } zeroinitializer, align [[ALIGNMENT]]
+// CHECK: [[EXTRA_DATA_PATTERN:@[0-9]+]] = internal constant <{ i64 }> zeroinitializer, align [[ALIGNMENT]]
 
 //      CHECK: @"$s4main4PairVMP" = internal constant <{ 
 //           :   i32, 
@@ -68,9 +68,9 @@
 //           :   i32 trunc (
 // CHECK-SAME:     [[INT]] sub (
 // CHECK-SAME:       [[INT]] ptrtoint (
-// CHECK-SAME:         { 
+// CHECK-SAME:         <{ 
 // CHECK-SAME:           i64 
-// CHECK-SAME:         }* [[EXTRA_DATA_PATTERN]] to [[INT]]
+// CHECK-SAME:         }>* [[EXTRA_DATA_PATTERN]] to [[INT]]
 // CHECK-SAME:       ), 
 // CHECK-SAME:       [[INT]] ptrtoint (
 // CHECK-SAME:         i32* getelementptr inbounds (

@@ -126,6 +126,10 @@ class CMake(object):
             define("CMAKE_C_COMPILER_LAUNCHER:PATH", toolchain.distcc)
             define("CMAKE_CXX_COMPILER_LAUNCHER:PATH", toolchain.distcc)
 
+        if args.sccache:
+            define("CMAKE_C_COMPILER_LAUNCHER:PATH", toolchain.sccache)
+            define("CMAKE_CXX_COMPILER_LAUNCHER:PATH", toolchain.sccache)
+
         if args.cmake_c_launcher:
             define("CMAKE_C_COMPILER_LAUNCHER:PATH", args.cmake_c_launcher)
         if args.cmake_cxx_launcher:
@@ -272,7 +276,7 @@ class CMake(object):
             cmake_binary = 'cmake'
 
         installed_ver = self.installed_cmake_version(cmake_binary)
-        if installed_ver > self.cmake_source_version(cmake_source_dir):
+        if installed_ver >= self.cmake_source_version(cmake_source_dir):
             return
         else:
             # Build CMake from source and return the path to the executable.

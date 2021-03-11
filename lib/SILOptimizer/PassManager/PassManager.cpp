@@ -60,51 +60,54 @@ llvm::cl::opt<std::string> SILBreakOnPass(
     llvm::cl::desc("Break before running a particular function pass"));
 
 llvm::cl::list<std::string>
-    SILPrintOnlyFun("sil-print-only-function", llvm::cl::CommaSeparated,
+    SILPrintFunction("sil-print-function", llvm::cl::CommaSeparated,
                     llvm::cl::desc("Only print out the sil for this function"));
 
 llvm::cl::opt<std::string>
-    SILPrintOnlyFuns("sil-print-only-functions", llvm::cl::init(""),
+    SILPrintFunctions("sil-print-functions", llvm::cl::init(""),
                      llvm::cl::desc("Only print out the sil for the functions "
                                     "whose name contains this substring"));
 
 llvm::cl::list<std::string>
-    SILPrintBefore("sil-print-before",
+    SILPrintBefore("sil-print-before", llvm::cl::CommaSeparated,
                    llvm::cl::desc("Print out the sil before passes which "
                                   "contain a string from this list."));
 
 llvm::cl::list<std::string>
-    SILPrintAfter("sil-print-after",
+    SILPrintAfter("sil-print-after", llvm::cl::CommaSeparated,
                   llvm::cl::desc("Print out the sil after passes which contain "
                                  "a string from this list."));
 
 llvm::cl::list<std::string>
-    SILPrintAround("sil-print-around",
+    SILPrintAround("sil-print-around", llvm::cl::CommaSeparated,
                    llvm::cl::desc("Print out the sil before and after passes "
                                   "which contain a string from this list"));
 
 llvm::cl::list<std::string>
-    SILDisablePass("sil-disable-pass",
+    SILDisablePass("sil-disable-pass", llvm::cl::CommaSeparated,
                      llvm::cl::desc("Disable passes "
                                     "which contain a string from this list"));
+llvm::cl::list<std::string> SILDisablePassOnlyFun(
+    "sil-disable-pass-only-function", llvm::cl::CommaSeparated,
+    llvm::cl::desc("Apply -sil-disable-pass only on this function"));
 
 llvm::cl::list<std::string> SILVerifyBeforePass(
-    "sil-verify-before-pass",
+    "sil-verify-before-pass", llvm::cl::CommaSeparated,
     llvm::cl::desc("Verify the module/analyses before we run "
                    "a pass from this list"));
 
 llvm::cl::list<std::string> SILVerifyAroundPass(
-    "sil-verify-around-pass",
+    "sil-verify-around-pass", llvm::cl::CommaSeparated,
     llvm::cl::desc("Verify the module/analyses before/after we run "
                    "a pass from this list"));
 
 llvm::cl::list<std::string>
-    SILVerifyAfterPass("sil-verify-after-pass",
+    SILVerifyAfterPass("sil-verify-after-pass", llvm::cl::CommaSeparated,
                        llvm::cl::desc("Verify the module/analyses after we run "
                                       "a pass from this list"));
 
 llvm::cl::list<std::string> SILForceVerifyAroundPass(
-    "sil-verify-force-analysis-around-pass",
+    "sil-verify-force-analysis-around-pass", llvm::cl::CommaSeparated,
     llvm::cl::desc("For the given passes, precompute analyses before the pass "
                    "and verify analyses after the pass"));
 
@@ -154,60 +157,76 @@ static llvm::cl::opt<DebugOnlyPassNumberOpt, true,
               llvm::cl::location(DebugOnlyPassNumberOptLoc),
               llvm::cl::ValueRequired);
 
-static bool doPrintBefore(SILTransform *T, SILFunction *F) {
-  if (!SILPrintOnlyFun.empty() && F && SILPrintOnlyFun.end() ==
-      std::find(SILPrintOnlyFun.begin(), SILPrintOnlyFun.end(), F->getName()))
+static bool isFunctionSelectedForPrinting(SILFunction *F) {
+  if (!SILPrintFunction.empty() && SILPrintFunction.end() ==
+      std::find(SILPrintFunction.begin(), SILPrintFunction.end(), F->getName()))
     return false;
 
-  if (!SILPrintOnlyFuns.empty() && F &&
-      F->getName().find(SILPrintOnlyFuns, 0) == StringRef::npos)
+  if (!F->getName().contains(SILPrintFunctions))
+    return false;
+
+  return true;
+}
+
+static bool functionSelectionEmpty() {
+  return SILPrintFunction.empty() && SILPrintFunctions.empty();
+}
+
+static bool doPrintBefore(SILTransform *T, SILFunction *F) {
+  if (F && !isFunctionSelectedForPrinting(F))
     return false;
 
   auto MatchFun = [&](const std::string &Str) -> bool {
-    return T->getTag().find(Str) != StringRef::npos
-      || T->getID().find(Str) != StringRef::npos;
+    return T->getTag().contains(Str) || T->getID().contains(Str);
   };
 
   if (SILPrintBefore.end() !=
       std::find_if(SILPrintBefore.begin(), SILPrintBefore.end(), MatchFun))
     return true;
+  if (!SILPrintBefore.empty())
+    return false;
 
   if (SILPrintAround.end() !=
       std::find_if(SILPrintAround.begin(), SILPrintAround.end(), MatchFun))
     return true;
+  if (!SILPrintAround.empty())
+    return false;
 
   return false;
 }
 
-static bool doPrintAfter(SILTransform *T, SILFunction *F, bool Default) {
-  if (!SILPrintOnlyFun.empty() && F && SILPrintOnlyFun.end() ==
-      std::find(SILPrintOnlyFun.begin(), SILPrintOnlyFun.end(), F->getName()))
-    return false;
-
-  if (!SILPrintOnlyFuns.empty() && F &&
-      F->getName().find(SILPrintOnlyFuns, 0) == StringRef::npos)
+static bool doPrintAfter(SILTransform *T, SILFunction *F, bool PassChangedSIL) {
+  if (F && !isFunctionSelectedForPrinting(F))
     return false;
 
   auto MatchFun = [&](const std::string &Str) -> bool {
-    return T->getTag().find(Str) != StringRef::npos
-      || T->getID().find(Str) != StringRef::npos;
+    return T->getTag().contains(Str) || T->getID().contains(Str);
   };
 
   if (SILPrintAfter.end() !=
       std::find_if(SILPrintAfter.begin(), SILPrintAfter.end(), MatchFun))
     return true;
+  if (!SILPrintAfter.empty())
+    return false;
 
   if (SILPrintAround.end() !=
       std::find_if(SILPrintAround.begin(), SILPrintAround.end(), MatchFun))
     return true;
+  if (!SILPrintAround.empty())
+    return false;
 
-  return Default;
+  return PassChangedSIL && (SILPrintAll || !functionSelectionEmpty());
 }
 
-static bool isDisabled(SILTransform *T) {
+static bool isDisabled(SILTransform *T, SILFunction *F = nullptr) {
+  if (!SILDisablePassOnlyFun.empty() && F &&
+      SILDisablePassOnlyFun.end() == std::find(SILDisablePassOnlyFun.begin(),
+                                               SILDisablePassOnlyFun.end(),
+                                               F->getName()))
+    return false;
+
   for (const std::string &NamePattern : SILDisablePass) {
-    if (T->getTag().find(NamePattern) != StringRef::npos
-        || T->getID().find(NamePattern) != StringRef::npos) {
+    if (T->getTag().contains(NamePattern) || T->getID().contains(NamePattern)) {
       return true;
     }
   }
@@ -215,17 +234,12 @@ static bool isDisabled(SILTransform *T) {
 }
 
 static void printModule(SILModule *Mod, bool EmitVerboseSIL) {
-  if (SILPrintOnlyFun.empty() && SILPrintOnlyFuns.empty()) {
+  if (functionSelectionEmpty()) {
     Mod->dump();
     return;
   }
   for (auto &F : *Mod) {
-    if (!SILPrintOnlyFun.empty() && SILPrintOnlyFun.end() !=
-        std::find(SILPrintOnlyFun.begin(), SILPrintOnlyFun.end(), F.getName()))
-      F.dump(EmitVerboseSIL);
-
-    if (!SILPrintOnlyFuns.empty() &&
-        F.getName().find(SILPrintOnlyFuns, 0) != StringRef::npos)
+    if (isFunctionSelectedForPrinting(&F))
       F.dump(EmitVerboseSIL);
   }
 }
@@ -374,11 +388,24 @@ void SILPassManager::dumpPassInfo(const char *Title, unsigned TransIdx,
   llvm::dbgs() << '\n';
 }
 
+bool SILPassManager::isMandatoryFunctionPass(SILFunctionTransform *sft) {
+  return isMandatory || sft->getPassKind() ==
+             PassKind::NonTransparentFunctionOwnershipModelEliminator ||
+         sft->getPassKind() == PassKind::OwnershipModelEliminator ||
+         sft->getPassKind() ==
+             PassKind::NonStdlibNonTransparentFunctionOwnershipModelEliminator;
+}
+
 void SILPassManager::runPassOnFunction(unsigned TransIdx, SILFunction *F) {
 
   assert(analysesUnlocked() && "Expected all analyses to be unlocked!");
 
   auto *SFT = cast<SILFunctionTransform>(Transformations[TransIdx]);
+
+  if (!F->shouldOptimize() && !isMandatoryFunctionPass(SFT)) {
+    return;
+  }
+
   SFT->injectPassManager(this);
   SFT->injectFunction(F);
 
@@ -386,16 +413,17 @@ void SILPassManager::runPassOnFunction(unsigned TransIdx, SILFunction *F) {
   DebugPrintEnabler DebugPrint(NumPassesRun);
 
   // If nothing changed since the last run of this pass, we can skip this
-  // pass.
+  // pass if it is not mandatory
   CompletedPasses &completedPasses = CompletedPassesMap[F];
-  if (completedPasses.test((size_t)SFT->getPassKind()) &&
+  if (!isMandatoryFunctionPass(SFT) &&
+      completedPasses.test((size_t)SFT->getPassKind()) &&
       !SILDisableSkippingPasses) {
     if (SILPrintPassName)
       dumpPassInfo("(Skip)", TransIdx, F);
     return;
   }
 
-  if (isDisabled(SFT)) {
+  if (isDisabled(SFT, F)) {
     if (SILPrintPassName)
       dumpPassInfo("(Disabled)", TransIdx, F);
     return;
@@ -406,8 +434,7 @@ void SILPassManager::runPassOnFunction(unsigned TransIdx, SILFunction *F) {
   CurrentPassHasInvalidated = false;
 
   auto MatchFun = [&](const std::string &Str) -> bool {
-    return SFT->getTag().find(Str) != StringRef::npos ||
-           SFT->getID().find(Str) != StringRef::npos;
+    return SFT->getTag().contains(Str) || SFT->getID().contains(Str);
   };
   if ((SILVerifyBeforePass.end() != std::find_if(SILVerifyBeforePass.begin(),
                                                  SILVerifyBeforePass.end(),
@@ -454,7 +481,7 @@ void SILPassManager::runPassOnFunction(unsigned TransIdx, SILFunction *F) {
   }
 
   // If this pass invalidated anything, print and verify.
-  if (doPrintAfter(SFT, F, CurrentPassHasInvalidated && SILPrintAll)) {
+  if (doPrintAfter(SFT, F, CurrentPassHasInvalidated)) {
     dumpPassInfo("*** SIL function after ", TransIdx);
     F->dump(getOptions().EmitVerboseSIL);
   }
@@ -503,7 +530,7 @@ runFunctionPasses(unsigned FromTransIdx, unsigned ToTransIdx) {
 
     // Only include functions that are definitions, and which have not
     // been intentionally excluded from optimization.
-    if (F.isDefinition() && (isMandatory || F.shouldOptimize()))
+    if (F.isDefinition())
       FunctionWorklist.push_back(*I);
   }
 
@@ -574,8 +601,7 @@ void SILPassManager::runModulePass(unsigned TransIdx) {
   }
 
   auto MatchFun = [&](const std::string &Str) -> bool {
-    return SMT->getTag().find(Str) != StringRef::npos ||
-           SMT->getID().find(Str) != StringRef::npos;
+    return SMT->getTag().contains(Str) || SMT->getID().contains(Str);
   };
   if ((SILVerifyBeforePass.end() != std::find_if(SILVerifyBeforePass.begin(),
                                                  SILVerifyBeforePass.end(),
@@ -600,8 +626,7 @@ void SILPassManager::runModulePass(unsigned TransIdx) {
   }
 
   // If this pass invalidated anything, print and verify.
-  if (doPrintAfter(SMT, nullptr,
-                   CurrentPassHasInvalidated && SILPrintAll)) {
+  if (doPrintAfter(SMT, nullptr, CurrentPassHasInvalidated)) {
     dumpPassInfo("*** SIL module after", TransIdx);
     printModule(Mod, Options.EmitVerboseSIL);
   }
@@ -714,7 +739,7 @@ SILPassManager::~SILPassManager() {
 }
 
 void SILPassManager::notifyOfNewFunction(SILFunction *F, SILTransform *T) {
-  if (doPrintAfter(T, F, SILPrintAll)) {
+  if (doPrintAfter(T, F, /*PassChangedSIL*/ true)) {
     dumpPassInfo("*** New SIL function in ", T, F);
     F->dump(getOptions().EmitVerboseSIL);
   }
@@ -729,6 +754,10 @@ void SILPassManager::addFunctionToWorklist(SILFunction *F,
 
   int NewLevel = 1;
   if (DerivedFrom) {
+    if (!functionSelectionEmpty() && isFunctionSelectedForPrinting(F)) {
+      llvm::dbgs() << F->getName() << " was derived from "
+                   << DerivedFrom->getName() << "\n";
+    }
     // When SILVerifyAll is enabled, individual functions are verified after
     // function passes are run upon them. This means that any functions created
     // by a function pass will not be verified after the pass runs. Thus
@@ -875,7 +904,7 @@ namespace {
       child_iterator &operator++() { baseIter++; return *this; }
       child_iterator operator++(int) {
         auto tmp = *this;
-        baseIter++;
+        ++baseIter;
         return tmp;
       }
       Node *operator*() const { return baseIter->Child; }
@@ -1011,7 +1040,7 @@ namespace llvm {
       std::string Label;
       raw_string_ostream O(Label);
       SILInstruction *Inst = I.baseIter->FAS.getInstruction();
-      O << '%' << Node->CG->InstToIDMap[Inst];
+      O << '%' << Node->CG->InstToIDMap[Inst->asSILNode()];
       return Label;
     }
 

@@ -36,8 +36,13 @@ bool isExclusiveArgument(SILValue V);
 /// does not look through init/open_existential_addr.
 bool pointsToLocalObject(SILValue V);
 
-/// Returns true if \p V is a uniquely identified address or reference. It may
-/// be any of:
+/// Returns true if \p V is a uniquely identified address or reference. Two
+/// uniquely identified pointers with distinct roots cannot alias. However, a
+/// uniquely identified pointer may alias with unidentified pointers. For
+/// example, the uniquely identified pointer may escape to a call that returns
+/// an alias of that pointer.
+///
+/// It may be any of:
 ///
 /// - an address projection based on a locally allocated address with no
 /// indirection
@@ -48,10 +53,25 @@ bool pointsToLocalObject(SILValue V);
 ///
 /// - an address projection based on an exclusive argument with no levels of
 /// indirection (e.g. ref_element_addr, project_box, etc.).
+///
+/// TODO: Fold this into the AccessedStorage API. pointsToLocalObject should be
+/// performed by AccessedStorage::isUniquelyIdentified.
 inline bool isUniquelyIdentified(SILValue V) {
-  return pointsToLocalObject(V)
-         || (V->getType().isAddress()
-             && isExclusiveArgument(getAccessedAddress(V)));
+  SILValue objectRef = V;
+  if (V->getType().isAddress()) {
+    auto storage = AccessedStorage::compute(V);
+    if (!storage)
+      return false;
+
+    if (storage.isUniquelyIdentified())
+      return true;
+
+    if (!storage.isObjectAccess())
+      return false;
+
+    objectRef = storage.getObject();
+  }
+  return pointsToLocalObject(objectRef);
 }
 
 enum class IsZeroKind {

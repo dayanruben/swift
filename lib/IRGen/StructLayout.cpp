@@ -19,8 +19,10 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsIRGen.h"
+#include "swift/ABI/MetadataValues.h"
 
 #include "BitPatternBuilder.h"
+#include "Field.h"
 #include "FixedTypeInfo.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
@@ -199,6 +201,33 @@ void StructLayoutBuilder::addNSObjectHeader() {
   headerSize = CurSize;
 }
 
+void StructLayoutBuilder::addDefaultActorHeader(ElementLayout &elt) {
+  assert(StructFields.size() == 1 &&
+         StructFields[0] == IGM.RefCountedStructTy &&
+         "adding default actor header at wrong offset");
+
+  // These must match the DefaultActor class in Actor.h.
+  auto size = NumWords_DefaultActor * IGM.getPointerSize();
+  auto align = Alignment(Alignment_DefaultActor);
+  auto ty = llvm::ArrayType::get(IGM.Int8PtrTy, NumWords_DefaultActor);
+
+  // Note that we align the *entire structure* to the new alignment,
+  // not the storage we're adding.  Otherwise we would potentially
+  // get internal padding.
+  assert(CurSize.isMultipleOf(IGM.getPointerSize()));
+  assert(align >= CurAlignment);
+  assert(CurSize == getDefaultActorStorageFieldOffset(IGM));
+  elt.completeFixed(IsNotPOD, CurSize, /*struct index*/ 1);
+  CurSize += size;
+  CurAlignment = align;
+  StructFields.push_back(ty);
+  headerSize = CurSize;
+}
+
+Size irgen::getDefaultActorStorageFieldOffset(IRGenModule &IGM) {
+  return IGM.RefCountedStructSize;
+}
+
 bool StructLayoutBuilder::addFields(llvm::MutableArrayRef<ElementLayout> elts,
                                     LayoutStrategy strategy) {
   // Track whether we've added any storage to our layout.
@@ -223,7 +252,7 @@ bool StructLayoutBuilder::addField(ElementLayout &elt,
   if (eltTI.isKnownEmpty(ResilienceExpansion::Maximal)) {
     addEmptyElement(elt);
     // If the element type is empty, it adds nothing.
-    NextNonFixedOffsetIndex++;
+    ++NextNonFixedOffsetIndex;
     return false;
   }
   // TODO: consider using different layout rules.
@@ -238,7 +267,7 @@ bool StructLayoutBuilder::addField(ElementLayout &elt,
   } else {
     addNonFixedSizeElement(elt);
   }
-  NextNonFixedOffsetIndex++;
+  ++NextNonFixedOffsetIndex;
   return true;
 }
 
@@ -312,7 +341,8 @@ void StructLayoutBuilder::addNonFixedSizeElement(ElementLayout &elt) {
 
 /// Add an empty element to the aggregate.
 void StructLayoutBuilder::addEmptyElement(ElementLayout &elt) {
-  elt.completeEmpty(elt.getType().isPOD(ResilienceExpansion::Maximal));
+  auto byteOffset = isFixedLayout() ? CurSize : Size(0);
+  elt.completeEmpty(elt.getType().isPOD(ResilienceExpansion::Maximal), byteOffset);
 }
 
 /// Add an element at the fixed offset of the current end of the
@@ -374,4 +404,69 @@ SpareBitVector StructLayoutBuilder::getSpareBits() const {
     spareBits.append(v);
   }
   return spareBits.build();
+}
+
+unsigned irgen::getNumFields(const NominalTypeDecl *target) {
+  auto numFields =
+    target->getStoredPropertiesAndMissingMemberPlaceholders().size();
+  if (auto cls = dyn_cast<ClassDecl>(target)) {
+    if (cls->isRootDefaultActor())
+      numFields++;
+  }
+  return numFields;
+}
+
+void irgen::forEachField(IRGenModule &IGM, const NominalTypeDecl *typeDecl,
+                         llvm::function_ref<void(Field field)> fn) {
+  auto classDecl = dyn_cast<ClassDecl>(typeDecl);
+  if (classDecl && classDecl->isRootDefaultActor()) {
+    fn(Field::DefaultActorStorage);
+  }
+
+  for (auto decl :
+         typeDecl->getStoredPropertiesAndMissingMemberPlaceholders()) {
+    if (auto var = dyn_cast<VarDecl>(decl)) {
+      fn(var);
+    } else {
+      fn(cast<MissingMemberDecl>(decl));
+    }
+  }
+}
+
+SILType Field::getType(IRGenModule &IGM, SILType baseType) const {
+  switch (getKind()) {
+  case Field::Var:
+    return baseType.getFieldType(getVarDecl(), IGM.getSILModule(),
+                                 TypeExpansionContext::minimal());
+  case Field::MissingMember:
+    llvm_unreachable("cannot ask for type of missing member");
+  case Field::DefaultActorStorage:
+    return SILType::getPrimitiveObjectType(
+                             IGM.Context.TheDefaultActorStorageType);
+  }
+  llvm_unreachable("bad field kind");
+}
+
+Type Field::getInterfaceType(IRGenModule &IGM) const {
+  switch (getKind()) {
+  case Field::Var:
+    return getVarDecl()->getInterfaceType();
+  case Field::MissingMember:
+    llvm_unreachable("cannot ask for type of missing member");
+  case Field::DefaultActorStorage:
+    return IGM.Context.TheDefaultActorStorageType;
+  }
+  llvm_unreachable("bad field kind");
+}
+
+StringRef Field::getName() const {
+  switch (getKind()) {
+  case Field::Var:
+    return getVarDecl()->getName().str();
+  case Field::MissingMember:
+    llvm_unreachable("cannot ask for type of missing member");
+  case Field::DefaultActorStorage:
+    return DEFAULT_ACTOR_STORAGE_FIELD_NAME;
+  }
+  llvm_unreachable("bad field kind");
 }

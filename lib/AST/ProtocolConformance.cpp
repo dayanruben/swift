@@ -26,6 +26,7 @@
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeWalker.h"
 #include "swift/AST/Types.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/Statistic.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -119,12 +120,6 @@ ProtocolConformanceRef::subst(Type origType,
 
   // Otherwise, compute the substituted type.
   auto substType = origType.subst(subs, conformances, options);
-
-  // Opened existentials trivially conform and do not need to go through
-  // substitution map lookup.
-  if (substType->isOpenedExistential() &&
-      !options.contains(SubstFlags::ForceSubstituteOpenedExistentials))
-    return *this;
 
   auto *proto = getRequirement();
 
@@ -577,8 +572,7 @@ void NormalProtocolConformance::setSignatureConformances(
              "Should have interface types here");
       assert(idx < conformances.size());
       assert(conformances[idx].isInvalid() ||
-             conformances[idx].getRequirement() ==
-               req.getSecondType()->castTo<ProtocolType>()->getDecl());
+             conformances[idx].getRequirement() == req.getProtocolDecl());
       ++idx;
     }
   }
@@ -777,7 +771,7 @@ NormalProtocolConformance::getAssociatedConformance(Type assocType,
     if (reqt.getKind() == RequirementKind::Conformance) {
       // Is this the conformance we're looking for?
       if (reqt.getFirstType()->isEqual(assocType) &&
-          reqt.getSecondType()->castTo<ProtocolType>()->getDecl() == protocol)
+          reqt.getProtocolDecl() == protocol)
         return getSignatureConformances()[conformanceIndex];
 
       ++conformanceIndex;
@@ -845,7 +839,7 @@ void NormalProtocolConformance::finishSignatureConformances() {
       auto *depMemTy = origTy->castTo<DependentMemberType>();
       substTy = recursivelySubstituteBaseType(module, this, depMemTy);
     }
-    auto reqProto = req.getSecondType()->castTo<ProtocolType>()->getDecl();
+    auto reqProto = req.getProtocolDecl();
 
     // Looking up a conformance for a contextual type and mapping the
     // conformance context produces a more accurate result than looking
@@ -1262,6 +1256,12 @@ void NominalTypeDecl::prepareConformanceTable() const {
       addSynthesized(KnownProtocolKind::RawRepresentable);
     }
   }
+
+  // Actor classes conform to the actor protocol.
+  if (auto classDecl = dyn_cast<ClassDecl>(mutableThis)) {
+    if (classDecl->isActor())
+      addSynthesized(KnownProtocolKind::Actor);
+  }
 }
 
 bool NominalTypeDecl::lookupConformance(
@@ -1319,83 +1319,163 @@ NominalTypeDecl::getSatisfiedProtocolRequirementsForMember(
 }
 
 SmallVector<ProtocolDecl *, 2>
-DeclContext::getLocalProtocols(ConformanceLookupKind lookupKind) const {
+IterableDeclContext::getLocalProtocols(ConformanceLookupKind lookupKind) const {
   SmallVector<ProtocolDecl *, 2> result;
-
-  // Dig out the nominal type.
-  NominalTypeDecl *nominal = getSelfNominalTypeDecl();
-  if (!nominal) {
-    return result;
-  }
-
-  // Update to record all potential conformances.
-  nominal->prepareConformanceTable();
-  nominal->ConformanceTable->lookupConformances(
-    nominal,
-    const_cast<DeclContext *>(this),
-    lookupKind,
-    &result,
-    nullptr,
-    nullptr);
-
+  for (auto conformance : getLocalConformances(lookupKind))
+    result.push_back(conformance->getProtocol());
   return result;
 }
 
-SmallVector<ProtocolConformance *, 2>
-DeclContext::getLocalConformances(ConformanceLookupKind lookupKind) const {
-  SmallVector<ProtocolConformance *, 2> result;
+/// Find a synthesized ConcurrentValue conformance in this declaration context,
+/// if there is one.
+static ProtocolConformance *findSynthesizedConcurrentValueConformance(
+    const DeclContext *dc) {
+  auto nominal = dc->getSelfNominalTypeDecl();
+  if (!nominal)
+    return nullptr;
 
+  if (isa<ProtocolDecl>(nominal))
+    return nullptr;
+
+  if (dc->getParentModule() != nominal->getParentModule())
+    return nullptr;
+
+  auto cvProto = nominal->getASTContext().getProtocol(
+      KnownProtocolKind::ConcurrentValue);
+  if (!cvProto)
+    return nullptr;
+
+  auto conformance = dc->getParentModule()->lookupConformance(
+      nominal->getDeclaredInterfaceType(), cvProto);
+  if (!conformance || !conformance.isConcrete())
+    return nullptr;
+
+  auto concrete = conformance.getConcrete();
+  if (concrete->getDeclContext() != dc)
+    return nullptr;
+
+  auto normal = concrete->getRootNormalConformance();
+  if (!normal || normal->getSourceKind() != ConformanceEntryKind::Synthesized)
+    return nullptr;
+
+  return normal;
+}
+
+std::vector<ProtocolConformance *>
+LookupAllConformancesInContextRequest::evaluate(
+    Evaluator &eval, const IterableDeclContext *IDC) const {
   // Dig out the nominal type.
-  NominalTypeDecl *nominal = getSelfNominalTypeDecl();
+  const auto dc = IDC->getAsGenericContext();
+  const auto nominal = dc->getSelfNominalTypeDecl();
   if (!nominal) {
-    return result;
+    return { };
   }
 
   // Protocols only have self-conformances.
   if (auto protocol = dyn_cast<ProtocolDecl>(nominal)) {
     if (protocol->requiresSelfConformanceWitnessTable()) {
-      return SmallVector<ProtocolConformance *, 2>{
-        protocol->getASTContext().getSelfConformance(protocol)
-      };
+      return { protocol->getASTContext().getSelfConformance(protocol) };
     }
-    return SmallVector<ProtocolConformance *, 2>();
+
+    return { };
   }
 
-  // Update to record all potential conformances.
+  // Record all potential conformances.
   nominal->prepareConformanceTable();
+  std::vector<ProtocolConformance *> conformances;
   nominal->ConformanceTable->lookupConformances(
     nominal,
-    const_cast<DeclContext *>(this),
-    lookupKind,
-    nullptr,
-    &result,
+    const_cast<GenericContext *>(dc),
+    &conformances,
     nullptr);
+
+  return conformances;
+}
+
+SmallVector<ProtocolConformance *, 2>
+IterableDeclContext::getLocalConformances(ConformanceLookupKind lookupKind)
+    const {
+  // Look up the cached set of all of the conformances.
+  std::vector<ProtocolConformance *> conformances =
+      evaluateOrDefault(
+        getASTContext().evaluator, LookupAllConformancesInContextRequest{this},
+        { });
+
+  // Copy all of the conformances we want.
+  SmallVector<ProtocolConformance *, 2> result;
+  std::copy_if(
+      conformances.begin(), conformances.end(), std::back_inserter(result),
+      [&](ProtocolConformance *conformance) {
+         // If we are to filter out this result, do so now.
+         switch (lookupKind) {
+         case ConformanceLookupKind::OnlyExplicit:
+           switch (conformance->getSourceKind()) {
+           case ConformanceEntryKind::Explicit:
+           case ConformanceEntryKind::Synthesized:
+             return true;
+           case ConformanceEntryKind::Implied:
+           case ConformanceEntryKind::Inherited:
+             return false;
+           }
+
+         case ConformanceLookupKind::NonInherited:
+           switch (conformance->getSourceKind()) {
+           case ConformanceEntryKind::Explicit:
+           case ConformanceEntryKind::Synthesized:
+           case ConformanceEntryKind::Implied:
+             return true;
+           case ConformanceEntryKind::Inherited:
+             return false;
+           }
+
+         case ConformanceLookupKind::All:
+         case ConformanceLookupKind::NonStructural:
+           return true;
+         }
+      });
+
+  // If we want to add structural conformances, do so now.
+  switch (lookupKind) {
+    case ConformanceLookupKind::All:
+    case ConformanceLookupKind::NonInherited: {
+      // Look for a ConcurrentValue conformance globally. If it is synthesized
+      // and matches this declaration context, use it.
+      auto dc = getAsGenericContext();
+      if (auto conformance = findSynthesizedConcurrentValueConformance(dc))
+        result.push_back(conformance);
+      break;
+    }
+
+    case ConformanceLookupKind::NonStructural:
+    case ConformanceLookupKind::OnlyExplicit:
+      break;
+  }
 
   return result;
 }
 
 SmallVector<ConformanceDiagnostic, 4>
-DeclContext::takeConformanceDiagnostics() const {
+IterableDeclContext::takeConformanceDiagnostics() const {
   SmallVector<ConformanceDiagnostic, 4> result;
 
   // Dig out the nominal type.
-  NominalTypeDecl *nominal = getSelfNominalTypeDecl();
+  const auto dc = getAsGenericContext();
+  const auto nominal = dc->getSelfNominalTypeDecl();
+
   if (!nominal) {
-    return { };
+    return result;
   }
 
   // Protocols are not subject to the checks for supersession.
   if (isa<ProtocolDecl>(nominal)) {
-    return { };
+    return result;
   }
 
   // Update to record all potential conformances.
   nominal->prepareConformanceTable();
   nominal->ConformanceTable->lookupConformances(
     nominal,
-    const_cast<DeclContext *>(this),
-    ConformanceLookupKind::All,
-    nullptr,
+    const_cast<GenericContext *>(dc),
     nullptr,
     &result);
 
@@ -1490,7 +1570,7 @@ ProtocolConformanceRef::getCanonicalConformanceRef() const {
 
 struct ProtocolConformanceTraceFormatter
     : public UnifiedStatsReporter::TraceFormatter {
-  void traceName(const void *Entity, raw_ostream &OS) const {
+  void traceName(const void *Entity, raw_ostream &OS) const override {
     if (!Entity)
       return;
     const ProtocolConformance *C =
@@ -1498,7 +1578,7 @@ struct ProtocolConformanceTraceFormatter
     C->printName(OS);
   }
   void traceLoc(const void *Entity, SourceManager *SM,
-                clang::SourceManager *CSM, raw_ostream &OS) const {
+                clang::SourceManager *CSM, raw_ostream &OS) const override {
     if (!Entity)
       return;
     const ProtocolConformance *C =
@@ -1523,4 +1603,25 @@ FrontendStatsTracer::getTraceFormatter<const ProtocolConformance *>() {
 void swift::simple_display(llvm::raw_ostream &out,
                            const ProtocolConformance *conf) {
   conf->printName(out);
+}
+
+SourceLoc swift::extractNearestSourceLoc(const ProtocolConformance *conformance) {
+  return extractNearestSourceLoc(conformance->getDeclContext());
+}
+
+void swift::simple_display(llvm::raw_ostream &out, ProtocolConformanceRef conformanceRef) {
+  if (conformanceRef.isAbstract()) {
+    simple_display(out, conformanceRef.getAbstract());
+  } else if (conformanceRef.isConcrete()) {
+    simple_display(out, conformanceRef.getConcrete());
+  }
+}
+
+SourceLoc swift::extractNearestSourceLoc(const ProtocolConformanceRef conformanceRef) {
+  if (conformanceRef.isAbstract()) {
+    return extractNearestSourceLoc(conformanceRef.getAbstract());
+  } else if (conformanceRef.isConcrete()) {
+    return extractNearestSourceLoc(conformanceRef.getConcrete());
+  }
+  return SourceLoc();
 }

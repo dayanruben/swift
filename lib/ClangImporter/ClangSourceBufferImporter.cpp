@@ -39,20 +39,21 @@ SourceLoc ClangSourceBufferImporter::resolveSourceLocation(
   if (decomposedLoc.first.isInvalid())
     return loc;
 
-  auto buffer = clangSrcMgr.getBuffer(decomposedLoc.first);
+  auto clangFileID = decomposedLoc.first;
+  auto buffer = clangSrcMgr.getBufferOrFake(clangFileID);
   unsigned mirrorID;
 
-  auto mirrorIter = mirroredBuffers.find(buffer);
+  auto mirrorIter = mirroredBuffers.find(buffer.getBufferStart());
   if (mirrorIter != mirroredBuffers.end()) {
     mirrorID = mirrorIter->second;
   } else {
     std::unique_ptr<llvm::MemoryBuffer> mirrorBuffer{
-      llvm::MemoryBuffer::getMemBuffer(buffer->getBuffer(),
-                                       buffer->getBufferIdentifier(),
+      llvm::MemoryBuffer::getMemBuffer(buffer.getBuffer(),
+                                       buffer.getBufferIdentifier(),
                                        /*RequiresNullTerminator=*/true)
     };
     mirrorID = swiftSourceManager.addNewSourceBuffer(std::move(mirrorBuffer));
-    mirroredBuffers[buffer] = mirrorID;
+    mirroredBuffers[buffer.getBufferStart()] = mirrorID;
   }
   loc = swiftSourceManager.getLocForOffset(mirrorID, decomposedLoc.second);
 
@@ -67,11 +68,17 @@ SourceLoc ClangSourceBufferImporter::resolveSourceLocation(
 
   StringRef presumedFile = presumedLoc.getFilename();
   SourceLoc startOfLine = loc.getAdvancedLoc(-presumedLoc.getColumn() + 1);
-  bool isNewVirtualFile = swiftSourceManager.openVirtualFile(
-      startOfLine, presumedFile, presumedLoc.getLine() - bufferLineNumber);
-  if (isNewVirtualFile) {
-    SourceLoc endOfLine = findEndOfLine(swiftSourceManager, loc, mirrorID);
-    swiftSourceManager.closeVirtualFile(endOfLine);
+
+  // FIXME: Virtual files can't actually model the EOF position correctly, so
+  // if this virtual file would start at EOF, just hope the physical location
+  // will do.
+  if (startOfLine != swiftSourceManager.getRangeForBuffer(mirrorID).getEnd()) {
+    bool isNewVirtualFile = swiftSourceManager.openVirtualFile(
+        startOfLine, presumedFile, presumedLoc.getLine() - bufferLineNumber);
+    if (isNewVirtualFile) {
+      SourceLoc endOfLine = findEndOfLine(swiftSourceManager, loc, mirrorID);
+      swiftSourceManager.closeVirtualFile(endOfLine);
+    }
   }
 
   using SourceManagerRef = llvm::IntrusiveRefCntPtr<const clang::SourceManager>;

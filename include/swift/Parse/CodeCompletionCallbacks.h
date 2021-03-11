@@ -119,7 +119,7 @@ public:
   virtual void setAttrTargetDeclKind(Optional<DeclKind> DK) {}
 
   /// Complete expr-dot after we have consumed the dot.
-  virtual void completeDotExpr(Expr *E, SourceLoc DotLoc) {};
+  virtual void completeDotExpr(CodeCompletionExpr *E, SourceLoc DotLoc) {};
 
   /// Complete the beginning of a statement or expression.
   virtual void completeStmtOrExpr(CodeCompletionExpr *E) {};
@@ -181,6 +181,9 @@ public:
   /// @available.
   virtual void completeDeclAttrParam(DeclAttrKind DK, int Index) {};
 
+  /// Complete 'async' and 'throws' at effects specifier position.
+  virtual void completeEffectsSpecifier(bool hasAsync, bool hasThrows) {};
+
   /// Complete within a precedence group decl or after a colon in an
   /// operator decl.
   virtual void completeInPrecedenceGroup(SyntaxKind SK) {};
@@ -190,13 +193,20 @@ public:
 
   /// Complete the import decl with importable modules.
   virtual void
-  completeImportDecl(std::vector<Located<Identifier>> &Path) {};
+  completeImportDecl(ImportPath::Builder &Path) {};
 
   /// Complete unresolved members after dot.
   virtual void completeUnresolvedMember(CodeCompletionExpr *E,
                                         SourceLoc DotLoc) {};
 
   virtual void completeCallArg(CodeCompletionExpr *E, bool isFirst) {};
+
+  virtual bool canPerformCompleteLabeledTrailingClosure() const {
+    return false;
+  }
+
+  virtual void completeLabeledTrailingClosure(CodeCompletionExpr *E,
+                                              bool isAtStartOfLine) {};
 
   virtual void completeReturnStmt(CodeCompletionExpr *E) {};
 

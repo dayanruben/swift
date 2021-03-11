@@ -1,9 +1,9 @@
 // RUN: %empty-directory(%t)
 
-// RUN: %target-build-swift -emit-library -module-name TestModule -module-link-name TestModule %S/Inputs/protocol-public.swift -emit-module-interface -swift-version 5 -o %t/%target-library-name(TestModule)
+// RUN: %target-build-swift -emit-library -module-name TestModule -module-link-name TestModule %S/Inputs/protocol-public-empty.swift -emit-module-interface -swift-version 5 -o %t/%target-library-name(TestModule)
 // RUN: %target-swift-frontend -prespecialize-generic-metadata -target %module-target-future -emit-ir -I %t -L %t %s | %FileCheck %s -DINT=i%target-ptrsize -DALIGNMENT=%target-alignment
 
-// REQUIRES: OS=macosx || OS=ios || OS=tvos || OS=watchos || OS=linux-gnu
+// REQUIRES: VENDOR=apple || OS=linux-gnu
 // UNSUPPORTED: CPU=i386 && OS=ios
 // UNSUPPORTED: CPU=armv7 && OS=ios
 // UNSUPPORTED: CPU=armv7s && OS=ios
@@ -60,7 +60,7 @@ doit()
 // CHECK: entry:
 // CHECK:   [[ERASED_TYPE:%[0-9]+]] = bitcast %swift.type* %1 to i8*
 // CHECK:   [[ERASED_TABLE:%[0-9]+]] = bitcast i8** %2 to i8*
-// CHECK:   {{%[0-9]+}} = call swiftcc %swift.metadata_response @__swift_instantiateGenericMetadata(
+// CHECK:   {{%[0-9]+}} = call swiftcc %swift.metadata_response @__swift_instantiateCanonicalPrespecializedGenericMetadata(
 // CHECK-SAME:     [[INT]] %0, 
 // CHECK-SAME:     i8* [[ERASED_TYPE]], 
 // CHECK-SAME:     i8* [[ERASED_TABLE]], 

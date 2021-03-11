@@ -73,8 +73,7 @@ void StackPromotion::run() {
     return;
 
   // Make sure that all stack allocating instructions are nested correctly.
-  StackNesting SN;
-  if (SN.correctStackNesting(F) == StackNesting::Changes::CFG) {
+  if (StackNesting::fixNesting(F) == StackNesting::Changes::CFG) {
     invalidateAnalysis(SILAnalysis::InvalidationKind::BranchesAndInstructions);
   } else {
     invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
@@ -140,7 +139,7 @@ bool StackPromotion::tryPromoteAlloc(AllocRefInst *ARI, EscapeAnalysis *EA,
     LLVM_DEBUG(llvm::dbgs() << "  uses don't post-dom allocation -> don't promote");
     return false;
   }
-  NumStackPromoted++;
+  ++NumStackPromoted;
 
   // We set the [stack] attribute in the alloc_ref.
   ARI->setStackAllocatable();

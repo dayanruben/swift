@@ -11,27 +11,22 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
+#include "swift/Basic/STLExtras.h"
 #include "swift/Demangling/ManglingMacros.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/Dominance.h"
 #include "swift/SIL/LoopInfo.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
+#include "swift/SIL/BasicBlockBits.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/ADT/TinyPtrVector.h"
 
 using namespace swift;
 
-/// Adds a new argument to an edge between a branch and a destination
-/// block.
-///
-/// \param branch The terminator to add the argument to.
-/// \param dest The destination block of the edge.
-/// \param val The value to the arguments of the branch.
-/// \return The created branch. The old branch is deleted.
-/// The argument is appended at the end of the argument tuple.
 TermInst *swift::addNewEdgeValueToBranch(TermInst *branch, SILBasicBlock *dest,
-                                         SILValue val) {
+                                         SILValue val,
+                                         InstModCallbacks &callbacks) {
   SILBuilderWithScope builder(branch);
   TermInst *newBr = nullptr;
 
@@ -58,6 +53,7 @@ TermInst *swift::addNewEdgeValueToBranch(TermInst *branch, SILBasicBlock *dest,
         cbi->getLoc(), cbi->getCondition(), cbi->getTrueBB(), trueArgs,
         cbi->getFalseBB(), falseArgs, cbi->getTrueBBCount(),
         cbi->getFalseBBCount());
+    callbacks.createdNewInst(newBr);
   } else if (auto *bi = dyn_cast<BranchInst>(branch)) {
     SmallVector<SILValue, 8> args;
 
@@ -67,13 +63,13 @@ TermInst *swift::addNewEdgeValueToBranch(TermInst *branch, SILBasicBlock *dest,
     args.push_back(val);
     assert(args.size() == dest->getNumArguments());
     newBr = builder.createBranch(bi->getLoc(), bi->getDestBB(), args);
+    callbacks.createdNewInst(newBr);
   } else {
     // At the moment we can only add arguments to br and cond_br.
     llvm_unreachable("Can't add argument to terminator");
   }
 
-  branch->dropAllReferences();
-  branch->eraseFromParent();
+  callbacks.deleteInst(branch);
 
   return newBr;
 }
@@ -147,7 +143,7 @@ void swift::erasePhiArgument(SILBasicBlock *block, unsigned argIndex) {
   //
   // NOTE: This needs to be a SmallSetVector since we need both uniqueness /and/
   // insertion order. Otherwise non-determinism can result.
-  SmallSetVector<SILBasicBlock *, 8> predBlocks;
+  BasicBlockSetVector<8> predBlocks(block->getParent());
 
   for (auto *pred : block->getPredecessorBlocks())
     predBlocks.insert(pred);
@@ -429,7 +425,7 @@ void swift::replaceBranchTarget(TermInst *t, SILBasicBlock *oldDest,
     }
     builder.createTryApply( tai->getLoc(), tai->getCallee(),
                 tai->getSubstitutionMap(), args, normalBB, errorBB,
-                tai->getSpecializationInfo());
+                tai->getApplyOptions(), tai->getSpecializationInfo());
     tai->eraseFromParent();
     return;
   }
@@ -446,6 +442,20 @@ void swift::replaceBranchTarget(TermInst *t, SILBasicBlock *oldDest,
     }
     builder.createYield(yi->getLoc(), args,resumeBB, unwindBB);
     yi->eraseFromParent();
+    return;
+  }
+      
+  case TermKind::AwaitAsyncContinuationInst: {
+    auto ai = cast<AwaitAsyncContinuationInst>(t);
+    SILBasicBlock *resumeBB =
+      (oldDest == ai->getResumeBB() ? newDest : ai->getResumeBB());
+    SILBasicBlock *errorBB =
+      (oldDest == ai->getErrorBB() ? newDest : ai->getErrorBB());
+    
+    builder.createAwaitAsyncContinuation(ai->getLoc(),
+                                         ai->getOperand(),
+                                         resumeBB, errorBB);
+    ai->eraseFromParent();
     return;
   }
 
@@ -477,6 +487,17 @@ bool swift::isCriticalEdge(TermInst *t, unsigned edgeIdx) {
     return false;
 
   return true;
+}
+
+SILBasicBlock *swift::createSplitBranchTarget(SILBasicBlock *targetBlock,
+                                              SILBuilder &builder,
+                                              SILLocation loc) {
+  auto *function = targetBlock->getParent();
+  auto *edgeBB = function->createBasicBlockBefore(targetBlock);
+  SILBuilderWithScope(edgeBB, builder.getBuilderContext(),
+                      builder.getCurrentDebugScope())
+      .createBranch(loc, targetBlock);
+  return edgeBB;
 }
 
 /// Splits the basic block at the iterator with an unconditional branch and
@@ -551,6 +572,20 @@ bool swift::splitCriticalEdgesFrom(SILBasicBlock *fromBB,
   return changed;
 }
 
+bool swift::splitCriticalEdgesTo(SILBasicBlock *toBB, DominanceInfo *domInfo,
+                                 SILLoopInfo *loopInfo) {
+  bool changed = false;
+  unsigned numPreds = std::distance(toBB->pred_begin(), toBB->pred_end());
+
+  for (unsigned idx = 0; idx != numPreds; ++idx) {
+    SILBasicBlock *fromBB = *std::next(toBB->pred_begin(), idx);
+    auto *newBB = splitIfCriticalEdge(fromBB, toBB);
+    changed |= (newBB != nullptr);
+  }
+
+  return changed;
+}
+
 bool swift::hasCriticalEdges(SILFunction &f, bool onlyNonCondBr) {
   for (SILBasicBlock &bb : f) {
     // Only consider critical edges for terminators that don't support block
@@ -561,9 +596,10 @@ bool swift::hasCriticalEdges(SILFunction &f, bool onlyNonCondBr) {
     if (isa<BranchInst>(bb.getTerminator()))
       continue;
 
-    for (unsigned idx = 0, e = bb.getSuccessors().size(); idx != e; ++idx)
-      if (isCriticalEdge(bb.getTerminator(), idx))
+    for (SILBasicBlock *succBB : bb.getSuccessorBlocks()) {
+      if (!isNonCriticalEdge(&bb, succBB))
         return true;
+    }
   }
   return false;
 }
@@ -711,6 +747,7 @@ static bool isSafeNonExitTerminator(TermInst *ti) {
   // yield is special because it can do arbitrary,
   // potentially-process-terminating things.
   case TermKind::YieldInst:
+  case TermKind::AwaitAsyncContinuationInst:
     return false;
   case TermKind::TryApplyInst:
     return true;

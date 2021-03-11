@@ -188,7 +188,7 @@ func r22459135() {
 
 // <rdar://problem/19710848> QoI: Friendlier error message for "[] as Set"
 // <rdar://problem/22326930> QoI: "argument for generic parameter 'Element' could not be inferred" lacks context
-_ = [] as Set  // expected-error {{value of protocol type 'Any' cannot conform to 'Hashable'; only struct/enum/class types can conform to protocols}}
+_ = [] as Set  // expected-error {{protocol 'Any' as a type cannot conform to 'Hashable'}} expected-note {{only concrete types such as structs, enums and classes can conform to protocols}}
 // expected-note@-1 {{required by generic struct 'Set' where 'Element' = 'Any'}}
 
 
@@ -648,7 +648,7 @@ let arr = [BottleLayout]()
 let layout = BottleLayout(count:1)
 let ix = arr.firstIndex(of:layout) // expected-error {{referencing instance method 'firstIndex(of:)' on 'Collection' requires that 'BottleLayout' conform to 'Equatable'}}
 
-let _: () -> UInt8 = { .init("a" as Unicode.Scalar) } // expected-error {{missing argument label 'ascii:' in call}}
+let _: () -> UInt8 = { .init("a" as Unicode.Scalar) } // expected-error {{initializer 'init(_:)' requires that 'Unicode.Scalar' conform to 'BinaryInteger'}}
 
 // https://bugs.swift.org/browse/SR-9068
 func compare<C: Collection, Key: Hashable, Value: Equatable>(c: C)
@@ -845,4 +845,16 @@ func test_dictionary_with_generic_mismatch_in_key_or_value() {
 
   let _: [S<Bool>: Int] = [S<Int>(): 42]
   // expected-error@-1 {{cannot convert value of type 'S<Int>' to expected dictionary key type 'S<Bool>'}}
+}
+
+
+// rdar://problem/56212087 - unable to infer type for generic parameter `T`
+func rdar56212087() {
+  func setValue(_: Any?, forKey: String) {}
+
+  func foo<T: ExpressibleByStringLiteral>(_: String, _: T) -> T {
+    fatalError()
+  }
+
+  setValue(foo("", ""), forKey: "") // Ok (T is inferred as a `String` instead of `Any?`)
 }

@@ -1,4 +1,4 @@
-// RUN: %target-swift-emit-silgen -parse-stdlib -module-name keypaths %s | %FileCheck %s
+// RUN: %target-swift-emit-silgen -disable-availability-checking -parse-stdlib -module-name keypaths %s | %FileCheck %s
 
 import Swift
 
@@ -470,13 +470,17 @@ func test_variadics() {
   // CHECK: [[FN_REF:%[0-9]+]] = function_ref @$ss27_allocateUninitializedArrayySayxG_BptBwlF
   // CHECK: [[MAKE_ARR:%[0-9]+]] = apply [[FN_REF]]<Int>([[ARR_COUNT]])
   // CHECK: ([[ARR:%[0-9]+]], %{{[0-9]+}}) = destructure_tuple [[MAKE_ARR]] : $(Array<Int>, Builtin.RawPointer)
-  // CHECK: keypath $KeyPath<SubscriptVariadic1, Int>, (root $SubscriptVariadic1; gettable_property $Int,  id @$s8keypaths18SubscriptVariadic1VyS2id_tcig : $@convention(method) (@guaranteed Array<Int>, SubscriptVariadic1) -> Int, getter @$s8keypaths18SubscriptVariadic1VyS2id_tcipACTK : $@convention(thin) (@in_guaranteed SubscriptVariadic1, UnsafeRawPointer) -> @out Int, indices [%$0 : $Array<Int> : $Array<Int>], indices_equals @$sSaySiGTH : $@convention(thin) (UnsafeRawPointer, UnsafeRawPointer) -> Bool, indices_hash @$sSaySiGTh : $@convention(thin) (UnsafeRawPointer) -> Int) ([[ARR]])
+  // CHECK: [[FIN_REF:%[0-9]+]] = function_ref @$ss27_finalizeUninitializedArrayySayxGABnlF
+  // CHECK: [[FIN_ARR:%[0-9]+]] = apply [[FIN_REF]]<Int>([[ARR]])
+  // CHECK: keypath $KeyPath<SubscriptVariadic1, Int>, (root $SubscriptVariadic1; gettable_property $Int,  id @$s8keypaths18SubscriptVariadic1VyS2id_tcig : $@convention(method) (@guaranteed Array<Int>, SubscriptVariadic1) -> Int, getter @$s8keypaths18SubscriptVariadic1VyS2id_tcipACTK : $@convention(thin) (@in_guaranteed SubscriptVariadic1, UnsafeRawPointer) -> @out Int, indices [%$0 : $Array<Int> : $Array<Int>], indices_equals @$sSaySiGTH : $@convention(thin) (UnsafeRawPointer, UnsafeRawPointer) -> Bool, indices_hash @$sSaySiGTh : $@convention(thin) (UnsafeRawPointer) -> Int) ([[FIN_ARR]])
   _ = \SubscriptVariadic1.[1, 2, 3]
   // CHECK: [[ARR_COUNT:%[0-9]+]] = integer_literal $Builtin.Word, 1
   // CHECK: [[FN_REF:%[0-9]+]] = function_ref @$ss27_allocateUninitializedArrayySayxG_BptBwlF
   // CHECK: [[MAKE_ARR:%[0-9]+]] = apply [[FN_REF]]<Int>([[ARR_COUNT]])
   // CHECK: ([[ARR:%[0-9]+]], %{{[0-9]+}}) = destructure_tuple [[MAKE_ARR]] : $(Array<Int>, Builtin.RawPointer)
-  // CHECK: keypath $KeyPath<SubscriptVariadic1, Int>, (root $SubscriptVariadic1; gettable_property $Int,  id @$s8keypaths18SubscriptVariadic1VyS2id_tcig : $@convention(method) (@guaranteed Array<Int>, SubscriptVariadic1) -> Int, getter @$s8keypaths18SubscriptVariadic1VyS2id_tcipACTK : $@convention(thin) (@in_guaranteed SubscriptVariadic1, UnsafeRawPointer) -> @out Int, indices [%$0 : $Array<Int> : $Array<Int>], indices_equals @$sSaySiGTH : $@convention(thin) (UnsafeRawPointer, UnsafeRawPointer) -> Bool, indices_hash @$sSaySiGTh : $@convention(thin) (UnsafeRawPointer) -> Int) ([[ARR]])
+  // CHECK: [[FIN_REF:%[0-9]+]] = function_ref @$ss27_finalizeUninitializedArrayySayxGABnlF
+  // CHECK: [[FIN_ARR:%[0-9]+]] = apply [[FIN_REF]]<Int>([[ARR]])
+  // CHECK: keypath $KeyPath<SubscriptVariadic1, Int>, (root $SubscriptVariadic1; gettable_property $Int,  id @$s8keypaths18SubscriptVariadic1VyS2id_tcig : $@convention(method) (@guaranteed Array<Int>, SubscriptVariadic1) -> Int, getter @$s8keypaths18SubscriptVariadic1VyS2id_tcipACTK : $@convention(thin) (@in_guaranteed SubscriptVariadic1, UnsafeRawPointer) -> @out Int, indices [%$0 : $Array<Int> : $Array<Int>], indices_equals @$sSaySiGTH : $@convention(thin) (UnsafeRawPointer, UnsafeRawPointer) -> Bool, indices_hash @$sSaySiGTh : $@convention(thin) (UnsafeRawPointer) -> Int) ([[FIN_ARR]])
   _ = \SubscriptVariadic1.[1]
   // CHECK: [[ARR_COUNT:%[0-9]+]] = integer_literal $Builtin.Word, 0
   // CHECK: [[FN_REF:%[0-9]+]] = function_ref @$ss27_allocateUninitializedArrayySayxG_BptBwlF
@@ -491,7 +495,9 @@ func test_variadics() {
   // CHECK: [[FN_REF:%[0-9]+]] = function_ref @$ss27_allocateUninitializedArrayySayxG_BptBwlF
   // CHECK: [[MAKE_ARR:%[0-9]+]] = apply [[FN_REF]]<String>([[ARR_COUNT]])
   // CHECK: ([[ARR:%[0-9]+]], %{{[0-9]+}}) = destructure_tuple [[MAKE_ARR]] : $(Array<String>, Builtin.RawPointer)
-  // CHECK: keypath $KeyPath<SubscriptVariadic2, String>, (root $SubscriptVariadic2; gettable_property $String,  id @$s8keypaths18SubscriptVariadic2Vyxxd_tcs26ExpressibleByStringLiteralRzluig : $@convention(method) <τ_0_0 where τ_0_0 : ExpressibleByStringLiteral> (@guaranteed Array<τ_0_0>, SubscriptVariadic2) -> @out τ_0_0, getter @$s8keypaths18SubscriptVariadic2Vyxxd_tcs26ExpressibleByStringLiteralRzluipACSSTK : $@convention(thin) (@in_guaranteed SubscriptVariadic2, UnsafeRawPointer) -> @out String, indices [%$0 : $Array<String> : $Array<String>], indices_equals @$sSaySSGTH : $@convention(thin) (UnsafeRawPointer, UnsafeRawPointer) -> Bool, indices_hash @$sSaySSGTh : $@convention(thin) (UnsafeRawPointer) -> Int) ([[ARR]])
+  // CHECK: [[FIN_REF:%[0-9]+]] = function_ref @$ss27_finalizeUninitializedArrayySayxGABnlF
+  // CHECK: [[FIN_ARR:%[0-9]+]] = apply [[FIN_REF]]<String>([[ARR]])
+  // CHECK: keypath $KeyPath<SubscriptVariadic2, String>, (root $SubscriptVariadic2; gettable_property $String,  id @$s8keypaths18SubscriptVariadic2Vyxxd_tcs26ExpressibleByStringLiteralRzluig : $@convention(method) <τ_0_0 where τ_0_0 : ExpressibleByStringLiteral> (@guaranteed Array<τ_0_0>, SubscriptVariadic2) -> @out τ_0_0, getter @$s8keypaths18SubscriptVariadic2Vyxxd_tcs26ExpressibleByStringLiteralRzluipACSSTK : $@convention(thin) (@in_guaranteed SubscriptVariadic2, UnsafeRawPointer) -> @out String, indices [%$0 : $Array<String> : $Array<String>], indices_equals @$sSaySSGTH : $@convention(thin) (UnsafeRawPointer, UnsafeRawPointer) -> Bool, indices_hash @$sSaySSGTh : $@convention(thin) (UnsafeRawPointer) -> Int) ([[FIN_ARR]])
   _ = \SubscriptVariadic2.["", #function]
   
   _ = \SubscriptVariadic3<String>.[""]
@@ -580,4 +586,46 @@ func tuples_generic<T, U, V>(_: T, _: U, _: V) {
   let _: ReferenceWritableKeyPath<TUC, V> = \TUC.2.x
   // CHECK: keypath $KeyPath<(T, U, C<V>), String>, <τ_0_0, τ_0_1, τ_0_2> (root $(τ_0_0, τ_0_1, C<τ_0_2>); tuple_element #2 : $C<τ_0_2>; stored_property #C.y : $String) <T, U, V>
   let _: KeyPath<TUC, String> = \TUC.2.y
+}
+
+protocol DefineSomeType {
+  associatedtype SomeType
+  func defineSome() -> SomeType
+}
+
+protocol A {}
+extension Int : A {}
+
+struct TestKeyPathWithSomeType : DefineSomeType {
+  func defineSome() -> some A {
+    return 0
+  }
+
+  func testKeyPathWithSome() {
+    _ = \S<SomeType>.y
+    _ = \S<SomeType>.z.x
+    _ = \C<SomeType>.x
+    _ = \C<SomeType>.y
+    _ = \C<SomeType>.z.x
+    _ = \C<SomeType>.z.z.y
+    _ = \C<SomeType>.nonfinal
+    _ = \C<SomeType>.computed
+    _ = \C<SomeType>.observed
+    _ = \C<SomeType>.nonfinal.x
+    _ = \C<SomeType>.computed.x
+    _ = \C<SomeType>.observed.x
+    _ = \C<SomeType>.z.computed
+    _ = \C<SomeType>.z.observed
+    _ = \C<SomeType>.observed.x
+    _ = \C<SomeType>.reabstracted
+    _ = \S<SomeType>.computed
+    _ = \S<SomeType>.observed
+    _ = \S<SomeType>.z.nonfinal
+    _ = \S<SomeType>.z.computed
+    _ = \S<SomeType>.z.observed
+    _ = \S<SomeType>.computed.x
+    _ = \S<SomeType>.computed.y
+    _ = \S<SomeType>.reabstracted
+
+  }
 }

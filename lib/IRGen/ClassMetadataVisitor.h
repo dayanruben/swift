@@ -21,14 +21,26 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/SIL/SILDeclRef.h"
+#include "swift/SIL/SILModule.h"
+#include "swift/SIL/SILVTable.h"
 #include "swift/SIL/SILVTableVisitor.h"
 #include "IRGen.h"
+#include "Field.h"
 #include "NominalMetadataVisitor.h"
 
 namespace swift {
 namespace irgen {
 
 class IRGenModule;
+
+/// Returns true if the given SILVTable entry needs to be reified as a runtime
+/// vtable entry.
+///
+/// Methods that have no overrides, and no ABI constraints that require a
+/// vtable to be present, can be left out of the runtime vtable for classes.
+bool methodRequiresReifiedVTableEntry(IRGenModule &IGM,
+                                      const SILVTable *vtable,
+                                      SILDeclRef method);
 
 /// A CRTP class for laying out class metadata.  Note that this does
 /// *not* handle the metadata template stuff.
@@ -43,27 +55,32 @@ protected:
 
   /// The most-derived class.
   ClassDecl *const Target;
+        
+  /// SILVTable entry for the class.
+  const SILVTable *VTable;
 
   ClassMetadataVisitor(IRGenModule &IGM, ClassDecl *target)
-    : super(IGM), Target(target) {}
+    : super(IGM), Target(target),
+      VTable(IGM.getSILModule().lookUpVTable(target, /*deserialize*/ false)) {}
 
 public:
   void layout() {
+    static_assert(MetadataAdjustmentIndex::Class == 2,
+                  "Adjustment index must be synchronized with this layout");
+
     // HeapMetadata header.
     asImpl().addDestructorFunction();
 
     // Metadata header.
     super::layout();
 
-    // ClassMetadata header.  In ObjCInterop mode, this must be
-    // layout-compatible with an Objective-C class.  The superclass
-    // pointer is useful regardless of mode, but the rest of the data
-    // isn't necessary.
-    // FIXME: Figure out what can be removed altogether in non-objc-interop
-    // mode and remove it. rdar://problem/18801263
+    // ClassMetadata header. This must be layout-compatible with Objective-C
+    // classes when interoperability is enabled.
     asImpl().addSuperclass();
-    asImpl().addClassCacheData();
-    asImpl().addClassDataPointer();
+    if (IGM.ObjCInterop) {
+      asImpl().addClassCacheData();
+      asImpl().addClassDataPointer();
+    }
 
     asImpl().addClassFlags();
     asImpl().addInstanceAddressPoint();
@@ -87,6 +104,10 @@ public:
   /// of a generic-layout class.
   void noteEndOfFieldOffsets(ClassDecl *whichClass) {}
 
+  /// Notes the existence of a formally virtual method that has been elided from the
+  /// reified vtable because it has no overrides.
+  void noteNonoverriddenMethod(SILDeclRef method) {}
+        
 private:
   /// Add fields associated with the given class and its bases.
   void addClassMembers(ClassDecl *theClass) {
@@ -137,10 +158,9 @@ private:
     // But we currently always give classes field-offset vectors,
     // whether they need them or not.
     asImpl().noteStartOfFieldOffsets(theClass);
-    for (auto field :
-           theClass->getStoredPropertiesAndMissingMemberPlaceholders()) {
-      addFieldEntries(field);
-    }
+    forEachField(IGM, theClass, [&](Field field) {
+      asImpl().addFieldEntries(field);
+    });
     asImpl().noteEndOfFieldOffsets(theClass);
 
     // If the class has resilient metadata, we cannot make any assumptions
@@ -151,15 +171,28 @@ private:
     // Add vtable entries.
     asImpl().addVTableEntries(theClass);
   }
-  
-private:
-  void addFieldEntries(Decl *field) {
-    if (auto var = dyn_cast<VarDecl>(field)) {
-      asImpl().addFieldOffset(var);
-      return;
+
+  friend SILVTableVisitor<Impl>;
+  void addMethod(SILDeclRef declRef) {
+    // Does this method require a reified runtime vtable entry?
+    if (!VTable || methodRequiresReifiedVTableEntry(IGM, VTable, declRef)) {
+      asImpl().addReifiedVTableEntry(declRef);
+    } else {
+      asImpl().noteNonoverriddenMethod(declRef);
     }
-    if (auto placeholder = dyn_cast<MissingMemberDecl>(field)) {
-      asImpl().addFieldOffsetPlaceholders(placeholder);
+  }
+  
+        
+  void addFieldEntries(Field field) {
+    switch (field.getKind()) {
+    case Field::Var:
+      asImpl().addFieldOffset(field.getVarDecl());
+      return;
+    case Field::MissingMember:
+      asImpl().addFieldOffsetPlaceholders(field.getMissingMemberDecl());
+      return;
+    case Field::DefaultActorStorage:
+      asImpl().addDefaultActorStorageFieldOffset();
       return;
     }
   }
@@ -193,10 +226,11 @@ public:
   void addClassAddressPoint() { addInt32(); }
   void addClassCacheData() { addPointer(); addPointer(); }
   void addClassDataPointer() { addPointer(); }
-  void addMethod(SILDeclRef declRef) {
+  void addReifiedVTableEntry(SILDeclRef declRef) {
     addPointer();
   }
   void addMethodOverride(SILDeclRef baseRef, SILDeclRef declRef) {}
+  void addDefaultActorStorageFieldOffset() { addPointer(); }
   void addFieldOffset(VarDecl *var) { addPointer(); }
   void addFieldOffsetPlaceholders(MissingMemberDecl *mmd) {
     for (unsigned i = 0, e = mmd->getNumberOfFieldOffsetVectorEntries();

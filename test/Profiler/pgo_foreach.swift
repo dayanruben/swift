@@ -3,6 +3,7 @@
 
 // This unusual use of 'sh' allows the path of the profraw file to be
 // substituted by %target-run.
+// RUN: %target-codesign %t/main
 // RUN: %target-run sh -c 'env LLVM_PROFILE_FILE=$1 $2' -- %t/default.profraw %t/main
 
 // RUN: %llvm-profdata merge %t/default.profraw -o %t/default.profdata
@@ -42,7 +43,7 @@ public func guessForEach1(x: Int32) -> Int32 {
 // IR-OPT-LABEL: define swiftcc i32 @$s9pgo_foreach10guessWhiles5Int32VAD1x_tF
 
 public func guessForEach2(x: Int32) -> Int32 {
-  // SIL: switch_enum {{.*}} : $Optional<(String, Int32)>, case #Optional.some!enumelt: {{.*}} !case_count(168), case #Optional.none!enumelt: {{.*}} !case_count(42)
+  // SIL: switch_enum {{.*}} : $Optional<(key: String, value: Int32)>, case #Optional.some!enumelt: {{.*}} !case_count(168), case #Optional.none!enumelt: {{.*}} !case_count(42)
 
   var ret : Int32 = 0
   let names = ["John" : Int32(1), "Paul" : Int32(2), "George" : Int32(3), "Ringo" : Int32(x)]

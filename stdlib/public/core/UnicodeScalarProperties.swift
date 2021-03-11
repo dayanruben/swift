@@ -19,7 +19,7 @@ extension Unicode.Scalar {
 
   /// A value that provides access to properties of a Unicode scalar that are
   /// defined by the Unicode standard.
-  public struct Properties {
+  public struct Properties: ConcurrentValue {
     @usableFromInline
     internal var _scalar: Unicode.Scalar
 
@@ -692,15 +692,14 @@ extension Unicode.Scalar.Properties {
   /// all current case mappings. In the event more space is needed, it will be
   /// allocated on the heap.
   internal func _applyMapping(_ u_strTo: _U_StrToX) -> String {
-    // TODO(String performance): Stack buffer first and then detect real count
-    let count = 64
-    var array = Array<UInt16>(repeating: 0, count: count)
-    let len: Int = array.withUnsafeMutableBufferPointer { bufPtr in
+    // Allocate 16 code units on the stack.
+    var fixedArray = _FixedArray16<UInt16>(allZeros: ())
+    let count: Int = fixedArray.withUnsafeMutableBufferPointer { buf in
       return _scalar.withUTF16CodeUnits { utf16 in
         var err = __swift_stdlib_U_ZERO_ERROR
         let correctSize = u_strTo(
-          bufPtr.baseAddress._unsafelyUnwrappedUnchecked,
-          Int32(bufPtr.count),
+          buf.baseAddress._unsafelyUnwrappedUnchecked,
+          Int32(buf.count),
           utf16.baseAddress._unsafelyUnwrappedUnchecked,
           Int32(utf16.count),
           "",
@@ -708,13 +707,36 @@ extension Unicode.Scalar.Properties {
         guard err.isSuccess else {
           fatalError("Unexpected error case-converting Unicode scalar.")
         }
-        // TODO: _internalInvariant(count == correctSize, "inconsistent ICU behavior")
         return Int(correctSize)
       }
     }
-    // TODO: replace `len` with `count`
-    return array[..<len].withUnsafeBufferPointer {
-      return String._uncheckedFromUTF16($0)
+    if _fastPath(count <= 16) {
+      fixedArray.count = count
+      return fixedArray.withUnsafeBufferPointer {
+        String._uncheckedFromUTF16($0)
+      }
+    }
+    // Allocate `count` code units on the heap.
+    let array = Array<UInt16>(unsafeUninitializedCapacity: count) {
+      buf, initializedCount in
+      _scalar.withUTF16CodeUnits { utf16 in
+        var err = __swift_stdlib_U_ZERO_ERROR
+        let correctSize = u_strTo(
+          buf.baseAddress._unsafelyUnwrappedUnchecked,
+          Int32(buf.count),
+          utf16.baseAddress._unsafelyUnwrappedUnchecked,
+          Int32(utf16.count),
+          "",
+          &err)
+        guard err.isSuccess else {
+          fatalError("Unexpected error case-converting Unicode scalar.")
+        }
+        _internalInvariant(count == correctSize, "inconsistent ICU behavior")
+        initializedCount = count
+      }
+    }
+    return array.withUnsafeBufferPointer {
+      String._uncheckedFromUTF16($0)
     }
   }
 
@@ -799,7 +821,7 @@ extension Unicode {
   /// The general category of a scalar is its "first-order, most usual
   /// categorization". It does not attempt to cover multiple uses of some
   /// scalars, such as the use of letters to represent Roman numerals.
-  public enum GeneralCategory {
+  public enum GeneralCategory: ConcurrentValue {
 
     /// An uppercase letter.
     ///
@@ -1091,27 +1113,29 @@ extension Unicode.Scalar.Properties {
   internal func _scalarName(
     _ choice: __swift_stdlib_UCharNameChoice
   ) -> String? {
-    var err = __swift_stdlib_U_ZERO_ERROR
-    let count = Int(__swift_stdlib_u_charName(icuValue, choice, nil, 0, &err))
+    var error = __swift_stdlib_U_ZERO_ERROR
+    let count = Int(__swift_stdlib_u_charName(icuValue, choice, nil, 0, &error))
     guard count > 0 else { return nil }
 
     // ICU writes a trailing null, so we have to save room for it as well.
-    var array = Array<UInt8>(repeating: 0, count: count + 1)
-    return array.withUnsafeMutableBufferPointer { bufPtr in
-      var err = __swift_stdlib_U_ZERO_ERROR
+    let array = Array<UInt8>(unsafeUninitializedCapacity: count + 1) {
+      buffer, initializedCount in
+      var error = __swift_stdlib_U_ZERO_ERROR
       let correctSize = __swift_stdlib_u_charName(
         icuValue,
         choice,
-        UnsafeMutableRawPointer(bufPtr.baseAddress._unsafelyUnwrappedUnchecked)
+        UnsafeMutableRawPointer(buffer.baseAddress._unsafelyUnwrappedUnchecked)
           .assumingMemoryBound(to: Int8.self),
-        Int32(bufPtr.count),
-        &err)
-      guard err.isSuccess else {
+        Int32(buffer.count),
+        &error)
+      guard error.isSuccess else {
         fatalError("Unexpected error case-converting Unicode scalar.")
       }
       _internalInvariant(count == correctSize, "inconsistent ICU behavior")
-      return String._fromASCII(
-        UnsafeBufferPointer(rebasing: bufPtr[..<count]))
+      initializedCount = count + 1
+    }
+    return array.withUnsafeBufferPointer { buffer in
+      String._fromASCII(UnsafeBufferPointer(rebasing: buffer[..<count]))
     }
   }
 
@@ -1132,7 +1156,7 @@ extension Unicode.Scalar.Properties {
   /// The name of a scalar is immutable and never changed in future versions of
   /// the Unicode Standard. The `nameAlias` property is provided to issue
   /// corrections if a name was issued erroneously. For example, the `name` of
-  /// U+FE18 is "PRESENTATION FORM FOR VERTICAL RIGHT WHITE LENTICULAR BRAKCET"
+  /// U+FE18 is "PRESENTATION FORM FOR VERTICAL RIGHT WHITE LENTICULAR BRACKET"
   /// (note that "BRACKET" is misspelled). The `nameAlias` property then
   /// contains the corrected name.
   ///
@@ -1184,7 +1208,7 @@ extension Unicode {
   ///     let overlayClassIsOverlay = overlayClass == .overlay
   ///     // overlayClassIsOverlay == true
   public struct CanonicalCombiningClass:
-    Comparable, Hashable, RawRepresentable
+    Comparable, Hashable, RawRepresentable, ConcurrentValue
   {
     /// Base glyphs that occupy their own space and do not combine with others.
     public static let notReordered = CanonicalCombiningClass(rawValue: 0)
@@ -1308,7 +1332,7 @@ extension Unicode {
   /// Some letterlike scalars used in numeric systems, such as Greek or Latin
   /// letters, do not have a non-nil numeric type, in order to prevent programs
   /// from incorrectly interpreting them as numbers in non-numeric contexts.
-  public enum NumericType {
+  public enum NumericType: ConcurrentValue {
 
     /// A digit that is commonly understood to form base-10 numbers.
     ///
@@ -1332,7 +1356,7 @@ extension Unicode {
     /// type or a non-digit numeric value.
     ///
     /// This numeric type includes fractions such as "⅕" (U+2155 VULGAR
-    /// FRACITON ONE FIFTH), numerical CJK ideographs like "兆" (U+5146 CJK
+    /// FRACTION ONE FIFTH), numerical CJK ideographs like "兆" (U+5146 CJK
     /// UNIFIED IDEOGRAPH-5146), and other scalars that are not decimal digits
     /// used positionally in the writing of base-10 numbers.
     ///

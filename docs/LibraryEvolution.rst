@@ -29,7 +29,7 @@ Library evolution was formally described in `SE-0260 <SE0260_>`_, but this
 document should be kept up to date as new features are added to the language.
 
 .. _library evolution: https://swift.org/blog/abi-stability-and-more/
-.. _SE0260: https://github.com/apple/swift-evolution/blob/master/proposals/0260-library-evolution.md
+.. _SE0260: https://github.com/apple/swift-evolution/blob/main/proposals/0260-library-evolution.md
 
 .. contents:: :local:
 
@@ -108,7 +108,7 @@ with a single app target are not forced to think about access control, anyone
 writing a bundled library should (ideally) not be required to use any of the
 annotations described below in order to achieve full performance.
 
-.. _SE0193: https://github.com/apple/swift-evolution/blob/master/proposals/0193-cross-module-inlining-and-specialization.md
+.. _SE0193: https://github.com/apple/swift-evolution/blob/main/proposals/0193-cross-module-inlining-and-specialization.md
 .. _Swift Package Manager: https://swift.org/package-manager/
 
 .. note::
@@ -159,7 +159,7 @@ No other changes are permitted; the following are particularly of note:
   not they have default arguments.
 - An ABI-public function that throws may not become non-throwing or vice versa.
 - The ``@escaping`` attribute may not be added to or removed from a parameter.
-- Adding or removing a function builder from a parameter is a
+- Adding or removing a result builder from a parameter is a
   `binary-compatible source-breaking change`.
 
 
@@ -210,7 +210,7 @@ any future use of the function must take this into account.
 Although they are not a supported feature for arbitrary libraries at this time,
 public `transparent`_ functions are implicitly marked ``@inlinable``.
 
-.. _transparent: https://github.com/apple/swift/blob/master/docs/TransparentAttr.md
+.. _transparent: https://github.com/apple/swift/blob/main/docs/TransparentAttr.md
 
 
 Restrictions on Inlinable Functions
@@ -578,7 +578,9 @@ There are very few safe changes to make to protocols and their members:
 - The ``@discardableResult`` and ``@warn_unqualified_access`` attributes may
   be added to or removed from a function requirement.
 - A new ``associatedtype`` requirement may be added (with the appropriate
-  availability), as long as it has a default implementation.
+  availability), as long as it has a default implementation. If the protocol
+  did not have one or more ``associatedtype`` requirements before the change,
+  then this is a `binary-compatible source-breaking change`.
 - A new non-type requirement may be added (with the appropriate availability),
   as long as it has an unconstrained default implementation. If the requirement
   uses ``Self`` and the protocol has no other requirements using ``Self`` and

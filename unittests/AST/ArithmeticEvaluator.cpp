@@ -16,6 +16,7 @@
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/Evaluator.h"
 #include "swift/AST/SimpleRequest.h"
+#include "swift/Basic/LangOptions.h"
 #include "swift/Basic/SourceManager.h"
 #include "gtest/gtest.h"
 #include <cmath>
@@ -218,9 +219,9 @@ TEST(ArithmeticEvaluator, Simple) {
 
   SourceManager sourceMgr;
   DiagnosticEngine diags(sourceMgr);
-  Evaluator evaluator(diags,
-                      /*debugDumpCycles=*/false,
-                      /*buildDependencyGraph=*/true);
+  LangOptions opts;
+  opts.DebugDumpCycles = false;
+  Evaluator evaluator(diags, opts);
   evaluator.registerRequestFunctions(Zone::ArithmeticEvaluator,
                                      arithmeticRequestFunctions);
 
@@ -250,77 +251,6 @@ TEST(ArithmeticEvaluator, Simple) {
   EXPECT_EQ(*sum->cachedValue, 3.14159 + 2.71828);
   EXPECT_EQ(*product->cachedValue, expectedResult);
 
-  // Dependency printing.
-
-  // Cache some values first, so they show up in the result.
-  (void)llvm::cantFail(evaluator(InternallyCachedEvaluationRule(product)),
-                       "no explicit cycles were requested");
-
-  std::string productDependencies;
-  {
-    llvm::raw_string_ostream out(productDependencies);
-    evaluator.printDependencies(InternallyCachedEvaluationRule(product), out);
-  }
-
-  EXPECT_EQ(productDependencies,
-    " `--InternallyCachedEvaluationRule(Binary: product) -> 2.461145e+02\n"
-    "     `--InternallyCachedEvaluationRule(Binary: sum) -> 5.859870e+00\n"
-    "     |   `--InternallyCachedEvaluationRule(Literal: 3.141590e+00)\n"
-    "     |   `--InternallyCachedEvaluationRule(Literal: 2.718280e+00)\n"
-    "     `--InternallyCachedEvaluationRule(Literal: 4.200000e+01)\n");
-
-  std::string sumDependencies;
-  {
-    llvm::raw_string_ostream out(sumDependencies);
-    evaluator.printDependencies(ExternallyCachedEvaluationRule(product), out);
-  }
-
-  EXPECT_EQ(sumDependencies,
-    " `--ExternallyCachedEvaluationRule(Binary: product)\n"
-    "     `--ExternallyCachedEvaluationRule(Binary: sum)\n"
-    "     |   `--ExternallyCachedEvaluationRule(Literal: 3.141590e+00)\n"
-    "     |   `--ExternallyCachedEvaluationRule(Literal: 2.718280e+00)\n"
-    "     `--ExternallyCachedEvaluationRule(Literal: 4.200000e+01)\n");
-
-  // Graphviz printing.
-  std::string allDependencies;
-  {
-    llvm::raw_string_ostream out(allDependencies);
-    evaluator.printDependenciesGraphviz(out);
-  }
-
-  EXPECT_EQ(allDependencies,
-    "digraph Dependencies {\n"
-    "  request_0 -> request_1;\n"
-    "  request_0 -> request_4;\n"
-    "  request_1 -> request_3;\n"
-    "  request_1 -> request_2;\n"
-    "  request_5 -> request_6;\n"
-    "  request_5 -> request_9;\n"
-    "  request_6 -> request_8;\n"
-    "  request_6 -> request_7;\n"
-    "  request_10 -> request_11;\n"
-    "  request_10 -> request_14;\n"
-    "  request_11 -> request_13;\n"
-    "  request_11 -> request_12;\n"
-    "\n"
-    "  request_0 [label=\"ExternallyCachedEvaluationRule(Binary: product)\"];\n"
-    "  request_1 [label=\"ExternallyCachedEvaluationRule(Binary: sum)\"];\n"
-    "  request_2 [label=\"ExternallyCachedEvaluationRule(Literal: 2.718280e+00)\"];\n"
-    "  request_3 [label=\"ExternallyCachedEvaluationRule(Literal: 3.141590e+00)\"];\n"
-    "  request_4 [label=\"ExternallyCachedEvaluationRule(Literal: 4.200000e+01)\"];\n"
-    "  request_5 [label=\"InternallyCachedEvaluationRule(Binary: product) -> 2.461145e+02\"];\n"
-    "  request_6 [label=\"InternallyCachedEvaluationRule(Binary: sum) -> 5.859870e+00\"];\n"
-    "  request_7 [label=\"InternallyCachedEvaluationRule(Literal: 2.718280e+00)\"];\n"
-    "  request_8 [label=\"InternallyCachedEvaluationRule(Literal: 3.141590e+00)\"];\n"
-    "  request_9 [label=\"InternallyCachedEvaluationRule(Literal: 4.200000e+01)\"];\n"
-    "  request_10 [label=\"UncachedEvaluationRule(Binary: product)\"];\n"
-    "  request_11 [label=\"UncachedEvaluationRule(Binary: sum)\"];\n"
-    "  request_12 [label=\"UncachedEvaluationRule(Literal: 2.718280e+00)\"];\n"
-    "  request_13 [label=\"UncachedEvaluationRule(Literal: 3.141590e+00)\"];\n"
-    "  request_14 [label=\"UncachedEvaluationRule(Literal: 4.200000e+01)\"];\n"
-    "}\n");
-
   // Cleanup
   delete pi;
   delete e;
@@ -343,9 +273,9 @@ TEST(ArithmeticEvaluator, Cycle) {
 
   SourceManager sourceMgr;
   DiagnosticEngine diags(sourceMgr);
-  Evaluator evaluator(diags,
-                      /*debugDumpCycles=*/false,
-                      /*buildDependencyGraph=*/false);
+  LangOptions opts;
+  opts.DebugDumpCycles = false;
+  Evaluator evaluator(diags, opts);
   evaluator.registerRequestFunctions(Zone::ArithmeticEvaluator,
                                      arithmeticRequestFunctions);
 
@@ -386,17 +316,6 @@ TEST(ArithmeticEvaluator, Cycle) {
   EXPECT_TRUE(std::isnan(evalOrNaN(evaluator,
                                    ExternallyCachedEvaluationRule(product))));
   EXPECT_FALSE(ExternallyCachedEvaluationRule::brokeCycle);
-
-  // Dependency printing.
-  std::string productDependencies;
-  {
-    llvm::raw_string_ostream out(productDependencies);
-    evaluator.printDependencies(InternallyCachedEvaluationRule(product), out);
-  }
-
-  EXPECT_EQ(productDependencies,
-    " `--InternallyCachedEvaluationRule(Binary: product) "
-      "(dependency not evaluated)\n");
 
   // Cleanup
   delete pi;

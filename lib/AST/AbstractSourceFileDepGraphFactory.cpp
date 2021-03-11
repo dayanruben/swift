@@ -33,12 +33,11 @@ using namespace fine_grained_dependencies;
 //==============================================================================
 
 AbstractSourceFileDepGraphFactory::AbstractSourceFileDepGraphFactory(
-    bool includePrivateDeps, bool hadCompilationError, StringRef swiftDeps,
-    StringRef fileFingerprint, bool emitDotFileAfterConstruction,
+    bool hadCompilationError, StringRef swiftDeps,
+    Fingerprint fileFingerprint, bool emitDotFileAfterConstruction,
     DiagnosticEngine &diags)
-    : includePrivateDeps(includePrivateDeps),
-      hadCompilationError(hadCompilationError), swiftDeps(swiftDeps.str()),
-      fileFingerprint(fileFingerprint.str()),
+    : hadCompilationError(hadCompilationError), swiftDeps(swiftDeps.str()),
+      fileFingerprint(fileFingerprint),
       emitDotFileAfterConstruction(emitDotFileAfterConstruction), diags(diags) {
 }
 
@@ -61,11 +60,11 @@ void AbstractSourceFileDepGraphFactory::addSourceFileNodesToGraph() {
   g.findExistingNodePairOrCreateAndAddIfNew(
       DependencyKey::createKeyForWholeSourceFile(DeclAspect::interface,
                                                  swiftDeps),
-      StringRef(fileFingerprint));
+      Fingerprint{fileFingerprint});
 }
 
 void AbstractSourceFileDepGraphFactory::addADefinedDecl(
-    const DependencyKey &interfaceKey, Optional<StringRef> fingerprint) {
+    const DependencyKey &interfaceKey, Optional<Fingerprint> fingerprint) {
 
   auto nodePair =
       g.findExistingNodePairOrCreateAndAddIfNew(interfaceKey, fingerprint);
@@ -79,14 +78,43 @@ void AbstractSourceFileDepGraphFactory::addAUsedDecl(
     const DependencyKey &defKey, const DependencyKey &useKey) {
   auto *defNode =
       g.findExistingNodeOrCreateIfNew(defKey, None, false /* = !isProvides */);
+
   // If the depended-upon node is defined in this file, then don't
   // create an arc to the user, when the user is the whole file.
   // Otherwise, if the defNode's type-body fingerprint changes,
   // the whole file will be marked as dirty, losing the benefit of the
   // fingerprint.
-  if (defNode->getIsProvides() &&
-      useKey.getKind() == NodeKind::sourceFileProvide)
-    return;
+
+  //  if (defNode->getIsProvides() &&
+  //      useKey.getKind() == NodeKind::sourceFileProvide)
+  //    return;
+
+  // Turns out the above three lines cause miscompiles, so comment them out
+  // for now. We might want them back if we can change the inputs to this
+  // function to be more precise.
+
+  // Example of a miscompile:
+  // In main.swift
+  // func foo(_: Any) { print("Hello Any") }
+  //    foo(123)
+  // Then add the following line to another file:
+  // func foo(_: Int) { print("Hello Int") }
+  // Although main.swift needs to get recompiled, the commented-out code below
+  // prevents that.
+
+  auto nullableUse = g.findExistingNode(useKey);
+  assert(nullableUse.isNonNull() && "Use must be an already-added provides");
+  auto *useNode = nullableUse.get();
+  assert(useNode->getIsProvides() && "Use (using node) must be a provides");
+  g.addArc(defNode, useNode);
+}
+
+void AbstractSourceFileDepGraphFactory::addAnExternalDependency(
+    const DependencyKey &defKey, const DependencyKey &useKey,
+    Optional<Fingerprint> maybeFP) {
+  auto *defNode = g.findExistingNodeOrCreateIfNew(defKey, maybeFP,
+                                                  false /* = !isProvides */);
+
   auto nullableUse = g.findExistingNode(useKey);
   assert(nullableUse.isNonNull() && "Use must be an already-added provides");
   auto *useNode = nullableUse.get();

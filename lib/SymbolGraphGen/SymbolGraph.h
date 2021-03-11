@@ -42,6 +42,16 @@ struct SymbolGraph {
    The module whose types were extended in `M`.
    */
   Optional<ModuleDecl *> ExtendedModule;
+  
+  /**
+   The module declaring `M`, if `M` is a cross-import overlay.
+   */
+  Optional<ModuleDecl *> DeclaringModule;
+  
+  /**
+   The modules that must be imported alongside `DeclaringModule` for `M` to be imported, if `M` is a cross-import overlay.
+   */
+  SmallVector<Identifier, 1> BystanderModules;
 
   /**
    A context for allocations.
@@ -64,11 +74,17 @@ struct SymbolGraph {
    */
   llvm::DenseSet<Edge> Edges;
 
+  /**
+   True if this graph is for a single symbol, rather than an entire module.
+   */
+  bool IsForSingleNode;
+
   SymbolGraph(SymbolGraphASTWalker &Walker,
               ModuleDecl &M,
               Optional<ModuleDecl *> ExtendedModule,
               markup::MarkupContext &Ctx,
-              Optional<llvm::VersionTuple> ModuleVersion = None);
+              Optional<llvm::VersionTuple> ModuleVersion = None,
+              bool IsForSingleNode = false);
 
   // MARK: - Utilities
 
@@ -207,7 +223,7 @@ struct SymbolGraph {
 
   /// Get the overall declaration for a symbol.
   void
-  serializeDeclarationFragments(StringRef Key, Type T,
+  serializeDeclarationFragments(StringRef Key, Type T, Type BaseTy,
                                 llvm::json::OStream &OS);
 
   /// Returns `true` if the declaration has a name that makes it
@@ -215,8 +231,8 @@ struct SymbolGraph {
   /// and checking every named parent context as well.
   ///
   /// \param IgnoreContext If `true`, don't consider
-  /// the context of the symbol to determine whether it is implicitly private.
-  bool isImplicitlyPrivate(const ValueDecl *VD,
+  /// the context of the declaration to determine whether it is implicitly private.
+  bool isImplicitlyPrivate(const Decl *D,
                            bool IgnoreContext = false) const;
 
   /// Returns `true` if the declaration should be included as a node
@@ -226,6 +242,11 @@ struct SymbolGraph {
   /// Returns `true` if the declaration is a requirement of a protocol
   /// or is a default implementation of a protocol
   bool isRequirementOrDefaultImplementation(const ValueDecl *VD) const;
+
+  /// Returns `true` if there are no nodes or edges in this graph.
+  bool empty() const {
+    return Nodes.empty() && Edges.empty();
+  }
 };
 
 } // end namespace symbolgraphgen

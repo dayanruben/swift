@@ -78,8 +78,7 @@ public:
     : valueAndFlag(value, false), cleanup(cleanup) {
     assert(value && "No value specified?!");
     assert((!getType().isObject() ||
-            value.getOwnershipKind() != ValueOwnershipKind::None ||
-            !hasCleanup()) &&
+            value.getOwnershipKind() != OwnershipKind::None || !hasCleanup()) &&
            "Objects with trivial ownership should never have a cleanup");
   }
 
@@ -98,7 +97,7 @@ public:
     assert(value && "No value specified");
     assert(value->getType().isObject() &&
            "Expected borrowed rvalues to be objects");
-    assert(value.getOwnershipKind() != ValueOwnershipKind::None);
+    assert(value.getOwnershipKind() != OwnershipKind::None);
     return ManagedValue(value, false, cleanup);
   }
 
@@ -109,7 +108,7 @@ public:
                                             CleanupHandle cleanup) {
     assert(value && "No value specified");
     assert(value->getType().isAddress() && "Expected value to be an address");
-    assert(value.getOwnershipKind() == ValueOwnershipKind::None &&
+    assert(value.getOwnershipKind() == OwnershipKind::None &&
            "Addresses always have any ownership");
     return ManagedValue(value, false, cleanup);
   }
@@ -121,13 +120,20 @@ public:
     return ManagedValue::forOwnedObjectRValue(value, cleanup);
   }
 
+  static ManagedValue
+  forExclusivelyBorrowedOwnedObjectRValue(SILValue value,
+                                          CleanupHandle cleanup) {
+    assert(value->getType().isObject());
+    return ManagedValue::forOwnedObjectRValue(value, cleanup);
+  }
+
   /// Create a managed value for a +0 borrowed non-trivial rvalue object.
   static ManagedValue
   forBorrowedObjectRValue(SILValue value) {
     assert(value && "No value specified");
     assert(value->getType().isObject() &&
            "Expected borrowed rvalues to be objects");
-    assert(value.getOwnershipKind() != ValueOwnershipKind::None);
+    assert(value.getOwnershipKind() != OwnershipKind::None);
     return ManagedValue(value, false, CleanupHandle::invalid());
   }
 
@@ -136,7 +142,7 @@ public:
   forBorrowedAddressRValue(SILValue value) {
     assert(value && "No value specified");
     assert(value->getType().isAddress() && "Expected value to be an address");
-    assert(value.getOwnershipKind() == ValueOwnershipKind::None &&
+    assert(value.getOwnershipKind() == OwnershipKind::None &&
            "Addresses always have trivial ownership");
     return ManagedValue(value, false, CleanupHandle::invalid());
   }
@@ -152,14 +158,14 @@ public:
   /// Create a managed value for a +0 trivial object rvalue.
   static ManagedValue forTrivialObjectRValue(SILValue value) {
     assert(value->getType().isObject() && "Expected an object");
-    assert(value.getOwnershipKind() == ValueOwnershipKind::None);
+    assert(value.getOwnershipKind() == OwnershipKind::None);
     return ManagedValue(value, false, CleanupHandle::invalid());
   }
 
   /// Create a managed value for a +0 trivial address rvalue.
   static ManagedValue forTrivialAddressRValue(SILValue value) {
     assert(value->getType().isAddress() && "Expected an address");
-    assert(value.getOwnershipKind() == ValueOwnershipKind::None);
+    assert(value.getOwnershipKind() == OwnershipKind::None);
     return ManagedValue(value, false, CleanupHandle::invalid());
   }
 

@@ -12,6 +12,7 @@
 
 #include "gtest/gtest.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/ModuleInterfaceLoader.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
@@ -98,11 +99,18 @@ protected:
     LangOptions langOpts;
     langOpts.Target = llvm::Triple(llvm::sys::getDefaultTargetTriple());
     SearchPathOptions searchPathOpts;
+    ClangImporterOptions clangImpOpts;
     auto ctx =
-        ASTContext::get(langOpts, typeckOpts, searchPathOpts, sourceMgr, diags);
+        ASTContext::get(langOpts, typeckOpts, searchPathOpts, clangImpOpts,
+                        sourceMgr, diags);
+
+    ctx->addModuleInterfaceChecker(
+      std::make_unique<ModuleInterfaceCheckerImpl>(*ctx, cacheDir,
+        prebuiltCacheDir, ModuleInterfaceLoaderOptions()));
 
     auto loader = ModuleInterfaceLoader::create(
-        *ctx, cacheDir, prebuiltCacheDir,
+        *ctx, *static_cast<ModuleInterfaceCheckerImpl*>(
+          ctx->getModuleInterfaceChecker()),
         /*dependencyTracker*/nullptr,
         ModuleLoadingMode::PreferSerialized);
 
@@ -116,7 +124,7 @@ protected:
       loader->findModuleFilesInDirectory({moduleName, SourceLoc()},
         SerializedModuleBaseName(tempDir, SerializedModuleBaseName("Library")),
         /*ModuleInterfacePath*/nullptr,
-        &moduleBuffer, &moduleDocBuffer, &moduleSourceInfoBuffer);
+        &moduleBuffer, &moduleDocBuffer, &moduleSourceInfoBuffer, /*IsFramework*/false);
     ASSERT_FALSE(error);
     ASSERT_FALSE(diags.hadAnyError());
 

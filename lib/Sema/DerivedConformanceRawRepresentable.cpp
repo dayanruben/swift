@@ -24,6 +24,7 @@
 #include "swift/AST/Types.h"
 #include "llvm/ADT/APInt.h"
 #include "DerivedConformances.h"
+#include "TypeCheckDecl.h"
 
 using namespace swift;
 
@@ -108,9 +109,9 @@ deriveBodyRawRepresentable_raw(AbstractFunctionDecl *toRawDecl, void *) {
 
   SmallVector<ASTNode, 4> cases;
   for (auto elt : enumDecl->getAllElements()) {
-    auto pat = new (C) EnumElementPattern(TypeLoc::withoutLoc(enumType),
-                                          SourceLoc(), DeclNameLoc(),
-                                          DeclNameRef(), elt, nullptr);
+    auto pat = new (C)
+        EnumElementPattern(TypeExpr::createImplicit(enumType, C), SourceLoc(),
+                           DeclNameLoc(), DeclNameRef(), elt, nullptr);
     pat->setImplicit();
 
     auto labelItem = CaseLabelItem(pat);
@@ -198,7 +199,7 @@ struct RuntimeVersionCheck {
     // platformSpec = "\(attr.platform) \(attr.introduced)"
     auto platformSpec = new (C) PlatformVersionConstraintAvailabilitySpec(
                             Platform, SourceLoc(),
-                            Version, SourceLoc()
+                            Version, Version, SourceLoc()
                         );
 
     // otherSpec = "*"
@@ -332,9 +333,9 @@ deriveBodyRawRepresentable_init(AbstractFunctionDecl *initDecl, void *) {
     // Create a statement which assigns the case to self.
 
     // valueExpr = "\(enumType).\(elt)"
-    auto eltRef = new (C) DeclRefExpr(elt, DeclNameLoc(), /*implicit*/true);
     auto metaTyRef = TypeExpr::createImplicit(enumType, C);
-    auto valueExpr = new (C) DotSyntaxCallExpr(eltRef, SourceLoc(), metaTyRef);
+    auto valueExpr = new (C) MemberRefExpr(metaTyRef, SourceLoc(),
+                                           elt, DeclNameLoc(), /*implicit*/true);
     
     // assignment = "self = \(valueExpr)"
     auto selfRef = new (C) DeclRefExpr(selfDecl, DeclNameLoc(),
@@ -354,7 +355,7 @@ deriveBodyRawRepresentable_init(AbstractFunctionDecl *initDecl, void *) {
                                      CaseLabelItem(litPat), SourceLoc(),
                                      SourceLoc(), body,
                                      /*case body var decls*/ None));
-    Idx++;
+    ++Idx;
   }
 
   auto anyPat = AnyPattern::createImplicit(C);
@@ -401,13 +402,15 @@ deriveRawRepresentable_init(DerivedConformance &derived) {
   auto rawInterfaceType = enumDecl->getRawType();
   auto rawType = parentDC->mapTypeIntoContext(rawInterfaceType);
 
-  auto equatableProto = TypeChecker::getProtocol(C, enumDecl->getLoc(),
-                                                 KnownProtocolKind::Equatable);
-  assert(equatableProto);
-  assert(
-      TypeChecker::conformsToProtocol(rawType, equatableProto, enumDecl));
-  (void)equatableProto;
-  (void)rawType;
+
+  assert([&]() -> bool {
+    auto equatableProto = TypeChecker::getProtocol(C, enumDecl->getLoc(),
+                                                   KnownProtocolKind::Equatable);
+    if (!equatableProto) {
+      return false;
+    }
+    return !TypeChecker::conformsToProtocol(rawType, equatableProto, enumDecl).isInvalid();
+  }());
 
   auto *rawDecl = new (C)
       ParamDecl(SourceLoc(), SourceLoc(),
@@ -446,7 +449,10 @@ bool DerivedConformance::canDeriveRawRepresentable(DeclContext *DC,
     return false;
 
   Type rawType = enumDecl->getRawType();
-  if (!rawType)
+  if (!rawType || rawType->hasError())
+    return false;
+
+  if (!computeAutomaticEnumValueKind(enumDecl))
     return false;
 
   rawType = DC->mapTypeIntoContext(rawType);

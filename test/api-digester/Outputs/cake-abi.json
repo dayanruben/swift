@@ -147,6 +147,12 @@
         },
         {
           "kind": "Conformance",
+          "name": "ConcurrentValue",
+          "printedName": "ConcurrentValue",
+          "usr": "s:s15ConcurrentValueP"
+        },
+        {
+          "kind": "Conformance",
           "name": "P2",
           "printedName": "P2",
           "usr": "s:4cake2P2P"
@@ -615,6 +621,7 @@
       "usr": "s:4cake6NumberO",
       "moduleName": "cake",
       "enumRawTypeName": "Int",
+      "isEnumExhaustive": true,
       "conformances": [
         {
           "kind": "Conformance",
@@ -882,6 +889,14 @@
       "moduleName": "cake",
       "declAttributes": [
         "Frozen"
+      ],
+      "conformances": [
+        {
+          "kind": "Conformance",
+          "name": "ConcurrentValue",
+          "printedName": "ConcurrentValue",
+          "usr": "s:s15ConcurrentValueP"
+        }
       ]
     },
     {
@@ -1729,6 +1744,12 @@
           "name": "_HasCustomAnyHashableRepresentation",
           "printedName": "_HasCustomAnyHashableRepresentation",
           "usr": "s:s35_HasCustomAnyHashableRepresentationP"
+        },
+        {
+          "kind": "Conformance",
+          "name": "ConcurrentValue",
+          "printedName": "ConcurrentValue",
+          "usr": "s:s15ConcurrentValueP"
         },
         {
           "kind": "Conformance",

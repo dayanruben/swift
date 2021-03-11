@@ -100,20 +100,41 @@ func illformed() throws {
     }
 }
 
-func postThrows() -> Int throws { // expected-error{{'throws' may only occur before '->'}}{{19-19=throws }}{{25-32=}}
+func postThrows() -> Int throws { // expected-error{{'throws' may only occur before '->'}}{{19-19=throws }}{{26-33=}}
   return 5
 }
 
-func postThrows2() -> throws Int { // expected-error{{'throws' may only occur before '->'}}{{20-22=throws}}{{23-29=->}}
+func postThrows2() -> throws Int { // expected-error{{'throws' may only occur before '->'}}{{20-20=throws }}{{23-30=}}
   return try postThrows()
 }
 
-func postRethrows(_ f: () throws -> Int) -> Int rethrows { // expected-error{{'rethrows' may only occur before '->'}}{{42-42=rethrows }}{{48-57=}}
+func postRethrows(_ f: () throws -> Int) -> Int rethrows { // expected-error{{'rethrows' may only occur before '->'}}{{42-42=rethrows }}{{49-58=}}
   return try f()
 }
 
-func postRethrows2(_ f: () throws -> Int) -> rethrows Int { // expected-error{{'rethrows' may only occur before '->'}}{{43-45=rethrows}}{{46-54=->}}
+func postRethrows2(_ f: () throws -> Int) -> rethrows Int { // expected-error{{'rethrows' may only occur before '->'}}{{43-43=rethrows }}{{46-55=}}
   return try f()
+}
+
+func postThrows3() {
+  _ = { () -> Int throws in } // expected-error {{'throws' may only occur before '->'}} {{19-26=}} {{12-12=throws }}
+}
+
+func dupThrows1() throws rethrows -> throws Int throw {}
+// expected-error@-1 {{'rethrows' has already been specified}} {{26-35=}}
+// expected-error@-2 {{'throws' has already been specified}} {{38-45=}}
+// expected-error@-3 {{'throw' has already been specified}} {{49-55=}}
+
+func dupThrows2(_ f: () throws -> rethrows Int) {}
+// expected-error@-1 {{'rethrows' has already been specified}} {{35-44=}}
+
+func dupThrows3() {
+  _ = { () try throws in }
+// expected-error@-1 {{expected throwing specifier; did you mean 'throws'?}} {{12-15=throws}}
+// expected-error@-2 {{'throws' has already been specified}} {{16-23=}}
+
+  _ = { () throws -> Int throws in }
+// expected-error@-1 {{'throws' has already been specified}} {{26-33=}}
 }
 
 func incompleteThrowType() {

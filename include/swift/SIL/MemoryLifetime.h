@@ -19,6 +19,7 @@
 
 #include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILFunction.h"
+#include "swift/SIL/BasicBlockData.h"
 
 namespace swift {
 
@@ -113,6 +114,11 @@ public:
     /// Bit 2 is never set because Inner is completly represented by its
     /// sub-locations 3 and 4. But bit 0 is set in location 0 (the "self" bit),
     /// because it represents the untracked field ``Outer.z``.
+    ///
+    /// Single-payload enums are represented by a location with a single sub-
+    /// location (the projected payload address, i.e. an ``init_enum_data_addr``
+    /// or an ``unchecked_take_enum_data_addr``.
+    /// Multi-payload enums are not supported right now.
     Bits subLocations;
 
     /// The accumulated parent bits, including the "self" bit.
@@ -140,6 +146,12 @@ public:
     ///    location 4 (Inner.b):     2
     /// \endcode
     int parentIdx;
+
+    /// Returns true if the location with index \p idx is this location or a
+    /// sub location of this location.
+    bool isSubLocation(unsigned idx) const {
+      return idx < subLocations.size() && subLocations.test(idx);
+    }
 
   private:
     friend class MemoryLocations;
@@ -180,8 +192,13 @@ private:
   /// The bit-set of locations for which numNonTrivialFieldsNotCovered is > 0.
   Bits nonTrivialLocations;
 
+  /// If true, support init_enum_data_addr, unchecked_take_enum_data_addr,
+  /// init_existential_addr and open_existential_addr.
+  bool handleNonTrivialProjections;
+
 public:
-  MemoryLocations() {}
+  MemoryLocations(bool handleNonTrivialProjections) :
+    handleNonTrivialProjections(handleNonTrivialProjections) {}
 
   MemoryLocations(const MemoryLocations &) = delete;
   MemoryLocations &operator=(const MemoryLocations &) = delete;
@@ -206,6 +223,9 @@ public:
   const Location *getLocation(unsigned index) const {
     return &locations[index];
   }
+  
+  /// Returns the root location of \p index.
+  const Location *getRootLocation(unsigned index) const;
 
   /// Registers an address projection instruction for a location.
   void registerProjection(SingleValueInstruction *projection, unsigned locIdx) {
@@ -214,16 +234,30 @@ public:
 
   /// Sets the location bits os \p addr in \p bits, if \p addr is associated
   /// with a location.
-  void setBits(Bits &bits, SILValue addr) {
+  void setBits(Bits &bits, SILValue addr) const {
     if (auto *loc = getLocation(addr))
       bits |= loc->subLocations;
   }
 
   /// Clears the location bits os \p addr in \p bits, if \p addr is associated
   /// with a location.
-  void clearBits(Bits &bits, SILValue addr) {
+  void clearBits(Bits &bits, SILValue addr) const {
     if (auto *loc = getLocation(addr))
       bits.reset(loc->subLocations);
+  }
+  
+  void genBits(Bits &genSet, Bits &killSet, SILValue addr) const {
+    if (auto *loc = getLocation(addr)) {
+      killSet.reset(loc->subLocations);
+      genSet |= loc->subLocations;
+    }
+  }
+
+  void killBits(Bits &genSet, Bits &killSet, SILValue addr) const {
+    if (auto *loc = getLocation(addr)) {
+      killSet |= loc->subLocations;
+      genSet.reset(loc->subLocations);
+    }
   }
 
   /// Analyzes all locations in a function.
@@ -307,9 +341,6 @@ public:
 
   /// Basic-block specific information used for dataflow analysis.
   struct BlockState {
-    /// The backlink to the SILBasicBlock.
-    SILBasicBlock *block;
-
     /// The bits valid at the entry (i.e. the first instruction) of the block.
     Bits entrySet;
 
@@ -333,22 +364,18 @@ public:
     /// This is only computed if exitReachableAnalysis is called.
     ExitReachability exitReachability = ExitReachability::InInfiniteLoop;
 
-    BlockState(SILBasicBlock *block = nullptr) : block(block) { }
+    BlockState(unsigned numLocations) :
+      entrySet(numLocations), exitSet(numLocations),
+      genSet(numLocations), killSet(numLocations) {}
 
     // Utility functions for setting and clearing gen- and kill-bits.
 
     void genBits(SILValue addr, const MemoryLocations &locs) {
-      if (auto *loc = locs.getLocation(addr)) {
-        killSet.reset(loc->subLocations);
-        genSet |= loc->subLocations;
-      }
+      locs.genBits(genSet, killSet, addr);
     }
 
     void killBits(SILValue addr, const MemoryLocations &locs) {
-      if (auto *loc = locs.getLocation(addr)) {
-        genSet.reset(loc->subLocations);
-        killSet |= loc->subLocations;
-      }
+      locs.killBits(genSet, killSet, addr);
     }
 
     bool exitReachable() const {
@@ -361,13 +388,12 @@ public:
   };
 
 private:
-  /// All block states.
-  std::vector<BlockState> blockStates;
-
-  /// Getting from SILBasicBlock to BlockState.
-  llvm::DenseMap<SILBasicBlock *, BlockState *> block2State;
+  BasicBlockData<BlockState> blockStates;
 
 public:
+
+  using iterator = BasicBlockData<BlockState>::iterator;
+
   /// Sets up the BlockState datastructures and associates all basic blocks with
   /// a state.
   MemoryDataflow(SILFunction *function, unsigned numLocations);
@@ -375,14 +401,12 @@ public:
   MemoryDataflow(const MemoryDataflow &) = delete;
   MemoryDataflow &operator=(const MemoryDataflow &) = delete;
 
-  using iterator = std::vector<BlockState>::iterator;
-
   iterator begin() { return blockStates.begin(); }
   iterator end() { return blockStates.end(); }
 
   /// Returns the state of a block.
-  BlockState *getState(SILBasicBlock *block) {
-    return block2State[block];
+  BlockState &operator[] (SILBasicBlock *block) {
+    return blockStates[block];
   }
 
   /// Calculates the BlockState::reachableFromEntry flags.

@@ -236,7 +236,7 @@ static void removeToken(SILValue Op) {
     if (!(GAI->use_empty() || GAI->hasOneUse()))
       return;
     // If it is not a *_token global variable, bail.
-    if (!Global || Global->getName().find("_token") == StringRef::npos)
+    if (!Global || !Global->getName().contains("_token"))
       return;
     GAI->getModule().eraseGlobalVariable(Global);
     GAI->replaceAllUsesWithUndef();
@@ -260,7 +260,7 @@ void SILGlobalOpt::collectOnceCall(BuiltinInst *BI) {
     UnhandledOnceCallee = true;
     return;
   }
-  if (!Callee->getName().startswith("globalinit_"))
+  if (!Callee->isGlobalInitOnceFunction())
     return;
 
   // We currently disable optimizing the initializer if a globalinit_func
@@ -270,7 +270,7 @@ void SILGlobalOpt::collectOnceCall(BuiltinInst *BI) {
     // an addressor, we set count to 2 to disable optimizing the initializer.
     InitializerCount[Callee] = 2;
   else
-    InitializerCount[Callee]++;
+    ++InitializerCount[Callee];
 }
 
 static bool isPotentialStore(SILInstruction *inst) {
@@ -301,7 +301,7 @@ bool SILGlobalOpt::isInLoop(SILBasicBlock *CurBB) {
 
   if (LoopCheckedFunctions.insert(F).second) {
     for (auto I = scc_begin(F); !I.isAtEnd(); ++I) {
-      if (I.hasLoop())
+      if (I.hasCycle())
         for (SILBasicBlock *BB : *I)
           LoopBlocks.insert(BB);
     }
@@ -358,7 +358,7 @@ static void replaceLoadsFromGlobal(SILValue addr,
     if (auto *teai = dyn_cast<TupleElementAddrInst>(user)) {
       auto *ti = cast<TupleInst>(initVal);
       auto *member = cast<SingleValueInstruction>(
-                          ti->getElement(teai->getFieldNo()));
+                          ti->getElement(teai->getFieldIndex()));
       replaceLoadsFromGlobal(teai, member, cloner);
       continue;
     }
@@ -388,7 +388,8 @@ replaceLoadsByKnownValue(SILFunction *InitF, SILGlobalVariable *SILG,
     StaticInitCloner cloner(initCall);
     SmallVector<SILInstruction *, 8> insertedInsts;
     cloner.setTrackingList(&insertedInsts);
-    cloner.add(initVal);
+    if (!cloner.add(initVal))
+      continue;
 
     // Replace all loads from the addressor with the initial value of the global.
     replaceLoadsFromGlobal(initCall, initVal, cloner);
@@ -431,9 +432,8 @@ bool SILGlobalOpt::optimizeInitializer(SILFunction *AddrF,
   // If the addressor contains a single "once" call, it calls globalinit_func,
   // and the globalinit_func is called by "once" from a single location,
   // continue; otherwise bail.
-  auto *InitF = findInitializer(Module, AddrF, CallToOnce);
-  if (!InitF || !InitF->getName().startswith("globalinit_") ||
-      InitializerCount[InitF] > 1)
+  auto *InitF = findInitializer(AddrF, CallToOnce);
+  if (!InitF || InitializerCount[InitF] > 1)
     return false;
 
   // If the globalinit_func is trivial, continue; otherwise bail.
@@ -694,7 +694,8 @@ void SILGlobalOpt::optimizeGlobalAccess(SILGlobalVariable *SILG,
       continue;
 
     StaticInitCloner cloner(globalAddr);
-    cloner.add(initVal);
+    if (!cloner.add(initVal))
+      continue;
 
     // Replace all loads from the addressor with the initial value of the global.
     replaceLoadsFromGlobal(globalAddr, initVal, cloner);
@@ -713,11 +714,6 @@ void SILGlobalOpt::reset() {
 
 void SILGlobalOpt::collect() {
   for (auto &F : *Module) {
-    // TODO: Add support for ownership.
-    if (F.hasOwnership()) {
-      continue;
-    }
-
     // Make sure to create an entry. This is important in case a global variable
     // (e.g. a public one) is not used inside the same module.
     if (F.isGlobalInit())

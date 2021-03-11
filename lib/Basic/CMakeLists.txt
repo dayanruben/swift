@@ -12,7 +12,12 @@ else()
 endif()
 
 function(generate_revision_inc revision_inc_var name dir)
-  find_first_existing_vc_file("${dir}" ${name}_vc)
+  if(SWIFT_APPEND_VC_REV)
+    # generate_vcs_version_script generates header with only `undef`s
+    # inside when source directory doesn't exist.
+    find_first_existing_vc_file("${dir}" ${name}_vc)
+    set(dir_when_append_enabled ${dir})
+  endif()
 
   # Create custom target to generate the VC revision include.
   set(version_inc "${CMAKE_CURRENT_BINARY_DIR}/${name}Revision.inc")
@@ -22,7 +27,7 @@ function(generate_revision_inc revision_inc_var name dir)
   add_custom_command(OUTPUT "${version_inc}"
     DEPENDS "${${name}_vc}" "${generate_vcs_version_script}"
     COMMAND ${CMAKE_COMMAND} "-DNAMES=$<UPPER_CASE:${name}>"
-                             "-D$<UPPER_CASE:${name}>_SOURCE_DIR=${dir}"
+                             "-D$<UPPER_CASE:${name}>_SOURCE_DIR=${dir_when_append_enabled}"
                              "-DHEADER_FILE=${version_inc}"
                              -P "${generate_vcs_version_script}")
 
@@ -34,11 +39,9 @@ function(generate_revision_inc revision_inc_var name dir)
 endfunction()
 
 generate_revision_inc(llvm_revision_inc LLVM "${LLVM_MAIN_SRC_DIR}")
-generate_revision_inc(clang_revision_inc Clang "${CLANG_MAIN_SRC_DIR}")
 generate_revision_inc(swift_revision_inc Swift "${SWIFT_SOURCE_DIR}")
 
 add_swift_host_library(swiftBasic STATIC
-  AnyValue.cpp
   Cache.cpp
   ClusteredBitVector.cpp
   DiverseStack.cpp
@@ -47,6 +50,8 @@ add_swift_host_library(swiftBasic STATIC
   ExponentialGrowthAppendingBinaryByteStream.cpp
   FileSystem.cpp
   FileTypes.cpp
+  Fingerprint.cpp
+  ParseableOutput.cpp
   JSONSerialization.cpp
   LangOptions.cpp
   Located.cpp
@@ -59,11 +64,11 @@ add_swift_host_library(swiftBasic STATIC
   Program.cpp
   QuotedString.cpp
   SourceLoc.cpp
+  StableHasher.cpp
   Statistic.cpp
   StringExtras.cpp
   TaskQueue.cpp
   ThreadSafeRefCounted.cpp
-  Timer.cpp
   Unicode.cpp
   UUID.cpp
   Version.cpp

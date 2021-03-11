@@ -41,14 +41,12 @@ bool SyntaxParsingCache::nodeCanBeReused(const Syntax &Node, size_t NodeStart,
   // StructDecl inside and `private struc Foo {}` parses as two CodeBlockItems
   // one for `private` and one for `struc Foo {}`
   size_t NextLeafNodeLength = 0;
-  if (auto NextNode = Node.getData().getNextNode()) {
+  if (auto NextNode = Node.getData()->getNextNode()) {
     auto NextLeafNode = NextNode->getFirstToken();
     auto NextRawNode = NextLeafNode->getRaw();
     assert(NextRawNode->isPresent());
     NextLeafNodeLength += NextRawNode->getTokenText().size();
-    for (auto TriviaPiece : NextRawNode->getLeadingTrivia()) {
-      NextLeafNodeLength += TriviaPiece.getTextLength();
-    }
+    NextLeafNodeLength += NextRawNode->getLeadingTriviaLength();
   }
 
   auto NodeEnd = NodeStart + Node.getTextLength();

@@ -31,6 +31,7 @@ enum class ArrayCallKind {
   kGetElement,
   kGetElementAddress,
   kMakeMutable,
+  kEndMutation,
   kMutateUnknown,
   kReserveCapacityForAppend,
   kWithUnsafeMutableBufferPointer,
@@ -41,8 +42,10 @@ enum class ArrayCallKind {
   // a function, and it has a self parameter, make sure that it is defined
   // before this comment.
   kArrayInit,
+  kArrayInitEmpty,
   kArrayUninitialized,
-  kArrayUninitializedIntrinsic
+  kArrayUninitializedIntrinsic,
+  kArrayFinalizeIntrinsic
 };
 
 /// Return true is the given function is an array semantics call.
@@ -77,6 +80,11 @@ public:
   /// Match array semantic calls.
   ArraySemanticsCall(SILValue V, StringRef semanticName,
                      bool matchPartialName);
+
+  ArraySemanticsCall() : SemanticsCall(nullptr) {}
+
+  /// Return the SemanticsCall
+  ApplyInst *getInstruction() { return SemanticsCall; }
 
   /// Can we hoist this call.
   bool canHoist(SILInstruction *To, DominanceInfo *DT) const;
@@ -183,7 +191,7 @@ public:
 
   /// Could this array be backed by an NSArray.
   bool mayHaveBridgedObjectElementType() const;
-  
+
   /// Can this function be inlined by the early inliner.
   bool canInlineEarly() const;
 

@@ -18,6 +18,7 @@
 #include "swift/AST/AutoDiff.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/ForeignAsyncConvention.h"
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Initializer.h"
@@ -34,6 +35,7 @@
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/Statistic.h"
+#include "clang/AST/DeclTemplate.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
@@ -56,7 +58,7 @@ using namespace swift::serialization;
 using llvm::Expected;
 
 StringRef swift::getNameOfModule(const ModuleFile *MF) {
-  return MF->Name;
+  return MF->getName();
 }
 
 namespace {
@@ -166,13 +168,13 @@ static void skipRecord(llvm::BitstreamCursor &cursor, unsigned recordKind) {
 
 void ModuleFile::fatal(llvm::Error error) {
   if (FileContext) {
-    getContext().Diags.diagnose(SourceLoc(), diag::serialization_fatal, Name);
+    getContext().Diags.diagnose(SourceLoc(), diag::serialization_fatal, Core->Name);
     getContext().Diags.diagnose(SourceLoc(), diag::serialization_misc_version,
-      Name, MiscVersion);
+      Core->Name, Core->MiscVersion);
 
-    if (!CompatibilityVersion.empty()) {
+    if (!Core->CompatibilityVersion.empty()) {
       if (getContext().LangOpts.EffectiveLanguageVersion
-            != CompatibilityVersion) {
+            != Core->CompatibilityVersion) {
         SmallString<16> effectiveVersionBuffer, compatVersionBuffer;
         {
           llvm::raw_svector_ostream out(effectiveVersionBuffer);
@@ -180,19 +182,16 @@ void ModuleFile::fatal(llvm::Error error) {
         }
         {
           llvm::raw_svector_ostream out(compatVersionBuffer);
-          out << CompatibilityVersion;
+          out << Core->CompatibilityVersion;
         }
         getContext().Diags.diagnose(
             SourceLoc(), diag::serialization_compatibility_version_mismatch,
-            effectiveVersionBuffer, Name, compatVersionBuffer);
+            effectiveVersionBuffer, Core->Name, compatVersionBuffer);
       }
     }
   }
 
-  logAllUnhandledErrors(std::move(error), llvm::errs(),
-                        "\n*** DESERIALIZATION FAILURE (please include this "
-                        "section in any bug report) ***\n");
-  abort();
+  ModuleFileSharedCore::fatal(std::move(error));
 }
 
 static Optional<swift::AccessorKind>
@@ -211,32 +210,25 @@ getActualAccessorKind(uint8_t raw) {
 static Optional<swift::DefaultArgumentKind>
 getActualDefaultArgKind(uint8_t raw) {
   switch (static_cast<serialization::DefaultArgumentKind>(raw)) {
-  case serialization::DefaultArgumentKind::None:
-    return swift::DefaultArgumentKind::None;
-  case serialization::DefaultArgumentKind::Normal:
-    return swift::DefaultArgumentKind::Normal;
-  case serialization::DefaultArgumentKind::Inherited:
-    return swift::DefaultArgumentKind::Inherited;
-  case serialization::DefaultArgumentKind::Column:
-    return swift::DefaultArgumentKind::Column;
-  case serialization::DefaultArgumentKind::File:
-    return swift::DefaultArgumentKind::File;
-  case serialization::DefaultArgumentKind::FilePath:
-    return swift::DefaultArgumentKind::FilePath;
-  case serialization::DefaultArgumentKind::Line:
-    return swift::DefaultArgumentKind::Line;
-  case serialization::DefaultArgumentKind::Function:
-    return swift::DefaultArgumentKind::Function;
-  case serialization::DefaultArgumentKind::DSOHandle:
-    return swift::DefaultArgumentKind::DSOHandle;
-  case serialization::DefaultArgumentKind::NilLiteral:
-    return swift::DefaultArgumentKind::NilLiteral;
-  case serialization::DefaultArgumentKind::EmptyArray:
-    return swift::DefaultArgumentKind::EmptyArray;
-  case serialization::DefaultArgumentKind::EmptyDictionary:
-    return swift::DefaultArgumentKind::EmptyDictionary;
-  case serialization::DefaultArgumentKind::StoredProperty:
-    return swift::DefaultArgumentKind::StoredProperty;
+#define CASE(X) \
+  case serialization::DefaultArgumentKind::X: \
+    return swift::DefaultArgumentKind::X;
+  CASE(None)
+  CASE(Normal)
+  CASE(Inherited)
+  CASE(Column)
+  CASE(FileID)
+  CASE(FileIDSpelledAsFile)
+  CASE(FilePath)
+  CASE(FilePathSpelledAsFile)
+  CASE(Line)
+  CASE(Function)
+  CASE(DSOHandle)
+  CASE(NilLiteral)
+  CASE(EmptyArray)
+  CASE(EmptyDictionary)
+  CASE(StoredProperty)
+#undef CASE
   }
   return None;
 }
@@ -402,11 +394,12 @@ Expected<Pattern *> ModuleFile::readPattern(DeclContext *owningDC) {
   }
   case decls_block::VAR_PATTERN: {
     bool isLet;
-    VarPatternLayout::readRecord(scratch, isLet);
+    BindingPatternLayout::readRecord(scratch, isLet);
 
     Pattern *subPattern = readPatternUnchecked(owningDC);
 
-    auto result = VarPattern::createImplicit(getContext(), isLet, subPattern);
+    auto result =
+        BindingPattern::createImplicit(getContext(), isLet, subPattern);
     if (Type interfaceType = subPattern->getDelayedInterfaceType())
       result->setDelayedInterfaceType(interfaceType, owningDC);
     else
@@ -478,7 +471,7 @@ ModuleFile::readConformanceChecked(llvm::BitstreamCursor &Cursor,
   assert(next.Kind == llvm::BitstreamEntry::Record);
 
   if (auto *Stats = getContext().Stats)
-    Stats->getFrontendCounters().NumConformancesDeserialized++;
+    ++Stats->getFrontendCounters().NumConformancesDeserialized;
 
   unsigned kind = fatalIfUnexpected(Cursor.readRecord(next.ID, scratch));
   switch (kind) {
@@ -1248,6 +1241,7 @@ static void filterValues(Type expectedTy, ModuleDecl *expectedModule,
   values.erase(newEnd, values.end());
 }
 
+/// Look for nested types in all files of \p extensionModule except from the \p thisFile.
 static TypeDecl *
 findNestedTypeDeclInModule(FileUnit *thisFile, ModuleDecl *extensionModule,
                            Identifier name, NominalTypeDecl *parent)  {
@@ -1261,6 +1255,13 @@ findNestedTypeDeclInModule(FileUnit *thisFile, ModuleDecl *extensionModule,
     }
   }
   return nullptr;
+}
+
+/// Look for nested types in all files of \p extensionModule.
+static TypeDecl *
+findNestedTypeDeclInModule(ModuleDecl *extensionModule,
+                           Identifier name, NominalTypeDecl *parent)  {
+  return findNestedTypeDeclInModule(nullptr, extensionModule, name, parent);
 }
 
 Expected<Decl *>
@@ -1331,7 +1332,7 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
                                getIdentifier(privateDiscriminator));
     } else {
       baseModule->lookupQualified(baseModule, DeclNameRef(name),
-                                  NL_QualifiedDefault | NL_KnownNoDependency,
+                                  NL_QualifiedDefault,
                                   values);
     }
     filterValues(filterTy, nullptr, nullptr, isType, inProtocolExt,
@@ -1364,19 +1365,35 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
     Identifier opName = getIdentifier(IID);
     pathTrace.addOperator(opName);
 
+    auto &ctx = getContext();
+    auto desc = OperatorLookupDescriptor::forModule(baseModule, opName);
     switch (rawOpKind) {
     case OperatorKind::Infix:
-      return baseModule->lookupInfixOperator(opName);
     case OperatorKind::Prefix:
-      return baseModule->lookupPrefixOperator(opName);
-    case OperatorKind::Postfix:
-      return baseModule->lookupPostfixOperator(opName);
-    case OperatorKind::PrecedenceGroup:
-      return baseModule->lookupPrecedenceGroup(opName);
+    case OperatorKind::Postfix: {
+      auto req = DirectOperatorLookupRequest{
+          desc, getASTOperatorFixity(static_cast<OperatorKind>(rawOpKind))};
+      auto results = evaluateOrDefault(ctx.evaluator, req, {});
+      if (results.size() != 1) {
+        return llvm::make_error<XRefError>("operator not found", pathTrace,
+                                           opName);
+      }
+      return results[0];
+    }
+    case OperatorKind::PrecedenceGroup: {
+      auto results = evaluateOrDefault(
+          ctx.evaluator, DirectPrecedenceGroupLookupRequest{desc}, {});
+      if (results.size() != 1) {
+        return llvm::make_error<XRefError>("precedencegroup not found",
+                                           pathTrace, opName);
+      }
+      return results[0];
+    }
     default:
       // Unknown operator kind.
       fatal();
     }
+    llvm_unreachable("Unhandled case in switch!");
   }
 
   case XREF_GENERIC_PARAM_PATH_PIECE:
@@ -1493,10 +1510,11 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
           extensionModule = baseType->getModuleContext();
 
         // Fault in extensions, then ask every file in the module.
+        // We include the current file in the search because the cross reference
+        // may involve a nested type of this file.
         (void)baseType->getExtensions();
         auto *nestedType =
-            findNestedTypeDeclInModule(getFile(), extensionModule,
-                                       memberName, baseType);
+            findNestedTypeDeclInModule(extensionModule, memberName, baseType);
 
         // For clang module units, also search tables in the overlays.
         if (!nestedType) {
@@ -1602,6 +1620,14 @@ giveUpFastPath:
         return llvm::make_error<XRefError>("base is not a nominal type",
                                            pathTrace,
                                            getXRefDeclNameForError());
+      }
+
+      if (memberName.getKind() == DeclBaseName::Kind::Destructor) {
+        assert(isa<ClassDecl>(nominal));
+        // Force creation of an implicit destructor
+        auto CD = dyn_cast<ClassDecl>(nominal);
+        values.push_back(CD->getDestructor());
+        break;
       }
 
       if (!privateDiscriminator.empty()) {
@@ -1855,13 +1881,7 @@ StringRef ModuleFile::getIdentifierText(IdentifierID IID) {
   if (!identRecord.Ident.empty())
     return identRecord.Ident.str();
 
-  assert(!IdentifierData.empty() && "no identifier data in module");
-
-  StringRef rawStrPtr = IdentifierData.substr(identRecord.Offset);
-  size_t terminatorOffset = rawStrPtr.find('\0');
-  assert(terminatorOffset != StringRef::npos &&
-         "unterminated identifier string data");
-  return rawStrPtr.slice(0, terminatorOffset);
+  return Core->getIdentifierText(IID);
 }
 
 DeclContext *ModuleFile::getLocalDeclContext(LocalDeclContextID DCID) {
@@ -2005,34 +2025,31 @@ ModuleDecl *ModuleFile::getModule(ModuleID MID) {
       llvm_unreachable("implementation detail only");
     }
   }
-  return getModule(getIdentifier(MID));
+  return getModule(ImportPath::Module::Builder(getIdentifier(MID)).get(),
+                   getContext().LangOpts.AllowDeserializingImplementationOnly);
 }
 
-ModuleDecl *ModuleFile::getModule(ArrayRef<Identifier> name,
+ModuleDecl *ModuleFile::getModule(ImportPath::Module name,
                                   bool allowLoading) {
-  if (name.empty() || name.front().empty())
+  if (name.empty() || name.front().Item.empty())
     return getContext().TheBuiltinModule;
 
   // FIXME: duplicated from ImportResolver::getModule
   if (name.size() == 1 &&
-      name.front() == FileContext->getParentModule()->getName()) {
+      name.front().Item == FileContext->getParentModule()->getName()) {
     if (!UnderlyingModule && allowLoading) {
       auto importer = getContext().getClangModuleLoader();
       assert(importer && "no way to import shadowed module");
-      UnderlyingModule = importer->loadModule(SourceLoc(),
-                                              {{name.front(), SourceLoc()}});
+      UnderlyingModule =
+          importer->loadModule(SourceLoc(), name.getTopLevelPath());
     }
 
     return UnderlyingModule;
   }
 
-  SmallVector<ImportDecl::AccessPathElement, 4> importPath;
-  for (auto pathElem : name)
-    importPath.push_back({ pathElem, SourceLoc() });
-
   if (allowLoading)
-    return getContext().getModule(importPath);
-  return getContext().getLoadedModule(importPath);
+    return getContext().getModule(name);
+  return getContext().getLoadedModule(name);
 }
 
 
@@ -2193,8 +2210,8 @@ getActualReadWriteImplKind(unsigned rawKind) {
   CASE(MutableAddress)
   CASE(MaterializeToTemporary)
   CASE(Modify)
-  CASE(StoredWithSimpleDidSet)
-  CASE(InheritedWithSimpleDidSet)
+  CASE(StoredWithDidSet)
+  CASE(InheritedWithDidSet)
 #undef CASE
   }
   return None;
@@ -2213,6 +2230,28 @@ getActualAutoDiffDerivativeFunctionKind(uint8_t raw) {
 #undef CASE
   }
   return None;
+}
+
+/// Translate from the Serialization differentiability kind enum values to the
+/// AST strongly-typed enum.
+///
+/// The former is guaranteed to be stable, but may not reflect this version of
+/// the AST.
+static Optional<swift::DifferentiabilityKind>
+getActualDifferentiabilityKind(uint8_t diffKind) {
+  switch (diffKind) {
+#define CASE(THE_DK) \
+  case (uint8_t)serialization::DifferentiabilityKind::THE_DK: \
+    return swift::DifferentiabilityKind::THE_DK;
+  CASE(NonDifferentiable)
+  CASE(Forward)
+  CASE(Reverse)
+  CASE(Normal)
+  CASE(Linear)
+#undef CASE
+  default:
+    return None;
+  }
 }
 
 void ModuleFile::configureStorage(AbstractStorageDecl *decl,
@@ -2330,6 +2369,8 @@ class DeclDeserializer {
   ASTContext &ctx;
   Serialized<Decl *> &declOrOffset;
 
+  bool IsInvalid = false;
+
   DeclAttribute *DAttrs = nullptr;
   DeclAttribute **AttrsNext = &DAttrs;
 
@@ -2382,6 +2423,22 @@ public:
     if (!decl)
       return;
 
+    if (IsInvalid) {
+      decl->setInvalidBit();
+
+      DeclName name;
+      if (auto *VD = dyn_cast<ValueDecl>(decl)) {
+        name = VD->getName();
+      }
+
+      auto diagId = ctx.LangOpts.AllowModuleWithCompilerErrors
+                        ? diag::serialization_allowing_invalid_decl
+                        : diag::serialization_invalid_decl;
+      ctx.Diags.diagnose(SourceLoc(), diagId, name,
+                         decl->getDescriptiveKind(),
+                         MF.getAssociatedModule()->getNameStr());
+    }
+
     if (DAttrs)
       decl->getAttrs().setRawAttributeChain(DAttrs);
 
@@ -2397,10 +2454,9 @@ public:
     }
   }
 
-  /// Deserializes decl attribute and attribute-like records from
-  /// \c MF.DeclTypesCursor until a non-attribute record is found,
-  /// passing each one to AddAttribute.
-  llvm::Error deserializeDeclAttributes();
+  /// Deserializes records common to all decls from \c MF.DeclTypesCursor (ie.
+  /// the invalid flag, attributes, and discriminators)
+  llvm::Error deserializeDeclCommon();
 
   Expected<Decl *> getDeclCheckedImpl(
     llvm::function_ref<bool(DeclAttributes)> matchAttributes = nullptr);
@@ -2471,9 +2527,9 @@ public:
                                                         depth,
                                                         index);
 
-    // Always create GenericTypeParamDecls in the associated module;
-    // the real context will reparent them.
-    auto DC = MF.getAssociatedModule();
+    // Always create GenericTypeParamDecls in the associated file; the real
+    // context will reparent them.
+    auto *DC = MF.getFile();
     auto genericParam = MF.createDecl<GenericTypeParamDecl>(
         DC, MF.getIdentifier(nameID), SourceLoc(), depth, index);
     declOrOffset = genericParam;
@@ -2690,6 +2746,8 @@ public:
 
     if (auto errorConvention = MF.maybeReadForeignErrorConvention())
       ctor->setForeignErrorConvention(*errorConvention);
+    if (auto asyncConvention = MF.maybeReadForeignAsyncConvention())
+      ctor->setForeignAsyncConvention(*asyncConvention);
 
     if (auto bodyText = MF.maybeReadInlinableBodyText())
       ctor->setBodyStringRepresentation(*bodyText);
@@ -2725,7 +2783,7 @@ public:
                                   StringRef blobData) {
     IdentifierID nameID;
     DeclContextID contextID;
-    bool isImplicit, isObjC, isStatic, hasNonPatternBindingInit;
+    bool isImplicit, isObjC, isStatic;
     uint8_t rawIntroducer;
     bool isGetterMutating, isSetterMutating;
     bool isLazyStorageProperty;
@@ -2743,7 +2801,6 @@ public:
 
     decls_block::VarLayout::readRecord(scratch, nameID, contextID,
                                        isImplicit, isObjC, isStatic, rawIntroducer,
-                                       hasNonPatternBindingInit,
                                        isGetterMutating, isSetterMutating,
                                        isLazyStorageProperty,
                                        isTopLevelGlobal,
@@ -2815,9 +2872,7 @@ public:
       MF.fatal();
 
     auto var = MF.createDecl<VarDecl>(/*IsStatic*/ isStatic, *introducer,
-                                      /*IsCaptureList*/ false, SourceLoc(),
-                                      name, DC);
-    var->setHasNonPatternBindingInit(hasNonPatternBindingInit);
+                                      SourceLoc(), name, DC);
     var->setIsGetterMutating(isGetterMutating);
     var->setIsSetterMutating(isSetterMutating);
     declOrOffset = var;
@@ -2895,13 +2950,13 @@ public:
       }
 
       VarDecl *backingVar = cast<VarDecl>(backingDecl.get());
-      VarDecl *storageWrapperVar = nullptr;
+      VarDecl *projectionVar = nullptr;
       if (numBackingProperties > 1) {
-        storageWrapperVar = cast<VarDecl>(MF.getDecl(backingPropertyIDs[1]));
+        projectionVar = cast<VarDecl>(MF.getDecl(backingPropertyIDs[1]));
       }
 
       PropertyWrapperBackingPropertyInfo info(
-          backingVar, storageWrapperVar, nullptr, nullptr, nullptr);
+          backingVar, projectionVar, nullptr, nullptr);
       ctx.evaluator.cacheOutput(
           PropertyWrapperBackingPropertyInfoRequest{var}, std::move(info));
       ctx.evaluator.cacheOutput(
@@ -2909,8 +2964,8 @@ public:
           backingVar->getInterfaceType());
       backingVar->setOriginalWrappedProperty(var);
 
-      if (storageWrapperVar)
-        storageWrapperVar->setOriginalWrappedProperty(var);
+      if (projectionVar)
+        projectionVar->setOriginalWrappedProperty(var);
     }
 
     return var;
@@ -2952,7 +3007,7 @@ public:
     declOrOffset = param;
 
     auto paramTy = MF.getType(interfaceTypeID);
-    if (paramTy->hasError()) {
+    if (paramTy->hasError() && !MF.isAllowModuleWithCompilerErrorsEnabled()) {
       // FIXME: This should never happen, because we don't serialize
       // error types.
       DC->printContext(llvm::errs());
@@ -2983,7 +3038,7 @@ public:
     bool isStatic;
     uint8_t rawStaticSpelling, rawAccessLevel, rawMutModifier;
     uint8_t rawAccessorKind;
-    bool isObjC, hasForcedStaticDispatch, throws;
+    bool isObjC, hasForcedStaticDispatch, async, throws;
     unsigned numNameComponentsBiased;
     GenericSignatureID genericSigID;
     TypeID resultInterfaceTypeID;
@@ -2993,13 +3048,15 @@ public:
     DeclID accessorStorageDeclID;
     bool overriddenAffectsABI, needsNewVTableEntry, isTransparent;
     DeclID opaqueReturnTypeID;
+    bool isUserAccessible;
     ArrayRef<uint64_t> nameAndDependencyIDs;
 
     if (!isAccessor) {
       decls_block::FuncLayout::readRecord(scratch, contextID, isImplicit,
                                           isStatic, rawStaticSpelling, isObjC,
                                           rawMutModifier,
-                                          hasForcedStaticDispatch, throws,
+                                          hasForcedStaticDispatch,
+                                          async, throws,
                                           genericSigID,
                                           resultInterfaceTypeID,
                                           isIUO,
@@ -3009,6 +3066,7 @@ public:
                                           rawAccessLevel,
                                           needsNewVTableEntry,
                                           opaqueReturnTypeID,
+                                          isUserAccessible,
                                           nameAndDependencyIDs);
     } else {
       decls_block::AccessorLayout::readRecord(scratch, contextID, isImplicit,
@@ -3120,20 +3178,19 @@ public:
     if (declOrOffset.isComplete())
       return declOrOffset;
 
+    const auto resultType = MF.getType(resultInterfaceTypeID);
+    if (declOrOffset.isComplete())
+      return declOrOffset;
+
     FuncDecl *fn;
     if (!isAccessor) {
-      fn = FuncDecl::createDeserialized(
-        ctx, /*StaticLoc=*/SourceLoc(), staticSpelling.getValue(),
-        /*FuncLoc=*/SourceLoc(), name, /*NameLoc=*/SourceLoc(),
-        /*Throws=*/throws, /*ThrowsLoc=*/SourceLoc(),
-        genericParams, DC);
+      fn = FuncDecl::createDeserialized(ctx, staticSpelling.getValue(), name,
+                                        async, throws, genericParams,
+                                        resultType, DC);
     } else {
       auto *accessor = AccessorDecl::createDeserialized(
-        ctx, /*FuncLoc=*/SourceLoc(), /*AccessorKeywordLoc=*/SourceLoc(),
-        accessorKind, storage,
-        /*StaticLoc=*/SourceLoc(), staticSpelling.getValue(),
-        /*Throws=*/throws, /*ThrowsLoc=*/SourceLoc(),
-        genericParams, DC);
+          ctx, accessorKind, storage, staticSpelling.getValue(),
+          /*Throws=*/throws, genericParams, resultType, DC);
       accessor->setIsTransparent(isTransparent);
 
       fn = accessor;
@@ -3169,8 +3226,6 @@ public:
     }
 
     fn->setStatic(isStatic);
-
-    fn->getBodyResultTypeLoc().setType(MF.getType(resultInterfaceTypeID));
     fn->setImplicitlyUnwrappedOptional(isIUO);
 
     ParameterList *paramList = MF.readParameterList();
@@ -3178,6 +3233,8 @@ public:
 
     if (auto errorConvention = MF.maybeReadForeignErrorConvention())
       fn->setForeignErrorConvention(*errorConvention);
+    if (auto asyncConvention = MF.maybeReadForeignAsyncConvention())
+      fn->setForeignAsyncConvention(*asyncConvention);
 
     if (auto bodyText = MF.maybeReadInlinableBodyText())
       fn->setBodyStringRepresentation(*bodyText);
@@ -3198,6 +3255,9 @@ public:
           OpaqueResultTypeRequest{fn},
           cast<OpaqueTypeDecl>(MF.getDecl(opaqueReturnTypeID)));
     }
+
+    if (!isAccessor)
+      fn->setUserAccessible(isUserAccessible);
 
     return fn;
   }
@@ -3541,6 +3601,7 @@ public:
     IdentifierID nameID;
     DeclContextID contextID;
     bool isImplicit, isObjC;
+    bool isExplicitActorDecl;
     bool inheritsSuperclassInitializers;
     bool hasMissingDesignatedInits;
     GenericSignatureID genericSigID;
@@ -3550,6 +3611,7 @@ public:
     ArrayRef<uint64_t> rawInheritedAndDependencyIDs;
     decls_block::ClassLayout::readRecord(scratch, nameID, contextID,
                                          isImplicit, isObjC,
+                                         isExplicitActorDecl,
                                          inheritsSuperclassInitializers,
                                          hasMissingDesignatedInits,
                                          genericSigID, superclassID,
@@ -3578,7 +3640,8 @@ public:
       return declOrOffset;
 
     auto theClass = MF.createDecl<ClassDecl>(SourceLoc(), name, SourceLoc(),
-                                             None, genericParams, DC);
+                                             None, genericParams, DC,
+                                             isExplicitActorDecl);
     declOrOffset = theClass;
 
     theClass->setGenericSignature(MF.getGenericSignature(genericSigID));
@@ -3846,11 +3909,12 @@ public:
     if (!staticSpelling.hasValue())
       MF.fatal();
 
-    auto subscript = MF.createDecl<SubscriptDecl>(name,
-                                                  SourceLoc(), *staticSpelling,
-                                                  SourceLoc(), nullptr,
-                                                  SourceLoc(), TypeLoc(),
-                                                  parent, genericParams);
+    const auto elemInterfaceType = MF.getType(elemInterfaceTypeID);
+    if (declOrOffset.isComplete())
+      return declOrOffset;
+
+    auto *const subscript = SubscriptDecl::createDeserialized(
+        ctx, name, *staticSpelling, elemInterfaceType, parent, genericParams);
     subscript->setIsGetterMutating(isGetterMutating);
     subscript->setIsSetterMutating(isSetterMutating);
     declOrOffset = subscript;
@@ -3874,8 +3938,6 @@ public:
         MF.fatal();
     }
 
-    auto elemInterfaceType = MF.getType(elemInterfaceTypeID);
-    subscript->getElementTypeLoc().setType(elemInterfaceType);
     subscript->setImplicitlyUnwrappedOptional(isIUO);
 
     if (isImplicit)
@@ -3947,7 +4009,7 @@ public:
     auto extendedType = MF.getType(extendedTypeID);
     ctx.evaluator.cacheOutput(ExtendedTypeRequest{extension},
                               std::move(extendedType));
-    auto nominal = dyn_cast<NominalTypeDecl>(MF.getDecl(extendedNominalID));
+    auto nominal = dyn_cast_or_null<NominalTypeDecl>(MF.getDecl(extendedNominalID));
     ctx.evaluator.cacheOutput(ExtendedNominalRequest{extension},
                               std::move(nominal));
 
@@ -3964,7 +4026,9 @@ public:
       encodeLazyConformanceContextData(numConformances,
                                        MF.DeclTypeCursor.GetCurrentBitNo()));
 
-    nominal->addExtension(extension);
+    if (nominal) {
+      nominal->addExtension(extension);
+    }
 
 #ifndef NDEBUG
     if (outerParams) {
@@ -4055,7 +4119,7 @@ ModuleFile::getDeclChecked(
   return declOrOffset;
 }
 
-llvm::Error DeclDeserializer::deserializeDeclAttributes() {
+llvm::Error DeclDeserializer::deserializeDeclCommon() {
   using namespace decls_block;
 
   SmallVector<uint64_t, 64> scratch;
@@ -4072,7 +4136,10 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
     unsigned recordID = MF.fatalIfUnexpected(
         MF.DeclTypeCursor.readRecord(entry.ID, scratch, &blobData));
 
-    if (isDeclAttrRecord(recordID)) {
+    if (recordID == ERROR_FLAG) {
+      assert(!IsInvalid && "Error flag written multiple times");
+      IsInvalid = true;
+    } else if (isDeclAttrRecord(recordID)) {
       DeclAttribute *Attr = nullptr;
       bool skipAttr = false;
       switch (recordID) {
@@ -4128,6 +4195,14 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
         serialization::decls_block::InlineDeclAttrLayout::readRecord(
             scratch, kind);
         Attr = new (ctx) InlineAttr((InlineKind)kind);
+        break;
+      }
+
+      case decls_block::ActorIndependent_DECL_ATTR: {
+        unsigned kind;
+        serialization::decls_block::ActorIndependentDeclAttrLayout::readRecord(
+            scratch, kind);
+        Attr = new (ctx) ActorIndependentAttr((ActorIndependentKind)kind);
         break;
       }
 
@@ -4250,18 +4325,48 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
         unsigned specializationKindVal;
         GenericSignatureID specializedSigID;
 
-        serialization::decls_block::SpecializeDeclAttrLayout::readRecord(
-          scratch, exported, specializationKindVal, specializedSigID);
+        ArrayRef<uint64_t> rawPieceIDs;
+        uint64_t numArgs;
+        uint64_t numSPIGroups;
+        DeclID targetFunID;
 
+        serialization::decls_block::SpecializeDeclAttrLayout::readRecord(
+            scratch, exported, specializationKindVal, specializedSigID,
+            targetFunID, numArgs, numSPIGroups, rawPieceIDs);
+
+        assert(rawPieceIDs.size() == numArgs + numSPIGroups ||
+               rawPieceIDs.size() == (numArgs - 1 + numSPIGroups));
         specializationKind = specializationKindVal
                                  ? SpecializeAttr::SpecializationKind::Partial
                                  : SpecializeAttr::SpecializationKind::Full;
+        // The 'target' parameter.
+        DeclNameRef replacedFunctionName;
+        if (numArgs) {
+          bool numArgumentLabels = (numArgs == 1) ? 0 : numArgs - 2;
+          auto baseName = MF.getDeclBaseName(rawPieceIDs[0]);
+          SmallVector<Identifier, 4> pieces;
+          if (numArgumentLabels) {
+            for (auto pieceID : rawPieceIDs.slice(1, numArgumentLabels))
+              pieces.push_back(MF.getIdentifier(pieceID));
+          }
+          replacedFunctionName = (numArgs == 1)
+                                     ? DeclNameRef({baseName}) // simple name
+                                     : DeclNameRef({ctx, baseName, pieces});
+        }
+
+        SmallVector<Identifier, 4> spis;
+        if (numSPIGroups) {
+          auto numTargetFunctionPiecesToSkip =
+              (rawPieceIDs.size() == numArgs + numSPIGroups) ? numArgs
+                                                             : numArgs - 1;
+          for (auto id : rawPieceIDs.slice(numTargetFunctionPiecesToSkip))
+            spis.push_back(MF.getIdentifier(id));
+        }
 
         auto specializedSig = MF.getGenericSignature(specializedSigID);
-        Attr = SpecializeAttr::create(ctx, SourceLoc(), SourceRange(),
-                                      nullptr, exported != 0,
-                                      specializationKind,
-                                      specializedSig);
+        Attr = SpecializeAttr::create(ctx, exported != 0, specializationKind,
+                                      spis, specializedSig,
+                                      replacedFunctionName, &MF, targetFunID);
         break;
       }
 
@@ -4298,9 +4403,10 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
 
       case decls_block::Custom_DECL_ATTR: {
         bool isImplicit;
+        bool isArgUnsafe;
         TypeID typeID;
         serialization::decls_block::CustomDeclAttrLayout::readRecord(
-          scratch, isImplicit, typeID);
+          scratch, isImplicit, typeID, isArgUnsafe);
 
         Expected<Type> deserialized = MF.getTypeChecked(typeID);
         if (!deserialized) {
@@ -4313,9 +4419,10 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
           } else
             return deserialized.takeError();
         } else {
-          Attr = CustomAttr::create(ctx, SourceLoc(),
-                                    TypeLoc::withoutLoc(deserialized.get()),
-                                    isImplicit);
+          auto *TE = TypeExpr::createImplicit(deserialized.get(), ctx);
+          auto custom = CustomAttr::create(ctx, SourceLoc(), TE, isImplicit);
+          custom->setArgIsUnsafe(isArgUnsafe);
+          Attr = custom;
         }
         break;
       }
@@ -4334,20 +4441,24 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
 
       case decls_block::Differentiable_DECL_ATTR: {
         bool isImplicit;
-        bool linear;
+        uint64_t rawDiffKind;
         GenericSignatureID derivativeGenSigId;
         ArrayRef<uint64_t> parameters;
 
         serialization::decls_block::DifferentiableDeclAttrLayout::readRecord(
-            scratch, isImplicit, linear, derivativeGenSigId, parameters);
+            scratch, isImplicit, rawDiffKind, derivativeGenSigId,
+            parameters);
 
+        auto diffKind = getActualDifferentiabilityKind(rawDiffKind);
+        if (!diffKind)
+          MF.fatal();
         auto derivativeGenSig = MF.getGenericSignature(derivativeGenSigId);
         llvm::SmallBitVector parametersBitVector(parameters.size());
         for (unsigned i : indices(parameters))
           parametersBitVector[i] = parameters[i];
         auto *indices = IndexSubset::get(ctx, parametersBitVector);
         auto *diffAttr = DifferentiableAttr::create(
-            ctx, isImplicit, SourceLoc(), SourceRange(), linear,
+            ctx, isImplicit, SourceLoc(), SourceRange(), *diffKind,
             /*parsedParameters*/ {}, /*trailingWhereClause*/ nullptr);
 
         // Cache parameter indices so that they can set later.
@@ -4355,7 +4466,7 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
         // because it requires `DifferentiableAttr::setOriginalDeclaration` to
         // be called first. `DifferentiableAttr::setOriginalDeclaration` cannot
         // be called here because the original declaration is not accessible in
-        // this function (`DeclDeserializer::deserializeDeclAttributes`).
+        // this function (`DeclDeserializer::deserializeDeclCommon`).
         diffAttrParamIndicesMap[diffAttr] = indices;
         diffAttr->setDerivativeGenericSignature(derivativeGenSig);
         Attr = diffAttr;
@@ -4365,16 +4476,26 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
       case decls_block::Derivative_DECL_ATTR: {
         bool isImplicit;
         uint64_t origNameId;
+        bool hasAccessorKind;
+        uint64_t rawAccessorKind;
         DeclID origDeclId;
         uint64_t rawDerivativeKind;
         ArrayRef<uint64_t> parameters;
 
         serialization::decls_block::DerivativeDeclAttrLayout::readRecord(
-            scratch, isImplicit, origNameId, origDeclId, rawDerivativeKind,
-            parameters);
+            scratch, isImplicit, origNameId, hasAccessorKind, rawAccessorKind,
+            origDeclId, rawDerivativeKind, parameters);
 
-        DeclNameRefWithLoc origName{
-            DeclNameRef(MF.getDeclBaseName(origNameId)), DeclNameLoc()};
+        Optional<AccessorKind> accessorKind = None;
+        if (hasAccessorKind) {
+          auto maybeAccessorKind = getActualAccessorKind(rawAccessorKind);
+          if (!maybeAccessorKind)
+            MF.fatal();
+          accessorKind = *maybeAccessorKind;
+        }
+
+        DeclNameRefWithLoc origName{DeclNameRef(MF.getDeclBaseName(origNameId)),
+                                    DeclNameLoc(), accessorKind};
         auto derivativeKind =
             getActualAutoDiffDerivativeFunctionKind(rawDerivativeKind);
         if (!derivativeKind)
@@ -4403,7 +4524,7 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
             scratch, isImplicit, origNameId, origDeclId, parameters);
 
         DeclNameRefWithLoc origName{
-            DeclNameRef(MF.getDeclBaseName(origNameId)), DeclNameLoc()};
+            DeclNameRef(MF.getDeclBaseName(origNameId)), DeclNameLoc(), None};
         auto *origDecl = cast<AbstractFunctionDecl>(MF.getDecl(origDeclId));
         llvm::SmallBitVector parametersBitVector(parameters.size());
         for (unsigned i : indices(parameters))
@@ -4428,6 +4549,27 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
 
         Attr = SPIAccessControlAttr::create(ctx, SourceLoc(),
                                             SourceRange(), spis);
+        break;
+      }
+
+      case decls_block::HasAsyncAlternative_DECL_ATTR: {
+        bool isCompound;
+        ArrayRef<uint64_t> rawPieces;
+        serialization::decls_block::HasAsyncAlternativeDeclAttrLayout::readRecord(
+            scratch, isCompound, rawPieces);
+
+        DeclNameRef name;
+        if (!rawPieces.empty()) {
+          auto baseName = MF.getDeclBaseName(rawPieces[0]);
+          SmallVector<Identifier, 4> pieces;
+          for (auto rawPiece : rawPieces.drop_front())
+            pieces.push_back(MF.getIdentifier(rawPiece));
+          name = !isCompound ? DeclNameRef({baseName})
+                             : DeclNameRef({ctx, baseName, pieces});
+        }
+
+        Attr = new (ctx) HasAsyncAlternativeAttr(name, SourceLoc(),
+                                                 SourceRange());
         break;
       }
 
@@ -4481,9 +4623,9 @@ Expected<Decl *>
 DeclDeserializer::getDeclCheckedImpl(
   llvm::function_ref<bool(DeclAttributes)> matchAttributes) {
 
-  auto attrError = deserializeDeclAttributes();
-  if (attrError)
-    return std::move(attrError);
+  auto commonError = deserializeDeclCommon();
+  if (commonError)
+    return std::move(commonError);
 
   if (matchAttributes) {
     // Deserialize the full decl only if matchAttributes finds a match.
@@ -4494,7 +4636,7 @@ DeclDeserializer::getDeclCheckedImpl(
   }
 
   if (auto s = ctx.Stats)
-    s->getFrontendCounters().NumDeclsDeserialized++;
+    ++s->getFrontendCounters().NumDeclsDeserialized;
 
   // FIXME: @_dynamicReplacement(for:) includes a reference to another decl,
   // usually in the same type, and that can result in this decl being
@@ -4588,26 +4730,6 @@ getActualFunctionTypeRepresentation(uint8_t rep) {
   CASE(Block)
   CASE(Thin)
   CASE(CFunctionPointer)
-#undef CASE
-  default:
-    return None;
-  }
-}
-
-/// Translate from the Serialization differentiability kind enum values to the
-/// AST strongly-typed enum.
-///
-/// The former is guaranteed to be stable, but may not reflect this version of
-/// the AST.
-static Optional<swift::DifferentiabilityKind>
-getActualDifferentiabilityKind(uint8_t rep) {
-  switch (rep) {
-#define CASE(THE_CC) \
-  case (uint8_t)serialization::DifferentiabilityKind::THE_CC: \
-    return swift::DifferentiabilityKind::THE_CC;
-  CASE(NonDifferentiable)
-  CASE(Normal)
-  CASE(Linear)
 #undef CASE
   default:
     return None;
@@ -4743,6 +4865,21 @@ Optional<swift::ResultConvention> getActualResultConvention(uint8_t raw) {
   return None;
 }
 
+/// Translate from the serialization SILResultDifferentiability enumerators,
+/// which are guaranteed to be stable, to the AST ones.
+static Optional<swift::SILResultDifferentiability>
+getActualSILResultDifferentiability(uint8_t raw) {
+  switch (serialization::SILResultDifferentiability(raw)) {
+#define CASE(ID)                                                               \
+  case serialization::SILResultDifferentiability::ID:                          \
+    return swift::SILResultDifferentiability::ID;
+    CASE(DifferentiableOrNotApplicable)
+    CASE(NotDifferentiable)
+#undef CASE
+  }
+  return None;
+}
+
 Type ModuleFile::getType(TypeID TID) {
   Expected<Type> deserialized = getTypeChecked(TID);
   if (!deserialized) {
@@ -4848,7 +4985,9 @@ public:
     auto substitutedType = substitutedTypeOrError.get();
 
     // Read the substitutions.
-    auto subMap = MF.getSubstitutionMap(substitutionsID);
+    auto subMapOrError = MF.getSubstitutionMapChecked(substitutionsID);
+    if (!subMapOrError)
+      return subMapOrError.takeError();
 
     auto parentTypeOrError = MF.getTypeChecked(parentTypeID);
     if (!parentTypeOrError)
@@ -4858,11 +4997,12 @@ public:
     if (alias &&
         alias->getAttrs().isUnavailable(ctx) &&
         alias->isCompatibilityAlias()) {
-      return alias->getUnderlyingType().subst(subMap);
+      return alias->getUnderlyingType().subst(subMapOrError.get());
     }
 
     auto parentType = parentTypeOrError.get();
-    return TypeAliasType::get(alias, parentType, subMap, substitutedType);
+    return TypeAliasType::get(alias, parentType, subMapOrError.get(),
+                              substitutedType);
   }
 
   Expected<Type> deserializeNominalType(ArrayRef<uint64_t> scratch,
@@ -4963,19 +5103,19 @@ public:
                                             bool isGeneric) {
     TypeID resultID;
     uint8_t rawRepresentation, rawDiffKind;
-    bool noescape = false, throws;
+    bool noescape = false, concurrent, async, throws;
     GenericSignature genericSig;
     TypeID clangTypeID;
 
     if (!isGeneric) {
       decls_block::FunctionTypeLayout::readRecord(
           scratch, resultID, rawRepresentation, clangTypeID,
-          noescape, throws, rawDiffKind);
+          noescape, concurrent, async, throws, rawDiffKind);
     } else {
       GenericSignatureID rawGenericSig;
       decls_block::GenericFunctionTypeLayout::readRecord(
-          scratch, resultID, rawRepresentation, throws, rawDiffKind,
-          rawGenericSig);
+          scratch, resultID, rawRepresentation, concurrent, async, throws,
+          rawDiffKind, rawGenericSig);
       genericSig = MF.getGenericSignature(rawGenericSig);
       clangTypeID = 0;
     }
@@ -4996,9 +5136,11 @@ public:
       clangFunctionType = loadedClangType.get();
     }
 
-    auto info = FunctionType::ExtInfo(*representation, noescape, throws,
-                                      *diffKind, clangFunctionType);
-
+    auto info = FunctionType::ExtInfoBuilder(*representation, noescape, throws,
+                                             *diffKind, clangFunctionType)
+                    .withConcurrent(concurrent)
+                    .withAsync(async)
+                    .build();
 
     auto resultTy = MF.getTypeChecked(resultID);
     if (!resultTy)
@@ -5180,9 +5322,11 @@ public:
       return opaqueTypeOrError.takeError();
 
     auto opaqueDecl = cast<OpaqueTypeDecl>(opaqueTypeOrError.get());
-    auto subs = MF.getSubstitutionMap(subsID);
+    auto subsOrError = MF.getSubstitutionMapChecked(subsID);
+    if (!subsOrError)
+      return subsOrError.takeError();
 
-    return OpaqueTypeArchetypeType::get(opaqueDecl, subs);
+    return OpaqueTypeArchetypeType::get(opaqueDecl, subsOrError.get());
   }
       
   Expected<Type> deserializeNestedArchetypeType(ArrayRef<uint64_t> scratch,
@@ -5278,6 +5422,31 @@ public:
       genericArgs.push_back(argTy.get());
     }
 
+    if (auto clangDecl = nominal->getClangDecl()) {
+      if (auto ctd = dyn_cast<clang::ClassTemplateDecl>(clangDecl)) {
+        auto clangImporter = static_cast<ClangImporter *>(
+            nominal->getASTContext().getClangModuleLoader());
+
+        SmallVector<Type, 2> typesOfGenericArgs;
+        for (auto arg : genericArgs) {
+          typesOfGenericArgs.push_back(arg);
+        }
+
+        SmallVector<clang::TemplateArgument, 2> templateArguments;
+        std::unique_ptr<TemplateInstantiationError> error =
+            ctx.getClangTemplateArguments(ctd->getTemplateParameters(),
+                                          typesOfGenericArgs,
+                                          templateArguments);
+
+        auto instantiation = clangImporter->instantiateCXXClassTemplate(
+            const_cast<clang::ClassTemplateDecl *>(ctd), templateArguments);
+
+        instantiation->setTemplateInstantiationType(
+            BoundGenericType::get(nominal, parentTy, genericArgs));
+        return instantiation->getDeclaredInterfaceType();
+      }
+    }
+
     return BoundGenericType::get(nominal, parentTy, genericArgs);
   }
 
@@ -5317,17 +5486,22 @@ public:
     if (!layout)
       return nullptr;
 
-    auto subMap = MF.getSubstitutionMap(subMapID);
-    return SILBoxType::get(ctx, layout, subMap);
+    auto subMapOrError = MF.getSubstitutionMapChecked(subMapID);
+    if (!subMapOrError)
+      return subMapOrError.takeError();
+
+    return SILBoxType::get(ctx, layout, subMapOrError.get());
   }
 
   Expected<Type> deserializeSILFunctionType(ArrayRef<uint64_t> scratch,
                                             StringRef blobData) {
+    bool async;
     uint8_t rawCoroutineKind;
     uint8_t rawCalleeConvention;
     uint8_t rawRepresentation;
     uint8_t rawDiffKind;
     bool pseudogeneric = false;
+    bool concurrent;
     bool noescape;
     bool hasErrorResult;
     unsigned numParams;
@@ -5340,6 +5514,8 @@ public:
     ClangTypeID clangFunctionTypeID;
 
     decls_block::SILFunctionTypeLayout::readRecord(scratch,
+                                             concurrent,
+                                             async,
                                              rawCoroutineKind,
                                              rawCalleeConvention,
                                              rawRepresentation,
@@ -5366,20 +5542,19 @@ public:
     if (!diffKind.hasValue())
       MF.fatal();
 
-    const clang::FunctionType *clangFunctionType = nullptr;
+    const clang::Type *clangFunctionType = nullptr;
     if (clangFunctionTypeID) {
       auto clangType = MF.getClangType(clangFunctionTypeID);
       if (!clangType)
         return clangType.takeError();
-      // FIXME: allow block pointers here.
-      clangFunctionType =
-        dyn_cast_or_null<clang::FunctionType>(clangType.get());
-      if (!clangFunctionType)
-        MF.fatal();
+      clangFunctionType = clangType.get();
     }
 
-    SILFunctionType::ExtInfo extInfo(*representation, pseudogeneric, noescape,
-                                     *diffKind, clangFunctionType);
+    auto extInfo =
+        SILFunctionType::ExtInfoBuilder(*representation, pseudogeneric,
+                                        noescape, concurrent, async, *diffKind,
+                                        clangFunctionType)
+            .build();
 
     // Process the coroutine kind.
     auto coroutineKind = getActualSILCoroutineKind(rawCoroutineKind);
@@ -5393,7 +5568,7 @@ public:
 
     auto processParameter =
         [&](TypeID typeID, uint64_t rawConvention,
-            uint64_t ramDifferentiability) -> llvm::Expected<SILParameterInfo> {
+            uint64_t rawDifferentiability) -> llvm::Expected<SILParameterInfo> {
       auto convention = getActualParameterConvention(rawConvention);
       if (!convention)
         MF.fatal();
@@ -5404,7 +5579,7 @@ public:
           swift::SILParameterDifferentiability::DifferentiableOrNotApplicable;
       if (diffKind != DifferentiabilityKind::NonDifferentiable) {
         auto differentiabilityOpt =
-            getActualSILParameterDifferentiability(ramDifferentiability);
+            getActualSILParameterDifferentiability(rawDifferentiability);
         if (!differentiabilityOpt)
           MF.fatal();
         differentiability = *differentiabilityOpt;
@@ -5424,15 +5599,26 @@ public:
       return SILYieldInfo(type.get()->getCanonicalType(), *convention);
     };
 
-    auto processResult = [&](TypeID typeID, uint64_t rawConvention)
-                               -> llvm::Expected<SILResultInfo> {
+    auto processResult =
+        [&](TypeID typeID, uint64_t rawConvention,
+            uint64_t rawDifferentiability) -> llvm::Expected<SILResultInfo> {
       auto convention = getActualResultConvention(rawConvention);
       if (!convention)
         MF.fatal();
       auto type = MF.getTypeChecked(typeID);
       if (!type)
         return type.takeError();
-      return SILResultInfo(type.get()->getCanonicalType(), *convention);
+      auto differentiability =
+          swift::SILResultDifferentiability::DifferentiableOrNotApplicable;
+      if (diffKind != DifferentiabilityKind::NonDifferentiable) {
+        auto differentiabilityOpt =
+            getActualSILResultDifferentiability(rawDifferentiability);
+        if (!differentiabilityOpt)
+          MF.fatal();
+        differentiability = *differentiabilityOpt;
+      }
+      return SILResultInfo(type.get()->getCanonicalType(), *convention,
+                           differentiability);
     };
 
     // Bounds check.  FIXME: overflow
@@ -5452,10 +5638,11 @@ public:
     for (unsigned i = 0; i != numParams; ++i) {
       auto typeID = variableData[nextVariableDataIndex++];
       auto rawConvention = variableData[nextVariableDataIndex++];
-      uint64_t differentiability = 0;
+      uint64_t rawDifferentiability = 0;
       if (diffKind != DifferentiabilityKind::NonDifferentiable)
-        differentiability = variableData[nextVariableDataIndex++];
-      auto param = processParameter(typeID, rawConvention, differentiability);
+        rawDifferentiability = variableData[nextVariableDataIndex++];
+      auto param =
+          processParameter(typeID, rawConvention, rawDifferentiability);
       if (!param)
         return param.takeError();
       allParams.push_back(param.get());
@@ -5479,7 +5666,10 @@ public:
     for (unsigned i = 0; i != numResults; ++i) {
       auto typeID = variableData[nextVariableDataIndex++];
       auto rawConvention = variableData[nextVariableDataIndex++];
-      auto result = processResult(typeID, rawConvention);
+      uint64_t rawDifferentiability = 0;
+      if (diffKind != DifferentiabilityKind::NonDifferentiable)
+        rawDifferentiability = variableData[nextVariableDataIndex++];
+      auto result = processResult(typeID, rawConvention, rawDifferentiability);
       if (!result)
         return result.takeError();
       allResults.push_back(result.get());
@@ -5490,7 +5680,9 @@ public:
     if (hasErrorResult) {
       auto typeID = variableData[nextVariableDataIndex++];
       auto rawConvention = variableData[nextVariableDataIndex++];
-      auto maybeErrorResult = processResult(typeID, rawConvention);
+      uint64_t rawDifferentiability = 0;
+      auto maybeErrorResult =
+          processResult(typeID, rawConvention, rawDifferentiability);
       if (!maybeErrorResult)
         return maybeErrorResult.takeError();
       errorResult = maybeErrorResult.get();
@@ -5503,16 +5695,19 @@ public:
 
     GenericSignature invocationSig =
       MF.getGenericSignature(rawInvocationGenericSig);
-    SubstitutionMap invocationSubs =
-      MF.getSubstitutionMap(rawInvocationSubs).getCanonical();
-    SubstitutionMap patternSubs =
-      MF.getSubstitutionMap(rawPatternSubs).getCanonical();
+    auto invocationSubsOrErr = MF.getSubstitutionMapChecked(rawInvocationSubs);
+    if (!invocationSubsOrErr)
+      return invocationSubsOrErr.takeError();
+    auto patternSubsOrErr = MF.getSubstitutionMapChecked(rawPatternSubs);
+    if (!patternSubsOrErr)
+      return patternSubsOrErr.takeError();
 
     return SILFunctionType::get(invocationSig, extInfo, coroutineKind.getValue(),
                                 calleeConvention.getValue(),
                                 allParams, allYields, allResults,
                                 errorResult,
-                                patternSubs, invocationSubs,
+                                patternSubsOrErr.get().getCanonical(),
+                                invocationSubsOrErr.get().getCanonical(),
                                 ctx, witnessMethodConformance);
   }
 
@@ -5573,6 +5768,32 @@ public:
 
     return UnboundGenericType::get(genericDecl, parentTy, ctx);
   }
+
+  Expected<Type> deserializeErrorType(ArrayRef<uint64_t> scratch,
+                                      StringRef blobData) {
+    TypeID origID;
+    decls_block::ErrorTypeLayout::readRecord(scratch, origID);
+
+    auto origTyOrError = MF.getTypeChecked(origID);
+    if (!origTyOrError)
+      return origTyOrError.takeError();
+
+    auto origTy = *origTyOrError;
+    auto diagId = ctx.LangOpts.AllowModuleWithCompilerErrors
+                      ? diag::serialization_allowing_error_type
+                      : diag::serialization_error_type;
+    // Generally not a super useful diagnostic, so only output once if there
+    // hasn't been any other diagnostic yet to ensure nothing slips by and
+    // causes SILGen to crash.
+    if (!ctx.hadError()) {
+      ctx.Diags.diagnose(SourceLoc(), diagId, StringRef(origTy.getString()),
+                         MF.getAssociatedModule()->getNameStr());
+    }
+
+    if (!origTy)
+      return ErrorType::get(ctx);
+    return ErrorType::get(origTy);
+  }
 };
 }
 
@@ -5596,7 +5817,8 @@ Expected<Type> ModuleFile::getTypeChecked(TypeID TID) {
 
 #ifndef NDEBUG
   PrettyStackTraceType trace(getContext(), "deserializing", typeOrOffset.get());
-  if (typeOrOffset.get()->hasError()) {
+  if (typeOrOffset.get()->hasError() &&
+      !isAllowModuleWithCompilerErrorsEnabled()) {
     typeOrOffset.get()->dump(llvm::errs());
     llvm_unreachable("deserialization produced an invalid type "
                      "(rdar://problem/30382791)");
@@ -5610,7 +5832,7 @@ Expected<Type> ModuleFile::getTypeChecked(TypeID TID) {
 
 Expected<Type> TypeDeserializer::getTypeCheckedImpl() {
   if (auto s = ctx.Stats)
-    s->getFrontendCounters().NumTypesDeserialized++;
+    ++s->getFrontendCounters().NumTypesDeserialized;
 
   llvm::BitstreamEntry entry =
       MF.fatalIfUnexpected(MF.DeclTypeCursor.advance());
@@ -5656,6 +5878,7 @@ Expected<Type> TypeDeserializer::getTypeCheckedImpl() {
   CASE(Dictionary)
   CASE(Optional)
   CASE(UnboundGeneric)
+  CASE(Error)
 
 #undef CASE
 
@@ -5740,6 +5963,9 @@ public:
 
 llvm::Expected<const clang::Type *>
 ModuleFile::getClangType(ClangTypeID TID) {
+  if (!getContext().LangOpts.UseClangFunctionTypes)
+    return nullptr;
+
   if (TID == 0)
     return nullptr;
 
@@ -5893,6 +6119,33 @@ void ModuleFile::loadAllMembers(Decl *container, uint64_t contextData) {
   }
 }
 
+static llvm::Error consumeErrorIfXRefNonLoadedModule(llvm::Error &&error) {
+    // Missing module errors are most likely caused by an
+    // implementation-only import hiding types and decls.
+    // rdar://problem/60291019
+    if (error.isA<XRefNonLoadedModuleError>()) {
+      consumeError(std::move(error));
+      return llvm::Error::success();
+    }
+
+    // Some of these errors may manifest as a TypeError with an
+    // XRefNonLoadedModuleError underneath. Catch those as well.
+    // rdar://66491720
+    if (error.isA<TypeError>()) {
+      auto errorInfo = takeErrorInfo(std::move(error));
+      auto *TE = static_cast<TypeError*>(errorInfo.get());
+
+      if (TE->underlyingReasonIsA<XRefNonLoadedModuleError>()) {
+        consumeError(std::move(errorInfo));
+        return llvm::Error::success();
+      }
+
+      return std::move(errorInfo);
+    }
+
+    return std::move(error);
+}
+
 void
 ModuleFile::loadAllConformances(const Decl *D, uint64_t contextData,
                           SmallVectorImpl<ProtocolConformance*> &conformances) {
@@ -5910,15 +6163,11 @@ ModuleFile::loadAllConformances(const Decl *D, uint64_t contextData,
     auto conformance = readConformanceChecked(DeclTypeCursor);
 
     if (!conformance) {
-      // Missing module errors are most likely caused by an
-      // implementation-only import hiding types and decls.
-      // rdar://problem/60291019
-      if (conformance.errorIsA<XRefNonLoadedModuleError>()) {
-        consumeError(conformance.takeError());
-        return;
-      }
-      else
-        fatal(conformance.takeError());
+      auto unconsumedError =
+        consumeErrorIfXRefNonLoadedModule(conformance.takeError());
+      if (unconsumedError)
+        fatal(std::move(unconsumedError));
+      return;
     }
 
     if (conformance.get().isConcrete())
@@ -5943,6 +6192,13 @@ ModuleFile::loadReferencedFunctionDecl(const DerivativeAttr *DA,
   return cast<AbstractFunctionDecl>(getDecl(contextData));
 }
 
+ValueDecl *ModuleFile::loadTargetFunctionDecl(const SpecializeAttr *attr,
+                                              uint64_t contextData) {
+  if (contextData == 0)
+    return nullptr;
+  return cast<AbstractFunctionDecl>(getDecl(contextData));
+}
+
 Type ModuleFile::loadTypeEraserType(const TypeEraserAttr *TRA,
                                     uint64_t contextData) {
   return getType(contextData);
@@ -5953,8 +6209,7 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
   using namespace decls_block;
 
   PrettyStackTraceModuleFile traceModule("While reading from", *this);
-  PrettyStackTraceConformance trace(getAssociatedModule()->getASTContext(),
-                                    "finishing conformance for",
+  PrettyStackTraceConformance trace("finishing conformance for",
                                     conformance);
   ++NumNormalProtocolConformancesCompleted;
 
@@ -6007,8 +6262,7 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
     for (const auto &req : proto->getRequirementSignature()) {
       if (req.getKind() != RequirementKind::Conformance)
         continue;
-      ProtocolDecl *proto =
-          req.getSecondType()->castTo<ProtocolType>()->getDecl();
+      ProtocolDecl *proto = req.getProtocolDecl();
       auto iter = conformancesForProtocols.find(proto);
       if (iter != conformancesForProtocols.end()) {
         reqConformances.push_back(iter->getSecond());
@@ -6027,7 +6281,8 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
     auto isConformanceReq = [](const Requirement &req) {
       return req.getKind() == RequirementKind::Conformance;
     };
-    if (conformanceCount != llvm::count_if(proto->getRequirementSignature(),
+    if (!isAllowModuleWithCompilerErrorsEnabled() &&
+        conformanceCount != llvm::count_if(proto->getRequirementSignature(),
                                            isConformanceReq)) {
       fatal(llvm::make_error<llvm::StringError>(
           "serialized conformances do not match requirement signature",
@@ -6295,4 +6550,59 @@ Optional<ForeignErrorConvention> ModuleFile::maybeReadForeignErrorConvention() {
   }
 
   llvm_unreachable("Unhandled ForeignErrorConvention in switch.");
+}
+
+Optional<ForeignAsyncConvention> ModuleFile::maybeReadForeignAsyncConvention() {
+  using namespace decls_block;
+
+  SmallVector<uint64_t, 8> scratch;
+
+  BCOffsetRAII restoreOffset(DeclTypeCursor);
+
+  llvm::BitstreamEntry next =
+      fatalIfUnexpected(DeclTypeCursor.advance(AF_DontPopBlockAtEnd));
+  if (next.Kind != llvm::BitstreamEntry::Record)
+    return None;
+
+  unsigned recKind =
+      fatalIfUnexpected(DeclTypeCursor.readRecord(next.ID, scratch));
+  switch (recKind) {
+  case FOREIGN_ASYNC_CONVENTION:
+    restoreOffset.reset();
+    break;
+
+  default:
+    return None;
+  }
+
+  TypeID completionHandlerTypeID;
+  unsigned completionHandlerParameterIndex;
+  unsigned rawErrorParameterIndex;
+  unsigned rawErrorFlagParameterIndex;
+  bool errorFlagPolarity;
+  ForeignAsyncConventionLayout::readRecord(scratch,
+                                           completionHandlerTypeID,
+                                           completionHandlerParameterIndex,
+                                           rawErrorParameterIndex,
+                                           rawErrorFlagParameterIndex,
+                                           errorFlagPolarity);
+
+  Type completionHandlerType = getType(completionHandlerTypeID);
+  CanType canCompletionHandlerType;
+  if (completionHandlerType)
+    canCompletionHandlerType = completionHandlerType->getCanonicalType();
+
+  // Decode the error and flag parameters.
+  Optional<unsigned> completionHandlerErrorParamIndex;
+  if (rawErrorParameterIndex > 0)
+    completionHandlerErrorParamIndex = rawErrorParameterIndex - 1;
+  Optional<unsigned> completionHandlerErrorFlagParamIndex;
+  if (rawErrorFlagParameterIndex > 0)
+    completionHandlerErrorFlagParamIndex = rawErrorFlagParameterIndex - 1;
+
+  return ForeignAsyncConvention(
+      canCompletionHandlerType, completionHandlerParameterIndex,
+      completionHandlerErrorParamIndex,
+      completionHandlerErrorFlagParamIndex,
+      errorFlagPolarity);
 }

@@ -191,7 +191,9 @@ getAccessorForComputedComponent(IRGenModule &IGM,
     accessorThunk->addAttribute(2, llvm::Attribute::NoCapture);
     accessorThunk->addAttribute(2, llvm::Attribute::NoAlias);
     // Output is sret.
-    accessorThunk->addAttribute(1, llvm::Attribute::StructRet);
+    accessorThunk->addAttribute(
+        1, llvm::Attribute::getWithStructRetType(
+               IGM.getLLVMContext(), thunkParams[0]->getPointerElementType()));
     break;
   case Setter:
     // Original accessor's args should be @in or @out, meaning they won't be
@@ -251,7 +253,7 @@ getAccessorForComputedComponent(IRGenModule &IGM,
                                forwardedArgs);
     }
     auto fnPtr = FunctionPointer::forDirect(IGM, accessorFn,
-                                          accessor->getLoweredFunctionType());
+                                            accessor->getLoweredFunctionType());
     auto call = IGF.Builder.CreateCall(fnPtr, forwardedArgs.claimAll());
     
     if (call->getType()->isVoidTy())
@@ -277,6 +279,7 @@ getLayoutFunctionForComputedComponent(IRGenModule &IGM,
     
   auto layoutFn = llvm::Function::Create(fnTy,
     llvm::GlobalValue::PrivateLinkage, "keypath_get_arg_layout", IGM.getModule());
+  layoutFn->setAttributes(IGM.constructInitialAttributes());
     
   {
     IRGenFunction IGF(IGM, layoutFn);
@@ -378,6 +381,7 @@ getWitnessTableForComputedComponent(IRGenModule &IGM,
       auto destroyFn = llvm::Function::Create(destroyType,
         llvm::GlobalValue::PrivateLinkage, "keypath_destroy", IGM.getModule());
       destroy = destroyFn;
+      destroyFn->setAttributes(IGM.constructInitialAttributes());
       
       IRGenFunction IGF(IGM, destroyFn);
       if (IGM.DebugInfo)
@@ -426,6 +430,7 @@ getWitnessTableForComputedComponent(IRGenModule &IGM,
       auto copyFn = llvm::Function::Create(copyType,
         llvm::GlobalValue::PrivateLinkage, "keypath_copy", IGM.getModule());
       copy = copyFn;
+      copyFn->setAttributes(IGM.constructInitialAttributes());
       
       IRGenFunction IGF(IGM, copyFn);
       if (IGM.DebugInfo)
@@ -538,6 +543,7 @@ getInitializerForComputedComponent(IRGenModule &IGM,
       
   auto initFn = llvm::Function::Create(fnTy,
     llvm::GlobalValue::PrivateLinkage, "keypath_arg_init", IGM.getModule());
+  initFn->setAttributes(IGM.constructInitialAttributes());
     
   {
     IRGenFunction IGF(IGM, initFn);
@@ -688,7 +694,7 @@ static unsigned getClassFieldIndex(ClassDecl *classDecl, VarDecl *property) {
     for (auto *other : superDecl->getStoredProperties()) {
       if (other == property)
         return index;
-      index++;
+      ++index;
     }
   }
 
@@ -916,7 +922,7 @@ emitKeyPathComponent(IRGenModule &IGM,
       idKind = KeyPathComponentHeader::Pointer;
       // FIXME: Does this need to be signed?
       auto idRef = IGM.getAddrOfLLVMVariableOrGOTEquivalent(
-        LinkEntity::forSILFunction(id.getFunction(), false));
+        LinkEntity::forSILFunction(id.getFunction()));
       
       idValue = idRef.getValue();
       // If we got an indirect reference, we'll need to resolve it at
@@ -945,23 +951,16 @@ emitKeyPathComponent(IRGenModule &IGM,
         // Note that we'd need to do this anyway in JIT mode because we would
         // need to unique the selector at runtime anyway.
         auto selectorName = IGM.getObjCSelectorName(declRef);
-        llvm::Type *fnParams[] = {IGM.Int8PtrTy};
-        auto fnTy = llvm::FunctionType::get(IGM.Int8PtrTy, fnParams, false);
         SmallString<32> fnName;
         fnName.append("keypath_get_selector_");
         fnName.append(selectorName);
-        auto fn = cast<llvm::Function>(
-          IGM.Module.getOrInsertFunction(fnName, fnTy).getCallee());
-        if (fn->empty()) {
-          fn->setLinkage(llvm::Function::PrivateLinkage);
-          IRGenFunction subIGF(IGM, fn);
-          if (IGM.DebugInfo)
-            IGM.DebugInfo->emitArtificialFunction(subIGF, fn);
-          
+        auto fn = IGM.getOrCreateHelperFunction(fnName, IGM.Int8PtrTy,
+                                                {IGM.Int8PtrTy},
+                                      [&selectorName](IRGenFunction &subIGF) {
           auto selectorValue = subIGF.emitObjCSelectorRefLoad(selectorName);
           subIGF.Builder.CreateRet(selectorValue);
-        }
-        
+        });
+
         idValue = fn;
         idResolution = KeyPathComponentHeader::FunctionCall;
       } else {
@@ -1332,7 +1331,7 @@ void IRGenModule::emitSILProperty(SILProperty *prop) {
       ApplyIRLinkage({linkInfo.getLinkage(),
                       linkInfo.getVisibility(),
                       llvm::GlobalValue::DLLExportStorageClass})
-          .to(GA);
+          .to(GA, linkInfo.isForDefinition());
     }
     return;
   }

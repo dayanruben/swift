@@ -1,11 +1,11 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/SearchPathOptions.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Basic/LLVMInitialize.h"
 #include "swift/Basic/LangOptions.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/ClangImporter/ClangImporter.h"
-#include "swift/ClangImporter/ClangImporterOptions.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
@@ -75,8 +75,9 @@ TEST(ClangImporterTest, emitPCHInMemory) {
   swift::SourceManager sourceMgr;
   swift::DiagnosticEngine diags(sourceMgr);
   std::unique_ptr<ASTContext> context(
-      ASTContext::get(langOpts, typeckOpts, searchPathOpts, sourceMgr, diags));
-  auto importer = ClangImporter::create(*context, options);
+      ASTContext::get(langOpts, typeckOpts, searchPathOpts, options,
+                      sourceMgr, diags));
+  auto importer = ClangImporter::create(*context);
 
   std::string PCH = createFilename(cache, "bridging.h.pch");
   ASSERT_FALSE(importer->canReadPCH(PCH));

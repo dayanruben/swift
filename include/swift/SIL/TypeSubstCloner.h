@@ -69,7 +69,7 @@ class TypeSubstCloner : public SILClonerWithScopes<ImplClass> {
 
       if (!Cloner.Inlining) {
         FunctionRefInst *FRI = dyn_cast<FunctionRefInst>(AI.getCallee());
-        if (FRI && FRI->getInitiallyReferencedFunction() == AI.getFunction() &&
+        if (FRI && FRI->getReferencedFunction() == AI.getFunction() &&
             Subs == Cloner.SubsMap) {
           // Handle recursions by replacing the apply to the callee with an
           // apply to the newly specialized function, but only if substitutions
@@ -137,15 +137,15 @@ public:
   using SILClonerWithScopes<ImplClass>::getOpBasicBlock;
   using SILClonerWithScopes<ImplClass>::recordClonedInstruction;
   using SILClonerWithScopes<ImplClass>::recordFoldedValue;
-  using SILClonerWithScopes<ImplClass>::addBlockWithUnreachable;
   using SILClonerWithScopes<ImplClass>::OpenedArchetypesTracker;
 
   TypeSubstCloner(SILFunction &To,
                   SILFunction &From,
                   SubstitutionMap ApplySubs,
                   SILOpenedArchetypesTracker &OpenedArchetypesTracker,
+                  DominanceInfo *DT = nullptr,
                   bool Inlining = false)
-    : SILClonerWithScopes<ImplClass>(To, OpenedArchetypesTracker, Inlining),
+    : SILClonerWithScopes<ImplClass>(To, OpenedArchetypesTracker, DT, Inlining),
       SwiftMod(From.getModule().getSwiftModule()),
       SubsMap(ApplySubs),
       Original(From),
@@ -213,7 +213,8 @@ protected:
     ApplyInst *N =
         getBuilder().createApply(getOpLocation(Inst->getLoc()),
                                  Helper.getCallee(), Helper.getSubstitutions(),
-                                 Helper.getArguments(), Inst->isNonThrowing(),
+                                 Helper.getArguments(),
+                                 Inst->getApplyOptions(),
                                  GenericSpecializationInformation::create(
                                    Inst, getBuilder()));
     // Specialization can return noreturn applies that were not identified as
@@ -233,6 +234,7 @@ protected:
         Helper.getSubstitutions(), Helper.getArguments(),
         getOpBasicBlock(Inst->getNormalBB()),
         getOpBasicBlock(Inst->getErrorBB()),
+        Inst->getApplyOptions(),
         GenericSpecializationInformation::create(
           Inst, getBuilder()));
     recordClonedInstruction(Inst, N);
@@ -351,7 +353,8 @@ protected:
         remappedOrigFnType
             ->getAutoDiffDerivativeFunctionType(
                 remappedOrigFnType->getDifferentiabilityParameterIndices(),
-                /*resultIndex*/ 0, dfei->getDerivativeFunctionKind(),
+                remappedOrigFnType->getDifferentiabilityResultIndices(),
+                dfei->getDerivativeFunctionKind(),
                 getBuilder().getModule().Types,
                 LookUpConformanceInModule(SwiftMod))
             ->getWithoutDifferentiability();
@@ -426,9 +429,10 @@ protected:
       return ParentFunction;
 
     // Clone the function with the substituted type for the debug info.
-    Mangle::GenericSpecializationMangler Mangler(
-        ParentFunction, SubsMap, IsNotSerialized, false, ForInlining);
-    std::string MangledName = Mangler.mangle(RemappedSig);
+    Mangle::GenericSpecializationMangler Mangler(ParentFunction,
+                                                 IsNotSerialized);
+    std::string MangledName =
+      Mangler.mangleForDebugInfo(RemappedSig, SubsMap, ForInlining);
 
     if (ParentFunction->getName() == MangledName)
       return ParentFunction;

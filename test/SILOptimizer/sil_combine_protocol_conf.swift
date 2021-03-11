@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend %s -O -wmo -emit-sil -Xllvm -sil-disable-pass=DeadFunctionElimination | %FileCheck %s
+// RUN: %target-swift-frontend %s -O -wmo -emit-sil | %FileCheck %s
 
 // case 1: class protocol -- should optimize
 internal protocol SomeProtocol : class {
@@ -95,7 +95,7 @@ internal class Klass2: MultipleConformanceProtocol {
 }
 
 
-internal class Other {
+public class Other {
    let x:SomeProtocol
    let y:SomeNonClassProtocol
    let z:DerivedProtocol
@@ -113,7 +113,7 @@ internal class Other {
      self.s = s;
    }
 
-// CHECK-LABEL: sil hidden [noinline] @$s25sil_combine_protocol_conf5OtherC11doWorkClassSiyF : $@convention(method) (@guaranteed Other) -> Int {
+// CHECK-LABEL: sil [noinline] @$s25sil_combine_protocol_conf5OtherC11doWorkClassSiyF : $@convention(method) (@guaranteed Other) -> Int {
 // CHECK: bb0
 // CHECK: debug_value
 // CHECK: integer_literal
@@ -162,7 +162,7 @@ internal class Other {
 // CHECK: struct 
 // CHECK: return
 // CHECK: } // end sil function '$s25sil_combine_protocol_conf5OtherC11doWorkClassSiyF'
-   @inline(never) func doWorkClass () ->Int {
+   @inline(never) public func doWorkClass () ->Int {
       return self.x.foo(x:self.x) // optimize
              + self.y.bar(x:self.y) // optimize
              + self.z.foo() // do not optimize
@@ -221,7 +221,7 @@ struct GenericOuter<T> {
   }
 }
 
-internal class OtherClass {
+public class OtherClass {
   var arg1: PropProtocol
   var arg2: GenericPropProtocol
   var arg3: NestedPropProtocol
@@ -234,7 +234,7 @@ internal class OtherClass {
      self.arg4 = arg4
   }
 
-// CHECK-LABEL: sil hidden [noinline] @$s25sil_combine_protocol_conf10OtherClassC12doWorkStructSiyF : $@convention(method) (@guaranteed OtherClass) -> Int {
+// CHECK-LABEL: sil [noinline] @$s25sil_combine_protocol_conf10OtherClassC12doWorkStructSiyF : $@convention(method) (@guaranteed OtherClass) -> Int {
 // CHECK: bb0([[ARG:%.*]] :
 // CHECK: debug_value
 // CHECK: [[R1:%.*]] = ref_element_addr [[ARG]] : $OtherClass, #OtherClass.arg1
@@ -245,8 +245,10 @@ internal class OtherClass {
 // CHECK: load [[S11]] 
 // CHECK: [[R2:%.*]] = ref_element_addr [[ARG]] : $OtherClass, #OtherClass.arg2
 // CHECK: [[O2:%.*]] = open_existential_addr immutable_access [[R2]] : $*GenericPropProtocol to $*@opened("{{.*}}") GenericPropProtocol
+// CHECK: [[T1:%.*]] = alloc_stack $@opened
+// CHECK: copy_addr [[O2]] to [initialization] [[T1]]
 // CHECK: [[W2:%.*]] = witness_method $@opened("{{.*}}") GenericPropProtocol, #GenericPropProtocol.val!getter : <Self where Self : GenericPropProtocol> (Self) -> () -> Int, [[O2]] : $*@opened("{{.*}}") GenericPropProtocol : $@convention(witness_method: GenericPropProtocol) <τ_0_0 where τ_0_0 : GenericPropProtocol> (@in_guaranteed τ_0_0) -> Int
-// CHECK: apply [[W2]]<@opened("{{.*}}") GenericPropProtocol>([[O2]]) : $@convention(witness_method: GenericPropProtocol) <τ_0_0 where τ_0_0 : GenericPropProtocol> (@in_guaranteed τ_0_0) -> Int
+// CHECK: apply [[W2]]<@opened("{{.*}}") GenericPropProtocol>([[T1]]) : $@convention(witness_method: GenericPropProtocol) <τ_0_0 where τ_0_0 : GenericPropProtocol> (@in_guaranteed τ_0_0) -> Int
 // CHECK: struct_extract
 // CHECK: integer_literal
 // CHECK: builtin
@@ -265,8 +267,10 @@ internal class OtherClass {
 // CHECK: cond_fail
 // CHECK: [[R5:%.*]] = ref_element_addr [[ARG]] : $OtherClass, #OtherClass.arg4
 // CHECK: [[O5:%.*]] = open_existential_addr immutable_access [[R5]] : $*GenericNestedPropProtocol to $*@opened("{{.*}}") GenericNestedPropProtocol
+// CHECK: [[T2:%.*]] = alloc_stack $@opened
+// CHECK: copy_addr [[O5]] to [initialization] [[T2]]
 // CHECK: [[W5:%.*]] = witness_method $@opened("{{.*}}") GenericNestedPropProtocol, #GenericNestedPropProtocol.val!getter : <Self where Self : GenericNestedPropProtocol> (Self) -> () -> Int, [[O5:%.*]] : $*@opened("{{.*}}") GenericNestedPropProtocol : $@convention(witness_method: GenericNestedPropProtocol) <τ_0_0 where τ_0_0 : GenericNestedPropProtocol> (@in_guaranteed τ_0_0) -> Int 
-// CHECK: apply [[W5]]<@opened("{{.*}}") GenericNestedPropProtocol>([[O5]]) : $@convention(witness_method: GenericNestedPropProtocol) <τ_0_0 where τ_0_0 : GenericNestedPropProtocol> (@in_guaranteed τ_0_0) -> Int
+// CHECK: apply [[W5]]<@opened("{{.*}}") GenericNestedPropProtocol>([[T2]]) : $@convention(witness_method: GenericNestedPropProtocol) <τ_0_0 where τ_0_0 : GenericNestedPropProtocol> (@in_guaranteed τ_0_0) -> Int
 // CHECK: struct_extract
 // CHECK: builtin
 // CHECK: tuple_extract
@@ -275,7 +279,7 @@ internal class OtherClass {
 // CHECK: struct
 // CHECK: return
 // CHECK: } // end sil function '$s25sil_combine_protocol_conf10OtherClassC12doWorkStructSiyF'
-  @inline(never) func doWorkStruct () -> Int{
+  @inline(never) public func doWorkStruct () -> Int{
     return self.arg1.val  // optimize
            + self.arg2.val  // do not optimize
            + self.arg3.val  // optimize
@@ -318,7 +322,7 @@ internal enum AGenericEnum<T> : AGenericProtocol {
   }
 }
 
-internal class OtherKlass {
+public class OtherKlass {
   var arg1: AProtocol
   var arg2: AGenericProtocol
 
@@ -327,14 +331,16 @@ internal class OtherKlass {
      self.arg2 = arg2
   }
 
-// CHECK-LABEL: sil hidden [noinline] @$s25sil_combine_protocol_conf10OtherKlassC10doWorkEnumSiyF : $@convention(method) (@guaranteed OtherKlass) -> Int {
+// CHECK-LABEL: sil [noinline] @$s25sil_combine_protocol_conf10OtherKlassC10doWorkEnumSiyF : $@convention(method) (@guaranteed OtherKlass) -> Int {
 // CHECK: bb0([[ARG:%.*]] :
 // CHECK: debug_value
 // CHECK: integer_literal
 // CHECK: [[R1:%.*]] = ref_element_addr [[ARG]] : $OtherKlass, #OtherKlass.arg2
 // CHECK: [[O1:%.*]] = open_existential_addr immutable_access [[R1]] : $*AGenericProtocol to $*@opened("{{.*}}") AGenericProtocol
+// CHECK: [[T1:%.*]] = alloc_stack $@opened
+// CHECK: copy_addr [[O1]] to [initialization] [[T1]]
 // CHECK: [[W1:%.*]] = witness_method $@opened("{{.*}}") AGenericProtocol, #AGenericProtocol.val!getter : <Self where Self : AGenericProtocol> (Self) -> () -> Int, [[O1]] : $*@opened("{{.*}}") AGenericProtocol : $@convention(witness_method: AGenericProtocol) <τ_0_0 where τ_0_0 : AGenericProtocol> (@in_guaranteed τ_0_0) -> Int
-// CHECK: apply [[W1]]<@opened("{{.*}}") AGenericProtocol>([[O1]]) : $@convention(witness_method: AGenericProtocol) <τ_0_0 where τ_0_0 : AGenericProtocol> (@in_guaranteed τ_0_0) -> Int
+// CHECK: apply [[W1]]<@opened("{{.*}}") AGenericProtocol>([[T1]]) : $@convention(witness_method: AGenericProtocol) <τ_0_0 where τ_0_0 : AGenericProtocol> (@in_guaranteed τ_0_0) -> Int
 // CHECK: struct_extract
 // CHECK: integer_literal
 // CHECK: builtin
@@ -344,9 +350,43 @@ internal class OtherKlass {
 // CHECK: struct
 // CHECK: return
 // CHECK: } // end sil function '$s25sil_combine_protocol_conf10OtherKlassC10doWorkEnumSiyF'
-  @inline(never) func doWorkEnum() -> Int {
+  @inline(never) public func doWorkEnum() -> Int {
     return self.arg1.val  // optimize
            + self.arg2.val // do not optimize
   }
 }
 
+// Don't assert on this following example.
+
+public struct SomeValue {}
+
+public protocol MyVariableProtocol : class {
+}
+
+extension MyVariableProtocol where Self: MyBaseClass {
+  @inline(never)
+  public var myVariable : SomeValue {
+    print(self)
+    return SomeValue()
+  }
+}
+public class MyBaseClass : MyVariableProtocol {}
+
+fileprivate protocol NonClassProto {
+  var myVariable : SomeValue { get }
+}
+
+
+fileprivate class ConformerClass : MyBaseClass, NonClassProto {}
+
+
+@inline(never)
+private func repo(_ c: NonClassProto) {
+  let p : NonClassProto = c
+  print(p.myVariable)
+}
+
+public func entryPoint() {
+  let c = ConformerClass()
+  repo(c)
+}

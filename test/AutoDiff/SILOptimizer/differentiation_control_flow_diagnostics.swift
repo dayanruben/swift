@@ -4,7 +4,7 @@ import _Differentiation
 
 // Test supported `br`, `cond_br`, and `switch_enum` terminators.
 
-@differentiable
+@differentiable(reverse)
 func branch(_ x: Float) -> Float {
   if x > 0 {
     return x
@@ -19,7 +19,7 @@ enum Enum {
   case b(Float)
 }
 
-@differentiable
+@differentiable(reverse)
 func enum_nonactive1(_ e: Enum, _ x: Float) -> Float {
   switch e {
     case .a: return x
@@ -27,7 +27,7 @@ func enum_nonactive1(_ e: Enum, _ x: Float) -> Float {
   }
 }
 
-@differentiable
+@differentiable(reverse)
 func enum_nonactive2(_ e: Enum, _ x: Float) -> Float {
   switch e {
     case let .a(a): return x + a
@@ -37,7 +37,7 @@ func enum_nonactive2(_ e: Enum, _ x: Float) -> Float {
 
 // Test loops.
 
-@differentiable
+@differentiable(reverse)
 func for_loop(_ x: Float) -> Float {
   var result: Float = x
   for _ in 0..<3 {
@@ -46,7 +46,7 @@ func for_loop(_ x: Float) -> Float {
   return result
 }
 
-@differentiable
+@differentiable(reverse)
 func while_loop(_ x: Float) -> Float {
   var result = x
   var i = 1
@@ -57,7 +57,7 @@ func while_loop(_ x: Float) -> Float {
   return result
 }
 
-@differentiable
+@differentiable(reverse)
 func nested_loop(_ x: Float) -> Float {
   var outer = x
   for _ in 1..<3 {
@@ -78,29 +78,35 @@ func nested_loop(_ x: Float) -> Float {
 
 func rethrowing(_ x: () throws -> Void) rethrows -> Void {}
 
-// expected-error @+1 {{function is not differentiable}}
-@differentiable
-// expected-note @+1 {{when differentiating this function definition}}
+@differentiable(reverse)
 func testTryApply(_ x: Float) -> Float {
-  // expected-note @+1 {{cannot differentiate unsupported control flow}}
   rethrowing({})
   return x
 }
 
 // expected-error @+1 {{function is not differentiable}}
-@differentiable
+@differentiable(reverse)
 // expected-note @+1 {{when differentiating this function definition}}
 func withoutDerivative<T : Differentiable, R: Differentiable>(
   at x: T, in body: (T) throws -> R
 ) rethrows -> R {
-  // expected-note @+1 {{cannot differentiate unsupported control flow}}
+  // expected-note @+1 {{expression is not differentiable}}
   try body(x)
+}
+
+// Tests active `try_apply`.
+// expected-error @+1 {{function is not differentiable}}
+@differentiable(reverse)
+// expected-note @+1 {{when differentiating this function definition}}
+func testNilCoalescing(_ maybeX: Float?) -> Float {
+  // expected-note @+1 {{expression is not differentiable}}
+  return maybeX ?? 10
 }
 
 // Test unsupported differentiation of active enum values.
 
 // expected-error @+1 {{function is not differentiable}}
-@differentiable
+@differentiable(reverse)
 // expected-note @+1 {{when differentiating this function definition}}
 func enum_active(_ x: Float) -> Float {
   // expected-note @+1 {{differentiating enum values is not yet supported}}
@@ -121,11 +127,10 @@ enum Tree : Differentiable & AdditiveArithmetic {
   case branch(Float, Float)
 
   typealias TangentVector = Self
-  typealias AllDifferentiableVariables = Self
   static var zero: Self { .leaf(0) }
 
   // expected-error @+1 {{function is not differentiable}}
-  @differentiable
+  @differentiable(reverse)
   // TODO(TF-956): Improve location of active enum non-differentiability errors
   // so that they are closer to the source of the non-differentiability.
   // expected-note @+2 {{when differentiating this function definition}}
@@ -142,7 +147,7 @@ enum Tree : Differentiable & AdditiveArithmetic {
   }
 
   // expected-error @+1 {{function is not differentiable}}
-  @differentiable
+  @differentiable(reverse)
   // TODO(TF-956): Improve location of active enum non-differentiability errors
   // so that they are closer to the source of the non-differentiability.
   // expected-note @+2 {{when differentiating this function definition}}
@@ -160,13 +165,13 @@ enum Tree : Differentiable & AdditiveArithmetic {
 }
 
 // expected-error @+1 {{function is not differentiable}}
-@differentiable
+@differentiable(reverse)
 // expected-note @+1 {{when differentiating this function definition}}
 func loop_array(_ array: [Float]) -> Float {
   var result: Float = 1
   // TODO(TF-957): Improve non-differentiability errors for for-in loops
   // (`Collection.makeIterator` and `IteratorProtocol.next`).
-  // expected-note @+1 {{cannot differentiate through a non-differentiable result; do you want to use 'withoutDerivative(at:)'?}}
+  // expected-note @+1 {{cannot differentiate through a non-differentiable result; do you want to use 'withoutDerivative(at:)'?}} {{12-12=withoutDerivative(at: }} {{17-17=)}}
   for x in array {
     result = result * x
   }

@@ -24,7 +24,6 @@
 #include "swift/SIL/TypeSubstCloner.h"
 #include "swift/SILOptimizer/Utils/BasicBlockOptUtils.h"
 #include "swift/SILOptimizer/Utils/Generics.h"
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include <functional>
 
@@ -47,14 +46,12 @@ class GenericCloner
 public:
   friend class SILCloner<GenericCloner>;
 
-  GenericCloner(SILOptFunctionBuilder &FuncBuilder,
-                SILFunction *F,
-                const ReabstractionInfo &ReInfo,
-                SubstitutionMap ParamSubs,
-                StringRef NewName,
-                CloneCollector::CallbackType Callback)
-    : SuperTy(*initCloned(FuncBuilder, F, ReInfo, NewName), *F,
-	      ParamSubs), FuncBuilder(FuncBuilder), ReInfo(ReInfo), Callback(Callback) {
+  GenericCloner(SILOptFunctionBuilder &FuncBuilder, SILFunction *F,
+                const ReabstractionInfo &ReInfo, SubstitutionMap ParamSubs,
+                StringRef NewName, CloneCollector::CallbackType Callback)
+      : SuperTy(*createDeclaration(FuncBuilder, F, ReInfo, NewName), *F,
+                ParamSubs),
+        FuncBuilder(FuncBuilder), ReInfo(ReInfo), Callback(Callback) {
     assert(F->getDebugScope()->Parent != getCloned()->getDebugScope()->Parent);
   }
   /// Clone and remap the types in \p F according to the substitution
@@ -76,6 +73,11 @@ public:
 
   void fixUp(SILFunction *calleeFunction);
 
+  static SILFunction *createDeclaration(SILOptFunctionBuilder &FuncBuilder,
+                                        SILFunction *Orig,
+                                        const ReabstractionInfo &ReInfo,
+                                        StringRef NewName);
+
 protected:
   void visitTerminator(SILBasicBlock *BB);
 
@@ -94,10 +96,6 @@ protected:
   }
 
 private:
-  static SILFunction *initCloned(SILOptFunctionBuilder &FuncBuilder,
-                                 SILFunction *Orig,
-                                 const ReabstractionInfo &ReInfo,
-                                 StringRef NewName);
   /// Clone the body of the function into the empty function that was created
   /// by initCloned.
   void populateCloned();

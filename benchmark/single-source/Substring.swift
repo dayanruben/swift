@@ -17,6 +17,8 @@ public let SubstringTest = [
   BenchmarkInfo(name: "EqualSubstringString", runFunction: run_EqualSubstringString, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "EqualSubstringSubstring", runFunction: run_EqualSubstringSubstring, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "EqualSubstringSubstringGenericEquatable", runFunction: run_EqualSubstringSubstringGenericEquatable, tags: [.validation, .api, .String]),
+  BenchmarkInfo(name: "SubstringRemoveFirst1", runFunction: run_SubstringRemoveFirst1, tags: [.validation, .api, .String]),
+  BenchmarkInfo(name: "SubstringRemoveLast1", runFunction: run_SubstringRemoveLast1, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "LessSubstringSubstring", runFunction: run_LessSubstringSubstring, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "LessSubstringSubstringGenericComparable", runFunction: run_LessSubstringSubstringGenericComparable, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "StringFromLongWholeSubstring", runFunction: run_StringFromLongWholeSubstring, tags: [.validation, .api, .String]),
@@ -27,12 +29,15 @@ public let SubstringTest = [
   BenchmarkInfo(name: "SubstringEquatable", runFunction: run_SubstringEquatable, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "SubstringFromLongString", runFunction: run_SubstringFromLongString, tags: [.validation, .api, .String]),
   BenchmarkInfo(name: "SubstringFromLongStringGeneric", runFunction: run_SubstringFromLongStringGeneric, tags: [.validation, .api, .String]),
+  BenchmarkInfo(name: "SubstringTrimmingASCIIWhitespace", runFunction: run_SubstringTrimmingASCIIWhitespace, tags: [.validation, .api, .String]),
 ]
 
 // A string that doesn't fit in small string storage and doesn't fit in Latin-1
 let longWide = "fὢasὢodὢijὢadὢolὢsjὢalὢsdὢjlὢasὢdfὢijὢliὢsdὢjøὢslὢdiὢalὢiὢ"
 let (s1, ss1) = equivalentWithDistinctBuffers()
 let (s2, ss2) = equivalentWithDistinctBuffers()
+
+let quiteLong = String(repeating: "0", count: 10_000)[...]
 
 @inline(never)
 public func run_SubstringFromLongString(_ N: Int) {
@@ -123,6 +128,24 @@ public func run_EqualSubstringSubstringGenericEquatable(_ N: Int) {
   }
   for _ in 1...N*500 {
     check(a, b)
+  }
+}
+
+@inline(never)
+public func run_SubstringRemoveFirst1(_ N: Int) {
+  for _ in 1...N {
+    var s = quiteLong
+    s.removeFirst(1)
+    blackHole(s.first == "0")
+  }
+}
+
+@inline(never)
+public func run_SubstringRemoveLast1(_ N: Int) {
+  for _ in 1...N {
+    var s = quiteLong
+    s.removeLast(1)
+    blackHole(s.first == "0")
   }
 }
 
@@ -243,6 +266,38 @@ public func run_SubstringComparable(_ N: Int) {
 		}
 	}
   CheckResults(count == N*500)
+}
+
+extension Character {
+  fileprivate var isASCIIWhitespace: Bool {
+    return self == " " || self == "\t" || self == "\r" || self == "\n" || self == "\r\n"
+  }
+}
+
+extension Substring {
+  fileprivate func trimWhitespace() -> Substring {
+    var me = self
+    while me.first?.isASCIIWhitespace == .some(true) {
+      me = me.dropFirst()
+    }
+    while me.last?.isASCIIWhitespace == .some(true) {
+      me = me.dropLast()
+    }
+    return me
+  }
+}
+
+let _trimmableSubstrings = "pineapple,🍍,  pineapple\t,\r\n\r\n\r\n, 🍍 ,".split(separator: ",")
+
+@inline(never)
+public func run_SubstringTrimmingASCIIWhitespace(_ N: Int) {
+  let substrings = _trimmableSubstrings // bringing this alias from above
+  var count = 0
+  for _ in 1...N*100 {
+    for substring in substrings {
+      blackHole(substring.trimWhitespace())
+    }
+  }
 }
 
 /*

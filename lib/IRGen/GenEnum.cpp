@@ -110,6 +110,7 @@
 #include "swift/AST/LazyResolver.h"
 #include "swift/IRGen/Linking.h"
 #include "swift/SIL/SILModule.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/Analysis/CFG.h"
@@ -1387,7 +1388,7 @@ namespace {
       assert(ElementsWithPayload.size() >= 1);
       if (PayloadSchema) {
         PayloadSchema.forEachType(IGM, [&](llvm::Type *t){
-          PayloadElementCount++;
+          ++PayloadElementCount;
           PayloadBitCount += IGM.DataLayout.getTypeSizeInBits(t);
         });
       } else {
@@ -2059,7 +2060,7 @@ namespace {
       auto nextCase = [&]() -> EnumElementDecl* {
         assert(elti != eltEnd);
         Element elt = *elti;
-        elti++;
+        ++elti;
         return elt.decl;
       };
       
@@ -2715,8 +2716,8 @@ namespace {
         // Unpack as an instance of the payload type and use its fixLifetime
         // operation.
         Explosion srcAsPayload;
-        unpackIntoPayloadExplosion(IGF, srcAsPayload, srcAsPayload);
-        payloadTI.fixLifetime(IGF, src);
+        unpackIntoPayloadExplosion(IGF, src, srcAsPayload);
+        payloadTI.fixLifetime(IGF, srcAsPayload);
         return;
       }
       }
@@ -6010,7 +6011,7 @@ EnumImplStrategy::get(TypeConverter &TC, SILType type, EnumDecl *theEnum) {
       TC.IGM.getResilienceExpansionForLayout(theEnum);
 
   for (auto elt : theEnum->getAllElements()) {
-    numElements++;
+    ++numElements;
 
     if (!elt->hasAssociatedValues()) {
       elementsWithNoPayload.push_back({elt, nullptr, nullptr});

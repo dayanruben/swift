@@ -1,5 +1,5 @@
-from Child import Child
-from Node import Node  # noqa: I201
+from .Child import Child
+from .Node import Node  # noqa: I201
 
 ATTRIBUTE_NODES = [
     # token-list -> token? token-list?
@@ -102,6 +102,7 @@ ATTRIBUTE_NODES = [
          element='Syntax', element_name='SpecializeAttribute',
          element_choices=[
              'LabeledSpecializeEntry',
+             'TargetFunctionEntry',
              'GenericWhereClause',
          ]),
 
@@ -125,6 +126,28 @@ ATTRIBUTE_NODES = [
                    A trailing comma if this argument is followed by another one
                    '''),
          ]),
+    # Representation of e.g. 'exported: true,'
+    # labeled-specialize-entry -> identifier ':' token ','?
+    Node('TargetFunctionEntry', kind='Syntax',
+         description='''
+         A labeled argument for the `@_specialize` attribute with a function
+         decl value like
+         `target: myFunc(_:)`
+         ''',
+         traits=['WithTrailingComma'],
+         children=[
+             Child('Label', kind='IdentifierToken',
+                   description='The label of the argument'),
+             Child('Colon', kind='ColonToken',
+                   description='The colon separating the label and the value'),
+             Child('Delcname', kind='DeclName',
+                   description='The value for this argument'),
+             Child('TrailingComma', kind='CommaToken',
+                   is_optional=True, description='''
+                   A trailing comma if this argument is followed by another one
+                   '''),
+         ]),
+
     # The argument of '@_dynamic_replacement(for:)' or '@_private(sourceFile:)'
     # named-attribute-string-arg -> 'name': string-literal
     Node('NamedAttributeStringArgument', kind='Syntax',
@@ -205,13 +228,21 @@ ATTRIBUTE_NODES = [
 
     # The argument of '@differentiable(...)'.
     # differentiable-attr-arguments ->
-    #     differentiability-params-clause? ','? generic-where-clause?
+    #     differentiability-kind? '.'? differentiability-params-clause? ','?
+    #     generic-where-clause?
     Node('DifferentiableAttributeArguments', kind='Syntax',
          description='''
          The arguments for the `@differentiable` attribute: an optional
-         differentiability parameter clause and an optional 'where' clause.
+         differentiability kind, an optional differentiability parameter clause,
+         and an optional 'where' clause.
          ''',
          children=[
+             Child('DiffKind', kind='IdentifierToken',
+                   text_choices=['forward', 'reverse', 'linear'],
+                   is_optional=True),
+             Child('DiffKindComma', kind='CommaToken', description='''
+                   The comma following the differentiability kind, if it exists.
+                   ''', is_optional=True),
              Child('DiffParams', kind='DifferentiabilityParamsClause',
                    is_optional=True),
              Child('DiffParamsComma', kind='CommaToken', description='''
@@ -254,7 +285,7 @@ ATTRIBUTE_NODES = [
     Node('DifferentiabilityParamList', kind='SyntaxCollection',
          element='DifferentiabilityParam'),
 
-    # differentiability-param -> ('self' | identifer | integer-literal) ','?
+    # differentiability-param -> ('self' | identifier | integer-literal) ','?
     Node('DifferentiabilityParam', kind='Syntax',
          description='''
          A differentiability parameter: either the "self" identifier, a function
@@ -292,6 +323,15 @@ ATTRIBUTE_NODES = [
                    '''),
              Child('OriginalDeclName', kind='QualifiedDeclName',
                    description='The referenced original declaration name.'),
+             Child('Period', kind='PeriodToken',
+                   description='''
+                   The period separating the original declaration name and the
+                   accessor name.
+                   ''', is_optional=True),
+             Child('AccessorKind', kind='IdentifierToken',
+                   description='The accessor name.',
+                   text_choices=['get', 'set'],
+                   is_optional=True),
              Child('Comma', kind='CommaToken', is_optional=True),
              Child('DiffParams', kind='DifferentiabilityParamsClause',
                    is_optional=True),

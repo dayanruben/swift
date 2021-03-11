@@ -30,10 +30,10 @@
 /// string in a particular binary representation.
 ///
 ///     print("Unicode scalar value count: \(greeting.unicodeScalars.count)")
-///     // Prints "Unicode scalar value count: 15"
+///     // Prints "Unicode scalar value count: 8"
 ///
 ///     print("UTF-8 representation count: \(greeting.utf8.count)")
-///     // Prints "UTF-8 representation count: 18"
+///     // Prints "UTF-8 representation count: 11"
 ///
 /// Every `Character` instance is composed of one or more Unicode scalar values
 /// that are grouped together as an *extended grapheme cluster*. The way these
@@ -62,7 +62,7 @@
 /// [clusters]: http://www.unicode.org/glossary/#extended_grapheme_cluster
 /// [scalars]: http://www.unicode.org/glossary/#unicode_scalar_value
 @frozen
-public struct Character {
+public struct Character: ConcurrentValue {
   @usableFromInline
   internal var _str: String
 
@@ -145,7 +145,7 @@ extension Character :
 
   /// Creates a character with the specified value.
   ///
-  /// Do not call this initalizer directly. It is used by the compiler when
+  /// Do not call this initializer directly. It is used by the compiler when
   /// you use a string literal to initialize a `Character` instance. For
   /// example:
   ///

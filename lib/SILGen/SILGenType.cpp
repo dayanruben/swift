@@ -83,35 +83,35 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass,
   // it will be redispatched, funneling the method call through the runtime
   // hook point.
   bool usesObjCDynamicDispatch =
-      (derivedDecl->isObjCDynamic() &&
+      (derivedDecl->shouldUseObjCDispatch() &&
        derived.kind != SILDeclRef::Kind::Allocator);
 
   if (usesObjCDynamicDispatch) {
     implFn = getDynamicThunk(
         derived, Types.getConstantInfo(TypeExpansionContext::minimal(), derived)
                      .SILFnType);
-  } else if (auto *derivativeId = derived.derivativeFunctionIdentifier) {
+  } else if (auto *derivativeId = derived.getDerivativeFunctionIdentifier()) {
     // For JVP/VJP methods, create a vtable entry thunk. The thunk contains an
     // `differentiable_function` instruction, which is later filled during the
     // differentiation transform.
     auto derivedFnType =
         Types.getConstantInfo(TypeExpansionContext::minimal(), derived)
             .SILFnType;
-    implFn = getOrCreateAutoDiffClassMethodThunk(derived, derivedFnType);
+    implFn = getOrCreateDerivativeVTableThunk(derived, derivedFnType);
   } else {
     implFn = getFunction(derived, NotForDefinition);
   }
 
   // As a fast path, if there is no override, definitely no thunk is necessary.
   if (derived == base)
-    return SILVTable::Entry(base, implFn, implKind);
+    return SILVTable::Entry(base, implFn, implKind, false);
 
   // If the base method is less visible than the derived method, we need
   // a thunk.
   bool baseLessVisibleThanDerived =
     (!usesObjCDynamicDispatch &&
      !derivedDecl->isFinal() &&
-     derivedDecl->isEffectiveLinkageMoreVisibleThan(baseDecl));
+     derivedDecl->isMoreVisibleThan(baseDecl));
 
   // Determine the derived thunk type by lowering the derived type against the
   // abstraction pattern of the base.
@@ -151,7 +151,7 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass,
   if (doesNotHaveGenericRequirementDifference
       && !baseLessVisibleThanDerived
       && compatibleCallingConvention)
-    return SILVTable::Entry(base, implFn, implKind);
+    return SILVTable::Entry(base, implFn, implKind, false);
 
   // Generate the thunk name.
   std::string name;
@@ -168,7 +168,7 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass,
         base.kind == SILDeclRef::Kind::Allocator);
     }
     // TODO(TF-685): Use proper autodiff thunk mangling.
-    if (auto *derivativeId = derived.derivativeFunctionIdentifier) {
+    if (auto *derivativeId = derived.getDerivativeFunctionIdentifier()) {
       switch (derivativeId->getKind()) {
       case AutoDiffDerivativeFunctionKind::JVP:
         name += "_jvp";
@@ -182,7 +182,7 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass,
 
   // If we already emitted this thunk, reuse it.
   if (auto existingThunk = M.lookUpFunction(name))
-    return SILVTable::Entry(base, existingThunk, implKind);
+    return SILVTable::Entry(base, existingThunk, implKind, false);
 
   GenericEnvironment *genericEnv = nullptr;
   if (auto genericSig = overrideInfo.FormalType.getOptGenericSignature())
@@ -207,7 +207,7 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass,
                      baseLessVisibleThanDerived);
   emitLazyConformancesForFunction(thunk);
 
-  return SILVTable::Entry(base, thunk, implKind);
+  return SILVTable::Entry(base, thunk, implKind, false);
 }
 
 bool SILGenModule::requiresObjCMethodEntryPoint(FuncDecl *method) {
@@ -216,18 +216,27 @@ bool SILGenModule::requiresObjCMethodEntryPoint(FuncDecl *method) {
   if (auto accessor = dyn_cast<AccessorDecl>(method)) {
     if (accessor->isGetterOrSetter()) {
       auto asd = accessor->getStorage();
-      return asd->isObjC() && !asd->getAttrs().hasAttribute<NSManagedAttr>();
+      return asd->isObjC() && !asd->getAttrs().hasAttribute<NSManagedAttr>() &&
+             !method->isNativeMethodReplacement();
     }
   }
 
   if (method->getAttrs().hasAttribute<NSManagedAttr>())
     return false;
+  if (!method->isObjC())
+    return false;
 
-  return method->isObjC();
+  // Don't emit the objective c entry point of @_dynamicReplacement(for:)
+  // methods in generic classes. There is no way to call it.
+  return !method->isNativeMethodReplacement();
 }
 
 bool SILGenModule::requiresObjCMethodEntryPoint(ConstructorDecl *constructor) {
-  return constructor->isObjC();
+  if (!constructor->isObjC())
+    return false;
+  // Don't emit the objective c entry point of @_dynamicReplacement(for:)
+  // methods in generic classes. There is no way to call it.
+  return !constructor->isNativeMethodReplacement();
 }
 
 namespace {
@@ -283,14 +292,16 @@ public:
       SILDeclRef dtorRef(dtor, SILDeclRef::Kind::Deallocator);
       auto *dtorFn = SGM.getFunction(dtorRef, NotForDefinition);
       vtableEntries.emplace_back(dtorRef, dtorFn,
-                                 SILVTable::Entry::Kind::Normal);
+                                 SILVTable::Entry::Kind::Normal,
+                                 false);
     }
 
     if (SGM.requiresIVarDestroyer(theClass)) {
       SILDeclRef dtorRef(theClass, SILDeclRef::Kind::IVarDestroyer);
       auto *dtorFn = SGM.getFunction(dtorRef, NotForDefinition);
       vtableEntries.emplace_back(dtorRef, dtorFn,
-                                 SILVTable::Entry::Kind::Normal);
+                                 SILVTable::Entry::Kind::Normal,
+                                 false);
     }
 
     IsSerialized_t serialized = IsNotSerialized;
@@ -487,8 +498,7 @@ public:
     if (!Conformance)
       return nullptr;
 
-    PrettyStackTraceConformance trace(SGM.getASTContext(),
-                                      "generating SIL witness table",
+    PrettyStackTraceConformance trace("generating SIL witness table",
                                       Conformance);
 
     auto *proto = Conformance->getProtocol();
@@ -722,8 +732,8 @@ SILFunction *SILGenModule::emitProtocolWitness(
   // Lower the witness thunk type with the requirement's abstraction level.
   auto witnessSILFnType = getNativeSILFunctionType(
       M.Types, TypeExpansionContext::minimal(), AbstractionPattern(reqtOrigTy),
-      reqtSubstTy, requirement, witnessRef, witnessSubsForTypeLowering,
-      conformance);
+      reqtSubstTy, requirementInfo.SILFnType->getExtInfo(), requirement,
+      witnessRef, witnessSubsForTypeLowering, conformance);
 
   // Mangle the name of the witness thunk.
   Mangle::ASTMangler NewMangler;
@@ -732,7 +742,7 @@ SILFunction *SILGenModule::emitProtocolWitness(
   std::string nameBuffer =
       NewMangler.mangleWitnessThunk(manglingConformance, requirement.getDecl());
   // TODO(TF-685): Proper mangling for derivative witness thunks.
-  if (auto *derivativeId = requirement.derivativeFunctionIdentifier) {
+  if (auto *derivativeId = requirement.getDerivativeFunctionIdentifier()) {
     std::string kindString;
     switch (derivativeId->getKind()) {
     case AutoDiffDerivativeFunctionKind::JVP:
@@ -875,8 +885,7 @@ public:
   }
 
   void emit() {
-    PrettyStackTraceConformance trace(SGM.getASTContext(),
-                                      "generating SIL witness table",
+    PrettyStackTraceConformance trace("generating SIL witness table",
                                       conformance);
 
     // Add entries for all the requirements.
@@ -1027,7 +1036,7 @@ public:
 
     // Build a vtable if this is a class.
     if (auto theClass = dyn_cast<ClassDecl>(theType)) {
-      for (Decl *member : theClass->getEmittedMembers())
+      for (Decl *member : theClass->getABIMembers())
         visit(member);
 
       SILGenVTable genVTable(SGM, theClass);
@@ -1124,7 +1133,7 @@ public:
     // If this variable has an attached property wrapper with an initialization
     // function, emit the backing initializer function.
     if (auto wrapperInfo = vd->getPropertyWrapperBackingPropertyInfo()) {
-      if (wrapperInfo.initializeFromOriginal && !vd->isStatic()) {
+      if (wrapperInfo.hasInitFromWrappedValue() && !vd->isStatic()) {
         SGM.emitPropertyWrapperBackingInitializer(vd);
       }
     }

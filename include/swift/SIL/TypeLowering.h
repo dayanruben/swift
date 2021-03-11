@@ -13,7 +13,7 @@
 #ifndef SWIFT_SIL_TYPELOWERING_H
 #define SWIFT_SIL_TYPELOWERING_H
 
-#include "swift/ABI/MetadataValues.h"
+#include "swift/ABI/ProtocolDispatchStrategy.h"
 #include "swift/AST/CaptureInfo.h"
 #include "swift/AST/Module.h"
 #include "swift/SIL/AbstractionPattern.h"
@@ -55,19 +55,17 @@ CanAnyFunctionType adjustFunctionType(CanAnyFunctionType type,
                                       AnyFunctionType::ExtInfo extInfo);
 
 /// Change the given function type's representation.
-inline CanAnyFunctionType adjustFunctionType(CanAnyFunctionType t,
-                                          SILFunctionType::Representation rep) {
-  auto extInfo = t->getExtInfo().withSILRepresentation(rep);
-  return adjustFunctionType(t, extInfo);  
+inline CanAnyFunctionType
+adjustFunctionType(CanAnyFunctionType t, AnyFunctionType::Representation rep,
+                   ClangTypeInfo clangTypeInfo) {
+  auto extInfo = t->getExtInfo()
+                     .intoBuilder()
+                     .withRepresentation(rep)
+                     .withClangFunctionType(clangTypeInfo.getType())
+                     .build();
+  return adjustFunctionType(t, extInfo);
 }
 
-/// Change the given function type's representation.
-inline CanAnyFunctionType adjustFunctionType(CanAnyFunctionType t,
-                                          AnyFunctionType::Representation rep) {
-  auto extInfo = t->getExtInfo().withRepresentation(rep);
-  return adjustFunctionType(t, extInfo);  
-}
-  
 /// Given a SIL function type, return a type that is identical except
 /// for using the given ExtInfo.
 CanSILFunctionType
@@ -149,16 +147,23 @@ enum IsResilient_t : bool {
   IsResilient = true
 };
 
+/// Does this type contain an opaque result type that affects type lowering?
+enum IsTypeExpansionSensitive_t : bool {
+  IsNotTypeExpansionSensitive = false,
+  IsTypeExpansionSensitive = true
+};
+
 /// Extended type information used by SIL.
 class TypeLowering {
 public:
   class RecursiveProperties {
     // These are chosen so that bitwise-or merges the flags properly.
     enum : unsigned {
-      NonTrivialFlag     = 1 << 0,
-      NonFixedABIFlag    = 1 << 1,
-      AddressOnlyFlag    = 1 << 2,
-      ResilientFlag      = 1 << 3,
+      NonTrivialFlag             = 1 << 0,
+      NonFixedABIFlag            = 1 << 1,
+      AddressOnlyFlag            = 1 << 2,
+      ResilientFlag              = 1 << 3,
+      TypeExpansionSensitiveFlag = 1 << 4,
     };
 
     uint8_t Flags;
@@ -167,15 +172,17 @@ public:
     /// a trivial, loadable, fixed-layout type.
     constexpr RecursiveProperties() : Flags(0) {}
 
-    constexpr RecursiveProperties(IsTrivial_t isTrivial,
-                                  IsFixedABI_t isFixedABI,
-                                  IsAddressOnly_t isAddressOnly,
-                                  IsResilient_t isResilient)
-      : Flags((isTrivial ? 0U : NonTrivialFlag) | 
-              (isFixedABI ? 0U : NonFixedABIFlag) |
-              (isAddressOnly ? AddressOnlyFlag : 0U) |
-              (isResilient ? ResilientFlag : 0U)) {}
-    
+    constexpr RecursiveProperties(
+        IsTrivial_t isTrivial, IsFixedABI_t isFixedABI,
+        IsAddressOnly_t isAddressOnly, IsResilient_t isResilient,
+        IsTypeExpansionSensitive_t isTypeExpansionSensitive =
+            IsNotTypeExpansionSensitive)
+        : Flags((isTrivial ? 0U : NonTrivialFlag) |
+                (isFixedABI ? 0U : NonFixedABIFlag) |
+                (isAddressOnly ? AddressOnlyFlag : 0U) |
+                (isResilient ? ResilientFlag : 0U) |
+                (isTypeExpansionSensitive ? TypeExpansionSensitiveFlag : 0U)) {}
+
     constexpr bool operator==(RecursiveProperties p) const {
       return Flags == p.Flags;
     }
@@ -185,7 +192,7 @@ public:
     }
 
     static constexpr RecursiveProperties forReference() {
-      return {IsNotTrivial, IsFixedABI, IsNotAddressOnly, IsNotResilient };
+      return {IsNotTrivial, IsFixedABI, IsNotAddressOnly, IsNotResilient};
     }
 
     static constexpr RecursiveProperties forOpaque() {
@@ -195,6 +202,7 @@ public:
     static constexpr RecursiveProperties forResilient() {
       return {IsTrivial, IsFixedABI, IsNotAddressOnly, IsResilient};
     }
+
 
     void addSubobject(RecursiveProperties other) {
       Flags |= other.Flags;
@@ -212,10 +220,19 @@ public:
     IsResilient_t isResilient() const {
       return IsResilient_t((Flags & ResilientFlag) != 0);
     }
+    IsTypeExpansionSensitive_t isTypeExpansionSensitive() const {
+      return IsTypeExpansionSensitive_t(
+          (Flags & TypeExpansionSensitiveFlag) != 0);
+    }
 
     void setNonTrivial() { Flags |= NonTrivialFlag; }
     void setNonFixedABI() { Flags |= NonFixedABIFlag; }
     void setAddressOnly() { Flags |= AddressOnlyFlag; }
+    void setTypeExpansionSensitive(
+        IsTypeExpansionSensitive_t isTypeExpansionSensitive) {
+      Flags = (Flags & ~TypeExpansionSensitiveFlag) |
+              (isTypeExpansionSensitive ? TypeExpansionSensitiveFlag : 0);
+    }
   };
 
 private:
@@ -307,6 +324,12 @@ public:
     return Properties.isResilient();
   }
 
+  /// Does this type contain an opaque result type that could influence how the
+  /// type is lowered if we could look through to the underlying type.
+  bool isTypeExpansionSensitive() const {
+    return Properties.isTypeExpansionSensitive();
+  }
+
   ResilienceExpansion getResilienceExpansion() const {
     return expansionContext.getResilienceExpansion();
   }
@@ -389,6 +412,28 @@ public:
                             ///> substypes and perform operations on these
                             ///> types.
   };
+
+  /// Emit a load from \p addr given the LoadOwnershipQualifier \p qual.
+  ///
+  /// This abstracts over the differences in between trivial and non-trivial
+  /// types and lets one specify an expansion kind that gets passed to any
+  /// copy_value that we create.
+  virtual SILValue emitLoweredLoad(
+      SILBuilder &B, SILLocation loc, SILValue addr,
+      LoadOwnershipQualifier qual,
+      Lowering::TypeLowering::TypeExpansionKind expansionKind) const = 0;
+
+  /// Emit a store of \p value into \p addr given the StoreOwnershipQualifier
+  /// qual.
+  ///
+  /// This abstracts over the differences in between trivial and non-trivial
+  /// types and allows for one to specify an expansion kind that is passed to
+  /// any destroy operations we create if we are asked to assign in non-ossa
+  /// code.
+  virtual void emitLoweredStore(
+      SILBuilder &B, SILLocation loc, SILValue value, SILValue addr,
+      StoreOwnershipQualifier qual,
+      Lowering::TypeLowering::TypeExpansionKind expansionKind) const = 0;
 
   //===--------------------------------------------------------------------===//
   // DestroyValue
@@ -685,8 +730,6 @@ class TypeConverter {
 
   llvm::DenseMap<SILDeclRef, CaptureInfo> LoweredCaptures;
 
-  llvm::DenseMap<CanType, bool> opaqueArchetypeFields;
-
   /// Cache of loadable SILType to number of (estimated) fields
   ///
   /// Second element is a ResilienceExpansion.
@@ -699,17 +742,15 @@ class TypeConverter {
   Optional<CanType> BridgedType##Ty;
 #include "swift/SIL/BridgedTypes.def"
 
-  const TypeLowering &
-  getTypeLoweringForLoweredType(AbstractionPattern origType,
-                                CanType loweredType,
-                                TypeExpansionContext forExpansion,
-                                bool origHadOpaqueTypeArchetype);
+  const TypeLowering &getTypeLoweringForLoweredType(
+      AbstractionPattern origType, CanType loweredType,
+      TypeExpansionContext forExpansion,
+      IsTypeExpansionSensitive_t isTypeExpansionSensitive);
 
-  const TypeLowering *
-  getTypeLoweringForExpansion(TypeKey key,
-                              TypeExpansionContext forExpansion,
-                              const TypeLowering *lowering,
-                              bool origHadOpaqueTypeArchetype);
+  const TypeLowering *getTypeLoweringForExpansion(
+      TypeKey key, TypeExpansionContext forExpansion,
+      const TypeLowering *minimalExpansionLowering,
+      IsTypeExpansionSensitive_t isOrigTypeExpansionSensitive);
 
 public:
   ModuleDecl &M;
@@ -772,8 +813,10 @@ public:
 
   /// True if a protocol uses witness tables for dynamic dispatch.
   static bool protocolRequiresWitnessTable(ProtocolDecl *P) {
-    return ProtocolDescriptorFlags::needsWitnessTable
-             (getProtocolDispatchStrategy(P));
+    if (P->isMarkerProtocol())
+      return false;
+
+    return swift::protocolRequiresWitnessTable(getProtocolDispatchStrategy(P));
   }
   
   /// True if a type is passed indirectly at +0 when used as the "self"
@@ -864,8 +907,6 @@ public:
   AbstractionPattern getAbstractionPattern(EnumElementDecl *element);
 
   CanType getLoweredTypeOfGlobal(VarDecl *var);
-
-  bool hasOpaqueArchetypeOrPropertiesOrCases(CanType ty);
 
   /// Return the SILFunctionType for a native function value of the
   /// given type.
@@ -969,8 +1010,8 @@ public:
   /// Given a function type, yield its bridged formal type.
   CanAnyFunctionType getBridgedFunctionType(AbstractionPattern fnPattern,
                                             CanAnyFunctionType fnType,
-                                            AnyFunctionType::ExtInfo extInfo,
-                                            Bridgeability bridging);
+                                            Bridgeability bridging,
+                                            SILFunctionTypeRepresentation rep);
 
   /// Given a referenced value and the substituted formal type of a
   /// resulting l-value expression, produce the substituted formal
@@ -1095,6 +1136,15 @@ private:
 };
 
 } // namespace Lowering
+
+CanSILFunctionType getNativeSILFunctionType(
+    Lowering::TypeConverter &TC, TypeExpansionContext context,
+    Lowering::AbstractionPattern origType, CanAnyFunctionType substType,
+    SILExtInfo silExtInfo, Optional<SILDeclRef> origConstant = None,
+    Optional<SILDeclRef> constant = None,
+    Optional<SubstitutionMap> reqtSubs = None,
+    ProtocolConformanceRef witnessMethodConformance = ProtocolConformanceRef());
+
 } // namespace swift
 
 namespace llvm {

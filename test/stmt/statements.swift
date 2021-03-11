@@ -280,7 +280,7 @@ func RepeatWhileStmt4() {
 
 func brokenSwitch(_ x: Int) -> Int {
   switch x {
-  case .Blah(var rep): // expected-error{{pattern cannot match values of type 'Int'}}
+  case .Blah(var rep): // expected-error{{type 'Int' has no member 'Blah'}}
     return rep
   }
 }
@@ -501,8 +501,9 @@ func test_guard(_ x : Int, y : Int??, cond : Bool) {
   guard let e, cond else {}    // expected-error {{variable binding in a condition requires an initializer}}
   guard case let f? : Int?, cond else {}    // expected-error {{variable binding in a condition requires an initializer}}
 
+  // FIXME: Bring back the tailored diagnostic
   guard let g = y else {
-    markUsed(g)  // expected-error {{variable declared in 'guard' condition is not usable in its body}}
+    markUsed(g)  // expected-error {{cannot find 'g' in scope}}
   }
 
   guard let h = y, cond {}  // expected-error {{expected 'else' after 'guard' condition}} {{25-25=else }}
@@ -512,8 +513,9 @@ func test_guard(_ x : Int, y : Int??, cond : Bool) {
 
   // SR-7567
   guard let outer = y else {
+    // FIXME: Bring back the tailored diagnostic
     guard true else {
-      print(outer) // expected-error {{variable declared in 'guard' condition is not usable in its body}}
+      print(outer) // expected-error {{cannot find 'outer' in scope}}
     }
   }
 }
@@ -556,6 +558,7 @@ func testThrowNil() throws {
 // condition may have contained a SequenceExpr.
 func r23684220(_ b: Any) {
   if let _ = b ?? b {} // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'Any', so the right side is never used}}
+  // expected-error@-1 {{initializer for conditional binding must have Optional type, not 'Any'}}
 }
 
 

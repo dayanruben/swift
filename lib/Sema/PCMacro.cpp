@@ -187,8 +187,8 @@ public:
     transformStmtCondition(SC, GS->getStartLoc());
     GS->setCond(SC);
 
-    if (Stmt *BS = GS->getBody())
-      GS->setBody(transformStmt(BS));
+    if (BraceStmt *BS = GS->getBody())
+      GS->setBody(transformBraceStmt(BS));
     return GS;
   }
 
@@ -226,8 +226,8 @@ public:
       SourceLoc StartLoc = FES->getStartLoc();
       SourceLoc EndLoc = FES->getSequence()->getEndLoc();
       // FIXME: get the 'end' of the for stmt
-      // if (FD->getBodyResultTypeLoc().hasLocation()) {
-      //   EndLoc = FD->getBodyResultTypeLoc().getSourceRange().End;
+      // if (FD->getResultTypeRepr()) {
+      //   EndLoc = FD->getResultTypeSourceRange().End;
       // } else {
       //   EndLoc = FD->getParameters()->getSourceRange().End;
       // }
@@ -343,8 +343,8 @@ public:
         // decl at the start of the transformed body
         SourceLoc StartLoc = FD->getStartLoc();
         SourceLoc EndLoc = SourceLoc();
-        if (FD->getBodyResultTypeLoc().hasLocation()) {
-          EndLoc = FD->getBodyResultTypeLoc().getSourceRange().End;
+        if (FD->getResultTypeRepr()) {
+          EndLoc = FD->getResultTypeSourceRange().End;
         } else {
           EndLoc = FD->getParameters()->getSourceRange().End;
         }
@@ -353,8 +353,8 @@ public:
           NB = prependLoggerCall(NB, {StartLoc, EndLoc});
 
         if (NB != B) {
-          FD->setBody(NB);
-          TypeChecker::checkFunctionErrorHandling(FD);
+          FD->setBody(NB, AbstractFunctionDecl::BodyKind::TypeChecked);
+          TypeChecker::checkFunctionEffects(FD);
         }
       }
     } else if (auto *NTD = dyn_cast<NominalTypeDecl>(D)) {
@@ -497,7 +497,7 @@ public:
   buildPatternAndVariable(Expr *InitExpr) {
     SmallString<16> NameBuf;
     (Twine("pctmp") + Twine(TmpNameIndex)).toVector(NameBuf);
-    TmpNameIndex++;
+    ++TmpNameIndex;
 
     Expr *MaybeLoadInitExpr = nullptr;
 
@@ -510,8 +510,7 @@ public:
 
     VarDecl *VD =
         new (Context) VarDecl(/*IsStatic*/false, VarDecl::Introducer::Let,
-                              /*IsCaptureList*/false, SourceLoc(),
-                              Context.getIdentifier(NameBuf),
+                              SourceLoc(), Context.getIdentifier(NameBuf),
                               TypeCheckDC);
     VD->setInterfaceType(MaybeLoadInitExpr->getType()->mapTypeOutOfContext());
     VD->setImplicit();
@@ -547,10 +546,11 @@ public:
     }
 
     std::pair<unsigned, unsigned> StartLC =
-        Context.SourceMgr.getLineAndColumn(SR.Start);
+        Context.SourceMgr.getPresumedLineAndColumnForLoc(SR.Start);
 
-    std::pair<unsigned, unsigned> EndLC = Context.SourceMgr.getLineAndColumn(
-        Lexer::getLocForEndOfToken(Context.SourceMgr, SR.End));
+    std::pair<unsigned, unsigned> EndLC =
+        Context.SourceMgr.getPresumedLineAndColumnForLoc(
+            Lexer::getLocForEndOfToken(Context.SourceMgr, SR.End));
 
     Expr *StartLine = IntegerLiteralExpr::createFromUnsigned(Context, StartLC.first);
     Expr *EndLine = IntegerLiteralExpr::createFromUnsigned(Context, EndLC.first);
@@ -617,10 +617,11 @@ public:
     }
 
     std::pair<unsigned, unsigned> StartLC =
-        Context.SourceMgr.getLineAndColumn(SR.Start);
+        Context.SourceMgr.getPresumedLineAndColumnForLoc(SR.Start);
 
-    std::pair<unsigned, unsigned> EndLC = Context.SourceMgr.getLineAndColumn(
-        Lexer::getLocForEndOfToken(Context.SourceMgr, SR.End));
+    std::pair<unsigned, unsigned> EndLC =
+        Context.SourceMgr.getPresumedLineAndColumnForLoc(
+            Lexer::getLocForEndOfToken(Context.SourceMgr, SR.End));
 
     Expr *StartLine = IntegerLiteralExpr::createFromUnsigned(Context, StartLC.first);
     Expr *EndLine = IntegerLiteralExpr::createFromUnsigned(Context, EndLC.first);
@@ -693,7 +694,7 @@ void swift::performPCMacro(SourceFile &SF) {
             BraceStmt *NewBody = I.transformBraceStmt(Body, true);
             if (NewBody != Body) {
               TLCD->setBody(NewBody);
-              TypeChecker::checkTopLevelErrorHandling(TLCD);
+              TypeChecker::checkTopLevelEffects(TLCD);
               TypeChecker::contextualizeTopLevelCode(TLCD);
             }
             return false;

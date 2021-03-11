@@ -32,6 +32,7 @@ namespace swift {
   class FileUnit;
   class FuncDecl;
   enum class ResilienceExpansion : unsigned;
+  struct SILDeclRef;
   class SILType;
   class VarDecl;
   enum class SpecialProtocol : uint8_t;
@@ -46,6 +47,7 @@ namespace irgen {
   class Size;
   class StructLayout;
   class ClassLayout;
+  class LinkEntity;
 
   bool requiresForeignTypeMetadata(CanType type);
   bool requiresForeignTypeMetadata(NominalTypeDecl *decl);
@@ -74,6 +76,9 @@ namespace irgen {
   /// Emit the type metadata accessor for a type for which it might be used.
   void emitLazyMetadataAccessor(IRGenModule &IGM, NominalTypeDecl *type);
 
+  void emitLazyCanonicalSpecializedMetadataAccessor(IRGenModule &IGM,
+                                                    CanType theType);
+
   void emitLazySpecializedGenericTypeMetadata(IRGenModule &IGM, CanType type);
 
   /// Emit metadata for a foreign struct, enum or class.
@@ -85,11 +90,19 @@ namespace irgen {
   /// Emit the metadata associated with the given enum declaration.
   void emitEnumMetadata(IRGenModule &IGM, EnumDecl *theEnum);
 
+  /// Emit the metadata associated with a given instantiation of a generic
+  /// struct.
   void emitSpecializedGenericStructMetadata(IRGenModule &IGM, CanType type,
                                             StructDecl &decl);
 
+  /// Emit the metadata associated with a given instantiation of a generic enum.
   void emitSpecializedGenericEnumMetadata(IRGenModule &IGM, CanType type,
                                           EnumDecl &decl);
+
+  /// Emit the metadata associated with a given instantiation of a generic
+  // class.
+  void emitSpecializedGenericClassMetadata(IRGenModule &IGM, CanType type,
+                                           ClassDecl &decl);
 
   /// Get what will be the index into the generic type argument array at the end
   /// of a nominal type's metadata.
@@ -170,6 +183,10 @@ namespace irgen {
                                           GenericSignature sig,
                                           ArrayRef<Requirement> requirements);
 
+  llvm::GlobalValue *emitAsyncFunctionPointer(IRGenModule &IGM,
+                                              llvm::Function *function,
+                                              LinkEntity entity,
+                                              Size size);
 } // end namespace irgen
 } // end namespace swift
 

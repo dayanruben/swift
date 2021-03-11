@@ -45,6 +45,7 @@ set(SWIFTLIB_ESSENTIAL
   CollectionAlgorithms.swift
   Comparable.swift
   CompilerProtocols.swift
+  ConcurrentValue.swift
   ContiguousArray.swift
   ContiguouslyStored.swift
   ClosedRange.swift
@@ -60,6 +61,7 @@ set(SWIFTLIB_ESSENTIAL
   DictionaryVariant.swift
   DropWhile.swift
   Dump.swift
+  EitherSequence.swift
   EmptyCollection.swift
   Equatable.swift
   ErrorType.swift
@@ -107,6 +109,7 @@ set(SWIFTLIB_ESSENTIAL
   Pointer.swift
   Policy.swift
   PrefixWhile.swift
+  Prespecialize.swift
   Print.swift
   PtrAuth.swift
   Random.swift
@@ -207,13 +210,11 @@ set(SWIFTLIB_SOURCES
   Availability.swift
   CollectionDifference.swift
   CollectionOfOne.swift
-  DiscontiguousSlice.swift
   Diffing.swift
+  FloatingPointRandom.swift
   Mirror.swift
   PlaygroundDisplay.swift
   CommandLine.swift
-  RangeSet.swift
-  RangeSetStorage.swift
   SliceBuffer.swift
   SIMDVector.swift
   UnfoldSequence.swift
@@ -256,22 +257,16 @@ else()
   endif()
 endif()
 
-if(SWIFT_PRIMARY_VARIANT_SDK STREQUAL ANDROID)
-  # workaround for libatomic needing to be after object files for swiftCore.so
-  list(APPEND swift_core_private_link_libraries atomic)
-elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL CYGWIN)
+if(SWIFT_PRIMARY_VARIANT_SDK STREQUAL CYGWIN)
   # TODO(compnerd) cache this variable to permit re-configuration
   execute_process(COMMAND "cygpath" "-u" "$ENV{SYSTEMROOT}" OUTPUT_VARIABLE ENV_SYSTEMROOT)
   list(APPEND swift_core_private_link_libraries "${ENV_SYSTEMROOT}/system32/psapi.dll")
 elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL FREEBSD)
   find_library(EXECINFO_LIBRARY execinfo)
   list(APPEND swift_core_private_link_libraries ${EXECINFO_LIBRARY})
-  # workaround for libatomic needing to be after object files for swiftCore.so
-  list(APPEND swift_core_private_link_libraries
-    ${SWIFTLIB_DIR}/clang/lib/freebsd/libclang_rt.builtins-${SWIFT_PRIMARY_VARIANT_ARCH}.a)
 elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL LINUX)
   if(SWIFT_BUILD_STATIC_STDLIB)
-    list(APPEND swift_core_private_link_libraries swiftImageInspectionShared)
+    list(APPEND swift_core_private_link_libraries)
   endif()
 elseif(SWIFT_PRIMARY_VARIANT_SDK STREQUAL WINDOWS)
   list(APPEND swift_core_private_link_libraries shell32;DbgHelp)
@@ -281,15 +276,17 @@ option(SWIFT_CHECK_ESSENTIAL_STDLIB
     "Check core standard library layering by linking its essential subset"
     FALSE)
 
-if(SWIFT_STDLIB_SIL_DEBUGGING)
-  list(APPEND swift_stdlib_compile_flags "-Xfrontend" "-gsil")
+if(NOT "${CMAKE_BUILD_TYPE}" STREQUAL "MinSizeRel")
+  list(APPEND swift_stdlib_compile_flags "-Xllvm" "-sil-inline-generics")
+  list(APPEND swift_stdlib_compile_flags "-Xllvm" "-sil-partial-specialization")
 endif()
-
-list(APPEND swift_stdlib_compile_flags "-Xllvm" "-sil-inline-generics")
-list(APPEND swift_stdlib_compile_flags "-Xllvm" "-sil-partial-specialization")
 if(SWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING)
   list(APPEND swift_stdlib_compile_flags "-enforce-exclusivity=checked")
 endif()
+
+# STAGING: Temporarily avoids having to write #fileID in Swift.swiftinterface.
+list(APPEND swift_stdlib_compile_flags "-Xfrontend" "-enable-experimental-concise-pound-file")
+list(APPEND swift_stdlib_compile_flags "-Xfrontend" "-enable-ossa-modules")
 
 if(SWIFT_CHECK_ESSENTIAL_STDLIB)
   add_swift_target_library(swift_stdlib_essential ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB IS_STDLIB_CORE
@@ -319,7 +316,7 @@ add_swift_target_library(swiftCore
                   PRIVATE_LINK_LIBRARIES
                     ${swift_core_private_link_libraries}
                   INCORPORATE_OBJECT_LIBRARIES
-                    swiftRuntime swiftStdlibStubs
+                    swiftRuntime swiftLLVMSupport swiftDemangling swiftStdlibStubs
                   FRAMEWORK_DEPENDS
                     ${swift_core_framework_depends}
                   INSTALL_IN_COMPONENT

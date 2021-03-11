@@ -44,18 +44,9 @@ static DefaultArgumentKind getDefaultArgKind(Expr *init) {
     return DefaultArgumentKind::Normal;
 
   switch (magic->getKind()) {
-  case MagicIdentifierLiteralExpr::Column:
-    return DefaultArgumentKind::Column;
-  case MagicIdentifierLiteralExpr::File:
-    return DefaultArgumentKind::File;
-  case MagicIdentifierLiteralExpr::FilePath:
-    return DefaultArgumentKind::FilePath;
-  case MagicIdentifierLiteralExpr::Line:
-    return DefaultArgumentKind::Line;
-  case MagicIdentifierLiteralExpr::Function:
-    return DefaultArgumentKind::Function;
-  case MagicIdentifierLiteralExpr::DSOHandle:
-    return DefaultArgumentKind::DSOHandle;
+#define MAGIC_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
+  case MagicIdentifierLiteralExpr::NAME: return DefaultArgumentKind::NAME;
+#include "swift/AST/MagicIdentifierKinds.def"
   }
 
   llvm_unreachable("Unhandled MagicIdentifierLiteralExpr in switch.");
@@ -79,7 +70,7 @@ static ParserStatus parseDefaultArgument(
   SourceLoc equalLoc = P.consumeToken();
 
   if (P.SF.Kind == SourceFileKind::Interface) {
-    // Swift module interfaces don't synthesize inherited intializers and
+    // Swift module interfaces don't synthesize inherited initializers and
     // instead include them explicitly in subclasses. Since the
     // \c DefaultArgumentKind of these initializers is \c Inherited, this is
     // represented textually as `= super` in the interface.
@@ -139,8 +130,10 @@ static ParserStatus parseDefaultArgument(
   
   defaultArgs->HasDefaultArgument = true;
 
-  if (initR.hasCodeCompletion())
+  if (initR.hasCodeCompletion()) {
+    init = initR.get();
     return makeParserCodeCompletionStatus();
+  }
 
   if (initR.isNull())
     return makeParserError();
@@ -235,7 +228,7 @@ Parser::parseParameterClause(SourceLoc &leftParenLoc,
       if (AttrStatus.hasCodeCompletion()) {
         if (CodeCompletion)
           CodeCompletion->setAttrTargetDeclKind(DeclKind::Param);
-        status.setHasCodeCompletion();
+        status.setHasCodeCompletionAndIsError();
       }
     }
     
@@ -283,11 +276,13 @@ Parser::parseParameterClause(SourceLoc &leftParenLoc,
     
     if (startsParameterName(*this, isClosure)) {
       // identifier-or-none for the first name
-      param.FirstNameLoc = consumeArgumentLabel(param.FirstName);
+      param.FirstNameLoc = consumeArgumentLabel(param.FirstName,
+                                                /*diagnoseDollarPrefix=*/!isClosure);
 
       // identifier-or-none? for the second name
       if (Tok.canBeArgumentLabel())
-        param.SecondNameLoc = consumeArgumentLabel(param.SecondName);
+        param.SecondNameLoc = consumeArgumentLabel(param.SecondName,
+                                                   /*diagnoseDollarPrefix=*/true);
 
       // Operators, closures, and enum elements cannot have API names.
       if ((paramContext == ParameterContextKind::Operator ||
@@ -443,7 +438,7 @@ Parser::parseParameterClause(SourceLoc &leftParenLoc,
     if (Tok.getLoc() == StartLoc) {
       // If we took a default argument index for this parameter, but didn't add
       // one, then give it back.
-      if (defaultArgs) defaultArgs->NextIndex--;
+      if (defaultArgs) --defaultArgs->NextIndex;
       return status;
     }
 
@@ -581,7 +576,6 @@ mapParsedParameters(Parser &parser,
   // Collect the elements of the tuple patterns for argument and body
   // parameters.
   SmallVector<ParamDecl*, 4> elements;
-  SourceLoc ellipsisLoc;
 
   for (auto &param : params) {
     // Whether the provided name is API by default depends on the parameter
@@ -632,27 +626,26 @@ mapParsedParameters(Parser &parser,
     }
 
     // Warn when an unlabeled parameter follows a variadic parameter
-    if (ellipsisLoc.isValid() && elements.back()->isVariadic() &&
-        param.FirstName.empty()) {
-      parser.diagnose(param.FirstNameLoc,
-                      diag::unlabeled_parameter_following_variadic_parameter);
+    if (!elements.empty() && elements.back()->isVariadic() && argName.empty()) {
+      // Closure parameters can't have external labels, so use a more specific
+      // diagnostic.
+      if (paramContext == Parser::ParameterContextKind::Closure)
+        parser.diagnose(
+            param.FirstNameLoc,
+            diag::closure_unlabeled_parameter_following_variadic_parameter);
+      else
+        parser.diagnose(param.FirstNameLoc,
+                        diag::unlabeled_parameter_following_variadic_parameter);
     }
-    
-    // If this parameter had an ellipsis, check whether it's the last parameter.
-    if (param.EllipsisLoc.isValid()) {
-      if (ellipsisLoc.isValid()) {
-        parser.diagnose(param.EllipsisLoc, diag::multiple_parameter_ellipsis)
-          .highlight(ellipsisLoc)
-          .fixItRemove(param.EllipsisLoc);
 
-        param.EllipsisLoc = SourceLoc();
-      } else if (!result->getTypeRepr()) {
+    // If this parameter had an ellipsis, check it has a TypeRepr.
+    if (param.EllipsisLoc.isValid()) {
+      if (!result->getTypeRepr()) {
         parser.diagnose(param.EllipsisLoc, diag::untyped_pattern_ellipsis)
           .highlight(result->getSourceRange());
 
         param.EllipsisLoc = SourceLoc();
       } else {
-        ellipsisLoc = param.EllipsisLoc;
         result->setVariadic();
       }
     }
@@ -770,7 +763,7 @@ Parser::parseFunctionArguments(SmallVectorImpl<Identifier> &NamePieces,
 
 /// Parse a function definition signature.
 ///   func-signature:
-///     func-arguments func-throws? func-signature-result?
+///     func-arguments ('async'|'reasync')? func-throws? func-signature-result?
 ///   func-signature-result:
 ///     '->' type
 ///
@@ -780,6 +773,8 @@ Parser::parseFunctionSignature(Identifier SimpleName,
                                DeclName &FullName,
                                ParameterList *&bodyParams,
                                DefaultArgumentInfo &defaultArgs,
+                               SourceLoc &asyncLoc,
+                               bool &reasync,
                                SourceLoc &throwsLoc,
                                bool &rethrows,
                                TypeRepr *&retType) {
@@ -792,42 +787,16 @@ Parser::parseFunctionSignature(Identifier SimpleName,
   Status |= parseFunctionArguments(NamePieces, bodyParams, paramContext,
                                    defaultArgs);
   FullName = DeclName(Context, SimpleName, NamePieces);
-  
-  // Check for the 'throws' keyword.
+
+  // Check for the 'async' and 'throws' keywords.
+  reasync = false;
   rethrows = false;
-  if (Tok.is(tok::kw_throws)) {
-    throwsLoc = consumeToken();
-  } else if (Tok.is(tok::kw_rethrows)) {
-    throwsLoc = consumeToken();
-    rethrows = true;
-  } else if (Tok.isAny(tok::kw_throw, tok::kw_try)) {
-    throwsLoc = consumeToken();
-    diagnose(throwsLoc, diag::throw_in_function_type)
-      .fixItReplace(throwsLoc, "throws");
-  }
-
-  SourceLoc arrowLoc;
-
-  auto diagnoseInvalidThrows = [&]() -> Optional<InFlightDiagnostic> {
-    if (throwsLoc.isValid())
-      return None;
-
-    if (Tok.is(tok::kw_throws)) {
-      throwsLoc = consumeToken();
-    } else if (Tok.is(tok::kw_rethrows)) {
-      throwsLoc = consumeToken();
-      rethrows = true;
-    }
-
-    if (!throwsLoc.isValid())
-      return None;
-
-    auto diag = rethrows ? diag::rethrows_in_wrong_position
-                         : diag::throws_in_wrong_position;
-    return diagnose(Tok, diag);
-  };
+  Status |= parseEffectsSpecifiers(SourceLoc(),
+                                   asyncLoc, &reasync,
+                                   throwsLoc, &rethrows);
 
   // If there's a trailing arrow, parse the rest as the result type.
+  SourceLoc arrowLoc;
   if (Tok.isAny(tok::arrow, tok::colon)) {
     SyntaxParsingContext ReturnCtx(SyntaxContext, SyntaxKind::ReturnClause);
     if (!consumeIf(tok::arrow, arrowLoc)) {
@@ -837,43 +806,138 @@ Parser::parseFunctionSignature(Identifier SimpleName,
       arrowLoc = consumeToken(tok::colon);
     }
 
-    // Check for 'throws' and 'rethrows' after the arrow, but
-    // before the type, and correct it.
-    if (auto diagOpt = diagnoseInvalidThrows()) {
-      assert(arrowLoc.isValid());
-      assert(throwsLoc.isValid());
-      (*diagOpt).fixItExchange(SourceRange(arrowLoc),
-                               SourceRange(throwsLoc));
-    }
+    // Check for effect specifiers after the arrow, but before the type, and
+    // correct it.
+    parseEffectsSpecifiers(arrowLoc, asyncLoc, &reasync, throwsLoc, &rethrows);
 
     ParserResult<TypeRepr> ResultType =
         parseDeclResultType(diag::expected_type_function_result);
-    if (ResultType.hasCodeCompletion())
-      return ResultType;
     retType = ResultType.getPtrOrNull();
-    if (!retType) {
-      Status.setIsParseError();
+    Status |= ResultType;
+    if (Status.isErrorOrHasCompletion())
       return Status;
-    }
+
+    // Check for effect specifiers after the type and correct it.
+    parseEffectsSpecifiers(arrowLoc, asyncLoc, &reasync, throwsLoc, &rethrows);
   } else {
     // Otherwise, we leave retType null.
     retType = nullptr;
   }
 
-  // Check for 'throws' and 'rethrows' after the type and correct it.
-  if (auto diagOpt = diagnoseInvalidThrows()) {
-    assert(arrowLoc.isValid());
-    assert(retType);
-    SourceLoc typeEndLoc = Lexer::getLocForEndOfToken(SourceMgr,
-                                                      retType->getEndLoc());
-    SourceLoc throwsEndLoc = Lexer::getLocForEndOfToken(SourceMgr, throwsLoc);
-    (*diagOpt).fixItInsert(arrowLoc, rethrows ? "rethrows " : "throws ")
-              .fixItRemoveChars(typeEndLoc, throwsEndLoc);
-  }
-
   return Status;
 }
 
+bool Parser::isEffectsSpecifier(const Token &T) {
+  // NOTE: If this returns 'true', that token must be handled in
+  //       'parseEffectsSpecifiers()'.
+
+  if (T.isContextualKeyword("async") ||
+      T.isContextualKeyword("reasync"))
+    return true;
+
+  if (T.isAny(tok::kw_throws, tok::kw_rethrows) ||
+      (T.isAny(tok::kw_throw, tok::kw_try) && !T.isAtStartOfLine()))
+    return true;
+
+  return false;
+}
+
+ParserStatus Parser::parseEffectsSpecifiers(SourceLoc existingArrowLoc,
+                                            SourceLoc &asyncLoc,
+                                            bool *reasync,
+                                            SourceLoc &throwsLoc,
+                                            bool *rethrows) {
+  ParserStatus status;
+
+  while (true) {
+    // 'async'
+    bool isReasync = (shouldParseExperimentalConcurrency() &&
+                      Tok.isContextualKeyword("reasync"));
+    if (Tok.isContextualKeyword("async") ||
+        isReasync) {
+      if (asyncLoc.isValid()) {
+        diagnose(Tok, diag::duplicate_effects_specifier, Tok.getText())
+            .highlight(asyncLoc)
+            .fixItRemove(Tok.getLoc());
+      } else if (!reasync && isReasync) {
+        // Replace 'reasync' with 'async' unless it's allowed.
+        diagnose(Tok, diag::reasync_function_type)
+            .fixItReplace(Tok.getLoc(), "async");
+      } else if (existingArrowLoc.isValid()) {
+        SourceLoc insertLoc = existingArrowLoc;
+        if (throwsLoc.isValid() &&
+            SourceMgr.isBeforeInBuffer(throwsLoc, insertLoc))
+          insertLoc = throwsLoc;
+        diagnose(Tok, diag::async_or_throws_in_wrong_position,
+                 (reasync && isReasync) ? "reasync" : "async")
+            .fixItRemove(Tok.getLoc())
+            .fixItInsert(insertLoc,
+                         (reasync && isReasync) ? "reasync " : "async ");
+      } else if (throwsLoc.isValid()) {
+        // 'async' cannot be after 'throws'.
+        assert(existingArrowLoc.isInvalid());
+        diagnose(Tok, diag::async_after_throws,
+                 reasync && isReasync,
+                 rethrows && *rethrows)
+            .fixItRemove(Tok.getLoc())
+            .fixItInsert(throwsLoc, isReasync ? "reasync " : "async ");
+      }
+      if (asyncLoc.isInvalid()) {
+        if (reasync)
+          *reasync = isReasync;
+        asyncLoc = Tok.getLoc();
+      }
+      consumeToken();
+      continue;
+    }
+
+    // 'throws'/'rethrows', or diagnose 'throw'/'try'.
+    if (Tok.isAny(tok::kw_throws, tok::kw_rethrows) ||
+        (Tok.isAny(tok::kw_throw, tok::kw_try) && !Tok.isAtStartOfLine())) {
+      bool isRethrows = Tok.is(tok::kw_rethrows);
+
+      if (throwsLoc.isValid()) {
+        diagnose(Tok, diag::duplicate_effects_specifier, Tok.getText())
+            .highlight(throwsLoc)
+            .fixItRemove(Tok.getLoc());
+      } else if (Tok.isAny(tok::kw_throw, tok::kw_try)) {
+        // Replace 'throw' or 'try' with 'throws'.
+        diagnose(Tok, diag::throw_in_function_type)
+            .fixItReplace(Tok.getLoc(), "throws");
+      } else if (!rethrows && isRethrows) {
+        // Replace 'rethrows' with 'throws' unless it's allowed.
+        diagnose(Tok, diag::rethrowing_function_type)
+            .fixItReplace(Tok.getLoc(), "throws");
+      } else if (existingArrowLoc.isValid()) {
+        diagnose(Tok, diag::async_or_throws_in_wrong_position, Tok.getText())
+            .fixItRemove(Tok.getLoc())
+            .fixItInsert(existingArrowLoc, (Tok.getText() + " ").str());
+      }
+
+      if (throwsLoc.isInvalid()) {
+        if (rethrows)
+          *rethrows = isRethrows;
+        throwsLoc = Tok.getLoc();
+      }
+      consumeToken();
+      continue;
+    }
+
+    // Code completion.
+    if (Tok.is(tok::code_complete) && !Tok.isAtStartOfLine() &&
+        !existingArrowLoc.isValid()) {
+      if (CodeCompletion)
+        CodeCompletion->completeEffectsSpecifier(asyncLoc.isValid(),
+                                                 throwsLoc.isValid());
+      consumeToken(tok::code_complete);
+      status.setHasCodeCompletionAndIsError();
+      continue;
+    }
+
+    break;
+  }
+  return status;
+}
 
 /// Parse a pattern with an optional type annotation.
 ///
@@ -917,15 +981,15 @@ ParserResult<Pattern> Parser::parseTypedPattern() {
         SmallVector<Expr *, 2> args;
         SmallVector<Identifier, 2> argLabels;
         SmallVector<SourceLoc, 2> argLabelLocs;
-        Expr *trailingClosure;
+        SmallVector<TrailingClosure, 2> trailingClosures;
         ParserStatus status = parseExprList(tok::l_paren, tok::r_paren,
                                             /*isPostfix=*/true,
                                             /*isExprBasic=*/false,
                                             lParenLoc, args, argLabels,
                                             argLabelLocs, rParenLoc,
-                                            trailingClosure,
+                                            trailingClosures,
                                             SyntaxKind::Unknown);
-        if (status.isSuccess()) {
+        if (status.isSuccess() && !status.hasCodeCompletion()) {
           backtrack.cancelBacktrack();
           
           // Suggest replacing ':' with '='
@@ -971,7 +1035,7 @@ ParserResult<Pattern> Parser::parsePattern() {
         SF.Kind == SourceFileKind::Interface) {
       PatternCtx.setCreateSyntax(SyntaxKind::IdentifierPattern);
       auto VD = new (Context) VarDecl(
-        /*IsStatic*/false, introducer, /*IsCaptureList*/false,
+        /*IsStatic*/false, introducer,
         consumeToken(tok::kw__), Identifier(), CurDeclContext);
       return makeParserResult(NamedPattern::createImplicit(Context, VD));
     }
@@ -981,7 +1045,7 @@ ParserResult<Pattern> Parser::parsePattern() {
   case tok::identifier: {
     PatternCtx.setCreateSyntax(SyntaxKind::IdentifierPattern);
     Identifier name;
-    SourceLoc loc = consumeIdentifier(&name);
+    SourceLoc loc = consumeIdentifier(name, /*diagnoseDollarPrefix=*/true);
     if (Tok.isIdentifierOrUnderscore() && !Tok.isContextualDeclKeyword())
       diagnoseConsecutiveIDs(name.str(), loc,
                              introducer == VarDecl::Introducer::Let
@@ -1022,8 +1086,8 @@ ParserResult<Pattern> Parser::parsePattern() {
       return makeParserCodeCompletionResult<Pattern>();
     if (subPattern.isNull())
       return nullptr;
-    return makeParserResult(new (Context) VarPattern(varLoc, isLet,
-                                                     subPattern.get()));
+    return makeParserResult(
+        new (Context) BindingPattern(varLoc, isLet, subPattern.get()));
   }
       
   default:
@@ -1044,8 +1108,7 @@ ParserResult<Pattern> Parser::parsePattern() {
 Pattern *Parser::createBindingFromPattern(SourceLoc loc, Identifier name,
                                           VarDecl::Introducer introducer) {
   auto var = new (Context) VarDecl(/*IsStatic*/false, introducer,
-                                   /*IsCaptureList*/false, loc, name,
-                                   CurDeclContext);
+                                   loc, name, CurDeclContext);
   return new (Context) NamedPattern(var);
 }
 
@@ -1061,7 +1124,7 @@ Parser::parsePatternTupleElement() {
 
   // If the tuple element has a label, parse it.
   if (Tok.is(tok::identifier) && peekToken().is(tok::colon)) {
-    LabelLoc = consumeIdentifier(&Label);
+    LabelLoc = consumeIdentifier(Label, /*diagnoseDollarPrefix=*/true);
     consumeToken(tok::colon);
   }
 
@@ -1124,8 +1187,7 @@ ParserResult<Pattern> Parser::parsePatternTuple() {
 ///  pattern-type-annotation ::= (':' type)?
 ///
 ParserResult<Pattern> Parser::
-parseOptionalPatternTypeAnnotation(ParserResult<Pattern> result,
-                                   bool isOptional) {
+parseOptionalPatternTypeAnnotation(ParserResult<Pattern> result) {
   if (!Tok.is(tok::colon))
     return result;
 
@@ -1140,22 +1202,17 @@ parseOptionalPatternTypeAnnotation(ParserResult<Pattern> result,
   Pattern *P = result.get();
   ParserStatus status;
   if (result.hasCodeCompletion())
-    status.setHasCodeCompletion();
+    status.setHasCodeCompletionAndIsError();
 
   ParserResult<TypeRepr> Ty = parseType();
   if (Ty.hasCodeCompletion()) {
-    result.setHasCodeCompletion();
+    result.setHasCodeCompletionAndIsError();
     return result;
   }
 
   TypeRepr *repr = Ty.getPtrOrNull();
   if (!repr)
     repr = new (Context) ErrorTypeRepr(PreviousLoc);
-
-  // In an if-let, the actual type of the expression is Optional of whatever
-  // was written.
-  if (isOptional)
-    repr = new (Context) OptionalTypeRepr(repr, SourceLoc());
 
   return makeParserResult(status, new (Context) TypedPattern(P, repr));
 }
@@ -1190,9 +1247,9 @@ ParserResult<Pattern> Parser::parseMatchingPattern(bool isExprBasic) {
     ParserResult<TypeRepr> castType = parseType();
     if (castType.isNull() || castType.hasCodeCompletion())
       return nullptr;
-    return makeParserResult(new (Context) IsPattern(isLoc, castType.get(),
-                                                    nullptr,
-                                                    CheckedCastKind::Unresolved));
+    auto *CastTE = new (Context) TypeExpr(castType.get());
+    return makeParserResult(new (Context) IsPattern(
+        isLoc, CastTE, nullptr, CheckedCastKind::Unresolved));
   }
 
   // matching-pattern ::= expr
@@ -1206,7 +1263,7 @@ ParserResult<Pattern> Parser::parseMatchingPattern(bool isExprBasic) {
 
   if (SyntaxContext->isEnabled()) {
     if (auto UPES = PatternCtx.popIf<ParsedUnresolvedPatternExprSyntax>()) {
-      PatternCtx.addSyntax(UPES->getDeferredPattern());
+      PatternCtx.addSyntax(UPES->getDeferredPattern(SyntaxContext));
     } else {
       PatternCtx.setCreateSyntax(SyntaxKind::ExpressionPattern);
     }
@@ -1239,7 +1296,7 @@ ParserResult<Pattern> Parser::parseMatchingPatternAsLetOrVar(bool isLet,
   ParserResult<Pattern> subPattern = parseMatchingPattern(isExprBasic);
   if (subPattern.isNull())
     return nullptr;
-  auto *varP = new (Context) VarPattern(varLoc, isLet, subPattern.get());
+  auto *varP = new (Context) BindingPattern(varLoc, isLet, subPattern.get());
   return makeParserResult(ParserStatus(subPattern), varP);
 }
 

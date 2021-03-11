@@ -15,7 +15,7 @@ func _vjpUnary(x: Tracked<Float>) -> (value: Tracked<Float>, pullback: (Tracked<
   return (value: x, pullback: { v in v })
 }
 DerivativeRegistrationTests.testWithLeakChecking("UnaryFreeFunction") {
-  expectEqual(1, gradient(at: 3.0, in: unary))
+  expectEqual(1, gradient(at: 3.0, of: unary))
 }
 
 @_semantics("autodiff.opaque")
@@ -28,7 +28,7 @@ func _vjpMultiply(_ x: Tracked<Float>, _ y: Tracked<Float>)
   return (x * y, { v in (v * y, v * x) })
 }
 DerivativeRegistrationTests.testWithLeakChecking("BinaryFreeFunction") {
-  expectEqual((3.0, 2.0), gradient(at: 2.0, 3.0, in: { x, y in multiply(x, y) }))
+  expectEqual((3.0, 2.0), gradient(at: 2.0, 3.0, of: { x, y in multiply(x, y) }))
 }
 
 struct Wrapper : Differentiable {
@@ -49,7 +49,7 @@ extension Wrapper {
 }
 DerivativeRegistrationTests.testWithLeakChecking("Initializer") {
   let v = Wrapper.TangentVector(float: 1)
-  let (𝛁x, 𝛁y) = pullback(at: 3, 4, in: { x, y in Wrapper(x, y) })(v)
+  let (𝛁x, 𝛁y) = pullback(at: 3, 4, of: { x, y in Wrapper(x, y) })(v)
   expectEqual(4, 𝛁x)
   expectEqual(3, 𝛁y)
 }
@@ -67,7 +67,7 @@ extension Wrapper {
   }
 }
 DerivativeRegistrationTests.testWithLeakChecking("StaticMethod") {
-  expectEqual((3.0, 2.0), gradient(at: 2.0, 3.0, in: { x, y in Wrapper.multiply(x, y) }))
+  expectEqual((3.0, 2.0), gradient(at: 2.0, 3.0, of: { x, y in Wrapper.multiply(x, y) }))
 }
 
 extension Wrapper {
@@ -94,20 +94,23 @@ DerivativeRegistrationTests.testWithLeakChecking("InstanceMethod") {
 
 extension Wrapper {
   subscript(_ x: Tracked<Float>) -> Tracked<Float> {
+    @differentiable(reverse)
     @_semantics("autodiff.opaque")
     get { float * x }
+
+    @differentiable(reverse)
     set {}
   }
 
   @derivative(of: subscript(_:))
-  func _vjpSubscript(_ x: Tracked<Float>)
+  func _vjpSubscriptGetter(_ x: Tracked<Float>)
     -> (value: Tracked<Float>, pullback: (Tracked<Float>) -> (Wrapper.TangentVector, Tracked<Float>)) {
     return (self[x], { v in
       (TangentVector(float: v * x), v * self.float)
     })
   }
 }
-DerivativeRegistrationTests.testWithLeakChecking("Subscript") {
+DerivativeRegistrationTests.testWithLeakChecking("SubscriptGetter") {
   let x: Tracked<Float> = 2
   let wrapper = Wrapper(float: 3)
   let (𝛁wrapper, 𝛁x) = gradient(at: wrapper, x) { wrapper, x in wrapper[x] }
@@ -116,28 +119,86 @@ DerivativeRegistrationTests.testWithLeakChecking("Subscript") {
 }
 
 extension Wrapper {
+  subscript() -> Tracked<Float> {
+    @differentiable(reverse)
+    get { float }
+
+    @differentiable(reverse)
+    set { float = newValue }
+  }
+
+  @derivative(of: subscript.set)
+  mutating func _vjpSubscriptSetter(_ newValue: Tracked<Float>)
+    -> (value: (), pullback: (inout TangentVector) -> Tracked<Float>) {
+    return ((), { dself in
+      // Note: pullback is hardcoded to set `dself.float = 100` and to return `dnewValue = 200`.
+      dself.float = 100
+      return 200
+    })
+  }
+}
+DerivativeRegistrationTests.testWithLeakChecking("SubscriptSetter") {
+  // A function wrapper around `Wrapper.subscript().set`.
+  func testSubscriptSet(_ wrapper: Wrapper, _ newValue: Tracked<Float>) -> Wrapper {
+    var result = wrapper
+    result[] = newValue
+    return result
+  }
+
+  let x: Tracked<Float> = 2
+  let wrapper = Wrapper(float: 3)
+  let (𝛁wrapper, 𝛁x) = pullback(at: wrapper, x, of: testSubscriptSet)(.init(float: 10))
+  expectEqual(Wrapper.TangentVector(float: 100), 𝛁wrapper)
+  expectEqual(200, 𝛁x)
+}
+
+extension Wrapper {
   var computedProperty: Tracked<Float> {
     @_semantics("autodiff.opaque")
     get { float * float }
-    set {}
+    set { float = newValue }
   }
 
   @derivative(of: computedProperty)
-  func _vjpComputedProperty()
+  func _vjpComputedPropertyGetter()
     -> (value: Tracked<Float>, pullback: (Tracked<Float>) -> Wrapper.TangentVector) {
     return (computedProperty, { [f = self.float] v in
       TangentVector(float: v * (f + f))
     })
   }
+
+  @derivative(of: computedProperty.set)
+  mutating func _vjpComputedPropertySetter(_ newValue: Tracked<Float>)
+    -> (value: (), pullback: (inout TangentVector) -> Tracked<Float>) {
+    return ((), { dself in
+      // Note: pullback is hardcoded to set `dself.float = 100` and to return `dnewValue = 200`.
+      dself.float = 100
+      return 200
+    })
+  }
 }
-DerivativeRegistrationTests.testWithLeakChecking("ComputedProperty") {
+DerivativeRegistrationTests.testWithLeakChecking("ComputedPropertyGetter") {
   let wrapper = Wrapper(float: 3)
   let 𝛁wrapper = gradient(at: wrapper) { wrapper in wrapper.computedProperty }
   expectEqual(Wrapper.TangentVector(float: 6), 𝛁wrapper)
 }
 
+DerivativeRegistrationTests.testWithLeakChecking("ComputedPropertySetter") {
+  // A function wrapper around `Wrapper.computedProperty.set`.
+  func testComputedPropertySet(_ wrapper: Wrapper, _ newValue: Tracked<Float>) -> Wrapper {
+    var result = wrapper
+    result.computedProperty = newValue
+    return result
+  }
+  let x: Tracked<Float> = 2
+  let wrapper = Wrapper(float: 3)
+  let (𝛁wrapper, 𝛁x) = pullback(at: wrapper, x, of: testComputedPropertySet)(.init(float: 10))
+  expectEqual(Wrapper.TangentVector(float: 100), 𝛁wrapper)
+  expectEqual(200, 𝛁x)
+}
+
 struct Generic<T> {
-  @differentiable // derivative generic signature: none
+  @differentiable(reverse) // derivative generic signature: none
   func instanceMethod(_ x: Tracked<Float>) -> Tracked<Float> {
     x
   }
@@ -156,12 +217,13 @@ DerivativeRegistrationTests.testWithLeakChecking("DerivativeGenericSignature") {
   expectEqual(1000, dx)
 }
 
+#if REQUIRES_SR14042
 // When non-canonicalized generic signatures are used to compare derivative configurations, the
 // `@differentiable` and `@derivative` attributes create separate derivatives, and we get a
 // duplicate symbol error in TBDGen.
 public protocol RefinesDifferentiable: Differentiable {}
 extension Float: RefinesDifferentiable {}
-@differentiable(where T: Differentiable, T: RefinesDifferentiable)
+@differentiable(reverse where T: Differentiable, T: RefinesDifferentiable)
 public func nonCanonicalizedGenSigComparison<T>(_ t: T) -> T { t }
 @derivative(of: nonCanonicalizedGenSigComparison)
 public func dNonCanonicalizedGenSigComparison<T: RefinesDifferentiable>(_ t: T)
@@ -170,11 +232,12 @@ public func dNonCanonicalizedGenSigComparison<T: RefinesDifferentiable>(_ t: T)
   (t, { _ in T.TangentVector.zero })
 }
 DerivativeRegistrationTests.testWithLeakChecking("NonCanonicalizedGenericSignatureComparison") {
-  let dx = gradient(at: Float(0), in: nonCanonicalizedGenSigComparison)
+  let dx = gradient(at: Float(0), of: nonCanonicalizedGenSigComparison)
   // Expect that we use the custom registered derivative, not a generated derivative (which would
   // give a gradient of 1).
   expectEqual(0, dx)
 }
+#endif
 
 // Test derivatives of default implementations.
 protocol HasADefaultImplementation {

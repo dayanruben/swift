@@ -105,7 +105,7 @@ macro(configure_build)
 endmacro()
 
 macro(configure_sdks_darwin)
-  set(macosx_arch "x86_64")
+  set(macosx_arch "x86_64" "arm64")
   set(iphoneos_arch "arm64" "arm64e" "armv7")
   set(appletvos_arch "arm64")
   set(watchos_arch "armv7k")
@@ -189,7 +189,7 @@ function (add_swift_benchmark_library objfile_out sibfile_out swiftmodule_out)
     DEPENDS ${stdlib_dependencies} ${sources} ${BENCHLIB_DEPENDS}
     COMMAND "${SWIFT_EXEC}"
       ${BENCHLIB_LIBRARY_FLAGS}
-      "-force-single-frontend-invocation"
+      "-whole-module-optimization"
       "-parse-as-library"
       "-module-name" "${module_name}"
       "-emit-module" "-emit-module-path" "${swiftmodule}"
@@ -209,7 +209,7 @@ function (add_swift_benchmark_library objfile_out sibfile_out swiftmodule_out)
       ${stdlib_dependencies} ${sources} ${BENCHLIB_DEPENDS}
       COMMAND "${SWIFT_EXEC}"
         ${BENCHLIB_LIBRARY_FLAGS}
-        "-force-single-frontend-invocation"
+        "-whole-module-optimization"
         "-parse-as-library"
         "-module-name" "${module_name}"
         "-emit-sib"
@@ -367,12 +367,17 @@ function (swift_benchmark_compile_archopts)
       "-F" "${sdk}/../../../Developer/Library/Frameworks"
       "-sdk" "${sdk}"
       "-no-link-objc-runtime")
+
+    # If we are not compiling at -Onone and are performing WMO, always emit
+    # optimization-records.
+    if(NOT ${optflag} STREQUAL "Onone" AND "${bench_flags}" MATCHES "-whole-module.*")
+      list(APPEND common_options "-save-optimization-record=bitstream")
+    endif()
   endif()
 
   set(opt_view_main_dir)
   if(SWIFT_BENCHMARK_GENERATE_OPT_VIEW AND LLVM_HAVE_OPT_VIEWER_MODULES)
     if(NOT ${optflag} STREQUAL "Onone" AND "${bench_flags}" MATCHES "-whole-module.*")
-      list(APPEND common_options "-save-optimization-record")
       set(opt_view_main_dir "${objdir}/opt-view")
     endif()
   endif()
@@ -473,6 +478,12 @@ function (swift_benchmark_compile_archopts)
       list(APPEND SWIFT_BENCH_OBJFILES "${objfile}")
       list(APPEND bench_library_swiftmodules "${swiftmodule}")
 
+      # Only set "enable-cxx-interop" for tests in the "cxx-source" directory.
+      set(cxx_options "")
+      if ("${module_name_path}" MATCHES ".*cxx-source/.*")
+        list(APPEND cxx_options "-Xfrontend" "-enable-cxx-interop" "-I" "${srcdir}/utils/CxxTests/")
+      endif()
+
       if ("${bench_flags}" MATCHES "-whole-module.*")
         set(output_option "-o" "${objfile}")
       else()
@@ -496,6 +507,7 @@ function (swift_benchmark_compile_archopts)
           "-module-name" "${module_name}"
           "-emit-module-path" "${swiftmodule}"
           "-I" "${objdir}"
+          ${cxx_options}
           ${output_option}
           "${source}")
       if (SWIFT_BENCHMARK_EMIT_SIB)
@@ -513,6 +525,7 @@ function (swift_benchmark_compile_archopts)
             ${SWIFT_BENCHMARK_EXTRA_FLAGS}
             "-module-name" "${module_name}"
             "-I" "${objdir}"
+            ${cxx_options}
             "-emit-sib"
             "-o" "${sibfile}"
             "${source}")
@@ -574,9 +587,11 @@ function (swift_benchmark_compile_archopts)
         ${SWIFT_BENCH_SIBFILES} "${source}"
       COMMAND "${SWIFT_EXEC}"
       ${common_swift4_options}
-      "-force-single-frontend-invocation"
+      "-whole-module-optimization"
       "-emit-module" "-module-name" "${module_name}"
       "-I" "${objdir}"
+      "-Xfrontend" "-enable-cxx-interop"
+      "-I" "${srcdir}/utils/CxxTests/"
       "-o" "${objdir}/${module_name}.o"
       "${source}")
   list(APPEND SWIFT_BENCH_OBJFILES "${objdir}/${module_name}.o")
@@ -609,11 +624,7 @@ function (swift_benchmark_compile_archopts)
 
   if(is_darwin)
     # If host == target.
-    if("${BENCH_COMPILE_ARCHOPTS_PLATFORM}" STREQUAL "macosx")
-      set(OUTPUT_EXEC "${benchmark-bin-dir}/Benchmark_${BENCH_COMPILE_ARCHOPTS_OPT}")
-    else()
-      set(OUTPUT_EXEC "${benchmark-bin-dir}/Benchmark_${BENCH_COMPILE_ARCHOPTS_OPT}-${target}")
-    endif()
+    set(OUTPUT_EXEC "${benchmark-bin-dir}/Benchmark_${BENCH_COMPILE_ARCHOPTS_OPT}-${target}")
   else()
     # If we are on Linux, we do not support cross compiling.
     set(OUTPUT_EXEC "${benchmark-bin-dir}/Benchmark_${BENCH_COMPILE_ARCHOPTS_OPT}")
@@ -660,8 +671,11 @@ function (swift_benchmark_compile_archopts)
           "-m${triple_platform}-version-min=${ver}"
           "-lobjc"
           "-L${SWIFT_LIBRARY_PATH}/${BENCH_COMPILE_ARCHOPTS_PLATFORM}"
+          "-L${sdk}/usr/lib/swift"
           "-Xlinker" "-rpath"
           "-Xlinker" "${SWIFT_LINK_RPATH}"
+          "-Xlinker" "-rpath"
+          "-Xlinker" "/usr/lib/swift"
           ${bench_library_objects}
           ${bench_driver_objects}
           ${ld64_add_ast_path_opts}
@@ -694,7 +708,7 @@ function(swift_benchmark_compile)
   cmake_parse_arguments(SWIFT_BENCHMARK_COMPILE "" "PLATFORM" "" ${ARGN})
 
   if(NOT SWIFT_BENCHMARK_BUILT_STANDALONE)
-    set(stdlib_dependencies "swift")
+    set(stdlib_dependencies "swift-frontend")
     foreach(stdlib_dependency ${UNIVERSAL_LIBRARY_NAMES_${SWIFT_BENCHMARK_COMPILE_PLATFORM}})
       string(FIND "${stdlib_dependency}" "Unittest" find_output)
       if("${find_output}" STREQUAL "-1")
@@ -738,11 +752,13 @@ function(swift_benchmark_compile)
       add_custom_target("check-${executable_target}"
           COMMAND "${swift-bin-dir}/Benchmark_Driver" "run"
                   "-o" "O" "--output-dir" "${CMAKE_CURRENT_BINARY_DIR}/logs"
+                  "--architecture" "${arch}"
                   "--swift-repo" "${SWIFT_SOURCE_DIR}"
                   "--independent-samples" "${SWIFT_BENCHMARK_NUM_O_ITERATIONS}"
           COMMAND "${swift-bin-dir}/Benchmark_Driver" "run"
                   "-o" "Onone" "--output-dir" "${CMAKE_CURRENT_BINARY_DIR}/logs"
                   "--swift-repo" "${SWIFT_SOURCE_DIR}"
+                  "--architecture" "${arch}"
                   "--independent-samples" "${SWIFT_BENCHMARK_NUM_ONONE_ITERATIONS}"
           COMMAND "${swift-bin-dir}/Benchmark_Driver" "compare"
                   "--log-dir" "${CMAKE_CURRENT_BINARY_DIR}/logs"

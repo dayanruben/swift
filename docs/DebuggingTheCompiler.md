@@ -1,14 +1,56 @@
-Debugging the Swift Compiler
-============================
 
-Abstract
---------
+<h1>Debugging The Compiler</h1>
 
-This document contains some useful information for debugging the
-Swift compiler and Swift compiler output.
+This document contains some useful information for debugging:
 
-Basic Utilities
----------------
+* The Swift compiler.
+* Intermediate output of the Swift Compiler.
+* Swift applications at runtime.
+
+Please feel free to add any useful tips that one finds to this document for the
+benefit of all Swift developers.
+
+**Table of Contents**
+
+- [Debugging the Compiler Itself](#debugging-the-compiler-itself)
+    - [Basic Utilities](#basic-utilities)
+    - [Printing the Intermediate Representations](#printing-the-intermediate-representations)
+    - [Debugging Diagnostic Emission](#debugging-diagnostic-emission)
+        - [Asserting on first emitted Warning/Assert Diagnostic](#asserting-on-first-emitted-warningassert-diagnostic)
+        - [Finding Diagnostic Names](#finding-diagnostic-names)
+    - [Debugging the Type Checker](#debugging-the-type-checker)
+        - [Enabling Logging](#enabling-logging)
+    - [Debugging on SIL Level](#debugging-on-sil-level)
+        - [Options for Dumping the SIL](#options-for-dumping-the-sil)
+        - [Getting CommandLine for swift stdlib from Ninja to enable dumping stdlib SIL](#getting-commandline-for-swift-stdlib-from-ninja-to-enable-dumping-stdlib-sil)
+        - [Dumping the SIL and other Data in LLDB](#dumping-the-sil-and-other-data-in-lldb)
+    - [Debugging and Profiling on SIL level](#debugging-and-profiling-on-sil-level)
+        - [SIL source level profiling using -gsil](#sil-source-level-profiling-using--gsil)
+        - [ViewCFG: Regex based CFG Printer for SIL/LLVM-IR](#viewcfg-regex-based-cfg-printer-for-silllvm-ir)
+        - [Debugging the Compiler using advanced LLDB Breakpoints](#debugging-the-compiler-using-advanced-lldb-breakpoints)
+        - [Debugging the Compiler using LLDB Scripts](#debugging-the-compiler-using-lldb-scripts)
+        - [Custom LLDB Commands](#custom-lldb-commands)
+    - [Debugging at LLVM Level](#debugging-at-llvm-level)
+        - [Options for Dumping LLVM IR](#options-for-dumping-llvm-ir)
+    - [Bisecting Compiler Errors](#bisecting-compiler-errors)
+        - [Bisecting on SIL optimizer pass counts to identify optimizer bugs](#bisecting-on-sil-optimizer-pass-counts-to-identify-optimizer-bugs)
+        - [Using git-bisect in the presence of branch forwarding/feature branches](#using-git-bisect-in-the-presence-of-branch-forwardingfeature-branches)
+        - [Reducing SIL test cases using bug_reducer](#reducing-sil-test-cases-using-bug_reducer)
+- [Debugging Swift Executables](#debugging-swift-executables)
+    - [Determining the mangled name of a function in LLDB](#determining-the-mangled-name-of-a-function-in-lldb)
+    - [Manually symbolication using LLDB](#manually-symbolication-using-lldb)
+    - [Viewing allocation history, references, and page-level info](#viewing-allocation-history-references-and-page-level-info)
+    - [Printing memory contents](#printing-memory-contents)
+- [Debugging LLDB failures](#debugging-lldb-failures)
+    - ["Types" Log](#types-log)
+    - ["Expression" Log](#expression-log)
+    - [Multiple Logs at a Time](#multiple-logs-at-a-time)
+- [Compiler Tools/Options for Bug Hunting](#compiler-toolsoptions-for-bug-hunting)
+    - [Using `clang-tidy` to run the Static Analyzer](#using-clang-tidy-to-run-the-static-analyzer)
+
+# Debugging the Compiler Itself
+
+## Basic Utilities
 
 Often, the first step to debug a compiler problem is to re-run the compiler
 with a command line, which comes from a crash trace or a build log.
@@ -16,28 +58,27 @@ with a command line, which comes from a crash trace or a build log.
 The script `split-cmdline` in `utils/dev-scripts` splits a command line
 into multiple lines. This is helpful to understand and edit long command lines.
 
-Printing the Intermediate Representations
------------------------------------------
+## Printing the Intermediate Representations
 
 The most important thing when debugging the compiler is to examine the IR.
 Here is how to dump the IR after the main phases of the Swift compiler
 (assuming you are compiling with optimizations enabled):
 
-* **Parser** To print the AST after parsing::
+* **Parser** To print the AST after parsing:
 
-```bash
+```sh
 swiftc -dump-ast -O file.swift
 ```
 
-* **SILGen** To print the SIL immediately after SILGen::
+* **SILGen** To print the SIL immediately after SILGen:
 
-```bash
+```sh
 swiftc -emit-silgen -O file.swift
 ```
 
-* **Mandatory SIL passes** To print the SIL after the mandatory passes::
+* **Mandatory SIL passes** To print the SIL after the mandatory passes:
 
-```bash
+```sh
 swiftc -emit-sil -Onone file.swift
 ```
 
@@ -46,27 +87,27 @@ swiftc -emit-sil -Onone file.swift
   get what you want to see.
 
 * **Performance SIL passes** To print the SIL after the complete SIL
-   optimization pipeline::
+   optimization pipeline:
 
-```bash
+```sh
 swiftc -emit-sil -O file.swift
 ```
 
-* **IRGen** To print the LLVM IR after IR generation::
+* **IRGen** To print the LLVM IR after IR generation:
 
-```bash
+```sh
 swiftc -emit-ir -Xfrontend -disable-llvm-optzns -O file.swift
 ```
 
-* **LLVM passes** To print the LLVM IR after LLVM passes::
+* **LLVM passes** To print the LLVM IR after LLVM passes:
 
-```bash
+```sh
 swiftc -emit-ir -O file.swift
 ```
 
-* **Code generation** To print the final generated code::
+* **Code generation** To print the final generated code:
 
-```bash
+```sh
 swiftc -S -O file.swift
 ```
 
@@ -75,11 +116,9 @@ print the SIL *and* the LLVM IR, you have to run the compiler twice.
 The output of all these dump options (except `-dump-ast`) can be redirected
 with an additional `-o <file>` option.
 
-Debugging Diagnostic Emission
------------------------------
+## Debugging Diagnostic Emission
 
-Asserting on first emitted Warning/Assert Diagnostic
-----------------------------------------------------
+### Asserting on first emitted Warning/Assert Diagnostic
 
 When changing the type checker and various SIL passes, one can cause a series of
 cascading diagnostics (errors/warnings) to be emitted. Since Swift does not by
@@ -94,19 +133,16 @@ diagnostic engine to assert on the first error/warning:
 These allow one to dump a stack trace of where the diagnostic is being emitted
 (if run without a debugger) or drop into the debugger if a debugger is attached.
 
-Finding Diagnostic Names
-----------------------------------------------------
+### Finding Diagnostic Names
 
 Some diagnostics rely heavily on format string arguments, so it can be difficult
 to find their implementation by searching for parts of the emitted message in
 the codebase. To print the corresponding diagnostic name at the end of each
 emitted message, use the `-Xfrontend -debug-diagnostic-names` argument.
 
-Debugging the Type Checker
---------------------------
+## Debugging the Type Checker
 
-Enabling Logging
-----------------
+### Enabling Logging
 
 To enable logging in the type checker, use the following argument: `-Xfrontend -debug-constraints`.
 This will cause the typechecker to log its internal state as it solves
@@ -168,63 +204,44 @@ typing `:constraints debug on`:
     ***  Type ':help' for assistance.              ***
     (swift) :constraints debug on
 
-Debugging on SIL Level
-----------------------
+## Debugging on SIL Level
 
-Options for Dumping the SIL
----------------------------
+### Options for Dumping the SIL
 
 Often it is not sufficient to dump the SIL at the beginning or end of
 the optimization pipeline. The SILPassManager supports useful options
 to dump the SIL also between pass runs.
 
-The SILPassManager's SIL dumping options vary along two orthogonal
-functional axes:
+A short (non-exhaustive) list of SIL printing options:
 
-1. Options that control if functions/modules are printed.
-2. Options that filter what is printed at those points.
+* `-Xllvm '-sil-print-function=SWIFT_MANGLED_NAME'`: Print the specified
+  function after each pass which modifies the function. Note that for module
+  passes, the function is printed if the pass changed _any_ function (the
+  pass manager doesn't know which functions a module pass has changed).
+  Multiple functions can be specified as a comma separated list.
 
-One generally always specifies an option of type 1 and optionally adds
-an option of type 2 to filter the output.
+* `-Xllvm '-sil-print-functions=NAME'`: Like `-sil-print-function`, except that
+  functions are selected if NAME is _contained_ in their mangled names.
 
-A short (non-exhaustive) list of type 1 options:
+* `-Xllvm -sil-print-all`: Print all functions when ever a function pass
+  modifies a function and print the entire module if a module pass modifies
+  the SILModule.
 
-* `-Xllvm -sil-print-all`: Print functions/modules when ever a
-  function pass modifies a function and Print the entire module
-  (modulo filtering) if a module pass modifies a SILModule.
+* `-Xllvm -sil-print-around=$PASS_NAME`: Print the SIL before and after a pass
+  with name `$PASS_NAME` runs on a function or module.
+  By default it prints the whole module. To print only specific functions, add
+  `-sil-print-function` and/or `-sil-print-functions`.
 
-A short (non-exhaustive) list of type 2 options:
+* `-Xllvm -sil-print-before=$PASS_NAME`: Like `-sil-print-around`, but prints
+  the SIL only _before_ the specified pass runs.
 
-* `-Xllvm -sil-print-around=$PASS_NAME`: Print a function/module
-  before and after a function pass with name `$PASS_NAME` runs on a
-  function/module or dump a module before a module pass with name
-  `$PASS_NAME` runs on a module.
-
-* `-Xllvm -sil-print-before=$PASS_NAME`: Print a function/module
-  before a function pass with name `$PASS_NAME` runs on a
-  function/module or dump a module before a module pass with name
-  `$PASS_NAME` runs on a module. NOTE: This happens even without
-  sil-print-all set!
-
-* `-Xllvm -sil-print-after=$PASS_NAME`: Print a function/module
-  after a function pass with name `$PASS_NAME` runs on a
-  function/module or dump a module before a module pass with name
-  `$PASS_NAME` runs on a module.
-
-* `-Xllvm '-sil-print-only-function=SWIFT_MANGLED_NAME'`: When ever
-  one would print a function/module, only print the given function.
-
-These options together allow one to visualize how a
-SILFunction/SILModule is optimized by the optimizer as each
-optimization pass runs easily via formulations like:
-
-    swiftc -Xllvm '-sil-print-only-function=$myMainFunction' -Xllvm -sil-print-all
+* `-Xllvm -sil-print-after=$PASS_NAME`: Like `-sil-print-around`, but prints
+  the SIL only _after_ the specified pass did run.
 
 NOTE: This may emit a lot of text to stderr, so be sure to pipe the
 output to a file.
 
-Getting CommandLine for swift stdlib from Ninja
------------------------------------------------
+### Getting CommandLine for swift stdlib from Ninja to enable dumping stdlib SIL
 
 If one builds swift using ninja and wants to dump the SIL of the
 stdlib using some of the SIL dumping options from the previous
@@ -235,8 +252,7 @@ section, one can use the following one-liner:
 This should give one a single command line that one can use for
 Swift.o, perfect for applying the previous sections options to.
 
-Dumping the SIL and other Data in LLDB
---------------------------------------
+### Dumping the SIL and other Data in LLDB
 
 When debugging the Swift compiler with LLDB (or Xcode, of course), there is
 even a more powerful way to examine the data in the compiler, e.g. the SIL.
@@ -273,8 +289,9 @@ with the proper attributes to ensure they'll be available in the debugger. In
 particular, if you see `SWIFT_DEBUG_DUMP` in a class declaration, that class
 has a `dump()` method you can call.
 
-Debugging and Profiling on SIL level
-------------------------------------
+## Debugging and Profiling on SIL level
+
+### SIL source level profiling using -gsil
 
 The compiler provides a way to debug and profile on SIL level. To enable SIL
 debugging add the front-end option -gsil together with -g. Example:
@@ -289,8 +306,7 @@ For details see the SILDebugInfoGenerator pass.
 To enable SIL debugging and profiling for the Swift standard library, use
 the build-script-impl option `--build-sil-debugging-stdlib`.
 
-ViewCFG: Regex based CFG Printer
---------------------------------
+### ViewCFG: Regex based CFG Printer for SIL/LLVM-IR
 
 ViewCFG (`./utils/viewcfg`) is a script that parses a textual CFG (e.g. a llvm
 or sil function) and displays a .dot file of the CFG. Since the parsing is done
@@ -336,8 +352,7 @@ used with viewcfg:
       <copy-paste output to file.s>
     $ blockifyasm < file.s | viewcfg
 
-Using Breakpoints
------------------
+### Debugging the Compiler using advanced LLDB Breakpoints
 
 LLDB has very powerful breakpoints, which can be utilized in many ways to debug
 the compiler and Swift executables. The examples in this section show the LLDB
@@ -353,18 +368,18 @@ and check for the function name in the breakpoint condition:
 
 Sometimes you may want to know which optimization inserts, removes or moves a
 certain instruction. To find out, set a breakpoint in
-`ilist_traits<SILInstruction>:addNodeToList` or
-`ilist_traits<SILInstruction>:removeNodeFromList`, which are defined in
+`ilist_traits<SILInstruction>::addNodeToList` or
+`ilist_traits<SILInstruction>::removeNodeFromList`, which are defined in
 `SILInstruction.cpp`.
 The following command sets a breakpoint which stops if a `strong_retain`
 instruction is removed:
 
-    (lldb) br set -c 'I->getKind() == ValueKind:StrongRetainInst' -f SILInstruction.cpp -l 63
+    (lldb) br set -c 'I->getKind() == ValueKind::StrongRetainInst' -f SILInstruction.cpp -l 63
 
 The condition can be made more precise e.g. by also testing in which function
 this happens:
 
-    (lldb) br set -c 'I->getKind() == ValueKind:StrongRetainInst &&
+    (lldb) br set -c 'I->getKind() == ValueKind::StrongRetainInst &&
                I->getFunction()->hasName("_TFC3nix1Xd")'
                -f SILInstruction.cpp -l 63
 
@@ -375,7 +390,7 @@ function.
 
 To achieve this, set another breakpoint and add breakpoint commands:
 
-    (lldb) br set -n GlobalARCOpts:run
+    (lldb) br set -n GlobalARCOpts::run
     Breakpoint 2
     (lldb) br com add 2
     > p int $n = $n + 1
@@ -392,26 +407,26 @@ Now remove the breakpoint commands from the second breakpoint (or create a new
 one) and set the ignore count to $n minus one:
 
     (lldb) br delete 2
-    (lldb) br set -i 4 -n GlobalARCOpts:run
+    (lldb) br set -i 4 -n GlobalARCOpts::run
 
 Run your program again and the breakpoint hits just before the first breakpoint.
 
 Another method for accomplishing the same task is to set the ignore count of the
 breakpoint to a large number, i.e.:
 
-    (lldb) br set -i 9999999 -n GlobalARCOpts:run
+    (lldb) br set -i 9999999 -n GlobalARCOpts::run
 
 Then whenever the debugger stops next time (due to hitting another
 breakpoint/crash/assert) you can list the current breakpoints:
 
     (lldb) br list
-    1: name = 'GlobalARCOpts:run', locations = 1, resolved = 1, hit count = 85 Options: ignore: 1 enabled
+    1: name = 'GlobalARCOpts::run', locations = 1, resolved = 1, hit count = 85 Options: ignore: 1 enabled
 
 which will then show you the number of times that each breakpoint was hit. In
-this case, we know that `GlobalARCOpts:run` was hit 85 times. So, now
+this case, we know that `GlobalARCOpts::run` was hit 85 times. So, now
 we know to ignore swift_getGenericMetadata 84 times, i.e.:
 
-    (lldb) br set -i 84 -n GlobalARCOpts:run
+    (lldb) br set -i 84 -n GlobalARCOpts::run
 
 A final trick is that one can use the -R option to stop at a relative assembly
 address in lldb. Specifically, lldb resolves the breakpoint normally and then
@@ -424,8 +439,7 @@ Then lldb would add 38 to the offset of foo and break there. This is really
 useful in contexts where one wants to set a breakpoint at an assembly address
 that is stable across multiple different invocations of lldb.
 
-LLDB Scripts
-------------
+### Debugging the Compiler using LLDB Scripts
 
 LLDB has powerful capabilities of scripting in Python among other languages. An
 often overlooked, but very useful technique is the -s command to lldb. This
@@ -463,8 +477,7 @@ Then by running `lldb test -s test.lldb`, lldb will:
 Using LLDB scripts can enable one to use complex debugger workflows without
 needing to retype the various commands perfectly every time.
 
-Custom LLDB Commands
---------------------
+### Custom LLDB Commands
 
 If you've ever found yourself repeatedly entering a complex sequence of
 commands within a debug session, consider using custom lldb commands. Custom
@@ -510,42 +523,23 @@ to define custom commands using just other lldb commands. For example,
 
     (lldb) command alias cs sequence p/x $rax; stepi
 
-Reducing SIL test cases using bug_reducer
------------------------------------------
+## Debugging at LLVM Level
 
-There is functionality provided in ./swift/utils/bug_reducer/bug_reducer.py for
-reducing SIL test cases by:
+### Options for Dumping LLVM IR
 
-1. Producing intermediate sib files that only require some of the passes to
-   trigger the crasher.
-2. Reducing the size of the sil test case by extracting functions or
-   partitioning a module into unoptimized and optimized modules.
+Similar to SIL, one can configure LLVM to dump the llvm-ir at various points in
+the pipeline. Here is a quick summary of the various options:
 
-For more information and a high level example, see:
-./swift/utils/bug_reducer/README.md.
+* ``-Xllvm -print-before=$PASS_ID``: Print the LLVM IR before a specified LLVM pass runs.
+* ``-Xllvm -print-before-all``: Print the LLVM IR before each pass runs.
+* ``-Xllvm -print-after-all``: Print the LLVM IR after each pass runs.
+* ``-Xllvm -filter-print-funcs=$FUNC_NAME_1,$FUNC_NAME_2,...,$FUNC_NAME_N``:
+  When printing IR for functions for print-[before|after]-all options, Only
+  print the IR for functions whose name is in this comma separated list.
 
-Using `clang-tidy` to run the Static Analyzer
------------------------------------------------
+## Bisecting Compiler Errors
 
-Recent versions of LLVM package the tool `clang-tidy`. This can be used in
-combination with a json compilation database to run static analyzer checks as
-well as cleanups/modernizations on a code-base. Swift's cmake invocation by
-default creates one of these json databases at the root path of the swift host
-build, for example on macOS:
-
-    $PATH_TO_BUILD/swift-macosx-x86_64/compile_commands.json
-
-Using this file, one invokes `clang-tidy` on a specific file in the codebase
-as follows:
-
-    clang-tidy -p=$PATH_TO_BUILD/swift-macosx-x86_64/compile_commands.json $FULL_PATH_TO_FILE
-
-One can also use shell regex to visit multiple files in the same directory. Example:
-
-    clang-tidy -p=$PATH_TO_BUILD/swift-macosx-x86_64/compile_commands.json $FULL_PATH_TO_DIR/*.cpp
-
-Identifying an optimizer bug
-----------------------------
+### Bisecting on SIL optimizer pass counts to identify optimizer bugs
 
 If a compiled executable is crashing when built with optimizations, but not
 crashing when built with -Onone, it's most likely one of the SIL optimizations
@@ -576,11 +570,11 @@ it's quite easy to do this manually:
 
 2. Get the SIL before and after the bad optimization.
 
-  a. Add the compiler options
-     `-Xllvm -sil-print-all -Xllvm -sil-print-only-function='<function>'`
+  a. Add the compiler option
+     `-Xllvm -sil-print-function='<function>'`
      where `<function>` is the function name (including the preceding `$`).
      For example:
-     `-Xllvm -sil-print-all -Xllvm -sil-print-only-function='$s4test6testityS2iF'`.
+     `-Xllvm -sil-print-function='$s4test6testityS2iF'`.
      Again, the output can be large, so it's best to redirect stderr to a file.
   b. From the output, copy the SIL of the function *before* the bad
      run into a separate file and the SIL *after* the bad run into a file.
@@ -588,16 +582,87 @@ it's quite easy to do this manually:
      did wrong. To simplify the comparison, it's sometimes helpful to replace
      all SIL values (e.g. `%27`) with a constant string (e.g. `%x`).
 
+### Using git-bisect in the presence of branch forwarding/feature branches
 
-Debugging Swift Executables
-===========================
+`git-bisect` is a useful tool for finding where a regression was
+introduced. Sadly `git-bisect` does not handle long lived branches
+and will in fact choose commits from upstream branches that may be
+missing important content from the downstream branch. As an example,
+consider a situation where one has the following straw man commit flow
+graph:
+
+    github/main -> github/tensorflow
+
+In this case if one attempts to use `git-bisect` on
+github/tensorflow, `git-bisect` will sometimes choose commits from
+github/main resulting in one being unable to compile/test specific
+tensorflow code that has not been upstreamed yet. Even worse, what if
+we are trying to bisect in between two that were branched from
+github/tensorflow and have had subsequent commits cherry-picked on
+top. Without any loss of generality, lets call those two tags
+`tag-tensorflow-bad` and `tag-tensorflow-good`. Since both of
+these tags have had commits cherry-picked on top, they are technically
+not even on the github/tensorflow branch, but rather in a certain
+sense are a tag of a feature branch from main/tensorflow. So,
+`git-bisect` doesn't even have a clear history to bisect on in
+multiple ways.
+
+With those constraints in mind, we can bisect! We just need to be
+careful how we do it. Lets assume that we have a test script called
+`test.sh` that indicates error by the error code. With that in hand,
+we need to compute the least common ancestor of the good/bad
+commits. This is traditionally called the "merge base" of the
+commits. We can compute this as so:
+
+    TAG_MERGE_BASE=$(git merge-base tags/tag-tensorflow-bad tags/tag-tensorflow-good)
+
+Given that both tags were taken from the feature branch, the reader
+can prove to themselves that this commit is guaranteed to be on
+`github/tensorflow` and not `github/main` since all commits from
+`github/main` are forwarded using git merges.
+
+Then lets assume that we checked out `$TAG_MERGE_BASE` and then ran
+`test.sh` and did not hit any error. Ok, we can not bisect. Sadly,
+as mentioned above if we run git-bisect in between `$TAG_MERGE_BASE`
+and `tags/tag-tensorflow-bad`, `git-bisect` will sometimes choose
+commits from `github/main` which would cause `test.sh` to fail
+if we are testing tensorflow specific code! To work around this
+problem, we need to start our bisect and then tell `git-bisect` to
+ignore those commits by using the skip sub command:
+
+    git bisect start tags/tag-tensorflow-bad $TAG_MERGE_BASE
+    for rev in $(git rev-list $TAG_MERGE_BASE..tags/tag-tensorflow-bad --merges --first-parent); do
+        git rev-list $rev^2 --not $rev^
+    done | xargs git bisect skip
+
+Once this has been done, one uses `git-bisect` normally. One thing
+to be aware of is that `git-bisect` will return a good/bad commits
+on the feature branch and if one of those commits is a merge from the
+upstream branch, one will need to analyze the range of commits from
+upstream for the bad commit afterwards. The commit range in the merge
+should be relatively small though compared with the large git history
+one just bisected.
+
+### Reducing SIL test cases using bug_reducer
+
+There is functionality provided in ./swift/utils/bug_reducer/bug_reducer.py for
+reducing SIL test cases by:
+
+1. Producing intermediate sib files that only require some of the passes to
+   trigger the crasher.
+2. Reducing the size of the sil test case by extracting functions or
+   partitioning a module into unoptimized and optimized modules.
+
+For more information and a high level example, see:
+./swift/utils/bug_reducer/README.md.
+
+# Debugging Swift Executables
 
 One can use the previous tips for debugging the Swift compiler with Swift
 executables as well. Here are some additional useful techniques that one can use
 in Swift executables.
 
-Determining the mangled name of a function in LLDB
---------------------------------------------------
+## Determining the mangled name of a function in LLDB
 
 One problem that often comes up when debugging Swift code in LLDB is that LLDB
 shows the demangled name instead of the mangled name. This can lead to mistakes
@@ -611,15 +676,97 @@ function in the current frame:
     Module: file = "/Volumes/Files/work/solon/build/build-swift/validation-test-macosx-x86_64/stdlib/Output/CollectionType.swift.gyb.tmp/CollectionType3", arch = "x86_64"
     Symbol: id = {0x0000008c}, range = [0x0000000100004db0-0x00000001000056f0), name="ext.CollectionType3.CollectionType3.MutableCollectionType2<A where A: CollectionType3.MutableCollectionType2>.(subscript.materializeForSet : (Swift.Range<A.Index>) -> Swift.MutableSlice<A>).(closure #1)", mangled="_TFFeRq_15CollectionType322MutableCollectionType2_S_S0_m9subscriptFGVs5Rangeqq_s16MutableIndexable5Index_GVs12MutableSliceq__U_FTBpRBBRQPS0_MS4__T_"
 
-Manually symbolication using LLDB
----------------------------------
+## Manually symbolication using LLDB
 
 One can perform manual symbolication of a crash log or an executable using LLDB
 without running the actual executable. For a detailed guide on how to do this,
 see: https://lldb.llvm.org/symbolication.html.
 
-Debugging LLDB failures
-=======================
+## Viewing allocation history, references, and page-level info
+
+The `malloc_history` tool (macOS only) shows the history of `malloc` and `free`
+calls for a particular pointer. To enable malloc_history, you must run the
+target process with the environment variable MallocStackLogging=1. Then you can
+see the allocation history of any pointer:
+
+    malloc_history YourProcessName 0x12345678
+
+By default, this will show a compact call stack representation for each event
+that puts everything on a single line. For a more readable but larger
+representation, pass -callTree.
+
+This works even when you have the process paused in the debugger!
+
+The `leaks` tool (macOS only) can do more than just find leaks. You can use its
+pointer tracing engine to show you where a particular block is referenced:
+
+    leaks YourProcessName --trace=0x12345678
+
+Like malloc_history, this works even when you're in the middle of debugging the
+process.
+
+Sometimes you just want to know some basic info about the region of memory an
+address is in. The `memory region` lldb command will print out basic info about
+the region containing a pointer, such as its permissions and whether it's stack,
+heap, or a loaded image.
+
+lldb comes with a heap script that offers powerful tools to search for pointers:
+
+    (lldb) p (id)[NSApplication sharedApplication]
+    (id) $0 = 0x00007fc50f904ba0
+    (lldb) script import lldb.macosx.heap
+    "crashlog" and "save_crashlog" command installed, use the "--help" option for detailed help
+    "malloc_info", "ptr_refs", "cstr_refs", "find_variable", and "objc_refs" commands have been installed, use the "--help" options on these commands for detailed help.
+    (lldb) ptr_refs 0x00007fc50f904ba0
+    0x0000600003a49580: malloc(    48) -> 0x600003a49560 + 32
+    0x0000600003a6cfe0: malloc(    48) -> 0x600003a6cfc0 + 32
+    0x0000600001f80190: malloc(   112) -> 0x600001f80150 + 64     NSMenuItem55 bytes after NSMenuItem
+    0x0000600001f80270: malloc(   112) -> 0x600001f80230 + 64     NSMenuItem55 bytes after NSMenuItem
+    0x0000600001f80350: malloc(   112) -> 0x600001f80310 + 64     NSMenuItem55 bytes after NSMenuItem
+    ...
+
+## Printing memory contents
+
+lldb's `x` command is cryptic but extremely useful for printing out memory
+contents. Example:
+
+    (lldb) x/5a `(Class)objc_getClass("NSString")`
+    0x7fff83f6d660: 0x00007fff83f709f0 (void *)0x00007fff8c6550f0: NSObject
+    0x7fff83f6d668: 0x00007fff8c655118 (void *)0x00007fff8c6550f0: NSObject
+    0x7fff83f6d670: 0x000060000089c500 -> 0x00007fff2d49c550 "_getCString:maxLength:encoding:"
+    0x7fff83f6d678: 0x000580100000000f
+    0x7fff83f6d680: 0x000060000348e784
+
+Let's unpack the command a bit. The `5` says that we want to print five entries.
+`a` means to print them as addresses, which gives you some automatic symbol
+lookups and pointer chasing as we see here. Finally, we give it the address. The
+backticks around the expression tells it to evaluate that expression and use the
+result as the address. Another example:
+
+    (lldb) x/10xb 0x000060000089c500
+    0x60000089c500: 0x50 0xc5 0x49 0x2d 0xff 0x7f 0x00 0x00
+    0x60000089c508: 0x77 0x63
+
+Here, `x` means to print the values as hex, and `b` means to print byte by byte.
+The following specifiers are available:
+
+* o - octal
+* x - hexadecimal
+* d - decimal
+* u - unsigned decimal
+* t - binary
+* f - floating point
+* a - address
+* c - char
+* s - string
+* i - instruction
+* b - byte
+* h - halfword (16-bit value)
+* w - word (32-bit value)
+* g - giant word (64-bit value)
+
+
+# Debugging LLDB failures
 
 Sometimes one needs to be able to while debugging actually debug LLDB and its
 interaction with Swift itself. Some examples of problems where this can come up
@@ -639,8 +786,7 @@ For more details about any of the information below, please run:
 
     (lldb) help log enable
 
-"Types" Log
------------
+## "Types" Log
 
 The "types" log reports on LLDB's process of constructing SwiftASTContexts and
 errors that may occur. The two main tasks here are:
@@ -670,8 +816,7 @@ That will write the types log to the file passed to the -f option.
 This will ensure that the type import command is run before /any/ modules are
 imported.
 
-"Expression" Log
-----------------
+## "Expression" Log
 
 The "expression" log reports on the process of wrapping, parsing, SILGen'ing,
 JITing, and inserting an expression into the current Swift module. Since this can
@@ -698,72 +843,30 @@ especially if one evaluates multiple expressions with the logging enabled. In
 such a situation, run all expressions before the bad expression, turn on the
 logging, and only then run the bad expression.
 
-Multiple Logs at a Time
------------------------
+## Multiple Logs at a Time
 
 Note, you can also turn on more than one log at a time as well, e.x.:
 
     (lldb) log enable -f /tmp/lldb-types-log.txt lldb types expression
 
-Using git-bisect in the presence of branch forwarding/feature branches
-======================================================================
+# Compiler Tools/Options for Bug Hunting
 
+## Using `clang-tidy` to run the Static Analyzer
 
-`git-bisect` is a useful tool for finding where a regression was
-introduced. Sadly `git-bisect` does not handle long lived branches
-and will in fact choose commits from upstream branches that may be
-missing important content from the downstream branch. As an example,
-consider a situation where one has the following straw man commit flow
-graph:
+Recent versions of LLVM package the tool `clang-tidy`. This can be used in
+combination with a json compilation database to run static analyzer checks as
+well as cleanups/modernizations on a code-base. Swift's cmake invocation by
+default creates one of these json databases at the root path of the swift host
+build, for example on macOS:
 
-    github/master -> github/tensorflow
+    $PATH_TO_BUILD/swift-macosx-$(uname -m)/compile_commands.json
 
-In this case if one attempts to use `git-bisect` on
-github/tensorflow, `git-bisect` will sometimes choose commits from
-github/master resulting in one being unable to compile/test specific
-tensorflow code that has not been upstreamed yet. Even worse, what if
-we are trying to bisect in between two that were branched from
-github/tensorflow and have had subsequent commits cherry-picked on
-top. Without any loss of generality, lets call those two tags
-`tag-tensorflow-bad` and `tag-tensorflow-good`. Since both of
-these tags have had commits cherry-picked on top, they are technically
-not even on the github/tensorflow branch, but rather in a certain
-sense are a tag of a feature branch from master/tensorflow. So,
-`git-bisect` doesn't even have a clear history to bisect on in
-multiple ways.
+Using this file, one invokes `clang-tidy` on a specific file in the codebase
+as follows:
 
-With those constraints in mind, we can bisect! We just need to be
-careful how we do it. Lets assume that we have a test script called
-`test.sh` that indicates error by the error code. With that in hand,
-we need to compute the least common ancestor of the good/bad
-commits. This is traditionally called the "merge base" of the
-commits. We can compute this as so:
+    clang-tidy -p=$PATH_TO_BUILD/swift-macosx-$(uname -m)/compile_commands.json $FULL_PATH_TO_FILE
 
-    TAG_MERGE_BASE=$(git merge-base tags/tag-tensorflow-bad tags/tag-tensorflow-good)
+One can also use shell regex to visit multiple files in the same directory. Example:
 
-Given that both tags were taken from the feature branch, the reader
-can prove to themselves that this commit is guaranteed to be on
-`github/tensorflow` and not `github/master` since all commits from
-`github/master` are forwarded using git merges.
+    clang-tidy -p=$PATH_TO_BUILD/swift-macosx-$(uname -m)/compile_commands.json $FULL_PATH_TO_DIR/*.cpp
 
-Then lets assume that we checked out `$TAG_MERGE_BASE` and then ran
-`test.sh` and did not hit any error. Ok, we can not bisect. Sadly,
-as mentioned above if we run git-bisect in between `$TAG_MERGE_BASE`
-and `tags/tag-tensorflow-bad`, `git-bisect` will sometimes choose
-commits from `github/master` which would cause `test.sh` to fail
-if we are testing tensorflow specific code! To work around this
-problem, we need to start our bisect and then tell `git-bisect` to
-ignore those commits by using the skip sub command:
-
-    git bisect start tags/tag-tensorflow-bad $TAG_MERGE_BASE
-    for rev in $(git rev-list $TAG_MERGE_BASE..tags/tag-tensorflow-bad --merges --first-parent); do
-        git rev-list $rev^2 --not $rev^
-    done | xargs git bisect skip
-
-Once this has been done, one uses `git-bisect` normally. One thing
-to be aware of is that `git-bisect` will return a good/bad commits
-on the feature branch and if one of those commits is a merge from the
-upstream branch, one will need to analyze the range of commits from
-upstream for the bad commit afterwards. The commit range in the merge
-should be relatively small though compared with the large git history
-one just bisected.

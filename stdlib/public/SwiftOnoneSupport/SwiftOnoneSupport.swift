@@ -15,7 +15,7 @@ import Swift
 
 // =============================================================================
 // Definitions of proxy functions that mimic a generic function signature in the
-// standard library and are annotated with the standard libary's
+// standard library and are annotated with the standard library's
 // actual generic function name. The "prespecialize" annotation forces
 // the actual generic function to be specialized based on the argument
 // types passed to the proxy function.
@@ -276,16 +276,16 @@ extension Range where Bound: Strideable, Bound.Stride : SignedInteger {
 extension ClosedRange {
   // init(uncheckedBounds: (lower: A, upper: A)) -> Swift.ClosedRange<A>
   @_semantics("prespecialize.$sSN15uncheckedBoundsSNyxGx5lower_x5uppert_tcfC")
-  // endIndex.getter
-  @_semantics("prespecialize.$sSNsSxRzSZ6StrideRpzrlE8endIndexSNsSxRzSZABRQrlE0C0Oyx_Gvg")
-  // subscript.read
-  @_semantics("prespecialize.$sSNsSxRzSZ6StrideRpzrlEyxSNsSxRzSZABRQrlE5IndexOyx_Gcir")
   func _prespecializeClosedRange() {}
 }
 
 extension ClosedRange where Bound: Strideable, Bound.Stride : SignedInteger {
   // startIndex.getter
   @_semantics("prespecialize.$sSNsSxRzSZ6StrideRpzrlE10startIndexSNsSxRzSZABRQrlE0C0Oyx_Gvg")
+  // endIndex.getter
+  @_semantics("prespecialize.$sSNsSxRzSZ6StrideRpzrlE8endIndexSNsSxRzSZABRQrlE0C0Oyx_Gvg")
+  // subscript.read
+  @_semantics("prespecialize.$sSNsSxRzSZ6StrideRpzrlEyxSNsSxRzSZABRQrlE5IndexOyx_Gcir")
   func _prespecializeIntegerClosedRange() {}
 
   // index(after: ClosedRange<A>< where A: Swift.Strideable, A.Stride: Swift.SignedInteger>.Index)

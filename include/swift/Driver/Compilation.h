@@ -24,9 +24,9 @@
 #include "swift/Basic/OutputFileMap.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Driver/Driver.h"
+#include "swift/Driver/FineGrainedDependencyDriverGraph.h"
 #include "swift/Driver/Job.h"
 #include "swift/Driver/Util.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Chrono.h"
 
@@ -57,7 +57,7 @@ namespace driver {
 enum class OutputLevel {
   /// Indicates that normal output should be produced.
   Normal,
-  
+
   /// Indicates that only jobs should be printed and not run. (-###)
   PrintJobs,
 
@@ -79,51 +79,27 @@ using CommandSet = llvm::SmallPtrSet<const Job *, 16>;
 
 class Compilation {
 public:
-  class IncrementalSchemeComparator {
-    const bool EnableIncrementalBuildWhenConstructed;
-    const bool &EnableIncrementalBuild;
-    const bool EnableSourceRangeDependencies;
+  struct Result {
+    /// Set to true if any job exits abnormally (i.e. crashes).
+    bool hadAbnormalExit;
+    /// The exit code of this driver process.
+    int exitCode;
+    /// The dependency graph built up during the compilation of this module.
+    ///
+    /// This data is used for cross-module module dependencies.
+    fine_grained_dependencies::ModuleDepGraph depGraph;
 
-    /// If not empty, the path to use to log the comparision.
-    const StringRef CompareIncrementalSchemesPath;
+    Result(const Result &) = delete;
+    Result &operator=(const Result &) = delete;
 
-    const unsigned SwiftInputCount;
+    Result(Result &&) = default;
+    Result &operator=(Result &&) = default;
 
-  public:
-    std::string WhyIncrementalWasDisabled = "";
-
-  private:
-    DiagnosticEngine &Diags;
-
-    CommandSet JobsWithoutRanges;
-    CommandSet JobsWithRanges;
-
-    unsigned CompileStagesWithoutRanges = 0;
-    unsigned CompileStagesWithRanges = 0;
-
-  public:
-    IncrementalSchemeComparator(const bool &EnableIncrementalBuild,
-                                bool EnableSourceRangeDependencies,
-                                const StringRef CompareIncrementalSchemesPath,
-                                unsigned SwiftInputCount,
-                                DiagnosticEngine &Diags)
-        : EnableIncrementalBuildWhenConstructed(EnableIncrementalBuild),
-          EnableIncrementalBuild(EnableIncrementalBuild),
-          EnableSourceRangeDependencies(EnableSourceRangeDependencies),
-          CompareIncrementalSchemesPath(CompareIncrementalSchemesPath),
-          SwiftInputCount(SwiftInputCount), Diags(Diags) {}
-
-    /// Record scheduled jobs in support of the
-    /// -compare-incremental-schemes[-path] options
-    void update(const CommandSet &withoutRangeJobs,
-                const CommandSet &withRangeJobs);
-
-    /// Write the information for the -compare-incremental-schemes[-path]
-    /// options
-    void outputComparison() const;
-
-  private:
-    void outputComparison(llvm::raw_ostream &) const;
+    /// Construct a \c Compilation::Result from just an exit code.
+    static Result code(int code) {
+      return Compilation::Result{false, code,
+                                 fine_grained_dependencies::ModuleDepGraph()};
+    }
   };
 
 public:
@@ -158,6 +134,16 @@ private:
 
   /// The Jobs which will be performed by this compilation.
   SmallVector<std::unique_ptr<const Job>, 32> Jobs;
+  // The Jobs which represent external actions performed by other drivers in
+  // the build graph.
+  //
+  // These Jobs are never scheduled into the build graph. This vector is
+  // populated by the routine that computes the set of incremental external
+  // dependencies that affect the current computation. Due to the way the
+  // Driver models multiple aspects of the incremental compilation scheduler
+  // by mapping to and from Jobs, it is necessary to lie and retain a set of
+  // pseudo-Jobs.
+  SmallVector<std::unique_ptr<const Job>, 32> ExternalJobs;
 
   /// The original (untranslated) input argument list.
   ///
@@ -206,15 +192,6 @@ private:
   /// Indicates whether tasks should only be executed if their output is out
   /// of date.
   bool EnableIncrementalBuild;
-
-  /// When true, emit duplicated compilation record file whose filename is
-  /// suffixed with '~moduleonly'.
-  ///
-  /// This compilation record is used by '-emit-module'-only incremental builds
-  /// so that module-only builds do not affect compilation record file for
-  /// normal builds, while module-only incremental builds are able to use
-  /// artifacts of normal builds if they are already up to date.
-  bool OutputCompilationRecordForModuleOnlyBuild = false;
 
   /// Indicates whether groups of parallel frontend jobs should be merged
   /// together and run in composite "batch jobs" when possible, to reduce
@@ -275,9 +252,6 @@ public:
   const bool OnlyOneDependencyFile;
 
 private:
-  /// Is the parser recording token hashes for each type body?
-  const bool EnableTypeFingerprints;
-
   /// Helpful for debugging, but slows down the driver. So, only turn on when
   /// needed.
   const bool VerifyFineGrainedDependencyGraphAfterEveryImport;
@@ -285,15 +259,8 @@ private:
   /// needed.
   const bool EmitFineGrainedDependencyDotFileAfterEveryImport;
 
-  /// Experiment with intrafile dependencies
-  const bool FineGrainedDependenciesIncludeIntrafileOnes;
-
-  /// Experiment with source-range-based dependencies
-  const bool EnableSourceRangeDependencies;
-
-public:
-  /// Will contain a comparator if an argument demands it.
-  Optional<IncrementalSchemeComparator> IncrementalComparator;
+  /// (experimental) Enable cross-module incremental build scheduling.
+  const bool EnableCrossModuleIncrementalBuild;
 
 private:
   template <typename T>
@@ -314,7 +281,6 @@ public:
               std::unique_ptr<llvm::opt::DerivedArgList> TranslatedArgs,
               InputFileList InputsWithTypes,
               std::string CompilationRecordPath,
-              bool OutputCompilationRecordForModuleOnlyBuild,
               StringRef ArgsHash, llvm::sys::TimePoint<> StartTime,
               llvm::sys::TimePoint<> LastBuildTime,
               size_t FilelistThreshold,
@@ -327,14 +293,9 @@ public:
               bool ShowDriverTimeCompilation = false,
               std::unique_ptr<UnifiedStatsReporter> Stats = nullptr,
               bool OnlyOneDependencyFile = false,
-              bool EnableTypeFingerprints =
-                LangOptions().EnableTypeFingerprints,
               bool VerifyFineGrainedDependencyGraphAfterEveryImport = false,
               bool EmitFineGrainedDependencyDotFileAfterEveryImport = false,
-              bool FineGrainedDependenciesIncludeIntrafileOnes = false,
-              bool EnableSourceRangeDependencies = false,
-              bool CompareIncrementalSchemes = false,
-              StringRef CompareIncrementalSchemesPath = "");
+              bool EnableCrossModuleIncrementalBuild = false);
   // clang-format on
   ~Compilation();
 
@@ -364,7 +325,6 @@ public:
   UnwrappedArrayView<const Job> getJobs() const {
     return llvm::makeArrayRef(Jobs);
   }
-  Job *addJob(std::unique_ptr<Job> J);
 
   /// To send job list to places that don't truck in fancy array views.
   std::vector<const Job *> getJobsSimply() const {
@@ -393,22 +353,12 @@ public:
   }
   void disableIncrementalBuild(Twine why);
 
-  bool getEnableTypeFingerprints() const { return EnableTypeFingerprints; }
-
   bool getVerifyFineGrainedDependencyGraphAfterEveryImport() const {
     return VerifyFineGrainedDependencyGraphAfterEveryImport;
   }
 
   bool getEmitFineGrainedDependencyDotFileAfterEveryImport() const {
     return EmitFineGrainedDependencyDotFileAfterEveryImport;
-  }
-
-  bool getFineGrainedDependenciesIncludeIntrafileOnes() const {
-    return FineGrainedDependenciesIncludeIntrafileOnes;
-  }
-
-  bool getEnableSourceRangeDependencies() const {
-    return EnableSourceRangeDependencies;
   }
 
   bool getBatchModeEnabled() const {
@@ -438,6 +388,10 @@ public:
 
   bool getShowDriverTimeCompilation() const {
     return ShowDriverTimeCompilation;
+  }
+
+  bool getEnableCrossModuleIncrementalBuild() const {
+    return EnableCrossModuleIncrementalBuild;
   }
 
   size_t getFilelistThreshold() const {
@@ -493,13 +447,24 @@ public:
   /// \sa types::isPartOfSwiftCompilation
   const char *getAllSourcesPath() const;
 
+  /// Retrieve the path to the external swift deps file.
+  ///
+  /// For cross-module incremental builds, this file contains the dependencies
+  /// from all the modules integrated over the prior build.
+  ///
+  /// Currently this patch is relative to the build record, but we may want
+  /// to allow the output file map to customize this at some point.
+  std::string getExternalSwiftDepsFilePath() const {
+    return CompilationRecordPath + ".external";
+  }
+
   /// Asks the Compilation to perform the Jobs which it knows about.
   ///
   /// \param TQ The TaskQueue used to schedule jobs for execution.
   ///
   /// \returns result code for the Compilation's Jobs; 0 indicates success and
   /// -2 indicates that one of the Compilation's Jobs crashed during execution
-  int performJobs(std::unique_ptr<sys::TaskQueue> &&TQ);
+  Compilation::Result performJobs(std::unique_ptr<sys::TaskQueue> &&TQ);
 
   /// Returns whether the callee is permitted to pass -emit-loaded-module-trace
   /// to a frontend job.
@@ -534,15 +499,20 @@ public:
       SmallVectorImpl<const Job *> &sortedJobs) const;
 
 private:
+  friend class Driver;
+  friend class PerformJobsState;
+
+  Job *addJob(std::unique_ptr<Job> J);
+  Job *addExternalJob(std::unique_ptr<Job> J);
+
+private:
   /// Perform all jobs.
   ///
-  /// \param[out] abnormalExit Set to true if any job exits abnormally (i.e.
-  /// crashes).
   /// \param TQ The task queue on which jobs will be scheduled.
   ///
   /// \returns exit code of the first failed Job, or 0 on success. If a Job
   /// crashes during execution, a negative value will be returned.
-  int performJobsImpl(bool &abnormalExit, std::unique_ptr<sys::TaskQueue> &&TQ);
+  Compilation::Result performJobsImpl(std::unique_ptr<sys::TaskQueue> &&TQ);
 
   /// Performs a single Job by executing in place, if possible.
   ///
@@ -552,7 +522,7 @@ private:
   /// will no longer exist, or it will call exit() if the program was
   /// successfully executed. In the event of an error, this function will return
   /// a negative value indicating a failure to execute.
-  int performSingleCommand(const Job *Cmd);
+  Compilation::Result performSingleCommand(const Job *Cmd);
 };
 
 } // end namespace driver

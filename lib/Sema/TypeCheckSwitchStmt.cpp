@@ -212,12 +212,6 @@ namespace {
         }
         return Space(T, H, SP);
       }
-      static Space forConstructor(Type T, DeclName H,
-                                  std::forward_list<Space> SP) {
-        // No need to filter SP here; this is only used to copy other
-        // Constructor spaces.
-        return Space(T, H, SP);
-      }
       static Space forBool(bool C) {
         return Space(C);
       }
@@ -418,6 +412,7 @@ namespace {
         PAIRCASE (SpaceKind::BooleanConstant, SpaceKind::BooleanConstant):
           return this->getBoolValue() == other.getBoolValue();
 
+        PAIRCASE (SpaceKind::BooleanConstant, SpaceKind::Constructor):
         PAIRCASE (SpaceKind::BooleanConstant, SpaceKind::UnknownCase):
           return false;
 
@@ -716,7 +711,7 @@ namespace {
             if (args != argEnd) {
               labelSpaces.push_back(
                   std::pair<Identifier, Space>(*args, param));
-              args++;
+              ++args;
             } else
               labelSpaces.push_back(
                   std::pair<Identifier, Space>(Identifier(), param));
@@ -794,31 +789,32 @@ namespace {
         } else if (auto *E = tp->getEnumOrBoundGenericEnum()) {
           // Look into each case of the enum and decompose it in turn.
           auto children = E->getAllElements();
-          std::transform(children.begin(), children.end(),
-                         std::back_inserter(arr), [&](EnumElementDecl *eed) {
-            // Don't force people to match unavailable cases; they can't even
-            // write them.
-            if (AvailableAttr::isUnavailable(eed)) {
-              return Space();
-            }
+          llvm::transform(
+              children, std::back_inserter(arr), [&](EnumElementDecl *eed) {
+                // Don't force people to match unavailable cases; they can't
+                // even write them.
+                if (AvailableAttr::isUnavailable(eed)) {
+                  return Space();
+                }
 
-            // .e(a: X, b: X)   -> (a: X, b: X)
-            // .f((a: X, b: X)) -> ((a: X, b: X)
-            auto eedTy = tp->getCanonicalType()
-                           ->getTypeOfMember(E->getModuleContext(), eed,
-                                             eed->getArgumentInterfaceType());
-            SmallVector<Space, 4> constElemSpaces;
-            if (eedTy) {
-              if (auto *TTy = eedTy->getAs<TupleType>()) {
-                Space::getTupleTypeSpaces(eedTy, TTy, constElemSpaces);
-              } else if (auto *TTy = dyn_cast<ParenType>(eedTy.getPointer())) {
-                constElemSpaces.push_back(
-                    Space::forType(TTy->getUnderlyingType(), Identifier()));
-              }
-            }
-            return Space::forConstructor(tp, eed->getName(),
-                                         constElemSpaces);
-          });
+                // .e(a: X, b: X)   -> (a: X, b: X)
+                // .f((a: X, b: X)) -> ((a: X, b: X)
+                auto eedTy = tp->getCanonicalType()->getTypeOfMember(
+                    E->getModuleContext(), eed,
+                    eed->getArgumentInterfaceType());
+                SmallVector<Space, 4> constElemSpaces;
+                if (eedTy) {
+                  if (auto *TTy = eedTy->getAs<TupleType>()) {
+                    Space::getTupleTypeSpaces(eedTy, TTy, constElemSpaces);
+                  } else if (auto *TTy =
+                                 dyn_cast<ParenType>(eedTy.getPointer())) {
+                    constElemSpaces.push_back(
+                        Space::forType(TTy->getUnderlyingType(), Identifier()));
+                  }
+                }
+                return Space::forConstructor(tp, eed->getName(),
+                                             constElemSpaces);
+              });
 
           if (!E->isFormallyExhaustive(DC)) {
             arr.push_back(Space::forUnknown(/*allowedButNotRequired*/false));
@@ -1342,7 +1338,7 @@ namespace {
 
             for (size_t rowIdx = 0, colIdx = 0; rowIdx < matrix.size(); ++rowIdx) {
               if (rowIdx != 0 && (rowIdx % stride) == 0) {
-                colIdx++;
+                ++colIdx;
               }
 
               matrix[rowIdx].push_back(columnVect[colIdx]);
@@ -1422,8 +1418,8 @@ namespace {
         llvm_unreachable("cannot appear in case patterns");
       case PatternKind::Expr:
         return Space();
-      case PatternKind::Var: {
-        auto *VP = cast<VarPattern>(item);
+      case PatternKind::Binding: {
+        auto *VP = cast<BindingPattern>(item);
         return projectPattern(VP->getSubPattern());
       }
       case PatternKind::Paren: {
@@ -1441,7 +1437,7 @@ namespace {
         if (subSpace.getKind() == SpaceKind::Constructor &&
             subSpace.getHead().getBaseIdentifier().empty()) {
           return Space::forConstructor(item->getType(), name,
-                                       std::move(subSpace.getSpaces()));
+                                       {subSpace});
         }
         return Space::forConstructor(item->getType(), name, subSpace);
       }
@@ -1460,11 +1456,10 @@ namespace {
         switch (SP->getKind()) {
         case PatternKind::Tuple: {
           auto *TP = dyn_cast<TuplePattern>(SP);
-          std::transform(TP->getElements().begin(), TP->getElements().end(),
-                         std::back_inserter(conArgSpace),
-                         [&](TuplePatternElt pate) {
-                           return projectPattern(pate.getPattern());
-                         });
+          llvm::transform(TP->getElements(), std::back_inserter(conArgSpace),
+                          [&](TuplePatternElt pate) {
+                            return projectPattern(pate.getPattern());
+                          });
           // FIXME: Compound names.
           return Space::forConstructor(item->getType(),
                                        VP->getName().getBaseIdentifier(),
@@ -1513,11 +1508,10 @@ namespace {
       case PatternKind::Tuple: {
         auto *TP = cast<TuplePattern>(item);
         SmallVector<Space, 4> conArgSpace;
-        std::transform(TP->getElements().begin(), TP->getElements().end(),
-                       std::back_inserter(conArgSpace),
-                       [&](TuplePatternElt pate) {
-          return projectPattern(pate.getPattern());
-        });
+        llvm::transform(TP->getElements(), std::back_inserter(conArgSpace),
+                        [&](TuplePatternElt pate) {
+                          return projectPattern(pate.getPattern());
+                        });
         return Space::forConstructor(item->getType(), Identifier(),
                                      conArgSpace);
       }

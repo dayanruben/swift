@@ -16,6 +16,7 @@
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/USRGeneration.h"
 #include "swift/Basic/SourceManager.h"
+#include "AvailabilityMixin.h"
 #include "JSON.h"
 #include "Symbol.h"
 #include "SymbolGraph.h"
@@ -25,10 +26,15 @@ using namespace swift;
 using namespace symbolgraphgen;
 
 Symbol::Symbol(SymbolGraph *Graph, const ValueDecl *VD,
-               const NominalTypeDecl *SynthesizedBaseTypeDecl)
+               const NominalTypeDecl *SynthesizedBaseTypeDecl,
+               Type BaseType)
 : Graph(Graph),
   VD(VD),
-  SynthesizedBaseTypeDecl(SynthesizedBaseTypeDecl) {}
+  BaseType(BaseType),
+  SynthesizedBaseTypeDecl(SynthesizedBaseTypeDecl) {
+    if (!BaseType && SynthesizedBaseTypeDecl)
+      BaseType = SynthesizedBaseTypeDecl->getDeclaredInterfaceType();
+  }
 
 void Symbol::serializeKind(StringRef Identifier, StringRef DisplayName,
                            llvm::json::OStream &OS) const {
@@ -38,67 +44,56 @@ void Symbol::serializeKind(StringRef Identifier, StringRef DisplayName,
   });
 }
 
-void Symbol::serializeKind(llvm::json::OStream &OS) const {
-  AttributeRAII A("kind", OS);
+std::pair<StringRef, StringRef> Symbol::getKind(const ValueDecl *VD) const {
+  // Make sure supportsKind stays in sync with getKind.
+  assert(Symbol::supportsKind(VD->getKind()) && "unsupported decl kind");
   switch (VD->getKind()) {
   case swift::DeclKind::Class:
-    serializeKind("swift.class", "Class", OS);
-    break;
+    return {"swift.class", "Class"};
   case swift::DeclKind::Struct:
-    serializeKind("swift.struct", "Structure", OS);
-    break;
+    return {"swift.struct", "Structure"};
   case swift::DeclKind::Enum:
-    serializeKind("swift.enum", "Enumeration", OS);
-    break;
+    return {"swift.enum", "Enumeration"};
   case swift::DeclKind::EnumElement:
-    serializeKind("swift.enum.case", "Case", OS);
-    break;
+    return {"swift.enum.case", "Case"};
   case swift::DeclKind::Protocol:
-    serializeKind("swift.protocol", "Protocol", OS);
-    break;
+    return {"swift.protocol", "Protocol"};
   case swift::DeclKind::Constructor:
-    serializeKind("swift.init", "Initializer", OS);
-    break;
+    return {"swift.init", "Initializer"};
   case swift::DeclKind::Destructor:
-    serializeKind("swift.deinit", "Deinitializer", OS);
-    break;
+    return {"swift.deinit", "Deinitializer"};
   case swift::DeclKind::Func:
-    if (VD->isOperator()) {
-      serializeKind("swift.func.op", "Operator", OS);
-    } else if (VD->isStatic()) {
-      serializeKind("swift.type.method", "Type Method", OS);
-    } else if (VD->getDeclContext()->getSelfNominalTypeDecl()){
-      serializeKind("swift.method", "Instance Method", OS);
-    } else {
-      serializeKind("swift.func", "Function", OS);
-    }
-    break;
+    if (VD->isOperator())
+      return {"swift.func.op", "Operator"};
+    if (VD->isStatic())
+      return {"swift.type.method", "Type Method"};
+    if (VD->getDeclContext()->getSelfNominalTypeDecl())
+      return {"swift.method", "Instance Method"};
+    return {"swift.func", "Function"};
   case swift::DeclKind::Var:
-    if (VD->isStatic()) {
-      serializeKind("swift.type.property", "Type Property", OS);
-    } else if (VD->getDeclContext()->getSelfNominalTypeDecl()) {
-      serializeKind("swift.property", "Instance Property", OS);
-    } else {
-      serializeKind("swift.var", "Global Variable", OS);
-    }
-    break;
+    if (VD->isStatic())
+      return {"swift.type.property", "Type Property"};
+    if (VD->getDeclContext()->getSelfNominalTypeDecl())
+      return {"swift.property", "Instance Property"};
+    return {"swift.var", "Global Variable"};
   case swift::DeclKind::Subscript:
-    if (VD->isStatic()) {
-      serializeKind("swift.type.subscript", "Type Subscript", OS);
-    } else {
-      serializeKind("swift.subscript", "Instance Subscript", OS);
-    }
-    break;
+    if (VD->isStatic())
+      return {"swift.type.subscript", "Type Subscript"};
+    return {"swift.subscript", "Instance Subscript"};
   case swift::DeclKind::TypeAlias:
-    serializeKind("swift.typealias", "Type Alias", OS);
-    break;
+    return {"swift.typealias", "Type Alias"};
   case swift::DeclKind::AssociatedType:
-    serializeKind("swift.associatedtype", "Associated Type", OS);
-    break;
+    return {"swift.associatedtype", "Associated Type"};
   default:
     llvm::errs() << "Unsupported kind: " << VD->getKindName(VD->getKind());
     llvm_unreachable("Unsupported declaration kind for symbol graph");
   }
+}
+
+void Symbol::serializeKind(llvm::json::OStream &OS) const {
+  AttributeRAII A("kind", OS);
+  std::pair<StringRef, StringRef> IDAndName = getKind(VD);
+  serializeKind(IDAndName.first, IDAndName.second, OS);
 }
 
 void Symbol::serializeIdentifier(llvm::json::OStream &OS) const {
@@ -112,20 +107,34 @@ void Symbol::serializeIdentifier(llvm::json::OStream &OS) const {
 
 void Symbol::serializePathComponents(llvm::json::OStream &OS) const {
   OS.attributeArray("pathComponents", [&](){
-    SmallVector<SmallString<32>, 8> PathComponents;
+    SmallVector<PathComponent, 8> PathComponents;
     getPathComponents(PathComponents);
     for (auto Component : PathComponents) {
-      OS.value(Component);
+      OS.value(Component.Title);
     }
   });
 }
 
 void Symbol::serializeNames(llvm::json::OStream &OS) const {
   OS.attributeObject("names", [&](){
-    SmallVector<SmallString<32>, 8> PathComponents;
+    SmallVector<PathComponent, 8> PathComponents;
     getPathComponents(PathComponents);
-    
-    OS.attribute("title", PathComponents.back());
+
+    if (isa<GenericTypeDecl>(VD)) {    
+      SmallString<64> FullyQualifiedTitle;
+
+      for (const auto *It = PathComponents.begin(); It != PathComponents.end(); ++It) {
+        if (It != PathComponents.begin()) {
+          FullyQualifiedTitle.push_back('.');
+        }
+        FullyQualifiedTitle.append(It->Title);
+      }
+      
+      OS.attribute("title", FullyQualifiedTitle.str());
+    } else {
+      OS.attribute("title", PathComponents.back().Title);
+    }
+
     Graph->serializeNavigatorDeclarationFragments("navigator", *this, OS);
     Graph->serializeSubheadingDeclarationFragments("subHeading", *this, OS);
     // "prose": null
@@ -136,7 +145,7 @@ void Symbol::serializePosition(StringRef Key, SourceLoc Loc,
                                SourceManager &SourceMgr,
                                llvm::json::OStream &OS) const {
   // Note: Line and columns are zero-based in this serialized format.
-  auto LineAndColumn = SourceMgr.getLineAndColumn(Loc);
+  auto LineAndColumn = SourceMgr.getPresumedLineAndColumnForLoc(Loc);
   auto Line = LineAndColumn.first - 1;
   auto Column = LineAndColumn.second - 1;
 
@@ -229,7 +238,8 @@ void Symbol::serializeFunctionSignature(llvm::json::OStream &OS) const {
                 }
                 Graph->serializeDeclarationFragments("declarationFragments",
                                                      Symbol(Graph, Param,
-                                                            nullptr), OS);
+                                                            getSynthesizedBaseTypeDecl(),
+                                                            getBaseType()), OS);
               }); // end parameter object
             }
           }); // end parameters:
@@ -238,35 +248,62 @@ void Symbol::serializeFunctionSignature(llvm::json::OStream &OS) const {
 
       // Returns
       if (const auto ReturnType = FD->getResultInterfaceType()) {
-        Graph->serializeDeclarationFragments("returns", ReturnType, OS);
+        Graph->serializeDeclarationFragments("returns", ReturnType, BaseType,
+                                             OS);
       }
     });
   }
 }
 
+static SubstitutionMap getSubMapForDecl(const ValueDecl *D, Type BaseType) {
+  if (!BaseType || BaseType->isExistentialType())
+    return {};
+
+  // Map from the base type into the this declaration's innermost type context,
+  // or if we're dealing with an extention rather than a member, into its
+  // extended nominal (the extension's own requirements shouldn't be considered
+  // in the substitution).
+  swift::DeclContext *DC;
+  if (isa<swift::ExtensionDecl>(D))
+    DC = cast<swift::ExtensionDecl>(D)->getExtendedNominal();
+  else
+    DC = D->getInnermostDeclContext()->getInnermostTypeContext();
+
+  swift::ModuleDecl *M = DC->getParentModule();
+  if (isa<swift::NominalTypeDecl>(D) || isa<swift::ExtensionDecl>(D)) {
+    return BaseType->getContextSubstitutionMap(M, DC);
+  }
+
+  const swift::ValueDecl *SubTarget = D;
+  if (isa<swift::ParamDecl>(D)) {
+    auto *DC = D->getDeclContext();
+    if (auto *FD = dyn_cast<swift::AbstractFunctionDecl>(DC))
+      SubTarget = FD;
+  }
+  return BaseType->getMemberSubstitutionMap(M, SubTarget);
+}
+
 void Symbol::serializeSwiftGenericMixin(llvm::json::OStream &OS) const {
+
+  SubstitutionMap SubMap;
+  if (BaseType)
+    SubMap = getSubMapForDecl(VD, BaseType);
+
   if (const auto *GC = VD->getAsGenericContext()) {
     if (const auto Generics = GC->getGenericSignature()) {
 
       SmallVector<const GenericTypeParamType *, 4> FilteredParams;
       SmallVector<Requirement, 4> FilteredRequirements;
-      for (const auto Param : Generics->getGenericParams()) {
-        if (const auto *D = Param->getDecl()) {
-          if (D->isImplicit()) {
-            continue;
-          }
-          FilteredParams.push_back(Param);
-        }
-      }
+      filterGenericParams(Generics->getGenericParams(), FilteredParams,
+                          SubMap);
 
       const auto *Self = dyn_cast<NominalTypeDecl>(VD);
       if (!Self) {
         Self = VD->getDeclContext()->getSelfNominalTypeDecl();
       }
 
-      filterGenericRequirements(Generics->getRequirements(),
-                         Self,
-                         FilteredRequirements);
+      filterGenericRequirements(Generics->getRequirements(), Self,
+                                FilteredRequirements, SubMap, FilteredParams);
 
       if (FilteredParams.empty() && FilteredRequirements.empty()) {
         return;
@@ -325,97 +362,89 @@ void Symbol::serializeLocationMixin(llvm::json::OStream &OS) const {
   });
 }
 
-llvm::Optional<StringRef>
-Symbol::getDomain(PlatformAgnosticAvailabilityKind AgnosticKind,
-                  PlatformKind Kind) const {
-  switch (AgnosticKind) {
-    // SPM- and Swift-specific availability.
-    case PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific:
-      return { "SwiftPM" };
-    case PlatformAgnosticAvailabilityKind::SwiftVersionSpecific:
-    case PlatformAgnosticAvailabilityKind::UnavailableInSwift:
-      return { "Swift" };
-    // Although these are in the agnostic kinds, they are actually a signal
-    // that there is either platform-specific or completely platform-agnostic.
-    // They'll be handled below.
-    case PlatformAgnosticAvailabilityKind::Deprecated:
-    case PlatformAgnosticAvailabilityKind::Unavailable:
-    case PlatformAgnosticAvailabilityKind::None:
-      break;
+namespace {
+/// Get the availabilities for each domain on a declaration without walking
+/// up the parent hierarchy.
+///
+/// \param D The declaration whose availabilities the method will collect.
+/// \param Availabilities The domain -> availability map that will be updated.
+/// \param IsParent If \c true\c, will update or fill availabilities for a given
+/// domain with different "inheriting" rules rather than filling from
+/// duplicate \c \@available attributes on the same declaration.
+void getAvailabilities(const Decl *D,
+                       llvm::StringMap<Availability> &Availabilities,
+                       bool IsParent) {
+  // DeclAttributes is a linked list in reverse order from where they
+  // appeared in the source. Let's re-reverse them.
+  SmallVector<const AvailableAttr *, 4> AvAttrs;
+  for (const auto *Attr : D->getAttrs()) {
+    if (const auto *AvAttr = dyn_cast<AvailableAttr>(Attr)) {
+      AvAttrs.push_back(AvAttr);
+    }
   }
+  std::reverse(AvAttrs.begin(), AvAttrs.end());
 
-  // Platform-specific availability.
-  switch (Kind) {
-    case swift::PlatformKind::iOS:
-      return { "iOS" };
-    case swift::PlatformKind::macCatalyst:
-      return { "macCatalyst" };
-    case swift::PlatformKind::OSX:
-      return { "macOS" };
-    case swift::PlatformKind::tvOS:
-      return { "tvOS" };
-    case swift::PlatformKind::watchOS:
-      return { "watchOS" };
-    case swift::PlatformKind::iOSApplicationExtension:
-      return { "iOSAppExtension" };
-    case swift::PlatformKind::macCatalystApplicationExtension:
-      return { "macCatalystAppExtension" };
-    case swift::PlatformKind::OSXApplicationExtension:
-      return { "macOSAppExtension" };
-    case swift::PlatformKind::tvOSApplicationExtension:
-      return { "tvOSAppExtension" };
-    case swift::PlatformKind::watchOSApplicationExtension:
-      return { "watchOSAppExtension" };
-    // Platform-agnostic availability, such as "unconditionally deprecated"
-    // or "unconditionally obsoleted".
-    case swift::PlatformKind::none:
-      return None;
+  // Now go through them in source order.
+  for (auto *AvAttr : AvAttrs) {
+    Availability NewAvailability(*AvAttr);
+    if (NewAvailability.empty()) {
+      continue;
+    }
+    auto ExistingAvailability = Availabilities.find(NewAvailability.Domain);
+    if (ExistingAvailability != Availabilities.end()) {
+      // There are different rules for filling in missing components
+      // or replacing existing components from a parent's @available
+      // attribute compared to duplicate @available attributes on the
+      // same declaration.
+      // See the respective methods below for an explanation for the
+      // replacement/filling rules.
+      if (IsParent) {
+        ExistingAvailability->getValue().updateFromParent(NewAvailability);
+      } else {
+        ExistingAvailability->getValue().updateFromDuplicate(NewAvailability);
+      }
+    } else {
+      // There are no availabilities for this domain yet, so either
+      // inherit the parent's in its entirety or set it from this declaration.
+      Availabilities.insert(std::make_pair(NewAvailability.Domain,
+                                           NewAvailability));
+    }
   }
 }
 
-void Symbol::serializeAvailabilityMixin(llvm::json::OStream &OS) const {
-  SmallVector<const AvailableAttr *, 4> Availabilities;
-  for (const auto *Attr : VD->getAttrs()) {
-    if (const auto *AvAttr = dyn_cast<AvailableAttr>(Attr)) {
-      Availabilities.push_back(AvAttr);
+/// Get the availabilities of a declaration, considering all of its
+/// parent context's except for the module.
+void getInheritedAvailabilities(const Decl *D,
+llvm::StringMap<Availability> &Availabilities) {
+  getAvailabilities(D, Availabilities, /*IsParent*/false);
+
+  auto CurrentContext = D->getDeclContext();
+  while (CurrentContext) {
+    if (const auto *Parent = CurrentContext->getAsDecl()) {
+      if (isa<ModuleDecl>(Parent)) {
+        return;
+      }
+      getAvailabilities(Parent, Availabilities, /*IsParent*/true);
     }
+    CurrentContext = CurrentContext->getParent();
   }
+}
+
+} // end anonymous namespace
+
+void Symbol::serializeAvailabilityMixin(llvm::json::OStream &OS) const {
+  llvm::StringMap<Availability> Availabilities;
+  getInheritedAvailabilities(VD, Availabilities);
+
   if (Availabilities.empty()) {
     return;
   }
 
-  OS.attributeArray("availability", [&](){
-    for (const auto *AvAttr : Availabilities) {
-      OS.object([&](){
-        auto Domain = getDomain(AvAttr->getPlatformAgnosticAvailability(),
-                                AvAttr->Platform);
-        if (Domain) {
-          OS.attribute("domain", *Domain);
-        }
-        if (AvAttr->Introduced) {
-          AttributeRAII Introduced("introduced", OS);
-          symbolgraphgen::serialize(*AvAttr->Introduced, OS);
-        }
-        if (AvAttr->Deprecated) {
-          AttributeRAII Deprecated("deprecated", OS);
-          symbolgraphgen::serialize(*AvAttr->Deprecated, OS);
-        }
-        if (AvAttr->Obsoleted) {
-          AttributeRAII Obsoleted("obsoleted", OS);
-          symbolgraphgen::serialize(*AvAttr->Obsoleted, OS);
-        }
-        if (!AvAttr->Message.empty()) {
-          OS.attribute("message", AvAttr->Message);
-        }
-        if (!AvAttr->Rename.empty()) {
-          OS.attribute("renamed", AvAttr->Rename);
-        }
-        if (AvAttr->isUnconditionallyDeprecated()) {
-          OS.attribute("isUnconditionallyDeprecated", true);
-        }
-      }); // end availability object
+  OS.attributeArray("availability", [&]{
+    for (const auto &Availability : Availabilities) {
+      Availability.getValue().serialize(OS);
     }
-  }); // end availability: []
+  });
 }
 
 void Symbol::serialize(llvm::json::OStream &OS) const {
@@ -438,16 +467,27 @@ void Symbol::serialize(llvm::json::OStream &OS) const {
 }
 
 void
-Symbol::getPathComponents(SmallVectorImpl<SmallString<32>> &Components) const {
+Symbol::getPathComponents(SmallVectorImpl<PathComponent> &Components) const {
+  // Note: this is also used for sourcekit's cursor-info request, so can be
+  // called on local symbols too. For such symbols, the path contains all parent
+  // decl contexts that are currently representable in the symbol graph,
+  // skipping over the rest (e.g. containing closures and accessors).
 
   auto collectPathComponents = [&](const ValueDecl *Decl,
-                                   SmallVectorImpl<SmallString<32>> &DeclComponents) {
-    // Collect the spellings of the fully qualified identifier components.
+                                   SmallVectorImpl<PathComponent> &DeclComponents) {
+    // Collect the spellings, kinds, and decls of the fully qualified identifier
+    // components.
     while (Decl && !isa<ModuleDecl>(Decl)) {
       SmallString<32> Scratch;
       Decl->getName().getString(Scratch);
-      DeclComponents.push_back(Scratch);
-      if (const auto *DC = Decl->getDeclContext()) {
+      if (supportsKind(Decl->getKind()))
+        DeclComponents.push_back({Scratch, getKind(Decl).first, Decl});
+
+      // Find the next parent.
+      auto *DC = Decl->getDeclContext();
+      while (DC && DC->getContextKind() == DeclContextKind::AbstractClosureExpr)
+        DC = DC->getParent();
+      if (DC) {
         if (const auto *Nominal = DC->getSelfNominalTypeDecl()) {
           Decl = Nominal;
         } else {
@@ -465,7 +505,8 @@ Symbol::getPathComponents(SmallVectorImpl<SmallString<32>> &Components) const {
     // a protocol. Build a path as if it were defined in the base type.
     SmallString<32> LastPathComponent;
     VD->getName().getString(LastPathComponent);
-    Components.push_back(LastPathComponent);
+    if (supportsKind(VD->getKind()))
+      Components.push_back({LastPathComponent, getKind(VD).first, VD});
     collectPathComponents(BaseTypeDecl, Components);
   } else {
     // Otherwise, this is just a normal declaration, so we can build
@@ -478,13 +519,13 @@ Symbol::getPathComponents(SmallVectorImpl<SmallString<32>> &Components) const {
 }
 
 void Symbol::printPath(llvm::raw_ostream &OS) const {
-  SmallVector<SmallString<32>, 8> Components;
+  SmallVector<PathComponent, 8> Components;
   getPathComponents(Components);
   for (auto it = Components.begin(); it != Components.end(); ++it) {
     if (it != Components.begin()) {
       OS << '.';
     }
-    OS << it->str();
+    OS << it->Title.str();
   }
 }
 
@@ -494,5 +535,25 @@ void Symbol::getUSR(SmallVectorImpl<char> &USR) const {
   if (SynthesizedBaseTypeDecl) {
     OS << "::SYNTHESIZED::";
     ide::printDeclUSR(SynthesizedBaseTypeDecl, OS);
+  }
+}
+
+bool Symbol::supportsKind(DeclKind Kind) {
+  switch (Kind) {
+  case DeclKind::Class: LLVM_FALLTHROUGH;
+  case DeclKind::Struct: LLVM_FALLTHROUGH;
+  case DeclKind::Enum: LLVM_FALLTHROUGH;
+  case DeclKind::EnumElement: LLVM_FALLTHROUGH;
+  case DeclKind::Protocol: LLVM_FALLTHROUGH;
+  case DeclKind::Constructor: LLVM_FALLTHROUGH;
+  case DeclKind::Destructor: LLVM_FALLTHROUGH;
+  case DeclKind::Func: LLVM_FALLTHROUGH;
+  case DeclKind::Var: LLVM_FALLTHROUGH;
+  case DeclKind::Subscript: LLVM_FALLTHROUGH;
+  case DeclKind::TypeAlias: LLVM_FALLTHROUGH;
+  case DeclKind::AssociatedType:
+    return true;
+  default:
+    return false;
   }
 }

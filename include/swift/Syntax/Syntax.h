@@ -34,17 +34,15 @@
 
 namespace swift {
 
-class SyntaxASTMap;
-
 namespace syntax {
 
 struct SyntaxVisitor;
 class SourceFileSyntax;
 
 template <typename SyntaxNode>
-SyntaxNode make(RC<RawSyntax> Raw) {
-  auto Data = SyntaxData::make(Raw);
-  return { Data, Data.get() };
+SyntaxNode makeRoot(const RawSyntax *Raw) {
+  auto Data = SyntaxData::makeRoot(AbsoluteRawSyntax::forRoot(Raw));
+  return SyntaxNode(Data);
 }
 
 const auto NoParent = llvm::None;
@@ -52,30 +50,14 @@ const auto NoParent = llvm::None;
 /// The main handle for syntax nodes - subclasses contain all public
 /// structured editing APIs.
 ///
-/// This opaque structure holds two pieces of data: a strong reference to a
-/// root node and a weak reference to the node itself. The node of interest can
-/// be weakly held because the data nodes contain strong references to
-/// their children.
+/// Essentially, this is a wrapper around \c SyntaxData that provides
+/// convenience methods based on the node's kind.
 class Syntax {
-  friend struct SyntaxFactory;
-  friend class swift::SyntaxASTMap;
-
 protected:
-  /// A strong reference to the root node of the tree in which this piece of
-  /// syntax resides.
-  const RC<SyntaxData> Root;
-
-  /// A raw pointer to the data representing this syntax node.
-  ///
-  /// This is mutable for being able to set cached child members, which are
-  /// lazily created.
-  mutable const SyntaxData *Data;
+  RC<const SyntaxData> Data;
 
 public:
-  Syntax(const RC<SyntaxData> Root, const SyntaxData *Data)
-  : Root(Root), Data(Data) {
-    assert(Data != nullptr);
-  }
+  explicit Syntax(const RC<const SyntaxData> &Data) : Data(Data) {}
 
   virtual ~Syntax() {}
 
@@ -83,7 +65,7 @@ public:
   SyntaxKind getKind() const;
 
   /// Get the shared raw syntax.
-  const RC<RawSyntax> &getRaw() const;
+  const RawSyntax *getRaw() const;
 
   /// Get an ID for this node that is stable across incremental parses
   SyntaxNodeId getId() const { return getRaw()->getId(); }
@@ -102,20 +84,14 @@ public:
   }
 
   /// Get the Data for this Syntax node.
-  const SyntaxData &getData() const {
-    return *Data;
-  }
-
-  const SyntaxData *getDataPointer() const {
-    return Data;
-  }
+  const RC<const SyntaxData> &getData() const { return Data; }
 
   /// Cast this Syntax node to a more specific type, asserting it's of the
   /// right kind.
   template <typename T>
   T castTo() const {
     assert(is<T>() && "castTo<T>() node of incompatible type!");
-    return T { Root, Data };
+    return T(Data);
   }
 
   /// If this Syntax node is of the right kind, cast and return it,
@@ -131,12 +107,9 @@ public:
   /// Return the parent of this node, if it has one.
   llvm::Optional<Syntax> getParent() const;
 
-  /// Return the root syntax of this node.
-  Syntax getRoot() const;
-
   /// Returns the child index of this node in its parent,
   /// if it has one, otherwise 0.
-  CursorIndex getIndexInParent() const { return getData().getIndexInParent(); }
+  CursorIndex getIndexInParent() const { return getData()->getIndexInParent(); }
 
   /// Return the number of bytes this node takes when spelled out in the source
   size_t getTextLength() const { return getRaw()->getTextLength(); }
@@ -180,7 +153,8 @@ public:
   SWIFT_DEBUG_DUMP;
 
   bool hasSameIdentityAs(const Syntax &Other) const {
-    return Root == Other.Root && Data == Other.Data;
+    return Data->getAbsoluteRaw().getNodeId() ==
+           Other.Data->getAbsoluteRaw().getNodeId();
   }
 
   static bool kindof(SyntaxKind Kind) {
@@ -195,21 +169,30 @@ public:
   /// Recursively visit this node.
   void accept(SyntaxVisitor &Visitor);
 
-  /// Get the absolute position of this raw syntax: its offset, line,
-  /// and column.
-  AbsolutePosition getAbsolutePosition() const {
-    return Data->getAbsolutePosition();
+  /// Same as \c getAbsolutePositionAfterLeadingTrivia.
+  AbsoluteOffsetPosition getAbsolutePosition() const {
+    return getAbsolutePositionAfterLeadingTrivia();
   }
 
-  /// Get the absolute end position (exclusively) where the trailing trivia of
-  /// this node ends.
-  AbsolutePosition getAbsoluteEndPositionAfterTrailingTrivia() const {
-    return Data->getAbsoluteEndPositionAfterTrailingTrivia();
-  }
-
-  /// Get the absolute position at which the leading trivia of this node starts.
-  AbsolutePosition getAbsolutePositionBeforeLeadingTrivia() const {
+  /// Get the offset at which the leading trivia of this node starts.
+  AbsoluteOffsetPosition getAbsolutePositionBeforeLeadingTrivia() const {
     return Data->getAbsolutePositionBeforeLeadingTrivia();
+  }
+
+  /// Get the offset at which the actual content (i.e. non-triva) of this node
+  /// starts.
+  AbsoluteOffsetPosition getAbsolutePositionAfterLeadingTrivia() const {
+    return Data->getAbsolutePositionAfterLeadingTrivia();
+  }
+
+  /// Get the offset at which the trailing trivia of this node starts.
+  AbsoluteOffsetPosition getAbsoluteEndPositionBeforeTrailingTrivia() const {
+    return Data->getAbsoluteEndPositionBeforeTrailingTrivia();
+  }
+
+  /// Get the offset at which the trailing trivia of this node starts.
+  AbsoluteOffsetPosition getAbsoluteEndPositionAfterTrailingTrivia() const {
+    return Data->getAbsoluteEndPositionAfterTrailingTrivia();
   }
 
   // TODO: hasSameStructureAs ?

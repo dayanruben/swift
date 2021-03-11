@@ -98,6 +98,8 @@ class ExtendedValidationInfo {
     unsigned IsSIB : 1;
     unsigned IsTestable : 1;
     unsigned ResilienceStrategy : 2;
+    unsigned IsImplicitDynamicEnabled : 1;
+    unsigned IsAllowModuleWithCompilerErrorsEnabled : 1;
   } Bits;
 public:
   ExtendedValidationInfo() : Bits() {}
@@ -123,6 +125,10 @@ public:
   void setPrivateImportsEnabled(bool enabled) {
     Bits.ArePrivateImportsEnabled = enabled;
   }
+  bool isImplicitDynamicEnabled() { return Bits.IsImplicitDynamicEnabled; }
+  void setImplicitDynamicEnabled(bool val) {
+    Bits.IsImplicitDynamicEnabled = val;
+  }
   bool isTestable() const { return Bits.IsTestable; }
   void setIsTestable(bool val) {
     Bits.IsTestable = val;
@@ -132,6 +138,12 @@ public:
   }
   void setResilienceStrategy(ResilienceStrategy resilience) {
     Bits.ResilienceStrategy = unsigned(resilience);
+  }
+  bool isAllowModuleWithCompilerErrorsEnabled() {
+    return Bits.IsAllowModuleWithCompilerErrorsEnabled;
+  }
+  void setAllowModuleWithCompilerErrorsEnabled(bool val) {
+    Bits.IsAllowModuleWithCompilerErrorsEnabled = val;
   }
 };
 
@@ -167,14 +179,13 @@ ValidationInfo validateSerializedAST(
 ///   Status::Valid.
 /// - \p moduleBufferID and \p moduleDocBufferID are the buffer identifiers
 ///   of the module input and doc input buffers respectively (\ref 
-///   SerializedModuleLoader::loadAST, \ref ModuleFile::load).
+///   SerializedModuleLoaderBase::loadAST, \ref ModuleFile::load).
 /// - \p loadedModuleFile is an invalid loaded module.
 /// - \p ModuleName is the name used to refer to the module in diagnostics.
 void diagnoseSerializedASTLoadFailure(
     ASTContext &Ctx, SourceLoc diagLoc, const ValidationInfo &loadInfo,
-    const ExtendedValidationInfo &extendedInfo, StringRef moduleBufferID,
-    StringRef moduleDocBufferID, ModuleFile *loadedModuleFile,
-    Identifier ModuleName);
+    StringRef moduleBufferID, StringRef moduleDocBufferID,
+    ModuleFile *loadedModuleFile, Identifier ModuleName);
 
 } // end namespace serialization
 } // end namespace swift

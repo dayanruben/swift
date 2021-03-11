@@ -5,12 +5,15 @@ else()
   set(SWIFTAST_LLVM_LINK_COMPONENTS
     bitreader bitwriter coroutines coverage irreader debuginfoDWARF
     profiledata instrumentation object objcarcopts mc mcparser
-    bitreader bitwriter lto ipo option core support ${LLVM_TARGETS_TO_BUILD}
+    bitreader bitwriter lto ipo option core support remarks ${LLVM_TARGETS_TO_BUILD}
   )
 endif()
 
+set_swift_llvm_is_available()
+
 add_swift_host_library(swiftAST STATIC
   AbstractSourceFileDepGraphFactory.cpp
+  AccessNotes.cpp
   AccessRequests.cpp
   ASTContext.cpp
   ASTDemangler.cpp
@@ -42,16 +45,19 @@ add_swift_host_library(swiftAST STATIC
   DiagnosticEngine.cpp
   DiagnosticList.cpp
   DocComment.cpp
+  Effects.cpp
   Evaluator.cpp
   Expr.cpp
+  ExtInfo.cpp
   FineGrainedDependencies.cpp
+  FineGrainedDependencyFormat.cpp
   FrontendSourceFileDepGraphFactory.cpp
   GenericEnvironment.cpp
+  GenericParamList.cpp
   GenericSignature.cpp
   GenericSignatureBuilder.cpp
   Identifier.cpp
   ImportCache.cpp
-  IncrementalRanges.cpp
   IndexSubset.cpp
   InlinableText.cpp
   LayoutConstraint.cpp
@@ -61,15 +67,14 @@ add_swift_host_library(swiftAST STATIC
   ModuleNameLookup.cpp
   NameLookup.cpp
   NameLookupRequests.cpp
+  OperatorNameLookup.cpp
   Parameter.cpp
   Pattern.cpp
   PlatformKind.cpp
   PrettyStackTrace.cpp
   ProtocolConformance.cpp
   RawComment.cpp
-  ReferencedNameTracker.cpp
   RequirementEnvironment.cpp
-  SyntaxASTMap.cpp
   SILLayout.cpp
   Stmt.cpp
   SubstitutionMap.cpp
@@ -121,15 +126,14 @@ target_link_libraries(swiftAST
   PUBLIC swiftBasic
   PRIVATE swiftSyntax)
 if(SWIFT_BUILD_ONLY_SYNTAXPARSERLIB)
-  # Add clangBasic as a single direct dependency to avoid bringing along some
-  # llvm libraries that we don't need.
-  if("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "WINDOWS")
-    target_link_libraries(swiftAST PRIVATE
-      "${LLVM_LIBRARY_OUTPUT_INTDIR}/clangBasic.lib")
-  else()
-    target_link_libraries(swiftAST PRIVATE
-      "${LLVM_LIBRARY_OUTPUT_INTDIR}/libclangBasic.a")
-  endif()
+  # Remove dependencies from clangBasic to avoid bringing along some llvm
+  # libraries that we don't need to be building.
+  set_property(TARGET clangBasic PROPERTY LINK_LIBRARIES "")
+  set_property(TARGET clangBasic PROPERTY LINK_DEPENDS "")
+  set_property(TARGET clangBasic PROPERTY INTERFACE_LINK_LIBRARIES "")
+  set_property(TARGET clangBasic PROPERTY INTERFACE_LINK_DEPENDS "")
+  target_link_libraries(swiftAST
+    PRIVATE clangBasic)
   target_compile_definitions(swiftAST PRIVATE
     SWIFT_BUILD_ONLY_SYNTAXPARSERLIB=1)
 else()
@@ -142,14 +146,3 @@ endif()
 # headers.
 # For more information see the comment at the top of lib/CMakeLists.txt.
 add_dependencies(swiftAST intrinsics_gen clang-tablegen-targets)
-
-set(swift_ast_verifier_flag)
-if(SWIFT_AST_VERIFIER)
-  set(swift_ast_verifier_flag " -USWIFT_DISABLE_AST_VERIFIER")
-else()
-  set(swift_ast_verifier_flag " -DSWIFT_DISABLE_AST_VERIFIER=1")
-endif()
-
-set_property(SOURCE ASTVerifier.cpp APPEND_STRING PROPERTY COMPILE_FLAGS
-  "${swift_ast_verifier_flag}")
-

@@ -21,6 +21,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/SIL/SILValue.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/Debug.h"
 
 namespace swift {
 namespace autodiff {
@@ -50,29 +51,45 @@ class AdjointValueBase {
   /// The type of this value as if it were materialized as a SIL value.
   SILType type;
 
+  using DebugInfo = std::pair<SILDebugLocation, SILDebugVariable>;
+
+  /// The debug location and variable info associated with the original value.
+  Optional<DebugInfo> debugInfo;
+
   /// The underlying value.
   union Value {
-    llvm::ArrayRef<AdjointValue> aggregate;
+    unsigned numAggregateElements;
     SILValue concrete;
-    Value(llvm::ArrayRef<AdjointValue> v) : aggregate(v) {}
+    Value(unsigned numAggregateElements)
+        : numAggregateElements(numAggregateElements) {}
     Value(SILValue v) : concrete(v) {}
     Value() {}
   } value;
 
+  // Begins tail-allocated aggregate elements, if
+  // `kind == AdjointValueKind::Aggregate`.
+
   explicit AdjointValueBase(SILType type,
-                            llvm::ArrayRef<AdjointValue> aggregate)
-      : kind(AdjointValueKind::Aggregate), type(type), value(aggregate) {}
+                            llvm::ArrayRef<AdjointValue> aggregate,
+                            Optional<DebugInfo> debugInfo)
+      : kind(AdjointValueKind::Aggregate), type(type), debugInfo(debugInfo),
+        value(aggregate.size()) {
+    MutableArrayRef<AdjointValue> tailElements(
+        reinterpret_cast<AdjointValue *>(this + 1), aggregate.size());
+    std::uninitialized_copy(
+        aggregate.begin(), aggregate.end(), tailElements.begin());
+  }
 
-  explicit AdjointValueBase(SILValue v)
-      : kind(AdjointValueKind::Concrete), type(v->getType()), value(v) {}
+  explicit AdjointValueBase(SILValue v, Optional<DebugInfo> debugInfo)
+      : kind(AdjointValueKind::Concrete), type(v->getType()),
+        debugInfo(debugInfo), value(v) {}
 
-  explicit AdjointValueBase(SILType type)
-      : kind(AdjointValueKind::Zero), type(type) {}
+  explicit AdjointValueBase(SILType type, Optional<DebugInfo> debugInfo)
+      : kind(AdjointValueKind::Zero), type(type), debugInfo(debugInfo) {}
 };
 
-/// A symbolic adjoint value that is capable of representing zero value 0 and
-/// 1, in addition to a materialized SILValue. This is expected to be passed
-/// around by value in most cases, as it's two words long.
+/// A symbolic adjoint value that wraps a `SILValue`, a zero, or an aggregate
+/// thereof.
 class AdjointValue final {
 
 private:
@@ -84,26 +101,37 @@ public:
   AdjointValueBase *operator->() const { return base; }
   AdjointValueBase &operator*() const { return *base; }
 
-  static AdjointValue createConcrete(llvm::BumpPtrAllocator &allocator,
-                                     SILValue value) {
-    return new (allocator.Allocate<AdjointValueBase>()) AdjointValueBase(value);
+  using DebugInfo = AdjointValueBase::DebugInfo;
+
+  static AdjointValue createConcrete(
+      llvm::BumpPtrAllocator &allocator, SILValue value,
+      Optional<DebugInfo> debugInfo = None) {
+    auto *buf = allocator.Allocate<AdjointValueBase>();
+    return new (buf) AdjointValueBase(value, debugInfo);
   }
 
-  static AdjointValue createZero(llvm::BumpPtrAllocator &allocator,
-                                 SILType type) {
-    return new (allocator.Allocate<AdjointValueBase>()) AdjointValueBase(type);
+  static AdjointValue createZero(
+      llvm::BumpPtrAllocator &allocator, SILType type,
+      Optional<DebugInfo> debugInfo = None) {
+    auto *buf = allocator.Allocate<AdjointValueBase>();
+    return new (buf) AdjointValueBase(type, debugInfo);
   }
 
-  static AdjointValue createAggregate(llvm::BumpPtrAllocator &allocator,
-                                      SILType type,
-                                      llvm::ArrayRef<AdjointValue> aggregate) {
-    return new (allocator.Allocate<AdjointValueBase>())
-        AdjointValueBase(type, aggregate);
+  static AdjointValue createAggregate(
+      llvm::BumpPtrAllocator &allocator, SILType type,
+      ArrayRef<AdjointValue> elements,
+      Optional<DebugInfo> debugInfo = None) {
+    AdjointValue *buf = reinterpret_cast<AdjointValue *>(allocator.Allocate(
+        sizeof(AdjointValueBase) + elements.size() * sizeof(AdjointValue),
+        alignof(AdjointValueBase)));
+    return new (buf) AdjointValueBase(type, elements, debugInfo);
   }
 
   AdjointValueKind getKind() const { return base->kind; }
   SILType getType() const { return base->type; }
   CanType getSwiftType() const { return getType().getASTType(); }
+  Optional<DebugInfo> getDebugInfo() const { return base->debugInfo; }
+  void setDebugInfo(DebugInfo debugInfo) const { base->debugInfo = debugInfo; }
 
   NominalTypeDecl *getAnyNominal() const {
     return getSwiftType()->getAnyNominal();
@@ -115,16 +143,18 @@ public:
 
   unsigned getNumAggregateElements() const {
     assert(isAggregate());
-    return base->value.aggregate.size();
+    return base->value.numAggregateElements;
   }
 
   AdjointValue getAggregateElement(unsigned i) const {
-    assert(isAggregate());
-    return base->value.aggregate[i];
+    return getAggregateElements()[i];
   }
 
   llvm::ArrayRef<AdjointValue> getAggregateElements() const {
-    return base->value.aggregate;
+    assert(isAggregate());
+    return {
+        reinterpret_cast<const AdjointValue *>(base + 1),
+        getNumAggregateElements()};
   }
 
   SILValue getConcreteValue() const {
@@ -135,24 +165,22 @@ public:
   void print(llvm::raw_ostream &s) const {
     switch (getKind()) {
     case AdjointValueKind::Zero:
-      s << "Zero";
+      s << "Zero[" << getType() << ']';
       break;
     case AdjointValueKind::Aggregate:
-      s << "Aggregate<";
+      s << "Aggregate[" << getType() << "](";
       if (auto *decl =
               getType().getASTType()->getStructOrBoundGenericStruct()) {
-        s << "Struct>(";
         interleave(
-            llvm::zip(decl->getStoredProperties(), base->value.aggregate),
+            llvm::zip(decl->getStoredProperties(), getAggregateElements()),
             [&s](std::tuple<VarDecl *, const AdjointValue &> elt) {
               s << std::get<0>(elt)->getName() << ": ";
               std::get<1>(elt).print(s);
             },
             [&s] { s << ", "; });
       } else if (getType().is<TupleType>()) {
-        s << "Tuple>(";
         interleave(
-            base->value.aggregate,
+            getAggregateElements(),
             [&s](const AdjointValue &elt) { elt.print(s); },
             [&s] { s << ", "; });
       } else {
@@ -161,10 +189,12 @@ public:
       s << ')';
       break;
     case AdjointValueKind::Concrete:
-      s << "Concrete(" << base->value.concrete << ')';
+      s << "Concrete[" << getType() << "](" << base->value.concrete << ')';
       break;
     }
   }
+
+  SWIFT_DEBUG_DUMP { print(llvm::dbgs()); };
 };
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,

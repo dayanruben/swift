@@ -20,8 +20,8 @@
 #define SWIFT_SIL_SILDeclRef_H
 
 #include "swift/AST/ClangNode.h"
+#include "swift/AST/GenericSignature.h"
 #include "swift/AST/TypeAlignments.h"
-#include "swift/SIL/SILLinkage.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PointerUnion.h"
@@ -47,7 +47,9 @@ namespace swift {
   enum class SubclassScope : unsigned char;
   class SILModule;
   class SILLocation;
+  enum class SILLinkage : uint8_t;
   class AnyFunctionRef;
+  class GenericSignature;
 
 /// How a method is dispatched.
 enum class MethodDispatch {
@@ -138,6 +140,10 @@ struct SILDeclRef {
     /// References the wrapped value injection function used to initialize
     /// the backing storage property from a wrapped value.
     PropertyWrapperBackingInitializer,
+
+    /// References the function used to initialize a property wrapper storage
+    /// instance from a projected value.
+    PropertyWrapperInitFromProjectedValue,
   };
   
   /// The ValueDecl or AbstractClosureExpr represented by this SILDeclRef.
@@ -148,13 +154,28 @@ struct SILDeclRef {
   unsigned isForeign : 1;
   /// The default argument index for a default argument getter.
   unsigned defaultArgIndex : 10;
+
+  PointerUnion<AutoDiffDerivativeFunctionIdentifier *,
+               const GenericSignatureImpl *>
+      pointer;
+
   /// The derivative function identifier.
-  AutoDiffDerivativeFunctionIdentifier *derivativeFunctionIdentifier = nullptr;
+  AutoDiffDerivativeFunctionIdentifier * getDerivativeFunctionIdentifier() const {
+    if (!pointer.is<AutoDiffDerivativeFunctionIdentifier *>())
+      return nullptr;
+    return pointer.get<AutoDiffDerivativeFunctionIdentifier *>();
+  }
+
+  GenericSignature getSpecializedSignature() const {
+    if (!pointer.is<const GenericSignatureImpl *>())
+      return GenericSignature();
+    else
+      return GenericSignature(pointer.get<const GenericSignatureImpl *>());
+  }
 
   /// Produces a null SILDeclRef.
   SILDeclRef()
-      : loc(), kind(Kind::Func), isForeign(0), defaultArgIndex(0),
-        derivativeFunctionIdentifier(nullptr) {}
+      : loc(), kind(Kind::Func), isForeign(0), defaultArgIndex(0) {}
 
   /// Produces a SILDeclRef of the given kind for the given decl.
   explicit SILDeclRef(
@@ -173,6 +194,9 @@ struct SILDeclRef {
   /// - If 'loc' is a global VarDecl, this returns its GlobalAccessor
   ///   SILDeclRef.
   explicit SILDeclRef(Loc loc, bool isForeign = false);
+
+  /// See above put produces a prespecialization according to the signature.
+  explicit SILDeclRef(Loc loc, GenericSignature prespecializationSig);
 
   /// Produce a SIL constant for a default argument generator.
   static SILDeclRef getDefaultArgGenerator(Loc loc, unsigned defaultArgIndex);
@@ -201,6 +225,7 @@ struct SILDeclRef {
   enum class ManglingKind {
     Default,
     DynamicThunk,
+    AsyncHandlerBody
   };
 
   /// Produce a mangled form of this constant.
@@ -243,7 +268,8 @@ struct SILDeclRef {
   /// True if the SILDeclRef references the initializer for the backing storage
   /// of a property wrapper.
   bool isPropertyWrapperBackingInitializer() const {
-    return kind == Kind::PropertyWrapperBackingInitializer;
+    return (kind == Kind::PropertyWrapperBackingInitializer ||
+            kind == Kind::PropertyWrapperInitFromProjectedValue);
   }
 
   /// True if the SILDeclRef references the ivar initializer or deinitializer of
@@ -277,17 +303,17 @@ struct SILDeclRef {
   SILLinkage getLinkage(ForDefinition_t forDefinition) const;
 
   /// Return the hash code for the SIL declaration.
-  llvm::hash_code getHashCode() const {
-    return llvm::hash_combine(loc.getOpaqueValue(),
-                              static_cast<int>(kind),
-                              isForeign, defaultArgIndex);
+  friend llvm::hash_code hash_value(const SILDeclRef &ref) {
+    return llvm::hash_combine(ref.loc.getOpaqueValue(),
+                              static_cast<int>(ref.kind),
+                              ref.isForeign, ref.defaultArgIndex);
   }
 
   bool operator==(SILDeclRef rhs) const {
     return loc.getOpaqueValue() == rhs.loc.getOpaqueValue() &&
            kind == rhs.kind && isForeign == rhs.isForeign &&
            defaultArgIndex == rhs.defaultArgIndex &&
-           derivativeFunctionIdentifier == rhs.derivativeFunctionIdentifier;
+           pointer == rhs.pointer;
   }
   bool operator!=(SILDeclRef rhs) const {
     return !(*this == rhs);
@@ -302,25 +328,25 @@ struct SILDeclRef {
   /// decl.
   SILDeclRef asForeign(bool foreign = true) const {
     return SILDeclRef(loc.getOpaqueValue(), kind, foreign, defaultArgIndex,
-                      derivativeFunctionIdentifier);
+                      pointer.get<AutoDiffDerivativeFunctionIdentifier *>());
   }
 
   /// Returns the entry point for the corresponding autodiff derivative
   /// function.
   SILDeclRef asAutoDiffDerivativeFunction(
       AutoDiffDerivativeFunctionIdentifier *derivativeId) const {
-    assert(!derivativeFunctionIdentifier);
+    assert(derivativeId);
     SILDeclRef declRef = *this;
-    declRef.derivativeFunctionIdentifier = derivativeId;
+    declRef.pointer = derivativeId;
     return declRef;
   }
 
   /// Returns the entry point for the original function corresponding to an
   /// autodiff derivative function.
   SILDeclRef asAutoDiffOriginalFunction() const {
-    assert(derivativeFunctionIdentifier);
+    assert(pointer.get<AutoDiffDerivativeFunctionIdentifier *>());
     SILDeclRef declRef = *this;
-    declRef.derivativeFunctionIdentifier = nullptr;
+    declRef.pointer = (AutoDiffDerivativeFunctionIdentifier *)nullptr;
     return declRef;
   }
 
@@ -397,6 +423,19 @@ struct SILDeclRef {
 
   bool canBeDynamicReplacement() const;
 
+  bool isAutoDiffDerivativeFunction() const {
+    return pointer.is<AutoDiffDerivativeFunctionIdentifier *>() &&
+           pointer.get<AutoDiffDerivativeFunctionIdentifier *>() != nullptr;
+  }
+
+  AutoDiffDerivativeFunctionIdentifier *
+  getAutoDiffDerivativeFunctionIdentifier() const {
+    assert(isAutoDiffDerivativeFunction());
+    return pointer.get<AutoDiffDerivativeFunctionIdentifier *>();
+  }
+  
+  bool hasAsync() const;
+
 private:
   friend struct llvm::DenseMapInfo<swift::SILDeclRef>;
   /// Produces a SILDeclRef from an opaque value.
@@ -405,28 +444,12 @@ private:
                       AutoDiffDerivativeFunctionIdentifier *derivativeId)
       : loc(Loc::getFromOpaqueValue(opaqueLoc)), kind(kind),
         isForeign(isForeign), defaultArgIndex(defaultArgIndex),
-        derivativeFunctionIdentifier(derivativeId) {}
+        pointer(derivativeId) {}
 };
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, SILDeclRef C) {
   C.print(OS);
   return OS;
-}
-
-// FIXME: This should not be necessary, but it looks like visibility rules for
-// extension members are slightly bogus, and so some protocol witness thunks
-// need to be public.
-//
-// We allow a 'public' member of an extension to witness a public
-// protocol requirement, even if the extended type is not public;
-// then SILGen gives the member private linkage, ignoring the more
-// visible access level it was given in the AST.
-inline bool
-fixmeWitnessHasLinkageThatNeedsToBePublic(SILDeclRef witness) {
-  auto witnessLinkage = witness.getLinkage(ForDefinition);
-  return !hasPublicVisibility(witnessLinkage)
-         && (!hasSharedVisibility(witnessLinkage)
-             || !witness.isSerialized());
 }
 
 } // end swift namespace
@@ -456,7 +479,7 @@ template<> struct DenseMapInfo<swift::SILDeclRef> {
                     ? UnsignedInfo::getHashValue(Val.defaultArgIndex)
                     : 0;
     unsigned h4 = UnsignedInfo::getHashValue(Val.isForeign);
-    unsigned h5 = PointerInfo::getHashValue(Val.derivativeFunctionIdentifier);
+    unsigned h5 = PointerInfo::getHashValue(Val.pointer.getOpaqueValue());
     return h1 ^ (h2 << 4) ^ (h3 << 9) ^ (h4 << 7) ^ (h5 << 11);
   }
   static bool isEqual(swift::SILDeclRef const &LHS,

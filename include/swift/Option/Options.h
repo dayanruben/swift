@@ -36,13 +36,16 @@ namespace options {
     SwiftIndentOption = (1 << 11),
     ArgumentIsPath = (1 << 12),
     ModuleInterfaceOption = (1 << 13),
+    SupplementaryOutput = (1 << 14),
+    SwiftAPIExtractOption = (1 << 15),
+    SwiftSymbolGraphExtractOption = (1 << 16),
   };
 
   enum ID {
     OPT_INVALID = 0, // This is not an option ID.
 #define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
                HELPTEXT, METAVAR, VALUES)                                      \
-  OPT_##ID,
+    OPT_##ID,
 #include "swift/Option/Options.inc"
     LastOption
 #undef OPTION

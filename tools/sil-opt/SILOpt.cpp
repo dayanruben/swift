@@ -48,7 +48,13 @@ namespace cl = llvm::cl;
 
 namespace {
 
-enum class OptGroup { Unknown, Diagnostics, Performance, Lowering };
+enum class OptGroup {
+  Unknown,
+  Diagnostics,
+  OnonePerformance,
+  Performance,
+  Lowering
+};
 
 } // end anonymous namespace
 
@@ -81,11 +87,6 @@ static llvm::cl::opt<bool> DisableSILOwnershipVerifier(
     llvm::cl::desc(
         "Do not verify SIL ownership invariants during SIL verification"));
 
-static llvm::cl::opt<bool> EnableOwnershipLoweringAfterDiagnostics(
-    "enable-ownership-lowering-after-diagnostics",
-    llvm::cl::desc("Enable ownership lowering after diagnostics"),
-    llvm::cl::init(false));
-
 static llvm::cl::opt<bool>
 EnableSILOpaqueValues("enable-sil-opaque-values",
                       llvm::cl::desc("Compile the module with sil-opaque-values enabled."));
@@ -99,6 +100,10 @@ DisableObjCInterop("disable-objc-interop",
                    llvm::cl::desc("Disable Objective-C interoperability."));
 
 static llvm::cl::opt<bool>
+EnableExperimentalConcurrency("enable-experimental-concurrency",
+                   llvm::cl::desc("Enable experimental concurrency model."));
+
+static llvm::cl::opt<bool>
 VerifyExclusivity("enable-verify-exclusivity",
                   llvm::cl::desc("Verify the access markers used to enforce exclusivity."));
 
@@ -106,12 +111,18 @@ static llvm::cl::opt<bool>
 EnableSpeculativeDevirtualization("enable-spec-devirt",
                   llvm::cl::desc("Enable Speculative Devirtualization pass."));
 
+static llvm::cl::opt<bool> EnableOSSAModules(
+    "enable-ossa-modules",
+    llvm::cl::desc("Do we always serialize SIL in OSSA form? If "
+                   "this is disabled we do not serialize in OSSA "
+                   "form when optimizing."));
+
 namespace {
-enum EnforceExclusivityMode {
+enum class EnforceExclusivityMode {
   Unchecked, // static only
   Checked,   // static and dynamic
   DynamicOnly,
-  None
+  None,
 };
 } // end anonymous namespace
 
@@ -147,6 +158,8 @@ static llvm::cl::opt<OptGroup> OptimizationGroup(
         clEnumValN(OptGroup::Diagnostics, "diagnostics",
                    "Run diagnostic passes"),
         clEnumValN(OptGroup::Performance, "O", "Run performance passes"),
+        clEnumValN(OptGroup::OnonePerformance, "Onone-performance",
+                   "Run Onone perf passes"),
         clEnumValN(OptGroup::Lowering, "lowering", "Run lowering passes")),
     llvm::cl::init(OptGroup::Unknown));
 
@@ -169,19 +182,38 @@ static llvm::cl::opt<unsigned>
 AssertConfId("assert-conf-id", llvm::cl::Hidden,
              llvm::cl::init(0));
 
-static llvm::cl::opt<bool>
-DisableSILLinking("disable-sil-linking",
-                  llvm::cl::desc("Disable SIL linking"));
-
 static llvm::cl::opt<int>
 SILInlineThreshold("sil-inline-threshold", llvm::cl::Hidden,
                    llvm::cl::init(-1));
 
+// Legacy option name still in use. The frontend uses -sil-verify-all.
 static llvm::cl::opt<bool>
 EnableSILVerifyAll("enable-sil-verify-all",
                    llvm::cl::Hidden,
                    llvm::cl::init(true),
                    llvm::cl::desc("Run sil verifications after every pass."));
+
+static llvm::cl::opt<bool>
+SILVerifyAll("sil-verify-all",
+             llvm::cl::Hidden,
+             llvm::cl::init(true),
+             llvm::cl::desc("Run sil verifications after every pass."));
+
+static llvm::cl::opt<bool>
+SILVerifyNone("sil-verify-none",
+              llvm::cl::Hidden,
+              llvm::cl::init(false),
+              llvm::cl::desc("Completely disable SIL verification"));
+
+/// Customize the default behavior
+static llvm::cl::opt<bool> EnableASTVerifier(
+    "enable-ast-verifier", llvm::cl::Hidden, llvm::cl::init(false),
+    llvm::cl::desc("Override the default behavior and Enable the ASTVerifier"));
+
+static llvm::cl::opt<bool> DisableASTVerifier(
+    "disable-ast-verifier", llvm::cl::Hidden, llvm::cl::init(false),
+    llvm::cl::desc(
+        "Override the default behavior and force disable the ASTVerifier"));
 
 static llvm::cl::opt<bool>
 RemoveRuntimeAsserts("remove-runtime-asserts",
@@ -200,10 +232,9 @@ static llvm::cl::opt<std::string>
 ModuleCachePath("module-cache-path", llvm::cl::desc("Clang module cache path"));
 
 static llvm::cl::opt<bool>
-EnableSILSortOutput("emit-sorted-sil", llvm::cl::Hidden,
-                    llvm::cl::init(false),
-                    llvm::cl::desc("Sort Functions, VTables, Globals, "
-                                   "WitnessTables by name to ease diffing."));
+    EmitSortedSIL("emit-sorted-sil", llvm::cl::Hidden, llvm::cl::init(false),
+                  llvm::cl::desc("Sort Functions, VTables, Globals, "
+                                 "WitnessTables by name to ease diffing."));
 
 static llvm::cl::opt<bool>
 DisableASTDump("sil-disable-ast-dump", llvm::cl::Hidden,
@@ -270,6 +301,16 @@ static cl::opt<std::string> RemarksFormat(
     cl::desc("The format used for serializing remarks (default: YAML)"),
     cl::value_desc("format"), cl::init("yaml"));
 
+static llvm::cl::opt<bool>
+    EnableCxxInterop("enable-cxx-interop",
+                     llvm::cl::desc("Enable C++ interop."),
+                     llvm::cl::init(false));
+
+static llvm::cl::opt<bool>
+    IgnoreAlwaysInline("ignore-always-inline",
+                       llvm::cl::desc("Ignore [always_inline] attribute."),
+                       llvm::cl::init(false));
+
 static void runCommandLineSelectedPasses(SILModule *Module,
                                          irgen::IRGenModule *IRGenMod) {
   auto &opts = Module->getOptions();
@@ -279,6 +320,22 @@ static void runCommandLineSelectedPasses(SILModule *Module,
 
   if (Module->getOptions().VerifyAll)
     Module->verify();
+}
+
+namespace {
+using ASTVerifierOverrideKind = LangOptions::ASTVerifierOverrideKind;
+} // end anonymous namespace
+
+static Optional<ASTVerifierOverrideKind> getASTOverrideKind() {
+  assert(!(EnableASTVerifier && DisableASTVerifier) &&
+         "Can only set one of EnableASTVerifier/DisableASTVerifier?!");
+  if (EnableASTVerifier)
+    return ASTVerifierOverrideKind::EnableVerifier;
+
+  if (DisableASTVerifier)
+    return ASTVerifierOverrideKind::DisableVerifier;
+
+  return None;
 }
 
 // This function isn't referenced outside its translation unit, but it
@@ -291,6 +348,8 @@ void anchorForGetMainExecutable() {}
 int main(int argc, char **argv) {
   PROGRAM_START(argc, argv);
   INITIALIZE_LLVM();
+  llvm::setBugReportMsg(SWIFT_CRASH_BUG_REPORT_MESSAGE  "\n");
+  llvm::EnablePrettyStackTraceOnSigInfoForThisThread();
 
   llvm::cl::ParseCommandLineOptions(argc, argv, "Swift SIL optimizer\n");
 
@@ -331,6 +390,12 @@ int main(int argc, char **argv) {
   Invocation.getLangOptions().DisableAvailabilityChecking = true;
   Invocation.getLangOptions().EnableAccessControl = false;
   Invocation.getLangOptions().EnableObjCAttrRequiresFoundation = false;
+  if (auto overrideKind = getASTOverrideKind()) {
+    Invocation.getLangOptions().ASTVerifierOverride = *overrideKind;
+  }
+  Invocation.getLangOptions().EnableExperimentalConcurrency =
+    EnableExperimentalConcurrency;
+
   Invocation.getLangOptions().EnableObjCInterop =
     EnableObjCInterop ? true :
     DisableObjCInterop ? false : llvm::Triple(Target).isOSDarwin();
@@ -348,20 +413,21 @@ int main(int argc, char **argv) {
   Invocation.getLangOptions().EnableExperimentalDifferentiableProgramming =
       EnableExperimentalDifferentiableProgramming;
 
+  Invocation.getLangOptions().EnableCXXInterop = EnableCxxInterop;
+
   Invocation.getDiagnosticOptions().VerifyMode =
       VerifyMode ? DiagnosticOptions::Verify : DiagnosticOptions::NoVerify;
 
   // Setup the SIL Options.
   SILOptions &SILOpts = Invocation.getSILOptions();
   SILOpts.InlineThreshold = SILInlineThreshold;
-  SILOpts.VerifyAll = EnableSILVerifyAll;
+  SILOpts.VerifyAll = SILVerifyAll || EnableSILVerifyAll;
+  SILOpts.VerifyNone = SILVerifyNone;
   SILOpts.RemoveRuntimeAsserts = RemoveRuntimeAsserts;
   SILOpts.AssertConfig = AssertConfId;
   if (OptimizationGroup != OptGroup::Diagnostics)
     SILOpts.OptMode = OptimizationMode::ForSpeed;
   SILOpts.VerifySILOwnership = !DisableSILOwnershipVerifier;
-  SILOpts.StripOwnershipAfterSerialization =
-      EnableOwnershipLoweringAfterDiagnostics;
   SILOpts.OptRecordFile = RemarksFilename;
   SILOpts.OptRecordPasses = RemarksPasses;
 
@@ -391,8 +457,12 @@ int main(int argc, char **argv) {
       break;
     }
   }
+  SILOpts.EmitVerboseSIL |= EmitVerboseSIL;
+  SILOpts.EmitSortedSIL |= EmitSortedSIL;
 
   SILOpts.EnableSpeculativeDevirtualization = EnableSpeculativeDevirtualization;
+  SILOpts.IgnoreAlwaysInline = IgnoreAlwaysInline;
+  SILOpts.EnableOSSAModules = EnableOSSAModules;
 
   serialization::ExtendedValidationInfo extendedInfo;
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> FileBufOrErr =
@@ -443,23 +513,17 @@ int main(int argc, char **argv) {
   if (HadError)
     return finishDiagProcessing(1);
 
-  // Load the SIL if we have a module. We have to do this after SILParse
-  // creating the unfortunate double if statement.
-  if (Invocation.hasSerializedAST()) {
-    assert(!CI.hasSILModule() &&
-           "performSema() should not create a SILModule.");
-    CI.createSILModule();
-    std::unique_ptr<SerializedSILLoader> SL = SerializedSILLoader::create(
-        CI.getASTContext(), CI.getSILModule(), nullptr);
+  auto *mod = CI.getMainModule();
+  assert(mod->getFiles().size() == 1);
 
-    if (extendedInfo.isSIB() || DisableSILLinking)
-      SL->getAllForModule(CI.getMainModule()->getName(), nullptr);
-    else
-      SL->getAll();
+  std::unique_ptr<SILModule> SILMod;
+  if (PerformWMO) {
+    SILMod = performASTLowering(mod, CI.getSILTypes(), CI.getSILOptions());
+  } else {
+    SILMod = performASTLowering(*mod->getFiles()[0], CI.getSILTypes(),
+                                CI.getSILOptions());
   }
-
-  if (CI.getSILModule())
-    CI.getSILModule()->setSerializeSILAction([]{});
+  SILMod->setSerializeSILAction([]{});
 
   if (!RemarksFilename.empty()) {
     llvm::Expected<llvm::remarks::Format> formatOrErr =
@@ -474,24 +538,30 @@ int main(int argc, char **argv) {
       SILOpts.OptRecordFormat = *formatOrErr;
     }
 
-    CI.getSILModule()->installSILRemarkStreamer();
+    SILMod->installSILRemarkStreamer();
   }
 
-  if (OptimizationGroup == OptGroup::Diagnostics) {
-    runSILDiagnosticPasses(*CI.getSILModule());
-  } else if (OptimizationGroup == OptGroup::Performance) {
-    runSILOptimizationPasses(*CI.getSILModule());
-  } else if (OptimizationGroup == OptGroup::Lowering) {
-    runSILLoweringPasses(*CI.getSILModule());
-  } else {
-    auto *SILMod = CI.getSILModule();
-    {
-      auto T = irgen::createIRGenModule(
-          SILMod, Invocation.getOutputFilenameForAtMostOnePrimary(),
-          Invocation.getMainInputFilenameForDebugInfoForAtMostOnePrimary(), "");
-      runCommandLineSelectedPasses(SILMod, T.second);
-      irgen::deleteIRGenModule(T);
-    }
+  switch (OptimizationGroup) {
+  case OptGroup::Diagnostics:
+    runSILDiagnosticPasses(*SILMod.get());
+    break;
+  case OptGroup::Performance:
+    runSILOptimizationPasses(*SILMod.get());
+    break;
+  case OptGroup::Lowering:
+    runSILLoweringPasses(*SILMod.get());
+    break;
+  case OptGroup::OnonePerformance:
+    runSILPassesForOnone(*SILMod.get());
+    break;
+  case OptGroup::Unknown: {
+    auto T = irgen::createIRGenModule(
+        SILMod.get(), Invocation.getOutputFilenameForAtMostOnePrimary(),
+        Invocation.getMainInputFilenameForDebugInfoForAtMostOnePrimary(), "");
+    runCommandLineSelectedPasses(SILMod.get(), T.second);
+    irgen::deleteIRGenModule(T);
+    break;
+  }
   }
 
   if (EmitSIB) {
@@ -513,16 +583,15 @@ int main(int argc, char **argv) {
     serializationOpts.SerializeAllSIL = true;
     serializationOpts.IsSIB = true;
 
-    serialize(CI.getMainModule(), serializationOpts, CI.getSILModule());
+    serialize(CI.getMainModule(), serializationOpts, SILMod.get());
   } else {
     const StringRef OutputFile = OutputFilename.size() ?
                                    StringRef(OutputFilename) : "-";
     auto SILOpts = SILOptions();
     SILOpts.EmitVerboseSIL = EmitVerboseSIL;
-    SILOpts.EmitSortedSIL = EnableSILSortOutput;
+    SILOpts.EmitSortedSIL = EmitSortedSIL;
     if (OutputFile == "-") {
-      CI.getSILModule()->print(llvm::outs(), CI.getMainModule(),
-                               SILOpts, !DisableASTDump);
+      SILMod->print(llvm::outs(), CI.getMainModule(), SILOpts, !DisableASTDump);
     } else {
       std::error_code EC;
       llvm::raw_fd_ostream OS(OutputFile, EC, llvm::sys::fs::F_None);
@@ -531,8 +600,7 @@ int main(int argc, char **argv) {
                      << EC.message() << '\n';
         return finishDiagProcessing(1);
       }
-      CI.getSILModule()->print(OS, CI.getMainModule(), SILOpts,
-                               !DisableASTDump);
+      SILMod->print(OS, CI.getMainModule(), SILOpts, !DisableASTDump);
     }
   }
 

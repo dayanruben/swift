@@ -58,14 +58,15 @@ class ModulePrinterPrintableChecker: public ShouldPrintChecker {
   }
 };
 
-PrintOptions PrintOptions::printModuleInterface() {
-  PrintOptions result = printInterface();
+PrintOptions PrintOptions::printModuleInterface(bool printFullConvention) {
+  PrintOptions result = printInterface(printFullConvention);
   result.CurrentPrintabilityChecker.reset(new ModulePrinterPrintableChecker());
   return result;
 }
 
-PrintOptions PrintOptions::printTypeInterface(Type T) {
-  PrintOptions result = printModuleInterface();
+PrintOptions PrintOptions::printTypeInterface(Type T,
+                                              bool printFullConvention) {
+  PrintOptions result = printModuleInterface(printFullConvention);
   result.PrintExtensionFromConformingProtocols = true;
   result.TransformContext = TypeTransformContext(T);
   result.printExtensionContentAsMembers = [T](const ExtensionDecl *ED) {
@@ -77,7 +78,8 @@ PrintOptions PrintOptions::printTypeInterface(Type T) {
 }
 
 PrintOptions PrintOptions::printDocInterface() {
-  PrintOptions result = PrintOptions::printModuleInterface();
+  PrintOptions result =
+      PrintOptions::printModuleInterface(/*printFullConvention*/ false);
   result.PrintAccess = false;
   result.SkipUnavailable = false;
   result.ExcludeAttrList.push_back(DAK_Available);
@@ -282,7 +284,10 @@ struct SynthesizedExtensionAnalyzer::Implementation {
 
     auto handleRequirements = [&](SubstitutionMap subMap,
                                   GenericSignature GenericSig,
+                                  ExtensionDecl *OwningExt,
                                   ArrayRef<Requirement> Reqs) {
+      ProtocolDecl *BaseProto = OwningExt->getInnermostDeclContext()
+        ->getSelfProtocolDecl();
       for (auto Req : Reqs) {
         auto Kind = Req.getKind();
 
@@ -290,8 +295,16 @@ struct SynthesizedExtensionAnalyzer::Implementation {
         if (Kind == RequirementKind::Layout)
           continue;
 
-        auto First = Req.getFirstType();
-        auto Second = Req.getSecondType();
+        Type First = Req.getFirstType();
+        Type Second = Req.getSecondType();
+
+        // Skip protocol's Self : <Protocol> requirement.
+        if (BaseProto &&
+            Req.getKind() == RequirementKind::Conformance &&
+            First->isEqual(BaseProto->getSelfInterfaceType()) &&
+            Second->getAnyNominal() == BaseProto)
+          continue;
+
         if (!BaseType->isExistentialType()) {
           First = First.subst(subMap);
           Second = Second.subst(subMap);
@@ -346,19 +359,29 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       // the extension to the interface types of the base type's
       // declaration.
       SubstitutionMap subMap;
-      if (!BaseType->isExistentialType())
-        subMap = BaseType->getContextSubstitutionMap(M, Ext);
+      if (!BaseType->isExistentialType()) {
+        if (auto *NTD = Ext->getExtendedNominal())
+          subMap = BaseType->getContextSubstitutionMap(M, NTD);
+      }
 
       assert(Ext->getGenericSignature() && "No generic signature.");
       auto GenericSig = Ext->getGenericSignature();
-      if (handleRequirements(subMap, GenericSig, GenericSig->getRequirements()))
+      if (handleRequirements(subMap, GenericSig, Ext, GenericSig->getRequirements()))
         return {Result, MergeInfo};
     }
 
-    if (Conf && handleRequirements(Conf->getSubstitutions(M),
-                                   Conf->getGenericSignature(),
-                                   Conf->getConditionalRequirements()))
-      return {Result, MergeInfo};
+    if (Conf) {
+      SubstitutionMap subMap;
+      if (!BaseType->isExistentialType()) {
+        if (auto *NTD = EnablingExt->getExtendedNominal())
+          subMap = BaseType->getContextSubstitutionMap(M, NTD);
+      }
+      if (handleRequirements(subMap,
+                             Conf->getGenericSignature(),
+                             EnablingExt,
+                             Conf->getConditionalRequirements()))
+        return {Result, MergeInfo};
+    }
 
     Result.Ext = Ext;
     return {Result, MergeInfo};
@@ -431,7 +454,14 @@ struct SynthesizedExtensionAnalyzer::Implementation {
     auto handleExtension = [&](ExtensionDecl *E, bool Synthesized,
                                ExtensionDecl *EnablingE,
                                NormalProtocolConformance *Conf) {
-      if (Options.shouldPrint(E)) {
+      PrintOptions AdjustedOpts = Options;
+      if (Synthesized) {
+        // Members from underscored system protocols should still appear as
+        // members of the target type, even if the protocols themselves are not
+        // printed.
+        AdjustedOpts.SkipUnderscoredStdlibProtocols = false;
+      }
+      if (AdjustedOpts.shouldPrint(E)) {
         auto Pair = isApplicable(E, Synthesized, EnablingE, Conf);
         if (Pair.first) {
           InfoMap->insert({E, Pair.first});
@@ -443,7 +473,11 @@ struct SynthesizedExtensionAnalyzer::Implementation {
     // We want to visit the protocols of any normal conformances we see, but
     // we have to avoid doing this to self-conformances or we can end up with
     // a cycle.  Otherwise this is cycle-proof on valid code.
+    // We also want to ignore inherited conformances. Members from these will
+    // be included in the class they were inherited from.
     auto addConformance = [&](ProtocolConformance *Conf) {
+      if (isa<InheritedProtocolConformance>(Conf))
+        return;
       auto RootConf = Conf->getRootConformance();
       if (isa<NormalProtocolConformance>(RootConf))
         Unhandled.push_back(RootConf->getProtocol());
@@ -451,10 +485,6 @@ struct SynthesizedExtensionAnalyzer::Implementation {
 
     for (auto *Conf : Target->getLocalConformances()) {
       addConformance(Conf);
-    }
-    if (auto *CD = dyn_cast<ClassDecl>(Target)) {
-      if (auto Super = CD->getSuperclassDecl())
-        Unhandled.push_back(Super);
     }
     while (!Unhandled.empty()) {
       NominalTypeDecl* Back = Unhandled.back();
@@ -464,10 +494,6 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       }
       for (auto *Conf : Back->getLocalConformances()) {
         addConformance(Conf);
-      }
-      if (auto *CD = dyn_cast<ClassDecl>(Back)) {
-        if (auto Super = CD->getSuperclass())
-          Unhandled.push_back(Super->getAnyNominal());
       }
     }
 

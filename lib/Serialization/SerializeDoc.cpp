@@ -313,17 +313,13 @@ static bool hasDoubleUnderscore(Decl *D) {
   // base names.
   static StringRef Prefix = "__";
 
-  if (auto AFD = dyn_cast<AbstractFunctionDecl>(D)) {
-    // If it's a function with a parameter with leading double underscore,
-    // it's a private function.
-    if (AFD->getParameters()->hasInternalParameter(Prefix))
+  // If it's a function or subscript with a parameter with leading
+  // double underscore, it's a private function or subscript.
+  if (isa<AbstractFunctionDecl>(D) || isa<SubscriptDecl>(D)) {
+    if (getParameterList(cast<ValueDecl>(D))->hasInternalParameter(Prefix))
       return true;
   }
 
-  if (auto SubscriptD = dyn_cast<SubscriptDecl>(D)) {
-    if (SubscriptD->getIndices()->hasInternalParameter(Prefix))
-      return true;
-  }
   if (auto *VD = dyn_cast<ValueDecl>(D)) {
     auto Name = VD->getBaseName();
     if (!Name.isSpecial() &&
@@ -344,8 +340,16 @@ static bool shouldIncludeDecl(Decl *D, bool ExcludeDoubleUnderscore) {
     if (VD->getEffectiveAccess() < swift::AccessLevel::Public)
       return false;
   }
+
+  // Skip SPI decls.
+  if (D->isSPI())
+    return false;
+
   if (auto *ED = dyn_cast<ExtensionDecl>(D)) {
-    return shouldIncludeDecl(ED->getExtendedNominal(), ExcludeDoubleUnderscore);
+    auto *extended = ED->getExtendedNominal();
+    if (!extended)
+      return false;
+    return shouldIncludeDecl(extended, ExcludeDoubleUnderscore);
   }
   if (ExcludeDoubleUnderscore && hasDoubleUnderscore(D)) {
     return false;
@@ -446,7 +450,6 @@ static void writeDeclCommentTable(
       return { false, E };
     }
 
-    bool walkToTypeLocPre(TypeLoc &TL) override { return false; }
     bool walkToTypeReprPre(TypeRepr *T) override { return false; }
     bool walkToParameterListPre(ParameterList *PL) override { return false; }
   };
@@ -684,7 +687,6 @@ struct BasicDeclLocsTableWriter : public ASTWalker {
 
   std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override { return { false, S };}
   std::pair<bool, Expr *> walkToExprPre(Expr *E) override { return { false, E };}
-  bool walkToTypeLocPre(TypeLoc &TL) override { return false; }
   bool walkToTypeReprPre(TypeRepr *T) override { return false; }
   bool walkToParameterListPre(ParameterList *PL) override { return false; }
 
@@ -708,16 +710,6 @@ writer.write<uint32_t>(data.X.Column);
     if (ide::printDeclUSR(D, OS))
       return None;
     return USRWriter.getNewUSRId(OS.str());
-  }
-
-  LineColumn getLineColumn(SourceManager &SM, SourceLoc Loc) {
-    LineColumn Result;
-    if (Loc.isValid()) {
-      auto LC = SM.getLineAndColumn(Loc);
-      Result.Line = LC.first;
-      Result.Column = LC.second;
-    }
-    return Result;
   }
 
   Optional<DeclLocationsTableData> getLocData(Decl *D) {
@@ -755,7 +747,7 @@ Result.X.Column = Locs->X.Column;
     };
     // .swiftdoc doesn't include comments for double underscored symbols, but
     // for .swiftsourceinfo, having the source location for these symbols isn't
-    // a concern becuase these symbols are in .swiftinterface anyway.
+    // a concern because these symbols are in .swiftinterface anyway.
     if (!shouldIncludeDecl(D, /*ExcludeDoubleUnderscore*/false))
       return false;
     if (!shouldSerializeSourceLoc(D))
@@ -791,6 +783,76 @@ static void emitBasicLocsRecord(llvm::BitstreamWriter &Out,
   DeclLocsList.emit(scratch, Writer.Buffer);
 }
 
+static void emitFileListRecord(llvm::BitstreamWriter &Out,
+                               ModuleOrSourceFile MSF, StringWriter &FWriter) {
+  assert(MSF);
+
+  struct SourceFileListWriter {
+    StringWriter &FWriter;
+
+    llvm::SmallString<0> Buffer;
+    llvm::StringSet<> seenFilenames;
+
+    void emitSourceFileInfo(const BasicSourceFileInfo &info) {
+      if (info.getFilePath().empty())
+        return;
+      // Make 'FilePath' absolute for serialization;
+      SmallString<128> absolutePath = info.getFilePath();
+      llvm::sys::fs::make_absolute(absolutePath);
+
+      // Don't emit duplicated files.
+      if (!seenFilenames.insert(absolutePath).second)
+        return;
+
+      auto fileID = FWriter.getTextOffset(absolutePath);
+
+      auto fingerprintStrIncludingTypeMembers =
+        info.getInterfaceHashIncludingTypeMembers().getRawValue();
+      auto fingerprintStrExcludingTypeMembers =
+        info.getInterfaceHashExcludingTypeMembers().getRawValue();
+
+      auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           info.getLastModified().time_since_epoch())
+                           .count();
+
+      llvm::raw_svector_ostream out(Buffer);
+      endian::Writer writer(out, little);
+      // FilePath.
+      writer.write<uint32_t>(fileID);
+
+      // InterfaceHashIncludingTypeMembers (fixed length string).
+      assert(fingerprintStrIncludingTypeMembers.size() == Fingerprint::DIGEST_LENGTH);
+      out << fingerprintStrIncludingTypeMembers;
+
+      // InterfaceHashExcludingTypeMembers (fixed length string).
+      assert(fingerprintStrExcludingTypeMembers.size() == Fingerprint::DIGEST_LENGTH);
+      out << fingerprintStrExcludingTypeMembers;
+
+      // LastModified (nanoseconds since epoch).
+      writer.write<uint64_t>(timestamp);
+      // FileSize (num of bytes).
+      writer.write<uint64_t>(info.getFileSize());
+    }
+
+    SourceFileListWriter(StringWriter &FWriter) : FWriter(FWriter) {
+      Buffer.reserve(1024);
+    }
+  } writer(FWriter);
+
+  if (SourceFile *SF = MSF.dyn_cast<SourceFile *>()) {
+    writer.emitSourceFileInfo(BasicSourceFileInfo(SF));
+  } else {
+    auto *M = MSF.get<ModuleDecl *>();
+    M->collectBasicSourceFileInfo([&](const BasicSourceFileInfo &info) {
+      writer.emitSourceFileInfo(info);
+    });
+  }
+
+  const decl_locs_block::SourceFileListLayout FileList(Out);
+  SmallVector<uint64_t, 8> scratch;
+  FileList.emit(scratch, writer.Buffer);
+}
+
 class SourceInfoSerializer : public SerializerBase {
 public:
   using SerializerBase::SerializerBase;
@@ -815,6 +877,7 @@ public:
     BLOCK_RECORD(control_block, TARGET);
 
     BLOCK(DECL_LOCS_BLOCK);
+    BLOCK_RECORD(decl_locs_block, SOURCE_FILE_LIST);
     BLOCK_RECORD(decl_locs_block, BASIC_DECL_LOCS);
     BLOCK_RECORD(decl_locs_block, DECL_USRS);
     BLOCK_RECORD(decl_locs_block, TEXT_DATA);
@@ -857,6 +920,7 @@ void serialization::writeSourceInfoToStream(raw_ostream &os,
       DeclUSRsTableWriter USRWriter;
       StringWriter FPWriter;
       DocRangeWriter DocWriter;
+      emitFileListRecord(S.Out, DC, FPWriter);
       emitBasicLocsRecord(S.Out, DC, USRWriter, FPWriter, DocWriter);
       // Emit USR table mapping from a USR to USR Id.
       // The basic locs record uses USR Id instead of actual USR, so that we

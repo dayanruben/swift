@@ -14,6 +14,7 @@ Default option value definitions.
 
 from __future__ import absolute_import, unicode_literals
 
+import os
 import platform
 
 from . import shell
@@ -21,7 +22,7 @@ from .versions import Version
 
 
 __all__ = [
-    # Command line configuarable
+    # Command line configurable
     'BUILD_VARIANT',
     'CMAKE_GENERATOR',
     'COMPILER_VENDOR',
@@ -37,6 +38,7 @@ __all__ = [
     'DARWIN_INSTALL_PREFIX',
     'LLVM_MAX_PARALLEL_LTO_LINK_JOBS',
     'SWIFT_MAX_PARALLEL_LTO_LINK_JOBS',
+    'DSYMUTIL_JOBS'
 
     # Constants
 ]
@@ -47,7 +49,7 @@ BUILD_VARIANT = 'Debug'
 CMAKE_GENERATOR = 'Ninja'
 
 COMPILER_VENDOR = 'none'
-SWIFT_USER_VISIBLE_VERSION = Version('5.3')
+SWIFT_USER_VISIBLE_VERSION = Version('5.4')
 CLANG_USER_VISIBLE_VERSION = Version('10.0.0')
 SWIFT_ANALYZE_CODE_COVERAGE = 'false'
 
@@ -60,6 +62,8 @@ DARWIN_DEPLOYMENT_VERSION_WATCHOS = '2.0'
 UNIX_INSTALL_PREFIX = '/usr'
 DARWIN_INSTALL_PREFIX = ('/Applications/Xcode.app/Contents/Developer/'
                          'Toolchains/XcodeDefault.xctoolchain/usr')
+
+DSYMUTIL_JOBS = 1
 
 
 def _system_memory():
@@ -111,6 +115,19 @@ def _default_swift_lto_link_jobs():
 
 LLVM_MAX_PARALLEL_LTO_LINK_JOBS = _default_llvm_lto_link_jobs()
 SWIFT_MAX_PARALLEL_LTO_LINK_JOBS = _default_swift_lto_link_jobs()
+
+
+def llvm_install_components():
+    """Convenience function for getting the default llvm install components for
+    platforms.
+    """
+    components = ['llvm-cov', 'llvm-profdata', 'IndexStore', 'clang',
+                  'clang-resource-headers', 'compiler-rt', 'clangd']
+    if os.sys.platform == 'darwin':
+        components.extend(['dsymutil'])
+    else:
+        components.extend(['lld'])
+    return ';'.join(components)
 
 
 # Options that can only be "configured" by editing this file.

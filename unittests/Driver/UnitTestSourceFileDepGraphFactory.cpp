@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "UnitTestSourceFileDepGraphFactory.h"
+#include "MockingFineGrainedDependencyGraphs.h"
 
 using namespace swift;
 using namespace swift::fine_grained_dependencies;
@@ -53,10 +54,9 @@ void UnitTestSourceFileDepGraphFactory::addADefinedDecl(StringRef s,
       parseADefinedDecl(s, kind, DeclAspect::interface);
   if (!key)
     return;
-  StringRef fingerprintString = s.split(fingerprintSeparator).second;
-  const Optional<StringRef> fingerprint = fingerprintString.empty()
-                                              ? Optional<StringRef>()
-                                              : StringRef(fingerprintString);
+  auto fingerprintString = s.split(fingerprintSeparator).second.str();
+  const Optional<Fingerprint> fingerprint =
+    swift::mockFingerprintFromString(fingerprintString);
 
   AbstractSourceFileDepGraphFactory::addADefinedDecl(key.getValue(),
                                                      fingerprint);
@@ -82,12 +82,9 @@ UnitTestSourceFileDepGraphFactory::computeUseKey(StringRef s,
   if (!s.empty())
     return parseADefinedDecl(s, kindOfUse, aspectOfUse).getValue();
   StringRef swiftDepsRef(swiftDeps);
-  return DependencyKey(
-      NodeKind::sourceFileProvide, aspectOfUse,
-      DependencyKey::computeContextForProvidedEntity<
-          NodeKind::sourceFileProvide>(swiftDepsRef),
-      DependencyKey::computeNameForProvidedEntity<NodeKind::sourceFileProvide>(
-          swiftDepsRef));
+  return DependencyKey::Builder(NodeKind::sourceFileProvide, aspectOfUse)
+          .withName(swiftDepsRef)
+          .build();
 }
 
 //==============================================================================
@@ -104,9 +101,7 @@ Optional<DependencyKey> UnitTestSourceFileDepGraphFactory::parseADefinedDecl(
     StringRef s, const NodeKind kind, const DeclAspect aspect) {
   static const char *privatePrefix = "#";
 
-  const bool isPrivate = s.consume_front(privatePrefix);
-  if (isPrivate && !includePrivateDeps)
-    return None;
+  s.consume_front(privatePrefix);
   const std::string context =
       parseContext(s.split(fingerprintSeparator).first, kind);
   std::string name = parseName(s.split(fingerprintSeparator).first, kind);
@@ -125,9 +120,7 @@ UnitTestSourceFileDepGraphFactory::parseAUsedDecl(const StringRef argString,
   // Someday, we might differentiate.
   const DeclAspect aspectOfDefUsed = DeclAspect::interface;
 
-  const bool isHolderPrivate = s.consume_front(privateHolderPrefix);
-  if (!includePrivateDeps && isHolderPrivate)
-    return None;
+  s.consume_front(privateHolderPrefix);
   const auto defUseStrings = s.split(defUseSeparator);
   const auto context = parseContext(defUseStrings.first, kind);
   const auto name = parseName(defUseStrings.first, kind);

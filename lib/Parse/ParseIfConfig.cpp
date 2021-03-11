@@ -102,7 +102,7 @@ class ValidateIfConfigCondition :
     return nullptr;
   }
 
-  // Support '||' and '&&' operator. The procedence of '&&' is higher than '||'.
+  // Support '||' and '&&' operator. The precedence of '&&' is higher than '||'.
   // Invalid operator and the next operand are diagnosed and removed from AST.
   Expr *foldSequence(Expr *LHS, ArrayRef<Expr*> &S, bool isRecurse = false) {
     assert(!S.empty() && ((S.size() & 1) == 0));
@@ -407,7 +407,19 @@ public:
 
   bool visitUnresolvedDeclRefExpr(UnresolvedDeclRefExpr *E) {
     auto Name = getDeclRefStr(E);
-    return Ctx.LangOpts.isCustomConditionalCompilationFlagSet(Name);
+
+    // Check whether this is any one of the known compiler features.
+    const auto &langOpts = Ctx.LangOpts;
+    bool isKnownFeature = llvm::StringSwitch<bool>(Name)
+#define LANGUAGE_FEATURE(FeatureName, SENumber, Description, Option) \
+        .Case("$" #FeatureName, Option)
+#include "swift/Basic/Features.def"
+        .Default(false);
+
+    if (isKnownFeature)
+      return true;
+    
+    return langOpts.isCustomConditionalCompilationFlagSet(Name);
   }
 
   bool visitCallExpr(CallExpr *E) {
@@ -603,17 +615,42 @@ static Expr *findAnyLikelySimulatorEnvironmentTest(Expr *Condition) {
 /// Delegate callback function to parse elements in the blocks.
 ParserResult<IfConfigDecl> Parser::parseIfConfig(
     llvm::function_ref<void(SmallVectorImpl<ASTNode> &, bool)> parseElements) {
+  assert(Tok.is(tok::pound_if));
   SyntaxParsingContext IfConfigCtx(SyntaxContext, SyntaxKind::IfConfigDecl);
 
   SmallVector<IfConfigClause, 4> Clauses;
   Parser::StructureMarkerRAII ParsingDecl(
       *this, Tok.getLoc(), Parser::StructureMarkerKind::IfConfig);
 
+  // Find the region containing code completion token.
+  SourceLoc codeCompletionClauseLoc;
+  if (SourceMgr.hasCodeCompletionBuffer() &&
+      SourceMgr.getCodeCompletionBufferID() == L->getBufferID() &&
+      SourceMgr.isBeforeInBuffer(Tok.getLoc(),
+                                 SourceMgr.getCodeCompletionLoc())) {
+    llvm::SaveAndRestore<Optional<StableHasher>> H(CurrentTokenHash, None);
+    BacktrackingScope backtrack(*this);
+    do {
+      auto startLoc = Tok.getLoc();
+      consumeToken();
+      skipUntilConditionalBlockClose();
+      auto endLoc = PreviousLoc;
+      if (SourceMgr.rangeContainsTokenLoc(SourceRange(startLoc, endLoc),
+                                          SourceMgr.getCodeCompletionLoc())){
+        codeCompletionClauseLoc = startLoc;
+        break;
+      }
+    } while (Tok.isNot(tok::pound_endif, tok::eof));
+  }
+
   bool shouldEvaluate =
       // Don't evaluate if it's in '-parse' mode, etc.
       shouldEvaluatePoundIfDecls() &&
       // If it's in inactive #if ... #endif block, there's no point to do it.
-      !getScopeInfo().isInactiveConfigBlock();
+      !InInactiveClauseEnvironment &&
+      // If this directive contains code completion location, 'isActive' is
+      // determined solely by which block has the completion token.
+      !codeCompletionClauseLoc.isValid();
 
   bool foundActive = false;
   bool isVersionCondition = false;
@@ -658,6 +695,10 @@ ParserResult<IfConfigDecl> Parser::parseIfConfig(
       }
     }
 
+    // Treat the region containing code completion token as "active".
+    if (codeCompletionClauseLoc.isValid() && !foundActive)
+      isActive = (ClauseLoc == codeCompletionClauseLoc);
+
     foundActive |= isActive;
 
     if (!Tok.isAtStartOfLine() && Tok.isNot(tok::eof)) {
@@ -676,6 +717,11 @@ ParserResult<IfConfigDecl> Parser::parseIfConfig(
     SmallVector<ASTNode, 16> Elements;
     llvm::SaveAndRestore<bool> S(InInactiveClauseEnvironment,
                                  InInactiveClauseEnvironment || !isActive);
+    // Disable updating the interface hash inside inactive blocks.
+    Optional<llvm::SaveAndRestore<Optional<StableHasher>>> T;
+    if (!isActive)
+      T.emplace(CurrentTokenHash, None);
+
     if (isActive || !isVersionCondition) {
       parseElements(Elements, isActive);
     } else if (SyntaxContext->isEnabled()) {

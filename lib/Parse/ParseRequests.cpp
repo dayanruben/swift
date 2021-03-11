@@ -19,9 +19,11 @@
 #include "swift/AST/DeclContext.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/Basic/Defer.h"
 #include "swift/Parse/Parser.h"
 #include "swift/Subsystems.h"
 #include "swift/Syntax/SyntaxArena.h"
+#include "swift/Syntax/SyntaxNodes.h"
 #include "swift/SyntaxParse/SyntaxTreeCreator.h"
 
 using namespace swift;
@@ -38,7 +40,7 @@ namespace swift {
 void swift::simple_display(llvm::raw_ostream &out,
                            const FingerprintAndMembers &value) {
   if (value.fingerprint)
-    simple_display(out, value.fingerprint.getValue());
+    simple_display(out, *value.fingerprint);
   else
     out << "<no fingerprint>";
   out << ", ";
@@ -48,15 +50,33 @@ void swift::simple_display(llvm::raw_ostream &out,
 FingerprintAndMembers
 ParseMembersRequest::evaluate(Evaluator &evaluator,
                               IterableDeclContext *idc) const {
-  SourceFile &sf = *idc->getDecl()->getDeclContext()->getParentSourceFile();
-  unsigned bufferID = *sf.getBufferID();
+  SourceFile *sf = idc->getAsGenericContext()->getParentSourceFile();
+  ASTContext &ctx = idc->getDecl()->getASTContext();
+  if (!sf) {
+    // If there is no parent source file, this is a deserialized or synthesized
+    // declaration context, in which case `getMembers()` has all of the members.
+    // Filter out the implicitly-generated ones.
+    SmallVector<Decl *, 4> members;
+    for (auto decl : idc->getMembers()) {
+      if (!decl->isImplicit()) {
+        members.push_back(decl);
+      }
+    }
+
+    Optional<Fingerprint> fp = None;
+    if (!idc->getDecl()->isImplicit()) {
+      fp = idc->getDecl()->getModuleContext()->loadFingerprint(idc);
+    }
+    return FingerprintAndMembers{fp, ctx.AllocateCopy(members)};
+  }
+
+  unsigned bufferID = *sf->getBufferID();
 
   // Lexer diaganostics have been emitted during skipping, so we disable lexer's
   // diagnostic engine here.
-  Parser parser(bufferID, sf, /*No Lexer Diags*/nullptr, nullptr, nullptr);
+  Parser parser(bufferID, *sf, /*No Lexer Diags*/nullptr, nullptr, nullptr);
   // Disable libSyntax creation in the delayed parsing.
   parser.SyntaxContext->disable();
-  ASTContext &ctx = idc->getDecl()->getASTContext();
   auto declsAndHash = parser.parseDeclListDelayed(idc);
   FingerprintAndMembers fingerprintAndMembers = {declsAndHash.second,
                                                  declsAndHash.first};
@@ -96,8 +116,7 @@ BraceStmt *ParseAbstractFunctionBodyRequest::evaluate(
     SourceFile &sf = *afd->getDeclContext()->getParentSourceFile();
     SourceManager &sourceMgr = sf.getASTContext().SourceMgr;
     unsigned bufferID = sourceMgr.findBufferContainingLoc(afd->getLoc());
-    Parser parser(bufferID, sf, static_cast<SILParserTUStateBase *>(nullptr),
-                  nullptr, nullptr);
+    Parser parser(bufferID, sf, /*SIL*/ nullptr);
     parser.SyntaxContext->disable();
     auto body = parser.parseAbstractFunctionBodyDelayed(afd);
     afd->setBodyKind(BodyKind::Parsed);
@@ -117,8 +136,8 @@ static void deletePersistentParserState(PersistentParserState *state) {
   delete state;
 }
 
-ArrayRef<Decl *> ParseSourceFileRequest::evaluate(Evaluator &evaluator,
-                                                  SourceFile *SF) const {
+SourceFileParsingResult ParseSourceFileRequest::evaluate(Evaluator &evaluator,
+                                                         SourceFile *SF) const {
   assert(SF);
   auto &ctx = SF->getASTContext();
   auto bufferID = SF->getBufferID();
@@ -150,37 +169,55 @@ ArrayRef<Decl *> ParseSourceFileRequest::evaluate(Evaluator &evaluator,
     SF->setDelayedParserState({state, &deletePersistentParserState});
   }
 
-  FrontendStatsTracer tracer(ctx.Stats, "Parsing");
   Parser parser(*bufferID, *SF, /*SIL*/ nullptr, state, sTreeCreator);
   PrettyStackTraceParser StackTrace(parser);
-
-  llvm::SaveAndRestore<NullablePtr<llvm::MD5>> S(parser.CurrentTokenHash,
-                                                 SF->getInterfaceHashPtr());
 
   SmallVector<Decl *, 128> decls;
   parser.parseTopLevel(decls);
 
+  Optional<SourceFileSyntax> syntaxRoot;
   if (sTreeCreator) {
     auto rawNode = parser.finalizeSyntaxTree();
-    sTreeCreator->acceptSyntaxRoot(rawNode, *SF);
+    syntaxRoot.emplace(*sTreeCreator->realizeSyntaxRoot(rawNode, *SF));
   }
-  return ctx.AllocateCopy(decls);
+
+  Optional<ArrayRef<Token>> tokensRef;
+  if (auto tokens = parser.takeTokenReceiver()->finalize())
+    tokensRef = ctx.AllocateCopy(*tokens);
+
+  return SourceFileParsingResult{ctx.AllocateCopy(decls), tokensRef,
+                                 parser.CurrentTokenHash, syntaxRoot};
 }
 
 evaluator::DependencySource ParseSourceFileRequest::readDependencySource(
-    const evaluator::DependencyCollector &e) const {
-  return {std::get<0>(getStorage()), evaluator::DependencyScope::Cascading};
+    const evaluator::DependencyRecorder &e) const {
+  return std::get<0>(getStorage());
 }
 
-Optional<ArrayRef<Decl *>> ParseSourceFileRequest::getCachedResult() const {
+Optional<SourceFileParsingResult>
+ParseSourceFileRequest::getCachedResult() const {
   auto *SF = std::get<0>(getStorage());
-  return SF->getCachedTopLevelDecls();
+  auto decls = SF->getCachedTopLevelDecls();
+  if (!decls)
+    return None;
+
+  Optional<SourceFileSyntax> syntaxRoot;
+  if (auto &rootPtr = SF->SyntaxRoot)
+    syntaxRoot.emplace(*rootPtr);
+
+  return SourceFileParsingResult{*decls, SF->AllCollectedTokens,
+                                 SF->InterfaceHasher, syntaxRoot};
 }
 
-void ParseSourceFileRequest::cacheResult(ArrayRef<Decl *> decls) const {
+void ParseSourceFileRequest::cacheResult(SourceFileParsingResult result) const {
   auto *SF = std::get<0>(getStorage());
   assert(!SF->Decls);
-  SF->Decls = decls;
+  SF->Decls = result.TopLevelDecls;
+  SF->AllCollectedTokens = result.CollectedTokens;
+  SF->InterfaceHasher = result.InterfaceHasher;
+
+  if (auto &root = result.SyntaxRoot)
+    SF->SyntaxRoot = std::make_unique<SourceFileSyntax>(std::move(*root));
 
   // Verify the parsed source file.
   verify(*SF);
@@ -196,8 +233,8 @@ void swift::simple_display(llvm::raw_ostream &out,
 
 evaluator::DependencySource
 CodeCompletionSecondPassRequest::readDependencySource(
-    const evaluator::DependencyCollector &e) const {
-  return {std::get<0>(getStorage()), e.getActiveSourceScope()};
+    const evaluator::DependencyRecorder &e) const {
+  return std::get<0>(getStorage());
 }
 
 // Define request evaluation functions for each of the type checker requests.

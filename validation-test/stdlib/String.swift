@@ -6,6 +6,7 @@
 // RUN: %target-run %t/String
 // REQUIRES: executable_test
 // XFAIL: interpret
+// UNSUPPORTED: freestanding
 
 // With a non-optimized stdlib the test takes very long.
 // REQUIRES: optimized_stdlib
@@ -25,11 +26,11 @@ import ucrt
 extension Collection {
   internal func index(_nth n: Int) -> Index {
     precondition(n >= 0)
-    return index(startIndex, offsetBy: numericCast(n))
+    return index(startIndex, offsetBy: n)
   }
   internal func index(_nthLast n: Int) -> Index {
     precondition(n >= 0)
-    return index(endIndex, offsetBy: -numericCast(n))
+    return index(endIndex, offsetBy: -n)
   }
 }
 
@@ -1227,7 +1228,7 @@ StringTests.test("Conversions") {
 }
 
 
-#if os(Linux) || os(FreeBSD) || os(PS4) || os(Android) || os(Cygwin) || os(Haiku)
+#if canImport(Glibc)
   import Glibc
 #endif
 

@@ -248,8 +248,9 @@ class TypeRefBuilder {
 
 public:
   using BuiltType = const TypeRef *;
-  using BuiltTypeDecl = Optional<std::string>;
-  using BuiltProtocolDecl = Optional<std::pair<std::string, bool /*isObjC*/>>;
+  using BuiltTypeDecl = llvm::Optional<std::string>;
+  using BuiltProtocolDecl =
+      llvm::Optional<std::pair<std::string, bool /*isObjC*/>>;
 
   TypeRefBuilder(const TypeRefBuilder &other) = delete;
   TypeRefBuilder &operator=(const TypeRefBuilder &other) = delete;
@@ -286,6 +287,10 @@ public:
 
   Demangle::NodeFactory &getNodeFactory() { return Dem; }
 
+  void clearNodeFactory() { Dem.clear(); }
+
+  BuiltType decodeMangledType(Node *node);
+  
   ///
   /// Factory methods for all TypeRef kinds
   ///
@@ -295,8 +300,7 @@ public:
     return BuiltinTypeRef::create(*this, mangledName);
   }
 
-  Optional<std::string>
-  createTypeDecl(Node *node, bool &typeAlias) {
+  llvm::Optional<std::string> createTypeDecl(Node *node, bool &typeAlias) {
     return Demangle::mangleNode(node);
   }
 
@@ -310,25 +314,25 @@ public:
     return std::make_pair(name, true);
   }
 
-  Optional<std::string> createTypeDecl(std::string &&mangledName,
-                                       bool &typeAlias) {
+  llvm::Optional<std::string> createTypeDecl(std::string &&mangledName,
+                                             bool &typeAlias) {
     return std::move(mangledName);
   }
-  
-  const NominalTypeRef *createNominalType(
-                                    const Optional<std::string> &mangledName) {
+
+  const NominalTypeRef *
+  createNominalType(const llvm::Optional<std::string> &mangledName) {
     return NominalTypeRef::create(*this, *mangledName, nullptr);
   }
 
-  const NominalTypeRef *createNominalType(
-                                    const Optional<std::string> &mangledName,
-                                    const TypeRef *parent) {
+  const NominalTypeRef *
+  createNominalType(const llvm::Optional<std::string> &mangledName,
+                    const TypeRef *parent) {
     return NominalTypeRef::create(*this, *mangledName, parent);
   }
 
-  const TypeRef *createTypeAliasType(
-                                    const Optional<std::string> &mangledName,
-                                    const TypeRef *parent) {
+  const TypeRef *
+  createTypeAliasType(const llvm::Optional<std::string> &mangledName,
+                      const TypeRef *parent) {
     // TypeRefs don't contain sugared types
     return nullptr;
   }
@@ -354,21 +358,21 @@ public:
   }
 
   const BoundGenericTypeRef *
-  createBoundGenericType(const Optional<std::string> &mangledName,
+  createBoundGenericType(const llvm::Optional<std::string> &mangledName,
                          const std::vector<const TypeRef *> &args) {
     return BoundGenericTypeRef::create(*this, *mangledName, args, nullptr);
   }
 
   const BoundGenericTypeRef *
-  createBoundGenericType(const Optional<std::string> &mangledName,
-                         ArrayRef<const TypeRef *> args,
+  createBoundGenericType(const llvm::Optional<std::string> &mangledName,
+                         llvm::ArrayRef<const TypeRef *> args,
                          const TypeRef *parent) {
     return BoundGenericTypeRef::create(*this, *mangledName, args, parent);
   }
-  
+
   const TypeRef *
   resolveOpaqueType(NodePointer opaqueDescriptor,
-                    ArrayRef<ArrayRef<const TypeRef *>> genericArgs,
+                    llvm::ArrayRef<llvm::ArrayRef<const TypeRef *>> genericArgs,
                     unsigned ordinal) {
     // TODO: Produce a type ref for the opaque type if the underlying type isn't
     // available.
@@ -403,26 +407,23 @@ public:
                                           genericArgs);
   }
 
-  const TupleTypeRef *
-  createTupleType(ArrayRef<const TypeRef *> elements,
-                  std::string &&labels, bool isVariadic) {
-    // FIXME: Add uniqueness checks in TupleTypeRef::Profile and
-    // unittests/Reflection/TypeRef.cpp if using labels for identity.
-    return TupleTypeRef::create(*this, elements, isVariadic);
+  const TupleTypeRef *createTupleType(llvm::ArrayRef<const TypeRef *> elements,
+                                      std::string &&labels) {
+    return TupleTypeRef::create(*this, elements, std::move(labels));
   }
 
   const FunctionTypeRef *createFunctionType(
-      ArrayRef<remote::FunctionParam<const TypeRef *>> params,
+      llvm::ArrayRef<remote::FunctionParam<const TypeRef *>> params,
       const TypeRef *result, FunctionTypeFlags flags) {
     return FunctionTypeRef::create(*this, params, result, flags);
   }
 
   const FunctionTypeRef *createImplFunctionType(
-    Demangle::ImplParameterConvention calleeConvention,
-    ArrayRef<Demangle::ImplFunctionParam<const TypeRef *>> params,
-    ArrayRef<Demangle::ImplFunctionResult<const TypeRef *>> results,
-    Optional<Demangle::ImplFunctionResult<const TypeRef *>> errorResult,
-    ImplFunctionTypeFlags flags) {
+      Demangle::ImplParameterConvention calleeConvention,
+      llvm::ArrayRef<Demangle::ImplFunctionParam<const TypeRef *>> params,
+      llvm::ArrayRef<Demangle::ImplFunctionResult<const TypeRef *>> results,
+      llvm::Optional<Demangle::ImplFunctionResult<const TypeRef *>> errorResult,
+      ImplFunctionTypeFlags flags) {
     // Minimal support for lowered function types. These come up in
     // reflection as capture types. For the reflection library's
     // purposes, the only part that matters is the convention.
@@ -446,14 +447,16 @@ public:
       break;
     }
 
-    auto result = createTupleType({}, "", false);
+    funcFlags = funcFlags.withConcurrent(flags.isConcurrent());
+    funcFlags = funcFlags.withAsync(flags.isAsync());
+
+    auto result = createTupleType({}, "");
     return FunctionTypeRef::create(*this, {}, result, funcFlags);
   }
 
   const ProtocolCompositionTypeRef *
-  createProtocolCompositionType(ArrayRef<BuiltProtocolDecl> protocols,
-                                BuiltType superclass,
-                                bool isClassBound) {
+  createProtocolCompositionType(llvm::ArrayRef<BuiltProtocolDecl> protocols,
+                                BuiltType superclass, bool isClassBound) {
     std::vector<const TypeRef *> protocolRefs;
     for (const auto &protocol : protocols) {
       if (!protocol)
@@ -469,14 +472,15 @@ public:
                                               isClassBound);
   }
 
-  const ExistentialMetatypeTypeRef *
-  createExistentialMetatypeType(const TypeRef *instance,
-                    Optional<Demangle::ImplMetatypeRepresentation> repr=None) {
+  const ExistentialMetatypeTypeRef *createExistentialMetatypeType(
+      const TypeRef *instance,
+      llvm::Optional<Demangle::ImplMetatypeRepresentation> repr = None) {
     return ExistentialMetatypeTypeRef::create(*this, instance);
   }
 
-  const MetatypeTypeRef *createMetatypeType(const TypeRef *instance,
-                    Optional<Demangle::ImplMetatypeRepresentation> repr=None) {
+  const MetatypeTypeRef *createMetatypeType(
+      const TypeRef *instance,
+      llvm::Optional<Demangle::ImplMetatypeRepresentation> repr = None) {
     bool WasAbstract = (repr && *repr != ImplMetatypeRepresentation::Thin);
     return MetatypeTypeRef::create(*this, instance, WasAbstract);
   }
@@ -514,6 +518,34 @@ public:
     return SILBoxTypeRef::create(*this, base);
   }
 
+  using BuiltSILBoxField = typename SILBoxTypeWithLayoutTypeRef::Field;
+  using BuiltSubstitution = std::pair<const TypeRef *, const TypeRef *>;
+  using BuiltRequirement = TypeRefRequirement;
+  using BuiltLayoutConstraint = TypeRefLayoutConstraint;
+  BuiltLayoutConstraint getLayoutConstraint(LayoutConstraintKind kind) {
+    // FIXME: Implement this.
+    return {};
+  }
+  BuiltLayoutConstraint
+  getLayoutConstraintWithSizeAlign(LayoutConstraintKind kind, unsigned size,
+                                   unsigned alignment) {
+    // FIXME: Implement this.
+    return {};
+  }
+
+  const SILBoxTypeWithLayoutTypeRef *createSILBoxTypeWithLayout(
+      const llvm::SmallVectorImpl<BuiltSILBoxField> &Fields,
+      const llvm::SmallVectorImpl<BuiltSubstitution> &Substitutions,
+      const llvm::SmallVectorImpl<BuiltRequirement> &Requirements) {
+    return SILBoxTypeWithLayoutTypeRef::create(*this, Fields, Substitutions,
+                                               Requirements);
+  }
+
+  bool isExistential(const TypeRef *) {
+    // FIXME: Implement this.
+    return true;
+  }
+
   const TypeRef *createDynamicSelfType(const TypeRef *selfType) {
     // TypeRefs should not contain DynamicSelfType.
     return nullptr;
@@ -530,7 +562,7 @@ public:
 
   const ObjCClassTypeRef *
   createBoundGenericObjCClassType(const std::string &name,
-                                  ArrayRef<const TypeRef *> args) {
+                                  llvm::ArrayRef<const TypeRef *> args) {
     // Remote reflection just ignores generic arguments for Objective-C
     // lightweight generic types, since they don't affect layout.
     return createObjCClassType(name);
@@ -619,8 +651,8 @@ public:
       }),
       OpaqueUnderlyingTypeReader(
       [&reader](uint64_t descriptorAddr, unsigned ordinal) -> const TypeRef* {
-        return reader.readUnderlyingTypeForOpaqueTypeDescriptor(descriptorAddr,
-                                                                ordinal);
+        return reader.readUnderlyingTypeForOpaqueTypeDescriptor(
+          descriptorAddr, ordinal).getType();
       })
   {}
 
@@ -635,16 +667,14 @@ public:
                     const std::string &Member,
                     StringRef Protocol);
 
-  const TypeRef *
-  lookupSuperclass(const TypeRef *TR);
+  const TypeRef *lookupSuperclass(const TypeRef *TR);
 
   /// Load unsubstituted field types for a nominal type.
-  RemoteRef<FieldDescriptor>
-  getFieldTypeInfo(const TypeRef *TR);
+  RemoteRef<FieldDescriptor> getFieldTypeInfo(const TypeRef *TR);
 
   /// Get the parsed and substituted field types for a nominal type.
-  bool getFieldTypeRefs(const TypeRef *TR,
-                        RemoteRef<FieldDescriptor> FD,
+  bool getFieldTypeRefs(const TypeRef *TR, RemoteRef<FieldDescriptor> FD,
+                        remote::TypeInfoProvider *ExternalTypeInfo,
                         std::vector<FieldTypeInfo> &Fields);
 
   /// Get the primitive type lowering for a builtin type.

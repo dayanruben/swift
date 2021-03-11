@@ -72,6 +72,8 @@ class NullEditorConsumer : public EditorConsumer {
 
   void recordAffectedLineRange(unsigned Line, unsigned Length) override {}
 
+  bool diagnosticsEnabled() override { return false; }
+
   void setDiagnosticStage(UIdent DiagStage) override {}
   void handleDiagnostic(const DiagnosticEntryInfo &Info,
                         UIdent DiagStage) override {}
@@ -116,6 +118,7 @@ public:
 
   CursorInfoTest()
       : Ctx(*new SourceKit::Context(getRuntimeLibPath(),
+                                    /*diagnosticDocumentationPath*/ "",
                                     SourceKit::createSwiftLangSupport,
                                     /*dispatchOnMain=*/false)) {
     // This is avoiding destroying \p SourceKit::Context because another
@@ -147,7 +150,7 @@ public:
     Semaphore sema(0);
 
     TestCursorInfo TestInfo;
-    getLang().getCursorInfo(DocName, Offset, 0, false, false, Args, None,
+    getLang().getCursorInfo(DocName, Offset, 0, false, false, false, Args, None,
       [&](const RequestResult<CursorInfoData> &Result) {
         assert(!Result.isCancelled());
         if (Result.isError()) {

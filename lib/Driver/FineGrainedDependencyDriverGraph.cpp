@@ -15,6 +15,7 @@
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/AST/FileSystem.h"
+#include "swift/Basic/PrettyStackTrace.h"
 #include "swift/Basic/ReferenceDependencyKeys.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Statistic.h"
@@ -65,6 +66,7 @@ ModuleDepGraph::Changes ModuleDepGraph::loadFromPath(const Job *Cmd,
                                                      StringRef path,
                                                      DiagnosticEngine &diags) {
   FrontendStatsTracer tracer(stats, "fine-grained-dependencies-loadFromPath");
+  PrettyStackTraceStringAction stackTrace("loading fine-grained dependency graph", path);
 
   if (driverDotFileBasePath.empty()) {
     driverDotFileBasePath = path;
@@ -106,6 +108,27 @@ ModuleDepGraph::Changes ModuleDepGraph::loadFromSourceFileDepGraph(
   return changes;
 }
 
+ModuleDepGraph::Changes ModuleDepGraph::loadFromSwiftModuleBuffer(
+    const Job *Cmd, llvm::MemoryBuffer &buffer, DiagnosticEngine &diags) {
+  FrontendStatsTracer tracer(
+      stats, "fine-grained-dependencies-loadFromSwiftModuleBuffer");
+  PrettyStackTraceStringAction stackTrace(
+      "loading fine-grained dependency graph from swiftmodule",
+      buffer.getBufferIdentifier());
+
+   Optional<SourceFileDepGraph> sourceFileDepGraph =
+      SourceFileDepGraph::loadFromSwiftModuleBuffer(buffer);
+  if (!sourceFileDepGraph)
+    return None;
+  jobsBySwiftDeps[buffer.getBufferIdentifier().str()] = Cmd;
+  auto changes = integrate(*sourceFileDepGraph, buffer.getBufferIdentifier());
+  if (verifyFineGrainedDependencyGraphAfterEveryImport)
+    verify();
+  if (emitFineGrainedDependencyDotFileAfterEveryImport)
+    emitDotFileForJob(diags, Cmd);
+  return changes;
+}
+
 bool ModuleDepGraph::haveAnyNodesBeenTraversedIn(const Job *cmd) const {
   std::string swiftDeps = getSwiftDeps(cmd).str();
 
@@ -132,25 +155,6 @@ std::vector<const Job *> ModuleDepGraph::findJobsToRecompileWhenWholeJobChanges(
                    [&](ModuleDepGraphNode *n) { allNodesInJob.push_back(n); });
   return findJobsToRecompileWhenNodesChange(allNodesInJob);
 }
-
-template <typename Nodes>
-std::vector<const Job *>
-ModuleDepGraph::findJobsToRecompileWhenNodesChange(const Nodes &nodes) {
-  std::vector<ModuleDepGraphNode *> foundDependents;
-  for (ModuleDepGraphNode *n : nodes)
-    findPreviouslyUntracedDependents(foundDependents, n);
-  return jobsContaining(foundDependents);
-}
-
-template std::vector<const Job *>
-ModuleDepGraph::findJobsToRecompileWhenNodesChange<
-    std::unordered_set<ModuleDepGraphNode *>>(
-    const std::unordered_set<ModuleDepGraphNode *> &);
-
-template std::vector<const Job *>
-ModuleDepGraph::findJobsToRecompileWhenNodesChange<
-    std::vector<ModuleDepGraphNode *>>(
-    const std::vector<ModuleDepGraphNode *> &);
 
 std::vector<std::string> ModuleDepGraph::computeSwiftDepsFromNodes(
     ArrayRef<const ModuleDepGraphNode *> nodes) const {
@@ -194,6 +198,8 @@ std::vector<StringRef> ModuleDepGraph::getExternalDependencies() const {
 }
 
 // Add every (swiftdeps) use of the external dependency to foundJobs.
+// Can return duplicates, but it doesn't break anything, and they will be
+// canonicalized later.
 std::vector<const Job *> ModuleDepGraph::findExternallyDependentUntracedJobs(
     StringRef externalDependency) {
   FrontendStatsTracer tracer(
@@ -216,9 +222,8 @@ void ModuleDepGraph::forEachUntracedJobDirectlyDependentOnExternalSwiftDeps(
     StringRef externalSwiftDeps, function_ref<void(const Job *)> fn) {
   // TODO move nameForDep into key
   // These nodes will depend on the *interface* of the external Decl.
-  DependencyKey key =
-      DependencyKey::createDependedUponKey<NodeKind::externalDepend>(
-          externalSwiftDeps.str());
+  DependencyKey key(NodeKind::externalDepend, DeclAspect::interface, "",
+                    externalSwiftDeps.str());
   for (const ModuleDepGraphNode *useNode : usesByDef[key]) {
     if (!useNode->getHasBeenTraced())
       fn(getJob(useNode->getSwiftDepsOfProvides()));
@@ -243,7 +248,6 @@ ModuleDepGraph::Changes ModuleDepGraph::integrate(const SourceFileDepGraph &g,
 
   g.forEachNode([&](const SourceFileDepGraphNode *integrand) {
     const auto &key = integrand->getKey();
-
     auto preexistingMatch = findPreexistingMatch(swiftDepsOfJob, integrand);
     if (preexistingMatch.hasValue() &&
         preexistingMatch.getValue().first == LocationOfPreexistingNode::here)
@@ -306,12 +310,6 @@ ModuleDepGraph::integrateSourceFileDepGraphNode(
     const SourceFileDepGraph &g, const SourceFileDepGraphNode *integrand,
     const PreexistingNodeIfAny preexistingMatch,
     const StringRef swiftDepsOfJob) {
-
-  if (!EnableTypeFingerprints &&
-      integrand->getKey().getKind() != NodeKind::sourceFileProvide &&
-      integrand->getFingerprint())
-    return None;
-
   if (!integrand->getIsProvides())
     return NullablePtr<ModuleDepGraphNode>(); // depends are captured by
                                               // recordWhatUseDependsUpon below
@@ -384,10 +382,12 @@ bool ModuleDepGraph::recordWhatUseDependsUpon(
       sourceFileUseNode, [&](const SourceFileDepGraphNode *def) {
         const bool isNewUse =
             usesByDef[def->getKey()].insert(moduleUseNode).second;
-        if (isNewUse && def->getKey().getKind() == NodeKind::externalDepend) {
+        if (isNewUse) {
           StringRef externalSwiftDeps = def->getKey().getName();
-          externalDependencies.insert(externalSwiftDeps.str());
-          useHasNewExternalDependency = true;
+          if (def->getKey().getKind() == NodeKind::externalDepend) {
+            externalDependencies.insert(externalSwiftDeps.str());
+            useHasNewExternalDependency = true;
+          }
         }
       });
   return useHasNewExternalDependency;
@@ -684,9 +684,14 @@ void ModuleDepGraph::printPath(raw_ostream &out,
 }
 
 StringRef ModuleDepGraph::getProvidingFilename(
-    const Optional<std::string> swiftDeps) const {
+    const Optional<std::string> &swiftDeps) const {
   if (!swiftDeps)
     return "<unknown";
+  auto ext = llvm::sys::path::extension(*swiftDeps);
+  if (file_types::lookupTypeForExtension(ext) ==
+      file_types::TY_SwiftModuleFile) {
+    return *swiftDeps;
+  }
   const StringRef inputName =
       llvm::sys::path::filename(getJob(swiftDeps)->getFirstSwiftPrimaryInput());
   // FineGrainedDependencyGraphTests work with simulated jobs with empty

@@ -17,8 +17,11 @@
 #ifndef SWIFT_SILOPTIMIZER_UTILS_CFG_H
 #define SWIFT_SILOPTIMIZER_UTILS_CFG_H
 
-#include "swift/SIL/SILInstruction.h"
+#include "swift/Basic/STLExtras.h"
 #include "swift/SIL/SILBuilder.h"
+#include "swift/SIL/SILInstruction.h"
+#include "swift/SIL/BasicBlockBits.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
 
 namespace swift {
 
@@ -28,6 +31,27 @@ namespace swift {
 /// of the analysis and can be a super set of the uses of the SILValue
 /// e.g. it can be the set of transitive uses of the SILValue.
 class ValueLifetimeAnalysis {
+  /// The instruction or argument that define the value.
+  PointerUnion<SILInstruction *, SILArgument *> defValue;
+
+  /// The set of blocks where the value is live.
+  llvm::SmallVector<SILBasicBlock *, 16> liveBlocks;
+  
+  /// True for blocks which are in liveBlocks.
+  BasicBlockFlag inLiveBlocks;
+
+  /// The set of instructions where the value is used, or the users-list
+  /// provided with the constructor.
+  llvm::SmallPtrSet<SILInstruction *, 16> userSet;
+
+  /// Indicates whether the basic block containing def has users of def that
+  /// precede def. This field is initialized by propagateLiveness.
+  bool hasUsersBeforeDef;
+
+  /// Critical edges that couldn't be split to compute the frontier. This could
+  /// be non-empty when the analysis is invoked with DontModifyCFG mode.
+  llvm::SmallVector<std::pair<TermInst *, unsigned>, 16> criticalEdges;
+
 public:
 
   /// The lifetime frontier for the value. It is the list of instructions
@@ -35,24 +59,47 @@ public:
   /// end the value's lifetime.
   using Frontier = SmallVector<SILInstruction *, 4>;
 
-  /// Constructor for the value \p Def with a specific range of users.
+  /// A type erased version of frontier so callers can customize the inline
+  /// size.
+  using FrontierImpl = SmallVectorImpl<SILInstruction *>;
+
+  /// Constructor for the value \p def with a specific range of users.
   ///
   /// We templatize over the RangeTy so that we can initialize
   /// ValueLifetimeAnalysis with misc iterators including transform
   /// iterators.
   template <typename RangeTy>
-  ValueLifetimeAnalysis(SILInstruction *def, const RangeTy &userRange)
-      : defValue(def), userSet(userRange.begin(), userRange.end()) {
+  ValueLifetimeAnalysis(SILArgument *def, const RangeTy &useRange)
+      : defValue(def), inLiveBlocks(def->getFunction()), userSet() {
+    for (SILInstruction *use : useRange)
+      userSet.insert(use);
     propagateLiveness();
   }
 
-  /// Constructor for the value \p def considering all the value's uses.
-  ValueLifetimeAnalysis(SILInstruction *def) : defValue(def) {
-    for (auto result : def->getResults()) {
-      for (Operand *op : result->getUses()) {
-        userSet.insert(op->getUser());
-      }
-    }
+  ValueLifetimeAnalysis(
+      SILArgument *def,
+      llvm::iterator_range<ValueBaseUseIterator> useRange)
+      : defValue(def), inLiveBlocks(def->getFunction()), userSet() {
+    for (Operand *use : useRange)
+      userSet.insert(use->getUser());
+    propagateLiveness();
+  }
+
+  template <typename RangeTy>
+  ValueLifetimeAnalysis(
+      SILInstruction *def, const RangeTy &useRange)
+      : defValue(def), inLiveBlocks(def->getFunction()), userSet() {
+    for (SILInstruction *use : useRange)
+      userSet.insert(use);
+    propagateLiveness();
+  }
+
+  ValueLifetimeAnalysis(
+      SILInstruction *def,
+      llvm::iterator_range<ValueBaseUseIterator> useRange)
+      : defValue(def), inLiveBlocks(def->getFunction()), userSet() {
+    for (Operand *use : useRange)
+      userSet.insert(use->getUser());
     propagateLiveness();
   }
 
@@ -87,7 +134,7 @@ public:
   ///
   /// If \p deBlocks is provided, all dead-end blocks are ignored. This
   /// prevents unreachable-blocks to be included in the frontier.
-  bool computeFrontier(Frontier &frontier, Mode mode,
+  bool computeFrontier(FrontierImpl &frontier, Mode mode,
                        DeadEndBlocks *deBlocks = nullptr);
 
   ArrayRef<std::pair<TermInst *, unsigned>> getCriticalEdges() {
@@ -101,35 +148,30 @@ public:
 
   /// Returns true if the value is alive at the begin of block \p bb.
   bool isAliveAtBeginOfBlock(SILBasicBlock *bb) {
-    return liveBlocks.count(bb) &&
-           (bb != defValue->getParent() || hasUsersBeforeDef);
+    return inLiveBlocks.get(bb) &&
+           (hasUsersBeforeDef || bb != getDefValueParentBlock());
   }
 
   /// Checks if there is a dealloc_ref inside the value's live range.
-  bool containsDeallocRef(const Frontier &frontier);
+  bool containsDeallocRef(const FrontierImpl &frontier);
 
   /// For debug dumping.
   void dump() const;
 
 private:
+  SILFunction *getFunction() const {
+    if (auto *inst = defValue.dyn_cast<SILInstruction *>()) {
+      return inst->getFunction();
+    }
+    return defValue.get<SILArgument *>()->getFunction();
+  }
 
-  /// The value.
-  SILInstruction *defValue;
-
-  /// The set of blocks where the value is live.
-  llvm::SmallSetVector<SILBasicBlock *, 16> liveBlocks;
-
-  /// The set of instructions where the value is used, or the users-list
-  /// provided with the constructor.
-  llvm::SmallPtrSet<SILInstruction *, 16> userSet;
-
-  /// Indicates whether the basic block containing def has users of def that
-  /// precede def. This field is initialized by propagateLiveness.
-  bool hasUsersBeforeDef;
-
-  /// Critical edges that couldn't be split to compute the frontier. This could
-  /// be non-empty when the analysis is invoked with DontModifyCFG mode.
-  llvm::SmallVector<std::pair<TermInst *, unsigned>, 16> criticalEdges;
+  SILBasicBlock *getDefValueParentBlock() const {
+    if (auto *inst = defValue.dyn_cast<SILInstruction *>()) {
+      return inst->getParent();
+    }
+    return defValue.get<SILArgument *>()->getParent();
+  }
 
   /// Propagates the liveness information up the control flow graph.
   void propagateLiveness();
@@ -145,8 +187,9 @@ private:
 /// Otherwise \p valueOrStackLoc must be a value type and in this case, inserts
 /// destroy_value at each instruction of the \p frontier.
 void endLifetimeAtFrontier(SILValue valueOrStackLoc,
-                           const ValueLifetimeAnalysis::Frontier &frontier,
-                           SILBuilderContext &builderCtxt);
+                           const ValueLifetimeAnalysis::FrontierImpl &frontier,
+                           SILBuilderContext &builderCtxt,
+                           InstModCallbacks callbacks);
 
 } // end namespace swift
 

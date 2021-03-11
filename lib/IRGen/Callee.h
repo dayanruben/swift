@@ -124,7 +124,79 @@ namespace irgen {
 
   /// A function pointer value.
   class FunctionPointer {
-    /// The actual function pointer.
+  public:
+    enum class BasicKind {
+      Function,
+      AsyncFunctionPointer
+    };
+
+    enum class SpecialKind {
+      TaskFutureWait,
+      TaskFutureWaitThrowing,
+      TaskGroupWaitNext,
+    };
+
+    class Kind {
+      static constexpr unsigned SpecialOffset = 2;
+      unsigned value;
+    public:
+      static constexpr BasicKind Function =
+        BasicKind::Function;
+      static constexpr BasicKind AsyncFunctionPointer =
+        BasicKind::AsyncFunctionPointer;
+
+      Kind(BasicKind kind) : value(unsigned(kind)) {}
+      Kind(SpecialKind kind) : value(unsigned(kind) + SpecialOffset) {}
+      Kind(CanSILFunctionType fnType)
+        : Kind(fnType->isAsync() ? BasicKind::AsyncFunctionPointer
+                                 : BasicKind::Function) {}
+
+      BasicKind getBasicKind() const {
+        return value < SpecialOffset ? BasicKind(value) : BasicKind::Function;
+      }
+      bool isAsyncFunctionPointer() const {
+        return value == unsigned(BasicKind::AsyncFunctionPointer);
+      }
+
+      bool isSpecial() const {
+        return value >= SpecialOffset;
+      }
+      SpecialKind getSpecialKind() const {
+        assert(isSpecial());
+        return SpecialKind(value - SpecialOffset);
+      }
+
+      /// Should we suppress the generic signature from the given function?
+      ///
+      /// This is a micro-optimization we apply to certain special functions
+      /// that we know don't need generics.
+      bool suppressGenerics() const {
+        if (!isSpecial()) return false;
+
+        switch (getSpecialKind()) {
+        case SpecialKind::TaskFutureWait:
+        case SpecialKind::TaskFutureWaitThrowing:
+          // We suppress generics from these as a code-size optimization
+          // because the runtime can recover the success type from the
+          // future.
+          return true;
+        case SpecialKind::TaskGroupWaitNext:
+          return false;
+        }
+      }
+
+      friend bool operator==(Kind lhs, Kind rhs) {
+        return lhs.value == rhs.value;
+      }
+      friend bool operator!=(Kind lhs, Kind rhs) {
+        return !(lhs == rhs);
+      }
+    };
+
+  private:
+    Kind kind;
+
+    /// The actual pointer, either to the function or to its descriptor.
     llvm::Value *Value;
 
     PointerAuthInfo AuthInfo;
@@ -135,25 +207,27 @@ namespace irgen {
     /// Construct a FunctionPointer for an arbitrary pointer value.
     /// We may add more arguments to this; try to use the other
     /// constructors/factories if possible.
-    explicit FunctionPointer(llvm::Value *value, PointerAuthInfo authInfo,
+    explicit FunctionPointer(Kind kind, llvm::Value *value,
+                             PointerAuthInfo authInfo,
                              const Signature &signature)
-        : Value(value), AuthInfo(authInfo), Sig(signature) {
+        : kind(kind), Value(value), AuthInfo(authInfo), Sig(signature) {
       // The function pointer should have function type.
       assert(value->getType()->getPointerElementType()->isFunctionTy());
       // TODO: maybe assert similarity to signature.getType()?
     }
 
     // Temporary only!
-    explicit FunctionPointer(llvm::Value *value, const Signature &signature)
-      : FunctionPointer(value, PointerAuthInfo(), signature) {}
+    explicit FunctionPointer(Kind kind, llvm::Value *value,
+                             const Signature &signature)
+      : FunctionPointer(kind, value, PointerAuthInfo(), signature) {}
 
     static FunctionPointer forDirect(IRGenModule &IGM,
                                      llvm::Constant *value,
                                      CanSILFunctionType fnType);
 
-    static FunctionPointer forDirect(llvm::Constant *value,
+    static FunctionPointer forDirect(Kind kind, llvm::Constant *value,
                                      const Signature &signature) {
-      return FunctionPointer(value, PointerAuthInfo(), signature);
+      return FunctionPointer(kind, value, PointerAuthInfo(), signature);
     }
 
     static FunctionPointer forExplosionValue(IRGenFunction &IGF,
@@ -166,8 +240,18 @@ namespace irgen {
       return (isa<llvm::Constant>(Value) && AuthInfo.isConstant());
     }
 
+    Kind getKind() const { return kind; }
+    BasicKind getBasicKind() const { return kind.getBasicKind(); }
+
+    /// Given that this value is known to have been constructed from a direct
+    /// function,  Return the name of that function.
+    StringRef getName(IRGenModule &IGM) const;
+
     /// Return the actual function pointer.
-    llvm::Value *getPointer() const { return Value; }
+    llvm::Value *getPointer(IRGenFunction &IGF) const;
+
+    /// Return the actual function pointer.
+    llvm::Value *getRawPointer() const { return Value; }
 
     /// Given that this value is known to have been constructed from
     /// a direct function, return the function pointer.
@@ -205,6 +289,17 @@ namespace irgen {
 
     llvm::Value *getExplosionValue(IRGenFunction &IGF,
                                    CanSILFunctionType fnType) const;
+
+    /// Form a FunctionPointer whose KindTy is ::Function.
+    FunctionPointer getAsFunction(IRGenFunction &IGF) const;
+
+    bool useStaticContextSize() const {
+      return !kind.isAsyncFunctionPointer();
+    }
+
+    bool suppressGenerics() const {
+      return kind.suppressGenerics();
+    }
   };
 
   class Callee {
@@ -266,6 +361,10 @@ namespace irgen {
 
     const Signature &getSignature() const {
       return Fn.getSignature();
+    }
+
+    bool suppressGenerics() const {
+      return Fn.suppressGenerics();
     }
 
     /// If this callee has a value for the Swift context slot, return

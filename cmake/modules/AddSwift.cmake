@@ -5,18 +5,31 @@ include(SwiftWindowsSupport)
 include(SwiftAndroidSupport)
 
 function(_swift_gyb_target_sources target scope)
+  file(GLOB GYB_UNICODE_DATA ${SWIFT_SOURCE_DIR}/utils/UnicodeData/*)
+  file(GLOB GYB_STDLIB_SUPPORT ${SWIFT_SOURCE_DIR}/utils/gyb_stdlib_support.py)
+  file(GLOB GYB_SYNTAX_SUPPORT ${SWIFT_SOURCE_DIR}/utils/gyb_syntax_support/*)
+  file(GLOB GYB_SOURCEKIT_SUPPORT ${SWIFT_SOURCE_DIR}/utils/gyb_sourcekit_support/*)
+  set(GYB_SOURCES
+    ${SWIFT_SOURCE_DIR}/utils/GYBUnicodeDataUtils.py
+    ${SWIFT_SOURCE_DIR}/utils/SwiftIntTypes.py
+    ${GYB_UNICODE_DATA}
+    ${GYB_STDLIB_SUPPORT}
+    ${GYB_SYNTAX_SUPPORT}
+    ${GYB_SOURCEKIT_SUPPORT})
+
   foreach(source ${ARGN})
     get_filename_component(generated ${source} NAME_WLE)
     get_filename_component(absolute ${source} REALPATH)
 
     add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${generated}
       COMMAND
-        $<TARGET_FILE:Python2::Interpreter> ${SWIFT_SOURCE_DIR}/utils/gyb -D CMAKE_SIZEOF_VOID_P=${CMAKE_SIZEOF_VOID_P} ${SWIFT_GYB_FLAGS} -o ${CMAKE_CURRENT_BINARY_DIR}/${generated}.tmp ${absolute}
+        $<TARGET_FILE:Python3::Interpreter> ${SWIFT_SOURCE_DIR}/utils/gyb -D CMAKE_SIZEOF_VOID_P=${CMAKE_SIZEOF_VOID_P} ${SWIFT_GYB_FLAGS} -o ${CMAKE_CURRENT_BINARY_DIR}/${generated}.tmp ${absolute}
       COMMAND
         ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/${generated}.tmp ${CMAKE_CURRENT_BINARY_DIR}/${generated}
       COMMAND
         ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/${generated}.tmp
       DEPENDS
+        ${GYB_SOURCES}
         ${absolute})
     set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/${generated} PROPERTIES
       GENERATED TRUE)
@@ -62,118 +75,70 @@ function(_set_target_prefix_and_suffix target kind sdk)
   endif()
 endfunction()
 
-function(is_darwin_based_sdk sdk_name out_var)
-  if ("${sdk_name}" STREQUAL "OSX" OR
-      "${sdk_name}" STREQUAL "IOS" OR
-      "${sdk_name}" STREQUAL "IOS_SIMULATOR" OR
-      "${sdk_name}" STREQUAL "TVOS" OR
-      "${sdk_name}" STREQUAL "TVOS_SIMULATOR" OR
-      "${sdk_name}" STREQUAL "WATCHOS" OR
-      "${sdk_name}" STREQUAL "WATCHOS_SIMULATOR")
-    set(${out_var} TRUE PARENT_SCOPE)
-  else()
-    set(${out_var} FALSE PARENT_SCOPE)
-  endif()
-endfunction()
-
 # Usage:
-# _add_host_variant_c_compile_link_flags(
-#   ANALYZE_CODE_COVERAGE analyze_code_coverage
-#   RESULT_VAR_NAME result_var_name
-# )
-function(_add_host_variant_c_compile_link_flags)
-  set(oneValueArgs RESULT_VAR_NAME ANALYZE_CODE_COVERAGE)
-  cmake_parse_arguments(CFLAGS
-    ""
-    "${oneValueArgs}"
-    ""
-    ${ARGN})
-
-  get_maccatalyst_build_flavor(maccatalyst_build_flavor
-    "${SWFIT_HOST_VARIANT_SDK}" "")
-
-  set(result ${${CFLAGS_RESULT_VAR_NAME}})
-
-  is_darwin_based_sdk("${SWIFT_HOST_VARIANT_SDK}" IS_DARWIN)
-  if(IS_DARWIN)
+# _add_host_variant_c_compile_link_flags(name)
+function(_add_host_variant_c_compile_link_flags name)
+  if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_APPLE_PLATFORMS)
     set(DEPLOYMENT_VERSION "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_DEPLOYMENT_VERSION}")
+  endif()
+
+  if(SWIFT_HOST_VARIANT_SDK STREQUAL ANDROID)
+    set(DEPLOYMENT_VERSION ${SWIFT_ANDROID_API_LEVEL})
   endif()
 
   # MSVC, clang-cl, gcc don't understand -target.
   if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT SWIFT_COMPILER_IS_MSVC_LIKE)
     get_target_triple(target target_variant "${SWIFT_HOST_VARIANT_SDK}" "${SWIFT_HOST_VARIANT_ARCH}"
-      MACCATALYST_BUILD_FLAVOR "${maccatalyst_build_flavor}"
+      MACCATALYST_BUILD_FLAVOR ""
       DEPLOYMENT_VERSION "${DEPLOYMENT_VERSION}")
-    list(APPEND result "-target" "${target}")
-    if(target_variant)
-      list(APPEND result "-target-variant" "${target_variant}")
-    endif()
+    target_compile_options(${name} PRIVATE -target;${target})
+    target_link_options(${name} PRIVATE -target;${target})
   endif()
 
   set(_sysroot
     "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${SWIFT_HOST_VARIANT_ARCH}_PATH}")
-  if(IS_DARWIN)
-    list(APPEND result "-isysroot" "${_sysroot}")
+  if(SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_USE_ISYSROOT)
+    target_compile_options(${name} PRIVATE -isysroot;${_sysroot})
   elseif(NOT SWIFT_COMPILER_IS_MSVC_LIKE AND NOT "${_sysroot}" STREQUAL "/")
-    list(APPEND result "--sysroot=${_sysroot}")
+    target_compile_options(${name} PRIVATE --sysroot=${_sysroot})
   endif()
 
   if(SWIFT_HOST_VARIANT_SDK STREQUAL ANDROID)
     # lld can handle targeting the android build.  However, if lld is not
     # enabled, then fallback to the linker included in the android NDK.
-    if(NOT SWIFT_ENABLE_LLD_LINKER)
+    if(NOT SWIFT_USE_LINKER STREQUAL "lld")
       swift_android_tools_path(${SWIFT_HOST_VARIANT_ARCH} tools_path)
-      list(APPEND result "-B" "${tools_path}")
+      target_compile_options(${name} PRIVATE -B${tools_path})
     endif()
   endif()
 
-  if(IS_DARWIN)
+  if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_APPLE_PLATFORMS)
     # We collate -F with the framework path to avoid unwanted deduplication
     # of options by target_compile_options -- this way no undesired
     # side effects are introduced should a new search path be added.
-    list(APPEND result
-      "-arch" "${SWIFT_HOST_VARIANT_ARCH}"
+    target_compile_options(${name} PRIVATE
+      -arch ${SWIFT_HOST_VARIANT_ARCH}
       "-F${SWIFT_SDK_${SWIFT_HOST_VARIANT_ARCH}_PATH}/../../../Developer/Library/Frameworks")
-
-    set(add_explicit_version TRUE)
-
-    # iOS-like and zippered libraries get their deployment version from the
-    # target triple
-    if(maccatalyst_build_flavor STREQUAL "ios-like" OR
-        maccatalyst_build_flavor STREQUAL "zippered")
-      set(add_explicit_version FALSE)
-    endif()
-
-    if(add_explicit_version)
-      list(APPEND result
-        "-m${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_VERSION_MIN_NAME}-version-min=${DEPLOYMENT_VERSION}")
-     endif()
-  endif()
-
-  if(CFLAGS_ANALYZE_CODE_COVERAGE)
-    list(APPEND result "-fprofile-instr-generate"
-                       "-fcoverage-mapping")
   endif()
 
   _compute_lto_flag("${SWIFT_TOOLS_ENABLE_LTO}" _lto_flag_out)
   if (_lto_flag_out)
-    list(APPEND result "${_lto_flag_out}")
+    target_compile_options(${name} PRIVATE ${_lto_flag_out})
+    target_link_options(${name} PRIVATE ${_lto_flag_out})
   endif()
-
-  set("${CFLAGS_RESULT_VAR_NAME}" "${result}" PARENT_SCOPE)
 endfunction()
 
 
 function(_add_host_variant_c_compile_flags target)
-  _add_host_variant_c_compile_link_flags(
-    ANALYZE_CODE_COVERAGE FALSE
-    RESULT_VAR_NAME result)
-  target_compile_options(${target} PRIVATE
-    ${result})
+  _add_host_variant_c_compile_link_flags(${target})
 
   is_build_type_optimized("${CMAKE_BUILD_TYPE}" optimized)
   if(optimized)
-    target_compile_options(${target} PRIVATE -O2)
+    if("${CMAKE_BUILD_TYPE}" STREQUAL "MinSizeRel")
+      target_compile_options(${target} PRIVATE -Os)
+    else()
+      target_compile_options(${target} PRIVATE -O2)
+    endif()
 
     # Omit leaf frame pointers on x86 production builds (optimized, no debug
     # info, and no asserts).
@@ -310,18 +275,6 @@ function(_add_host_variant_c_compile_flags target)
     target_compile_options(${target} PRIVATE -funwind-tables)
   endif()
 
-  if(SWIFT_HOST_VARIANT_SDK STREQUAL ANDROID)
-    target_compile_options(${target} PRIVATE -nostdinc++)
-    swift_android_libcxx_include_paths(CFLAGS_CXX_INCLUDES)
-    swift_android_include_for_arch("${SWIFT_HOST_VARIANT_ARCH}"
-      "${SWIFT_HOST_VARIANT_ARCH}_INCLUDE")
-    target_include_directories(${target} SYSTEM PRIVATE
-      ${CFLAGS_CXX_INCLUDES}
-      ${${SWIFT_HOST_VARIANT_ARCH}_INCLUDE})
-    target_compile_definitions(${target} PRIVATE
-      __ANDROID_API__=${SWIFT_ANDROID_API_LEVEL})
-  endif()
-
   if(SWIFT_HOST_VARIANT_SDK STREQUAL "LINUX")
     if(SWIFT_HOST_VARIANT_ARCH STREQUAL x86_64)
       # this is the minimum architecture that supports 16 byte CAS, which is
@@ -329,14 +282,20 @@ function(_add_host_variant_c_compile_flags target)
       target_compile_options(${target} PRIVATE -march=core2)
     endif()
   endif()
+
+  # The LLVM backend is built with these defines on most 32-bit platforms,
+  # llvm/llvm-project@66395c9, which can cause incompatibilities with the Swift
+  # frontend if not built the same way.
+  if("${SWIFT_HOST_VARIANT_ARCH}" MATCHES "armv6|armv7|i686" AND
+     NOT (SWIFT_HOST_VARIANT_SDK STREQUAL ANDROID AND SWIFT_ANDROID_API_LEVEL LESS 24))
+    target_compile_definitions(${target} PRIVATE
+      _LARGEFILE_SOURCE
+      _FILE_OFFSET_BITS=64)
+  endif()
 endfunction()
 
 function(_add_host_variant_link_flags target)
-  _add_host_variant_c_compile_link_flags(
-    ANALYZE_CODE_COVERAGE ${SWIFT_ANALYZE_CODE_COVERAGE}
-    RESULT_VAR_NAME result)
-  target_link_options(${target} PRIVATE
-    ${result})
+  _add_host_variant_c_compile_link_flags(${target})
 
   if(SWIFT_HOST_VARIANT_SDK STREQUAL LINUX)
     target_link_libraries(${target} PRIVATE
@@ -367,13 +326,11 @@ function(_add_host_variant_link_flags target)
       ${CMAKE_BINARY_DIR}/winsdk_lib_${SWIFT_HOST_VARIANT_ARCH}_symlinks)
   elseif(SWIFT_HOST_VARIANT_SDK STREQUAL HAIKU)
     target_link_libraries(${target} PRIVATE
-      atomic
       bsd)
     target_link_options(${target} PRIVATE
       "SHELL:-Xlinker -Bsymbolic")
   elseif(SWIFT_HOST_VARIANT_SDK STREQUAL ANDROID)
     target_link_libraries(${target} PRIVATE
-      atomic
       dl
       log
       # We need to add the math library, which is linked implicitly by libc++
@@ -385,7 +342,7 @@ function(_add_host_variant_link_flags target)
     target_link_libraries(${target} PRIVATE
       ${cxx_link_libraries})
 
-    swift_android_lib_for_arch(${SWIFT_HOST_VARIANT_ARCH}
+    swift_android_libgcc_for_arch_cross_compile(${SWIFT_HOST_VARIANT_ARCH}
       ${SWIFT_HOST_VARIANT_ARCH}_LIB)
     target_link_directories(${target} PRIVATE
       ${${SWIFT_HOST_VARIANT_ARCH}_LIB})
@@ -403,18 +360,9 @@ function(_add_host_variant_link_flags target)
   endif()
 
   if(NOT SWIFT_COMPILER_IS_MSVC_LIKE)
-    # FIXME: On Apple platforms, find_program needs to look for "ld64.lld"
-    find_program(LDLLD_PATH "ld.lld")
-    if((SWIFT_ENABLE_LLD_LINKER AND LDLLD_PATH AND NOT APPLE) OR
-       (SWIFT_HOST_VARIANT_SDK STREQUAL WINDOWS AND NOT CMAKE_SYSTEM_NAME STREQUAL WINDOWS))
-      target_link_options(${target} PRIVATE -fuse-ld=lld)
-    elseif(SWIFT_ENABLE_GOLD_LINKER AND
-           "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_OBJECT_FORMAT}" STREQUAL "ELF")
-      if(CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)
-        target_link_options(${target} PRIVATE -fuse-ld=gold.exe)
-      else()
-        target_link_options(${target} PRIVATE -fuse-ld=gold)
-      endif()
+    if(SWIFT_USE_LINKER)
+      target_link_options(${target} PRIVATE
+        -fuse-ld=${SWIFT_USE_LINKER}$<$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>:.exe>)
     endif()
   endif()
 
@@ -424,205 +372,14 @@ function(_add_host_variant_link_flags target)
   #
   # TODO: Evaluate/enable -f{function,data}-sections --gc-sections for bfd,
   # gold, and lld.
-  if(NOT CMAKE_BUILD_TYPE STREQUAL Debug)
-    if(CMAKE_SYSTEM_NAME MATCHES Darwin)
+  if(NOT CMAKE_BUILD_TYPE STREQUAL Debug AND CMAKE_SYSTEM_NAME MATCHES Darwin)
+    if (NOT SWIFT_DISABLE_DEAD_STRIPPING)
       # See rdar://48283130: This gives 6MB+ size reductions for swift and
       # SourceKitService, and much larger size reductions for sil-opt etc.
       target_link_options(${target} PRIVATE
         "SHELL:-Xlinker -dead_strip")
     endif()
   endif()
-
-  get_maccatalyst_build_flavor(maccatalyst_build_flavor
-    "${SWIFT_HOST_VARIANT_SDK}" "")
-endfunction()
-
-# Add a single variant of a new Swift library.
-#
-# Usage:
-#   _add_swift_host_library_single(
-#     target
-#     [SHARED]
-#     [STATIC]
-#     [LLVM_LINK_COMPONENTS comp1 ...]
-#     source1 [source2 source3 ...])
-#
-# target
-#   Name of the library (e.g., swiftParse).
-#
-# SHARED
-#   Build a shared library.
-#
-# STATIC
-#   Build a static library.
-#
-# LLVM_LINK_COMPONENTS
-#   LLVM components this library depends on.
-#
-# source1 ...
-#   Sources to add into this library
-function(_add_swift_host_library_single target)
-  set(options
-        SHARED
-        STATIC)
-  set(single_parameter_options)
-  set(multiple_parameter_options
-        LLVM_LINK_COMPONENTS)
-
-  cmake_parse_arguments(ASHLS
-                        "${options}"
-                        "${single_parameter_options}"
-                        "${multiple_parameter_options}"
-                        ${ARGN})
-  set(ASHLS_SOURCES ${ASHLS_UNPARSED_ARGUMENTS})
-
-  translate_flags(ASHLS "${options}")
-
-  if(NOT ASHLS_SHARED AND NOT ASHLS_STATIC)
-    message(FATAL_ERROR "Either SHARED or STATIC must be specified")
-  endif()
-
-  # Include LLVM Bitcode slices for iOS, Watch OS, and Apple TV OS device libraries.
-  set(embed_bitcode_arg)
-  if(SWIFT_EMBED_BITCODE_SECTION)
-    if(SWIFT_HOST_VARIANT_SDK MATCHES "(I|TV|WATCH)OS")
-      list(APPEND ASHLS_C_COMPILE_FLAGS "-fembed-bitcode")
-      set(embed_bitcode_arg EMBED_BITCODE)
-    endif()
-  endif()
-
-  if(XCODE)
-    string(REGEX MATCHALL "/[^/]+" split_path ${CMAKE_CURRENT_SOURCE_DIR})
-    list(GET split_path -1 dir)
-    file(GLOB_RECURSE ASHLS_HEADERS
-      ${SWIFT_SOURCE_DIR}/include/swift${dir}/*.h
-      ${SWIFT_SOURCE_DIR}/include/swift${dir}/*.def
-      ${CMAKE_CURRENT_SOURCE_DIR}/*.def)
-
-    file(GLOB_RECURSE ASHLS_TDS
-      ${SWIFT_SOURCE_DIR}/include/swift${dir}/*.td)
-
-    set_source_files_properties(${ASHLS_HEADERS} ${ASHLS_TDS}
-      PROPERTIES
-      HEADER_FILE_ONLY true)
-    source_group("TableGen descriptions" FILES ${ASHLS_TDS})
-
-    set(ASHLS_SOURCES ${ASHLS_SOURCES} ${ASHLS_HEADERS} ${ASHLS_TDS})
-  endif()
-
-  if(ASHLS_SHARED)
-    set(libkind SHARED)
-  elseif(ASHLS_STATIC)
-    set(libkind STATIC)
-  endif()
-
-  add_library("${target}" ${libkind} ${ASHLS_SOURCES})
-  _set_target_prefix_and_suffix("${target}" "${libkind}" "${SWIFT_HOST_VARIANT_SDK}")
-  add_dependencies(${target} ${LLVM_COMMON_DEPENDS})
-
-  if(SWIFT_HOST_VARIANT_SDK STREQUAL WINDOWS)
-    swift_windows_include_for_arch(${SWIFT_HOST_VARIANT_ARCH} SWIFTLIB_INCLUDE)
-    target_include_directories("${target}" SYSTEM PRIVATE ${SWIFTLIB_INCLUDE})
-    set_target_properties(${target}
-                          PROPERTIES
-                            CXX_STANDARD 14)
-  endif()
-
-  if(SWIFT_HOST_VARIANT_SDK STREQUAL WINDOWS)
-    set_property(TARGET "${target}" PROPERTY NO_SONAME ON)
-  endif()
-
-  llvm_update_compile_flags(${target})
-
-  set_output_directory(${target}
-      BINARY_DIR ${SWIFT_RUNTIME_OUTPUT_INTDIR}
-      LIBRARY_DIR ${SWIFT_LIBRARY_OUTPUT_INTDIR})
-
-  if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_APPLE_PLATFORMS)
-    set_target_properties("${target}"
-      PROPERTIES
-      INSTALL_NAME_DIR "@rpath")
-  elseif(SWIFT_HOST_VARIANT_SDK STREQUAL LINUX)
-    set_target_properties("${target}"
-      PROPERTIES
-      INSTALL_RPATH "$ORIGIN:/usr/lib/swift/linux")
-  elseif(SWIFT_HOST_VARIANT_SDK STREQUAL CYGWIN)
-    set_target_properties("${target}"
-      PROPERTIES
-      INSTALL_RPATH "$ORIGIN:/usr/lib/swift/cygwin")
-  elseif(SWIFT_HOST_VARIANT_SDK STREQUAL "ANDROID")
-    set_target_properties("${target}"
-      PROPERTIES
-      INSTALL_RPATH "$ORIGIN")
-  endif()
-
-  set_target_properties("${target}" PROPERTIES BUILD_WITH_INSTALL_RPATH YES)
-  set_target_properties("${target}" PROPERTIES FOLDER "Swift libraries")
-
-  # Call llvm_config() only for libraries that are part of the compiler.
-  swift_common_llvm_config("${target}" ${ASHLS_LLVM_LINK_COMPONENTS})
-
-  target_compile_options(${target} PRIVATE
-    ${ASHLS_C_COMPILE_FLAGS})
-  if(SWIFT_HOST_VARIANT_SDK STREQUAL WINDOWS)
-    if(libkind STREQUAL SHARED)
-      target_compile_definitions(${target} PRIVATE
-        _WINDLL)
-    endif()
-  endif()
-
-  _add_host_variant_c_compile_flags(${target})
-  _add_host_variant_link_flags(${target})
-
-  # Set compilation and link flags.
-  if(SWIFT_HOST_VARIANT_SDK STREQUAL WINDOWS)
-    swift_windows_include_for_arch(${SWIFT_HOST_VARIANT_ARCH}
-      ${SWIFT_HOST_VARIANT_ARCH}_INCLUDE)
-    target_include_directories(${target} SYSTEM PRIVATE
-      ${${SWIFT_HOST_VARIANT_ARCH}_INCLUDE})
-
-    if(NOT ${CMAKE_C_COMPILER_ID} STREQUAL MSVC)
-      swift_windows_get_sdk_vfs_overlay(ASHLS_VFS_OVERLAY)
-      target_compile_options(${target} PRIVATE
-        "SHELL:-Xclang -ivfsoverlay -Xclang ${ASHLS_VFS_OVERLAY}")
-
-      # MSVC doesn't support -Xclang. We don't need to manually specify
-      # the dependent libraries as `cl` does so.
-      target_compile_options(${target} PRIVATE
-        "SHELL:-Xclang --dependent-lib=oldnames"
-        # TODO(compnerd) handle /MT, /MTd
-        "SHELL:-Xclang --dependent-lib=msvcrt$<$<CONFIG:Debug>:d>")
-    endif()
-  endif()
-
-  if(${SWIFT_HOST_VARIANT_SDK} IN_LIST SWIFT_APPLE_PLATFORMS)
-    target_link_options(${target} PRIVATE
-      "LINKER:-compatibility_version,1")
-    if(SWIFT_COMPILER_VERSION)
-      target_link_options(${target} PRIVATE
-        "LINKER:-current_version,${SWIFT_COMPILER_VERSION}")
-    endif()
-    # Include LLVM Bitcode slices for iOS, Watch OS, and Apple TV OS device libraries.
-    if(SWIFT_EMBED_BITCODE_SECTION)
-      if(${SWIFT_HOST_VARIANT_SDK} MATCHES "(I|TV|WATCH)OS")
-        target_link_options(${target} PRIVATE
-          "LINKER:-bitcode_bundle"
-          "LINKER:-lto_library,${LLVM_LIBRARY_DIR}/libLTO.dylib")
-
-        # Please note that using a generator expression to fit
-        # this in a single target_link_options does not work
-        # (at least in CMake 3.15 and 3.16),
-        # since that seems not to allow the LINKER: prefix to be
-        # evaluated (i.e. it will be added as-is to the linker parameters)
-        if(SWIFT_EMBED_BITCODE_SECTION_HIDE_SYMBOLS)
-          target_link_options(${target} PRIVATE
-            "LINKER:-bitcode_hide_symbols")
-        endif()
-      endif()
-    endif()
-  endif()
-
-  # Do not add code here.
 endfunction()
 
 # Add a new Swift host library.
@@ -669,13 +426,98 @@ function(add_swift_host_library name)
     message(FATAL_ERROR "Either SHARED or STATIC must be specified")
   endif()
 
-  _add_swift_host_library_single(
-    ${name}
-    ${ASHL_SHARED_keyword}
-    ${ASHL_STATIC_keyword}
-    ${ASHL_SOURCES}
-    LLVM_LINK_COMPONENTS ${ASHL_LLVM_LINK_COMPONENTS}
-    )
+  if(XCODE)
+    get_filename_component(base_dir ${CMAKE_CURRENT_SOURCE_DIR} NAME)
+  
+    file(GLOB_RECURSE ASHL_HEADERS
+      ${SWIFT_SOURCE_DIR}/include/swift/${base_dir}/*.h
+      ${SWIFT_SOURCE_DIR}/include/swift/${base_dir}/*.def
+      ${CMAKE_CURRENT_SOURCE_DIR}/*.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/*.def)
+    file(GLOB_RECURSE ASHL_TDS
+      ${SWIFT_SOURCE_DIR}/include/swift${base_dir}/*.td)
+
+    set_source_files_properties(${ASHL_HEADERS} ${ASHL_TDS} PROPERTIES
+      HEADER_FILE_ONLY true)
+    source_group("TableGen descriptions" FILES ${ASHL_TDS})
+
+    set(ASHL_SOURCES ${ASHL_SOURCES} ${ASHL_HEADERS} ${ASHL_TDS})
+  endif()
+
+  if(ASHL_SHARED)
+    set(libkind SHARED)
+  elseif(ASHL_STATIC)
+    set(libkind STATIC)
+  endif()
+
+  add_library(${name} ${libkind} ${ASHL_SOURCES})
+  add_dependencies(${name} ${LLVM_COMMON_DEPENDS})
+  llvm_update_compile_flags(${name})
+  swift_common_llvm_config(${name} ${ASHL_LLVM_LINK_COMPONENTS})
+  set_output_directory(${name}
+      BINARY_DIR ${SWIFT_RUNTIME_OUTPUT_INTDIR}
+      LIBRARY_DIR ${SWIFT_LIBRARY_OUTPUT_INTDIR})
+
+  if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_APPLE_PLATFORMS)
+    set_target_properties(${name} PROPERTIES
+      INSTALL_NAME_DIR "@rpath")
+  elseif(SWIFT_HOST_VARIANT_SDK STREQUAL LINUX)
+    set_target_properties(${name} PROPERTIES
+      INSTALL_RPATH "$ORIGIN")
+  elseif(SWIFT_HOST_VARIANT_SDK STREQUAL CYGWIN)
+    set_target_properties(${name} PROPERTIES
+      INSTALL_RPATH "$ORIGIN:/usr/lib/swift/cygwin")
+  elseif(SWIFT_HOST_VARIANT_SDK STREQUAL "ANDROID")
+    set_target_properties(${name} PROPERTIES
+      INSTALL_RPATH "$ORIGIN")
+  endif()
+
+  set_target_properties(${name} PROPERTIES
+    BUILD_WITH_INSTALL_RPATH YES
+    FOLDER "Swift libraries")
+
+  _add_host_variant_c_compile_flags(${name})
+  _add_host_variant_link_flags(${name})
+  _add_host_variant_c_compile_link_flags(${name})
+  _set_target_prefix_and_suffix(${name} "${libkind}" "${SWIFT_HOST_VARIANT_SDK}")
+
+  # Set compilation and link flags.
+  if(SWIFT_HOST_VARIANT_SDK STREQUAL WINDOWS)
+    swift_windows_include_for_arch(${SWIFT_HOST_VARIANT_ARCH}
+      ${SWIFT_HOST_VARIANT_ARCH}_INCLUDE)
+    target_include_directories(${name} SYSTEM PRIVATE
+      ${${SWIFT_HOST_VARIANT_ARCH}_INCLUDE})
+
+    if(libkind STREQUAL SHARED)
+      target_compile_definitions(${name} PRIVATE
+        _WINDLL)
+    endif()
+
+    if(NOT ${CMAKE_C_COMPILER_ID} STREQUAL MSVC)
+      swift_windows_get_sdk_vfs_overlay(ASHL_VFS_OVERLAY)
+      target_compile_options(${name} PRIVATE
+        "SHELL:-Xclang -ivfsoverlay -Xclang ${ASHL_VFS_OVERLAY}")
+
+      # MSVC doesn't support -Xclang. We don't need to manually specify
+      # the dependent libraries as `cl` does so.
+      target_compile_options(${name} PRIVATE
+        "SHELL:-Xclang --dependent-lib=oldnames"
+        # TODO(compnerd) handle /MT, /MTd
+        "SHELL:-Xclang --dependent-lib=msvcrt$<$<CONFIG:Debug>:d>")
+    endif()
+
+    set_target_properties(${name} PROPERTIES
+      NO_SONAME YES)
+  endif()
+
+  if(${SWIFT_HOST_VARIANT_SDK} IN_LIST SWIFT_APPLE_PLATFORMS)
+    target_link_options(${name} PRIVATE
+      "LINKER:-compatibility_version,1")
+    if(SWIFT_COMPILER_VERSION)
+      target_link_options(${name} PRIVATE
+        "LINKER:-current_version,${SWIFT_COMPILER_VERSION}")
+    endif()
+  endif()
 
   add_dependencies(dev ${name})
   if(NOT LLVM_INSTALL_TOOLCHAIN_ONLY)
@@ -719,6 +561,7 @@ function(add_swift_host_tool executable)
   add_executable(${executable} ${ASHT_UNPARSED_ARGUMENTS})
   _add_host_variant_c_compile_flags(${executable})
   _add_host_variant_link_flags(${executable})
+  _add_host_variant_c_compile_link_flags(${executable})
   target_link_directories(${executable} PRIVATE
     ${SWIFTLIB_DIR}/${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR})
   add_dependencies(${executable} ${LLVM_COMMON_DEPENDS})
@@ -788,4 +631,10 @@ endfunction()
 macro(add_swift_tool_symlink name dest component)
   add_llvm_tool_symlink(${name} ${dest} ALWAYS_GENERATE)
   llvm_install_symlink(${name} ${dest} ALWAYS_GENERATE COMPONENT ${component})
+endmacro()
+
+# Declare that files in this library are built with LLVM's support
+# libraries available.
+macro(set_swift_llvm_is_available)
+  add_compile_options(-DSWIFT_LLVM_SUPPORT_IS_AVAILABLE)
 endmacro()

@@ -68,6 +68,14 @@ protected:
   std::function<bool (SymbolicReferent)> CanSymbolicReference;
   
   bool canSymbolicReference(SymbolicReferent referent) {
+    // Marker protocols cannot ever be symbolically referenced.
+    if (auto nominal = referent.dyn_cast<const NominalTypeDecl *>()) {
+      if (auto proto = dyn_cast<ProtocolDecl>(nominal)) {
+        if (proto->isMarkerProtocol())
+          return false;
+      }
+    }
+
     return AllowSymbolicReferences
       && (!CanSymbolicReference || CanSymbolicReference(referent));
   }
@@ -77,6 +85,7 @@ protected:
 public:
   enum class SymbolKind {
     Default,
+    AsyncHandlerBody,
     DynamicThunk,
     SwiftAsObjCThunk,
     ObjCAsSwiftThunk,
@@ -101,7 +110,8 @@ public:
                            SymbolKind SKind = SymbolKind::Default);
 
   std::string mangleDestructorEntity(const DestructorDecl *decl,
-                                     bool isDeallocating, SymbolKind SKind);
+                                     bool isDeallocating,
+                                     SymbolKind SKind = SymbolKind::Default);
 
   std::string mangleConstructorEntity(const ConstructorDecl *ctor,
                                       bool isAllocating,
@@ -120,11 +130,13 @@ public:
 
   std::string mangleDefaultArgumentEntity(const DeclContext *func,
                                           unsigned index,
-                                          SymbolKind SKind);
+                                          SymbolKind SKind = SymbolKind::Default);
 
   std::string mangleInitializerEntity(const VarDecl *var, SymbolKind SKind);
   std::string mangleBackingInitializerEntity(const VarDecl *var,
-                                             SymbolKind SKind);
+                                             SymbolKind SKind = SymbolKind::Default);
+  std::string mangleInitFromProjectedValueEntity(const VarDecl *var,
+                                                 SymbolKind SKind = SymbolKind::Default);
 
   std::string mangleNominalType(const NominalTypeDecl *decl);
 
@@ -145,7 +157,8 @@ public:
 
   std::string mangleGlobalVariableFull(const VarDecl *decl);
 
-  std::string mangleGlobalInit(const VarDecl *decl, int counter,
+  std::string mangleGlobalInit(const PatternBindingDecl *decl,
+                               unsigned entry,
                                bool isInitFunc);
 
   std::string mangleReabstractionThunkHelper(CanSILFunctionType ThunkType,
@@ -153,24 +166,51 @@ public:
                                              Type SelfType,
                                              ModuleDecl *Module);
 
-  /// Mangle the derivative function (JVP/VJP) for the given:
-  /// - Mangled original function name.
+  /// Mangle a completion handler block implementation function, used for importing ObjC
+  /// APIs as async.
+  ///
+  /// - If `predefined` is true, this mangles the symbol name of the completion handler
+  /// predefined in the Swift runtime for the given type signature.
+  std::string mangleObjCAsyncCompletionHandlerImpl(CanSILFunctionType BlockType,
+                                                   CanType ResultType,
+                                                   CanGenericSignature Sig,
+                                                   Optional<bool> FlagParamIsZeroOnError,
+                                                   bool predefined);
+  
+  /// Mangle the derivative function (JVP/VJP), or optionally its vtable entry
+  /// thunk, for the given:
+  /// - Mangled original function declaration.
   /// - Derivative function kind.
   /// - Derivative function configuration: parameter/result indices and
   ///   derivative generic signature.
   std::string
-  mangleAutoDiffDerivativeFunctionHelper(StringRef name,
-                                         AutoDiffDerivativeFunctionKind kind,
-                                         AutoDiffConfig config);
+  mangleAutoDiffDerivativeFunction(const AbstractFunctionDecl *originalAFD,
+                                   AutoDiffDerivativeFunctionKind kind,
+                                   AutoDiffConfig config,
+                                   bool isVTableThunk = false);
 
   /// Mangle the linear map (differential/pullback) for the given:
-  /// - Mangled original function name.
+  /// - Mangled original function declaration.
   /// - Linear map kind.
   /// - Derivative function configuration: parameter/result indices and
   ///   derivative generic signature.
-  std::string mangleAutoDiffLinearMapHelper(StringRef name,
-                                            AutoDiffLinearMapKind kind,
-                                            AutoDiffConfig config);
+  std::string mangleAutoDiffLinearMap(const AbstractFunctionDecl *originalAFD,
+                                      AutoDiffLinearMapKind kind,
+                                      AutoDiffConfig config);
+
+  /// Mangle the linear map self parameter reordering thunk the given:
+  /// - Mangled original function declaration.
+  /// - Linear map kind.
+  /// - Derivative function configuration: parameter/result indices and
+  ///   derivative generic signature.
+  std::string mangleAutoDiffSelfReorderingReabstractionThunk(
+      CanType fromType, CanType toType, GenericSignature signature,
+      AutoDiffLinearMapKind linearMapKind);
+
+  /// Mangle a SIL differentiability witness.
+  std::string mangleSILDifferentiabilityWitness(StringRef originalName,
+                                                DifferentiabilityKind kind,
+                                                AutoDiffConfig config);
 
   /// Mangle the AutoDiff generated declaration for the given:
   /// - Generated declaration kind: linear map struct or branching trace enum.
@@ -184,14 +224,6 @@ public:
                                      StringRef origFnName, unsigned bbId,
                                      AutoDiffLinearMapKind linearMapKind,
                                      AutoDiffConfig config);
-
-  /// Mangle a SIL differentiability witness key:
-  /// - Mangled original function name.
-  /// - Parameter indices.
-  /// - Result indices.
-  /// - Derivative generic signature (optional).
-  std::string
-  mangleSILDifferentiabilityWitnessKey(SILDifferentiabilityWitnessKey key);
 
   std::string mangleKeyPathGetterThunkHelper(const AbstractStorageDecl *property,
                                              GenericSignature signature,
@@ -210,7 +242,10 @@ public:
                                       GenericSignature signature,
                                       ResilienceExpansion expansion);
 
-  std::string mangleTypeForDebugger(Type decl, const DeclContext *DC);
+  std::string mangleTypeForDebugger(Type decl, GenericSignature sig);
+
+  /// Create a mangled name to be used for _typeName constant propagation.
+  std::string mangleTypeForTypeName(Type type);
 
   std::string mangleOpaqueTypeDescriptor(const OpaqueTypeDecl *decl);
   
@@ -240,6 +275,8 @@ public:
 
   std::string mangleOpaqueTypeDecl(const ValueDecl *decl);
 
+  std::string mangleGenericSignature(const GenericSignature sig);
+
   enum SpecialContext {
     ObjCContext,
     ClangImporterContext,
@@ -265,9 +302,7 @@ protected:
   void appendOpWithGenericParamIndex(StringRef,
                                      const GenericTypeParamType *paramTy);
 
-  void bindGenericParameters(const DeclContext *DC);
-
-  void bindGenericParameters(CanGenericSignature sig);
+  void bindGenericParameters(GenericSignature sig);
 
   /// Mangles a sugared type iff we are mangling for the debugger.
   template <class T> void appendSugaredType(Type type,
@@ -309,13 +344,24 @@ protected:
 
   void appendAnyGenericType(const GenericTypeDecl *decl);
 
-  void appendFunction(AnyFunctionType *fn, bool isFunctionMangling = false,
-                      const ValueDecl *forDecl = nullptr);
+  enum FunctionManglingKind {
+    NoFunctionMangling,
+    FunctionMangling,
+    AsyncHandlerBodyMangling
+  };
+
+  void appendFunction(AnyFunctionType *fn,
+                    FunctionManglingKind functionMangling = NoFunctionMangling,
+                    const ValueDecl *forDecl = nullptr);
   void appendFunctionType(AnyFunctionType *fn, bool isAutoClosure = false,
                           const ValueDecl *forDecl = nullptr);
+  void appendClangType(AnyFunctionType *fn);
+  template <typename FnType>
+  void appendClangType(FnType *fn, llvm::raw_svector_ostream &os);
 
   void appendFunctionSignature(AnyFunctionType *fn,
-                               const ValueDecl *forDecl = nullptr);
+                               const ValueDecl *forDecl,
+                               FunctionManglingKind functionMangling);
 
   void appendFunctionInputType(ArrayRef<AnyFunctionType::Param> params,
                                const ValueDecl *forDecl = nullptr);
@@ -361,12 +407,16 @@ protected:
 
   void appendInitializerEntity(const VarDecl *var);
   void appendBackingInitializerEntity(const VarDecl *var);
+  void appendInitFromProjectedValueEntity(const VarDecl *var);
 
   CanType getDeclTypeForMangling(const ValueDecl *decl,
                                  GenericSignature &genericSig,
                                  GenericSignature &parentGenericSig);
 
-  void appendDeclType(const ValueDecl *decl, bool isFunctionMangling = false);
+  
+
+  void appendDeclType(const ValueDecl *decl,
+                    FunctionManglingKind functionMangling = NoFunctionMangling);
 
   bool tryAppendStandardSubstitution(const GenericTypeDecl *type);
 
@@ -383,7 +433,7 @@ protected:
 
   void appendEntity(const ValueDecl *decl, StringRef EntityOp, bool isStatic);
 
-  void appendEntity(const ValueDecl *decl);
+  void appendEntity(const ValueDecl *decl, bool isAsyncHandlerBody = false);
 
   void appendProtocolConformance(const ProtocolConformance *conformance);
   void appendProtocolConformanceRef(const RootProtocolConformance *conformance);
@@ -398,6 +448,13 @@ protected:
   void appendSymbolicReference(SymbolicReferent referent);
   
   void appendOpaqueDeclName(const OpaqueTypeDecl *opaqueDecl);
+
+  void beginManglingWithAutoDiffOriginalFunction(
+      const AbstractFunctionDecl *afd);
+  void appendAutoDiffFunctionParts(StringRef op, 
+                                   Demangle::AutoDiffFunctionKind kind,
+                                   AutoDiffConfig config);
+  void appendIndexSubset(IndexSubset *indexSubset);
 };
 
 } // end namespace Mangle

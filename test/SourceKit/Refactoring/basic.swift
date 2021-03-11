@@ -113,6 +113,14 @@ struct HasInitWithDefaultArgs {
 HasInitWithDefaultArgs(z: 45)
 HasInitWithDefaultArgs(y: 45, z: 89)
 
+func `hasBackticks`(`x`: Int) {}
+`hasBackticks`(`x`:2)
+
+func hasAsyncAlternative(completion: (String?, Error?) -> Void) { }
+func hasCallToAsyncAlternative() {
+  hasAsyncAlternative { str, err in print(str!) }
+}
+
 // RUN: %sourcekitd-test -req=cursor -pos=3:1 -end-pos=5:13 -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK1
 
 // CHECK1: ACTIONS BEGIN
@@ -151,6 +159,16 @@ HasInitWithDefaultArgs(y: 45, z: 89)
 // RUN: %sourcekitd-test -req=cursor -pos=114:31  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
 // RUN: %sourcekitd-test -req=cursor -pos=114:31  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
 
+// RUN: %sourcekitd-test -req=cursor -pos=116:6  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
+// RUN: %sourcekitd-test -req=cursor -pos=116:7  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
+// RUN: %sourcekitd-test -req=cursor -pos=117:1  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
+// RUN: %sourcekitd-test -req=cursor -pos=117:2  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
+// RUN: %sourcekitd-test -req=cursor -pos=117:16  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
+// RUN: %sourcekitd-test -req=cursor -pos=117:17  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-GLOBAL
+
+// RUN: %sourcekitd-test -req=cursor -pos=119:6  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-ASYNC
+// RUN: %sourcekitd-test -req=cursor -pos=121:3  -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-CALLASYNC
+
 // RUN: %sourcekitd-test -req=cursor -pos=35:10 -end-pos=35:16 -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-RENAME-EXTRACT
 // RUN: %sourcekitd-test -req=cursor -pos=35:10 -end-pos=35:16 -cursor-action %s -- %s | %FileCheck %s -check-prefix=CHECK-RENAME-EXTRACT
 
@@ -169,10 +187,12 @@ HasInitWithDefaultArgs(y: 45, z: 89)
 // CHECK-NORENAME-NOT: Local Rename
 
 // CHECK2: ACTIONS BEGIN
-// CHECK2-NEXT: source.refactoring.kind.rename.global
+// CHECK2-NOT: Local Rename
+// CHECK2: source.refactoring.kind.rename.global
 // CHECK2-NEXT: Global Rename
 // CHECK2-NEXT: symbol from system module cannot be renamed
-// CHECK2-NEXT: ACTIONS END
+// CHECK2-NOT: Local Rename
+// CHECK2: ACTIONS END
 
 // CHECK3: ACTIONS BEGIN
 // CHECK3-NEXT: source.refactoring.kind.rename.global
@@ -186,14 +206,18 @@ HasInitWithDefaultArgs(y: 45, z: 89)
 // CHECK4-NEXT: Expand Default
 
 // CHECK-GLOBAL: ACTIONS BEGIN
-// CHECK-GLOBAL-NEXT: source.refactoring.kind.rename.global
+// CHECK-GLOBAL-NOT: Local Rename
+// CHECK-GLOBAL: source.refactoring.kind.rename.global
 // CHECK-GLOBAL-NEXT: Global Rename
-// CHECK-GLOBAL-NEXT: ACTIONS END
+// CHECK-GLOBAL-NOT: Local Rename
+// CHECK-GLOBAL: ACTIONS END
 
 // CHECK-LOCAL: ACTIONS BEGIN
-// CHECK-LOCAL-NEXT: source.refactoring.kind.rename.local
+// CHECK-LOCAL-NOT: Global Rename
+// CHECK-LOCAL: source.refactoring.kind.rename.local
 // CHECK-LOCAL-NEXT: Local Rename
-// CHECK-LOCAL-NEXT: ACTIONS END
+// CHECK-LOCAL-NOT: Global Rename
+// CHECK-LOCAL: ACTIONS END
 
 // CHECK-RENAME-EXTRACT: Global Rename
 // CHECK-RENAME-EXTRACT: Extract Method
@@ -213,5 +237,23 @@ HasInitWithDefaultArgs(y: 45, z: 89)
 // CHECK-IMPLICIT-SELF: Global Rename
 
 // CHECK-LOCALIZE-STRING: source.refactoring.kind.localize.string
+
+// CHECK-ASYNC: ACTIONS BEGIN
+// CHECK-ASYNC-NOT: source.refactoring.kind.convert.call-to-async
+// CHECK-ASYNC: source.refactoring.kind.convert.func-to-async
+// CHECK-ASYNC-NEXT: Convert Function to Async
+// CHECK-ASYNC-NEXT: source.refactoring.kind.add.async-alternative
+// CHECK-ASYNC-NEXT: Add Async Alternative
+// CHECK-ASYNC-NOT: source.refactoring.kind.convert.call-to-async
+// CHECK-ASYNC: ACTIONS END
+
+// CHECK-CALLASYNC: ACTIONS BEGIN
+// CHECK-ASYNC-NOT: source.refactoring.kind.add.async-alternative
+// CHECK-ASYNC-NOT: source.refactoring.kind.convert.func-to-async
+// CHECK-CALLASYNC: source.refactoring.kind.convert.call-to-async
+// CHECK-CALLASYNC-NEXT: Convert Call to Async Alternative
+// CHECK-ASYNC-NOT: source.refactoring.kind.add.async-alternative
+// CHECK-ASYNC-NOT: source.refactoring.kind.convert.func-to-async
+// CHECK-CALLASYNC: ACTIONS END
 
 // REQUIRES: OS=macosx || OS=linux-gnu

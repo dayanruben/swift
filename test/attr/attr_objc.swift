@@ -413,6 +413,11 @@ class GenericContext3<T> {
   }
 }
 
+class GenericContext4<T> {
+  @objc
+  func foo() where T: Hashable { } // expected-error {{instance method cannot be marked @objc because it has a 'where' clause}}
+}
+
 @objc // expected-error{{generic subclasses of '@objc' classes cannot have an explicit '@objc' because they are not directly visible from Objective-C}} {{1-7=}}
 class ConcreteSubclassOfGeneric : GenericContext3<Int> {}
 
@@ -2374,4 +2379,10 @@ class SR_9035_C {}
   func throwingMethod1() throws -> Unmanaged<CFArray> // Ok
   func throwingMethod2() throws -> Unmanaged<SR_9035_C> // expected-error {{method cannot be a member of an @objc protocol because its result type cannot be represented in Objective-C}}
   // expected-note@-1 {{inferring '@objc' because the declaration is a member of an '@objc' protocol}}
+}
+
+// SR-12801: Make sure we reject an @objc generic subscript.
+class SR12801 {
+  @objc subscript<T>(foo : [T]) -> Int { return 0 }
+  // expected-error@-1 {{subscript cannot be marked @objc because it has generic parameters}}
 }

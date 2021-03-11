@@ -27,10 +27,13 @@
 #include "swift/AST/ASTMangler.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/FileUnit.h"
+#include "swift/AST/ForeignAsyncConvention.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/SIL/PrettyStackTrace.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/TypeLowering.h"
+
+#include "clang/AST/ASTContext.h"
 
 using namespace swift;
 using namespace Lowering;
@@ -90,32 +93,14 @@ SILGenFunction::emitDynamicMethodRef(SILLocation loc, SILDeclRef constant,
 
 void SILGenModule::emitForeignToNativeThunk(SILDeclRef thunk) {
   // Thunks are always emitted by need, so don't need delayed emission.
-  assert(!thunk.isForeign && "foreign-to-native thunks only");
-  SILFunction *f = getFunction(thunk, ForDefinition);
-  f->setThunk(IsThunk);
-  if (thunk.asForeign().isClangGenerated())
-    f->setSerialized(IsSerializable);
-  preEmitFunction(thunk, thunk.getDecl(), f, thunk.getDecl());
-  PrettyStackTraceSILFunction X("silgen emitForeignToNativeThunk", f);
-  SILGenFunction(*this, *f, SwiftModule).emitForeignToNativeThunk(thunk);
-  postEmitFunction(thunk, f);
+  assert(thunk.isForeignToNativeThunk() && "foreign-to-native thunks only");
+  emitFunctionDefinition(thunk, getFunction(thunk, ForDefinition));
 }
 
 void SILGenModule::emitNativeToForeignThunk(SILDeclRef thunk) {
   // Thunks are always emitted by need, so don't need delayed emission.
-  assert(thunk.isForeign && "native-to-foreign thunks only");
-  
-  SILFunction *f = getFunction(thunk, ForDefinition);
-  if (thunk.hasDecl())
-    preEmitFunction(thunk, thunk.getDecl(), f, thunk.getDecl());
-  else
-    preEmitFunction(thunk, thunk.getAbstractClosureExpr(), f,
-                    thunk.getAbstractClosureExpr());
-  PrettyStackTraceSILFunction X("silgen emitNativeToForeignThunk", f);
-  f->setBare(IsBare);
-  f->setThunk(IsThunk);
-  SILGenFunction(*this, *f, SwiftModule).emitNativeToForeignThunk(thunk);
-  postEmitFunction(thunk, f);
+  assert(thunk.isNativeToForeignThunk() && "native-to-foreign thunks only");
+  emitFunctionDefinition(thunk, getFunction(thunk, ForDefinition));
 }
 
 SILValue
@@ -138,18 +123,306 @@ SILGenFunction::emitGlobalFunctionRef(SILLocation loc, SILDeclRef constant,
       SGM.emitForeignToNativeThunk(constant);
     } else if (constant.isNativeToForeignThunk()) {
       SGM.emitNativeToForeignThunk(constant);
-    } else if (constant.kind == SILDeclRef::Kind::EnumElement) {
-      SGM.emitEnumConstructor(cast<EnumElementDecl>(constant.getDecl()));
     }
   }
 
   auto f = SGM.getFunction(constant, NotForDefinition);
-  assert(f->getLoweredFunctionTypeInContext(B.getTypeExpansionContext()) ==
-         constantInfo.SILFnType);
+#ifndef NDEBUG
+  auto constantFnTypeInContext =
+    SGM.Types.getLoweredType(constantInfo.SILFnType,
+                             B.getTypeExpansionContext())
+             .castTo<SILFunctionType>();
+  assert(f->getLoweredFunctionTypeInContext(B.getTypeExpansionContext())
+          == constantFnTypeInContext);
+#endif
   if (callPreviousDynamicReplaceableImpl)
     return B.createPreviousDynamicFunctionRef(loc, f);
   else
     return B.createFunctionRefFor(loc, f);
+}
+
+static const clang::Type *prependParameterType(
+      ASTContext &ctx,
+      const clang::Type *oldBlockPtrTy,
+      const clang::Type *newParameterTy) {
+  if (!oldBlockPtrTy)
+    return nullptr;
+
+  SmallVector<clang::QualType, 4> newParamTypes;
+  newParamTypes.push_back(clang::QualType(newParameterTy, 0));
+  clang::QualType returnType;
+  clang::FunctionProtoType::ExtProtoInfo newExtProtoInfo{};
+  using ExtParameterInfo = clang::FunctionProtoType::ExtParameterInfo;
+  SmallVector<ExtParameterInfo, 4> newExtParamInfos;
+
+  auto blockPtrTy = cast<clang::BlockPointerType>(oldBlockPtrTy);
+  auto blockPointeeTy = blockPtrTy->getPointeeType().getTypePtr();
+  if (auto fnNoProtoTy = dyn_cast<clang::FunctionNoProtoType>(blockPointeeTy)) {
+    returnType = fnNoProtoTy->getReturnType();
+    newExtProtoInfo.ExtInfo = fnNoProtoTy->getExtInfo();
+  } else {
+    auto fnProtoTy = cast<clang::FunctionProtoType>(blockPointeeTy);
+    llvm::copy(fnProtoTy->getParamTypes(), std::back_inserter(newParamTypes));
+    returnType = fnProtoTy->getReturnType();
+    newExtProtoInfo = fnProtoTy->getExtProtoInfo();
+    auto extParamInfos = fnProtoTy->getExtParameterInfosOrNull();
+    if (extParamInfos) {
+      auto oldExtParamInfos =
+          ArrayRef<ExtParameterInfo>(extParamInfos, fnProtoTy->getNumParams());
+      newExtParamInfos.push_back(clang::FunctionProtoType::ExtParameterInfo());
+      llvm::copy(oldExtParamInfos, std::back_inserter(newExtParamInfos));
+      newExtProtoInfo.ExtParameterInfos = newExtParamInfos.data();
+    }
+  }
+
+  auto &clangCtx = ctx.getClangModuleLoader()->getClangASTContext();
+  auto newFnTy =
+      clangCtx.getFunctionType(returnType, newParamTypes, newExtProtoInfo);
+  return clangCtx.getPointerType(newFnTy).getTypePtr();
+}
+
+SILFunction *
+SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
+                                         CanSILFunctionType blockType,
+                                         CanType continuationTy,
+                                         CanGenericSignature sig,
+                                         ForeignAsyncConvention convention) {
+  // Extract the result and error types from the continuation type.
+  auto resumeType = cast<BoundGenericType>(continuationTy).getGenericArgs()[0];
+
+  // Build up the implementation function type, which matches the
+  // block signature with an added block storage argument that points at the
+  // block buffer. The block storage holds the continuation we feed the
+  // result values into.
+  SmallVector<SILParameterInfo, 4> implArgs;
+  auto blockStorageTy = SILBlockStorageType::get(continuationTy);
+  implArgs.push_back(SILParameterInfo(blockStorageTy,
+                                ParameterConvention::Indirect_InoutAliasable));
+  
+  std::copy(blockType->getParameters().begin(),
+            blockType->getParameters().end(),
+            std::back_inserter(implArgs));
+
+  auto newClangTy = prependParameterType(
+      getASTContext(),
+      blockType->getClangTypeInfo().getType(),
+      getASTContext().getClangTypeForIRGen(blockStorageTy));
+  
+  auto implTy = SILFunctionType::get(sig,
+         blockType->getExtInfo().intoBuilder()
+           .withRepresentation(SILFunctionTypeRepresentation::CFunctionPointer)
+           .withClangFunctionType(newClangTy)
+           .withIsPseudogeneric((bool)sig)
+           .build(),
+         SILCoroutineKind::None,
+         ParameterConvention::Direct_Unowned,
+         implArgs, {}, blockType->getResults(),
+         None,
+         SubstitutionMap(), SubstitutionMap(), getASTContext());
+
+  auto loc = RegularLocation::getAutoGeneratedLocation();
+
+  Mangle::ASTMangler Mangler;
+  auto name = Mangler.mangleObjCAsyncCompletionHandlerImpl(
+    blockType, resumeType, sig,
+    convention.completionHandlerFlagParamIndex()
+      ? Optional<bool>(convention.completionHandlerFlagIsErrorOnZero())
+      : Optional<bool>(),
+    /*predefined*/ false);
+  
+  SILGenFunctionBuilder builder(*this);
+  auto F = builder.getOrCreateSharedFunction(loc, name, implTy,
+                                           IsBare, IsTransparent, IsSerializable,
+                                           ProfileCounter(),
+                                           IsThunk,
+                                           IsNotDynamic);
+  
+  if (F->empty()) {
+    // Emit the implementation.
+    if (sig)
+      F->setGenericEnvironment(sig->getGenericEnvironment());
+
+    SILGenFunction SGF(*this, *F, SwiftModule);
+    {
+      Scope scope(SGF, loc);
+      SmallVector<ManagedValue, 4> params;
+      SGF.collectThunkParams(loc, params);
+
+      // Get the continuation out of the block object.
+      auto blockStorage = params[0].getValue();
+      auto continuationAddr = SGF.B.createProjectBlockStorage(loc, blockStorage);
+      auto continuationVal = SGF.B.createLoad(loc, continuationAddr,
+                                           LoadOwnershipQualifier::Trivial);
+      auto continuation = ManagedValue::forUnmanaged(continuationVal);
+      
+      // Check for an error if the convention includes one.
+      auto errorIndex = convention.completionHandlerErrorParamIndex();
+      auto flagIndex = convention.completionHandlerFlagParamIndex();
+
+      FuncDecl *resumeIntrinsic;
+
+      SILBasicBlock *returnBB = nullptr;
+      if (errorIndex) {
+        resumeIntrinsic = getResumeUnsafeThrowingContinuation();
+        auto errorIntrinsic = getResumeUnsafeThrowingContinuationWithError();
+        
+        auto errorArgument = params[*errorIndex + 1];
+        auto someErrorBB = SGF.createBasicBlock(FunctionSection::Postmatter);
+        auto noneErrorBB = SGF.createBasicBlock();
+        returnBB = SGF.createBasicBlockAfter(noneErrorBB);
+        auto &C = SGF.getASTContext();
+        
+        // Check whether there's an error, based on the presence of a flag
+        // parameter. If there is a flag parameter, test it against zero.
+        if (flagIndex) {
+          auto flagArgument = params[*flagIndex + 1];
+          
+          // The flag must be an integer type. Get the underlying builtin
+          // integer field from it.
+          auto builtinFlagArg = SGF.emitUnwrapIntegerResult(loc, flagArgument.getValue());
+          
+          auto zero = SGF.B.createIntegerLiteral(loc, builtinFlagArg->getType(), 0);
+          auto zeroOnError = convention.completionHandlerFlagIsErrorOnZero();
+          
+          auto zeroBB = zeroOnError ? someErrorBB : noneErrorBB;
+          auto nonzeroBB = zeroOnError ? noneErrorBB : someErrorBB;
+          
+          std::pair<SILValue, SILBasicBlock*> switchFlagBBs[] = {
+            {zero, zeroBB}
+          };
+          
+          SGF.B.createSwitchValue(loc, builtinFlagArg,
+                                  /*default*/ nonzeroBB,
+                                  switchFlagBBs);
+        } else {
+          // If there is no flag parameter, the presence of a nonnull error
+          // parameter indicates an error.
+          std::pair<EnumElementDecl *, SILBasicBlock *> switchErrorBBs[] = {
+            {C.getOptionalSomeDecl(), someErrorBB},
+            {C.getOptionalNoneDecl(), noneErrorBB}
+          };
+          
+          SGF.B.createSwitchEnum(loc, errorArgument.borrow(SGF, loc).getValue(),
+                                 /*default*/ nullptr,
+                                 switchErrorBBs);
+        }
+        
+        SGF.B.emitBlock(someErrorBB);
+        
+        auto matchedErrorTy = errorArgument.getType().getOptionalObjectType();
+        ManagedValue matchedError;
+        Scope errorScope(SGF, loc);
+        if (flagIndex) {
+          // Force-unwrap the error argument, since the flag condition should
+          // guarantee that an error did occur.
+          matchedError = SGF.emitPreconditionOptionalHasValue(loc,
+                                                 errorArgument.borrow(SGF, loc),
+                                                 /*implicit*/ true);
+        } else {
+          matchedError = SGF.B
+            .createGuaranteedTransformingTerminatorArgument(matchedErrorTy);
+        }
+        
+        // Resume the continuation as throwing the given error, bridged to a
+        // native Swift error.
+        auto nativeError = SGF.emitBridgedToNativeError(loc, matchedError);
+        Type replacementTypes[]
+          = {F->mapTypeIntoContext(resumeType)->getCanonicalType()};
+        auto subs = SubstitutionMap::get(errorIntrinsic->getGenericSignature(),
+                                         replacementTypes,
+                                         ArrayRef<ProtocolConformanceRef>{});
+        SGF.emitApplyOfLibraryIntrinsic(loc, errorIntrinsic, subs,
+                                        {continuation, nativeError},
+                                        SGFContext());
+        errorScope.pop();
+        SGF.B.createBranch(loc, returnBB);
+        SGF.B.emitBlock(noneErrorBB);
+      } else {
+        resumeIntrinsic = getResumeUnsafeContinuation();
+      }
+            
+      auto loweredResumeTy = SGF.getLoweredType(AbstractionPattern::getOpaque(),
+                                            F->mapTypeIntoContext(resumeType));
+      
+      // Prepare the argument for the resume intrinsic, using the non-error
+      // arguments to the callback.
+      {
+        Scope resumeScope(SGF, loc);
+        auto resumeArgBuf = SGF.emitTemporaryAllocation(loc,
+                                              loweredResumeTy.getAddressType());
+
+        auto prepareArgument = [&](SILValue destBuf, ManagedValue arg) {
+          // Convert the ObjC argument to the bridged Swift representation we
+          // want.
+          ManagedValue bridgedArg = SGF.emitBridgedToNativeValue(loc,
+                                       arg.copy(SGF, loc),
+                                       arg.getType().getASTType(),
+                                       // FIXME: pass down formal type
+                                       destBuf->getType().getASTType(),
+                                       destBuf->getType().getObjectType());
+          // Force-unwrap an argument that comes to us as Optional if it's
+          // formally non-optional in the return.
+          if (bridgedArg.getType().getOptionalObjectType()
+              && !destBuf->getType().getOptionalObjectType()) {
+            bridgedArg = SGF.emitPreconditionOptionalHasValue(loc,
+                                                             bridgedArg,
+                                                             /*implicit*/ true);
+          }
+          bridgedArg.forwardInto(SGF, loc, destBuf);
+        };
+
+        if (auto resumeTuple = dyn_cast<TupleType>(resumeType)) {
+          assert(params.size() == resumeTuple->getNumElements()
+                                   + 1 + (bool)errorIndex + (bool)flagIndex);
+          for (unsigned i : indices(resumeTuple.getElementTypes())) {
+            unsigned paramI = i;
+            if (errorIndex && paramI >= *errorIndex) {
+              ++paramI;
+            }
+            if (flagIndex && paramI >= *flagIndex) {
+              ++paramI;
+            }
+            auto resumeEltBuf = SGF.B.createTupleElementAddr(loc,
+                                                             resumeArgBuf, i);
+            prepareArgument(resumeEltBuf, params[paramI + 1]);
+          }
+        } else {
+          assert(params.size() == 2 + (bool)errorIndex + (bool)flagIndex);
+          unsigned paramI = 0;
+          if (errorIndex && paramI >= *errorIndex) {
+            ++paramI;
+          }
+          if (flagIndex && paramI >= *flagIndex) {
+            ++paramI;
+          }
+          prepareArgument(resumeArgBuf, params[paramI + 1]);
+        }
+        
+        // Resume the continuation with the composed bridged result.
+        ManagedValue resumeArg = SGF.emitManagedBufferWithCleanup(resumeArgBuf);
+        Type replacementTypes[]
+          = {F->mapTypeIntoContext(resumeType)->getCanonicalType()};
+        auto subs = SubstitutionMap::get(resumeIntrinsic->getGenericSignature(),
+                                         replacementTypes,
+                                         ArrayRef<ProtocolConformanceRef>{});
+        SGF.emitApplyOfLibraryIntrinsic(loc, resumeIntrinsic, subs,
+                                        {continuation, resumeArg},
+                                        SGFContext());
+      }
+      
+      // Now we've resumed the continuation one way or another. Return from the
+      // completion callback.
+      if (returnBB) {
+        SGF.B.createBranch(loc, returnBB);
+        SGF.B.emitBlock(returnBB);
+      }
+    }
+
+    SGF.B.createReturn(loc,
+                       SILUndef::get(SGF.SGM.Types.getEmptyTupleType(), SGF.F));
+  }
+  
+  return F;
 }
 
 SILFunction *SILGenModule::
@@ -187,21 +460,26 @@ getOrCreateReabstractionThunk(CanSILFunctionType thunkType,
       ProfileCounter(), IsReabstractionThunk, IsNotDynamic);
 }
 
-SILFunction *SILGenModule::getOrCreateAutoDiffClassMethodThunk(
+SILFunction *SILGenModule::getOrCreateDerivativeVTableThunk(
     SILDeclRef derivativeFnDeclRef, CanSILFunctionType constantTy) {
-  auto *derivativeId = derivativeFnDeclRef.derivativeFunctionIdentifier;
+  auto *derivativeId = derivativeFnDeclRef.getDerivativeFunctionIdentifier();
   assert(derivativeId);
   auto *derivativeFnDecl = derivativeFnDeclRef.getDecl();
 
   SILGenFunctionBuilder builder(*this);
   auto originalFnDeclRef = derivativeFnDeclRef.asAutoDiffOriginalFunction();
-  // TODO(TF-685): Use principled thunk mangling.
-  // Do not simply reuse reabstraction thunk mangling.
-  auto name = derivativeFnDeclRef.mangle() + "_vtable_entry_thunk";
+  Mangle::ASTMangler mangler;
+  auto name = mangler.mangleAutoDiffDerivativeFunction(
+      originalFnDeclRef.getAbstractFunctionDecl(),
+      derivativeId->getKind(),
+      AutoDiffConfig(derivativeId->getParameterIndices(),
+                     IndexSubset::get(getASTContext(), 1, {0}),
+                     derivativeId->getDerivativeGenericSignature()),
+      /*isVTableThunk*/ true);
   auto *thunk = builder.getOrCreateFunction(
-      derivativeFnDecl, name, originalFnDeclRef.getLinkage(ForDefinition),
-      constantTy, IsBare, IsTransparent, derivativeFnDeclRef.isSerialized(),
-      IsNotDynamic, ProfileCounter(), IsThunk);
+      derivativeFnDecl, name, SILLinkage::Private, constantTy, IsBare,
+      IsTransparent, derivativeFnDeclRef.isSerialized(), IsNotDynamic,
+      ProfileCounter(), IsThunk);
   if (!thunk->empty())
     return thunk;
 
@@ -216,8 +494,9 @@ SILFunction *SILGenModule::getOrCreateAutoDiffClassMethodThunk(
   auto *loweredParamIndices = autodiff::getLoweredParameterIndices(
       derivativeId->getParameterIndices(),
       derivativeFnDecl->getInterfaceType()->castTo<AnyFunctionType>());
-  auto diffFn =
-      SGF.B.createDifferentiableFunction(loc, loweredParamIndices, originalFn);
+  auto *loweredResultIndices = IndexSubset::get(getASTContext(), 1, {0});
+  auto diffFn = SGF.B.createDifferentiableFunction(
+      loc, loweredParamIndices, loweredResultIndices, originalFn);
   auto derivativeFn = SGF.B.createDifferentiableFunctionExtract(
       loc, NormalDifferentiableFunctionTypeComponent(derivativeId->getKind()),
       diffFn);

@@ -149,6 +149,7 @@ public:
   PostDominanceInfo(SILFunction *F);
 
   bool properlyDominates(SILInstruction *A, SILInstruction *B);
+  bool properlyDominates(SILValue A, SILInstruction *B);
 
   void verify() const;
 
@@ -191,7 +192,7 @@ namespace llvm {
 /// DominatorTree GraphTraits specialization so the DominatorTree can be
 /// iterable by generic graph iterators.
 template <> struct GraphTraits<swift::DominanceInfoNode *> {
-  using ChildIteratorType = swift::DominanceInfoNode::iterator;
+  using ChildIteratorType = swift::DominanceInfoNode::const_iterator;
   using NodeRef = swift::DominanceInfoNode *;
 
   static NodeRef getEntryNode(NodeRef N) { return N; }

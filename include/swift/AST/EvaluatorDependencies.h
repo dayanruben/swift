@@ -18,11 +18,17 @@
 #ifndef SWIFT_AST_EVALUATOR_DEPENDENCIES_H
 #define SWIFT_AST_EVALUATOR_DEPENDENCIES_H
 
-#include "swift/AST/AttrKind.h"
-#include "swift/AST/SourceFile.h"
-#include "llvm/ADT/PointerIntPair.h"
+#include "swift/AST/AnyRequest.h"
+#include "swift/AST/DependencyCollector.h"
+#include "swift/AST/RequestCache.h"
+#include "swift/Basic/NullablePtr.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include <vector>
 
 namespace swift {
+
+class SourceFile;
 
 namespace evaluator {
 
@@ -31,196 +37,181 @@ namespace detail {
 template <typename...> using void_t = void;
 } // namespace detail
 
-/// The "scope" of a dependency edge tracked by the evaluator.
-///
-/// Dependency scopes come in two flavors: cascading and private. A private
-/// edge captures dependencies discovered in contexts that are not visible to
-/// to other files. For example, a conformance to a private protocol, or the use
-/// of any names inside of a function body. A cascading edge, by contrast,
-/// captures dependencies discovered in the remaining visible contexts. These
-/// are types with at least \c internal visibility, names defined or used
-/// outside of function bodies with at least \c internal visibility, etc. A
-/// dependency that has cascading scope is so-named because upon traversing the
-/// edge, a reader such as the driver should continue transitively evaluating
-/// further dependency edges.
-///
-/// A cascading edge is always conservatively correct to produce, but it comes
-/// at the cost of increased resources spent (and possibly even wasted!) during
-/// incremental compilation. A private edge, by contrast, is more efficient for
-/// incremental compilation but it is harder to safely use.
-///
-/// To ensure that these edges are registered consistently with the correct
-/// scopes, requests that act as the source of dependency edges are required
-/// to specify a \c DependencyScope under which all evaluated sub-requests will
-/// register their dependency edges. In this way, \c DependencyScope values
-/// form a stack-like structure and are pushed and popped by the evaluator
-/// during the course of request evaluation.
-///
-/// When determining the kind of scope a request should use, always err on the
-/// side of a cascading scope unless there is absolute proof any discovered
-/// dependencies will be private. Inner requests may also defensively choose to
-/// flip the dependency scope from private to cascading in the name of safety.
-enum class DependencyScope : bool {
-  Private = false,
-  Cascading = true,
-};
-
-/// Returns a \c DependencyScope appropriate for the given (formal) access level.
-///
-/// :warning: This function exists to bridge the old manual reference
-/// dependencies code to the new evaluator-based reference dependencies code.
-/// The manual code often made private/cascading scope judgements based on the
-/// access level of a declaration. While this makes some sense intuitively, it
-/// does not necessarily capture an accurate picture of where real incremental
-/// dependencies lie. For example, references to formally private types can
-/// "escape" to contexts that have no reference to the private name if, say,
-/// the layout of that private type is taken into consideration by
-/// SILGen or IRGen in a separate file that references the declaration
-/// transitively. However, due to the density of the current dependency
-/// graph, redundancy in registered dependency edges, and the liberal use of
-/// cascading edges, we may be saved from the worst consequences of this
-/// modelling choice.
-///
-/// The use of access-levels for dependency decisions is an anti-pattern that
-/// should be revisited once finer-grained dependencies are explored more
-/// thoroughly.
-inline DependencyScope getScopeForAccessLevel(AccessLevel l) {
-  switch (l) {
-  case AccessLevel::Private:
-  case AccessLevel::FilePrivate:
-    return DependencyScope::Private;
-  case AccessLevel::Internal:
-  case AccessLevel::Public:
-  case AccessLevel::Open:
-    return DependencyScope::Cascading;
-  }
-}
-
-// A \c DependencySource is currently defined to be a parent source file and
-// an associated dependency scope.
+// A \c DependencySource is currently defined to be a primary source file.
 //
 // The \c SourceFile instance is an artifact of the current dependency system,
 // and should be scrapped if possible. It currently encodes the idea that
 // edges in the incremental dependency graph invalidate entire files instead
 // of individual contexts.
-using DependencySource = llvm::PointerIntPair<SourceFile *, 1, DependencyScope>;
+using DependencySource = swift::NullablePtr<SourceFile>;
 
-/// A \c DependencyCollector is an aggregator of named references discovered in a
+/// A \c DependencyRecorder is an aggregator of named references discovered in a
 /// particular \c DependencyScope during the course of request evaluation.
-struct DependencyCollector {
-private:
-  /// A stack of dependency sources in the order they were evaluated.
-  llvm::SmallVector<evaluator::DependencySource, 8> dependencySources;
+class DependencyRecorder {
+  friend DependencyCollector;
+
+  /// Whether we are performing an incremental build and should therefore
+  /// record request references.
+  bool shouldRecord;
+
+  /// References recorded while evaluating a dependency source request for each
+  /// source file. This map is updated upon completion of a dependency source
+  /// request, and includes all references from each downstream request as well.
+  llvm::DenseMap<SourceFile *,
+                 llvm::DenseSet<DependencyCollector::Reference,
+                                DependencyCollector::Reference::Info>>
+      fileReferences;
+
+  /// References recorded while evaluating each request. This map is populated
+  /// upon completion of each request, and includes all references from each
+  /// downstream request as well. Note that uncached requests don't appear as
+  /// keys in this map; their references are charged to the innermost cached
+  /// active request.
+  RequestReferences requestReferences;
+
+  /// Stack of references from each cached active request. When evaluating a
+  /// dependency sink request, we update the innermost set of references.
+  /// Upon completion of a request, we union the completed request's references
+  /// with the next innermost active request.
+  std::vector<llvm::SmallDenseSet<DependencyCollector::Reference, 2,
+                                  DependencyCollector::Reference::Info>>
+      activeRequestReferences;
+
+#ifndef NDEBUG
+  /// Used to catch places where a request's writeDependencySink() method
+  /// kicks off another request, which would break invariants, so we
+  /// disallow this from happening.
+  bool isRecording = false;
+#endif
 
 public:
-  DependencyCollector() = default;
+  DependencyRecorder(bool shouldRecord) : shouldRecord(shouldRecord) {}
 
-public:
-  /// Registers a named reference from the current dependency scope to a member
-  /// defined in the given \p subject type.
-  ///
-  /// Used member constraints are typically the by-product of direct lookups,
-  /// where the name being looked up and the target of the lookup are known
-  /// up front. A used member dependency causes the file to be rebuilt if the
-  /// definition of that member changes in any way - via
-  /// deletion, addition, or mutation of a member with that same name.
-  void addUsedMember(NominalTypeDecl *subject, DeclBaseName name);
-  /// Registers a reference from the current dependency scope to a
-  /// "potential member" of the given \p subject type.
-  ///
-  /// A single potential member dependency can be thought of as many used member
-  /// dependencies - one for each current member of the subject type, but also
-  /// one for every member that will be added or removed from the type in the
-  /// future. As such, these dependencies cause rebuilds when any members are
-  /// added, removed, or changed in the \p subject type. It also indicates a
-  /// dependency on the \p subject type's existence, so deleting the \p subject
-  /// type will also cause a rebuild.
-  ///
-  /// These dependencies are most appropriate for protocol conformances,
-  /// superclass constraints, and other requirements involving entire types.
-  void addPotentialMember(NominalTypeDecl *subject);
-  /// Registers a reference from the current dependency scope to a given
-  /// top-level \p name.
-  ///
-  /// A top level dependency causes a rebuild when another top-level entity with
-  /// that name is added, removed, or modified.
-  void addTopLevelName(DeclBaseName name);
-  /// Registers a reference from the current dependency scope to a given
-  /// dynamic member \p name.
-  ///
-  /// A dynamic lookup dependency is a special kind of member dependency on
-  /// a name that is found by \c AnyObject lookup.
-  void addDynamicLookupName(DeclBaseName name);
+  /// Push a new empty set onto the activeRequestReferences stack.
+  template<typename Request>
+  void beginRequest();
 
-public:
-  /// Returns the scope of the current active scope.
-  ///
-  /// If there is no active scope, the result always cascades.
-  evaluator::DependencyScope getActiveSourceScope() const {
-    if (dependencySources.empty()) {
-      return evaluator::DependencyScope::Cascading;
-    }
-    return dependencySources.back().getInt();
-  }
+  /// Pop the activeRequestReferences stack, and insert recorded references
+  /// into the requestReferences map, as well as the next innermost entry in
+  /// activeRequestReferences.
+  template<typename Request>
+  void endRequest(const Request &req);
 
-  /// Returns the active dependency's source file, or \c nullptr if no
-  /// dependency source is active.
-  ///
-  /// The use of this accessor is strongly discouraged, as it implies that a
-  /// dependency sink is seeking to filter out names based on the files they
-  /// come from. Existing callers are being migrated to more reasonable ways
-  /// of judging the relevancy of a dependency.
-  SourceFile *getActiveDependencySourceOrNull() const {
-    if (dependencySources.empty())
-      return nullptr;
-    return dependencySources.back().getPointer();
-  }
+  /// When replaying a request whose value has already been cached, we need
+  /// to update the innermost set in the activeRequestReferences stack.
+  template<typename Request>
+  void replayCachedRequest(const Request &req);
 
-public:
-  /// An RAII type that manages manipulating the evaluator's
-  /// dependency source stack. It is specialized to be zero-cost for
-  /// requests that are not dependency sources.
-  template <typename Request, typename = detail::void_t<>> struct StackRAII {
-    StackRAII(DependencyCollector &DC, const Request &Req) {}
-  };
+  /// Upon completion of a dependency source request, we update the
+  /// fileReferences map.
+  template<typename Request>
+  void handleDependencySourceRequest(const Request &req,
+                                     SourceFile *source);
 
-  template <typename Request>
-  struct StackRAII<Request,
-                   typename std::enable_if<Request::isDependencySource>::type> {
-    NullablePtr<DependencyCollector> Coll;
-    StackRAII(DependencyCollector &coll, const Request &Req) {
-      auto Source = Req.readDependencySource(coll);
-      // If there is no source to introduce, bail. This can occur if
-      // a request originates in the context of a module.
-      if (!Source.getPointer()) {
-        return;
-      }
-      coll.dependencySources.emplace_back(Source);
-      Coll = &coll;
-    }
-
-    ~StackRAII() {
-      if (Coll.isNonNull())
-        Coll.get()->dependencySources.pop_back();
-    }
-  };
+  /// Clear the recorded dependencies of a request, if any.
+  template<typename Request>
+  void clearRequest(const Request &req);
 
 private:
-  /// If there is an active dependency source, returns its
-  /// \c ReferencedNameTracker. Else, returns \c nullptr.
-  ReferencedNameTracker *getActiveDependencyTracker() const {
-    if (auto *source = getActiveDependencySourceOrNull())
-      return source->getRequestBasedReferencedNameTracker();
-    return nullptr;
-  }
+  /// Add an entry to the innermost set on the activeRequestReferences stack.
+  /// Called from the DependencyCollector.
+  void recordDependency(const DependencyCollector::Reference &ref);
 
-  /// Returns \c true if the scope of the current active source cascades.
+public:
+  using ReferenceEnumerator =
+      llvm::function_ref<void(const DependencyCollector::Reference &)>;
+
+  /// Enumerates the set of references associated with a given source file,
+  /// passing them to the given enumeration callback.
   ///
-  /// If there is no active scope, the result always cascades.
-  bool isActiveSourceCascading() const {
-    return getActiveSourceScope() == evaluator::DependencyScope::Cascading;
-  }
+  /// Only makes sense to call once all dependency sources associated with this
+  /// source file have already been evaluated, otherwise the map will obviously
+  /// be incomplete.
+  ///
+  /// The order of enumeration is completely undefined. It is the responsibility
+  /// of callers to ensure they are order-invariant or are sorting the result.
+  void enumerateReferencesInFile(const SourceFile *SF,
+                                 ReferenceEnumerator f) const ;
 };
+
+template<typename Request>
+void evaluator::DependencyRecorder::beginRequest() {
+  if (!shouldRecord)
+    return;
+
+  if (!Request::isEverCached && !Request::isDependencySource)
+    return;
+
+  activeRequestReferences.push_back({});
+}
+
+template<typename Request>
+void evaluator::DependencyRecorder::endRequest(const Request &req) {
+  if (!shouldRecord)
+    return;
+
+  if (!Request::isEverCached && !Request::isDependencySource)
+    return;
+
+  // Grab all the dependencies we've recorded so far, and pop
+  // the stack.
+  auto recorded = std::move(activeRequestReferences.back());
+  activeRequestReferences.pop_back();
+
+  // If we didn't record anything, there is nothing to do.
+  if (recorded.empty())
+    return;
+
+  // Convert the set of dependencies into a vector.
+  std::vector<DependencyCollector::Reference>
+      vec(recorded.begin(), recorded.end());
+
+  // The recorded dependencies bubble up to the parent request.
+  if (!activeRequestReferences.empty()) {
+    activeRequestReferences.back().insert(vec.begin(),
+                                          vec.end());
+  }
+
+  // Finally, record the dependencies so we can replay them
+  // later when the request is re-evaluated.
+  requestReferences.insert<Request>(std::move(req), std::move(vec));
+}
+
+template<typename Request>
+void evaluator::DependencyRecorder::replayCachedRequest(const Request &req) {
+  assert(req.isCached());
+
+  if (!shouldRecord)
+    return;
+
+  if (activeRequestReferences.empty())
+    return;
+
+  auto found = requestReferences.find_as<Request>(req);
+  if (found == requestReferences.end<Request>())
+    return;
+
+  activeRequestReferences.back().insert(found->second.begin(),
+                                        found->second.end());
+}
+
+template<typename Request>
+void evaluator::DependencyRecorder::handleDependencySourceRequest(
+    const Request &req,
+    SourceFile *source) {
+  auto found = requestReferences.find_as<Request>(req);
+  if (found != requestReferences.end<Request>()) {
+    fileReferences[source].insert(found->second.begin(),
+                                  found->second.end());
+  }
+}
+
+template<typename Request>
+void evaluator::DependencyRecorder::clearRequest(
+    const Request &req) {
+  requestReferences.erase(req);
+}
+
 } // end namespace evaluator
 
 } // end namespace swift

@@ -154,7 +154,7 @@ void SILLinkerVisitor::linkInVTable(ClassDecl *D) {
   for (auto P : Vtbl->getEntries()) {
     // Deserialize and recursively walk any vtable entries that do not have
     // bodies yet.
-    maybeAddFunctionToWorklist(P.Implementation);
+    maybeAddFunctionToWorklist(P.getImplementation());
   }
 }
 
@@ -175,7 +175,7 @@ void SILLinkerVisitor::visitPartialApplyInst(PartialApplyInst *PAI) {
 }
 
 void SILLinkerVisitor::visitFunctionRefInst(FunctionRefInst *FRI) {
-  maybeAddFunctionToWorklist(FRI->getInitiallyReferencedFunction());
+  maybeAddFunctionToWorklist(FRI->getReferencedFunction());
 }
 
 void SILLinkerVisitor::visitDynamicFunctionRefInst(

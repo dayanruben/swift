@@ -19,31 +19,21 @@
 #ifndef SWIFT_BASIC_TYPEID_H
 #define SWIFT_BASIC_TYPEID_H
 
-#include "llvm/ADT/StringRef.h"
+// NOTE: Most of these includes are for CTypeIDZone.def and DefineTypeIDZone.h.
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/TinyPtrVector.h"
+#include "llvm/ADT/StringRef.h"
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace swift {
 
 enum class Zone : uint8_t {
-  C                       = 0,
-  AST                     = 1,
-  AccessControl           = 11,
-  IDETypes                = 136,
-  IDE                     = 137,
-  IDETypeChecking         = 97,
-  NameLookup              = 9,
-  Parse                   = 8,
-  TypeChecker             = 10,
-  SILGen                  = 12,
-  SILOptimizer            = 13,
-  TBDGen                  = 14,
-  IRGen                   = 20,
-
-  // N.B. This is not a formal zone and exists solely to support the unit tests.
-  ArithmeticEvaluator     = 255,
+#define SWIFT_TYPEID_ZONE(Name, Id) Name = Id,
+#include "swift/Basic/TypeIDZones.def"
+#undef SWIFT_TYPEID_ZONE
 };
 
 static_assert(std::is_same<std::underlying_type<Zone>::type, uint8_t>::value,
@@ -53,7 +43,7 @@ static_assert(std::is_same<std::underlying_type<Zone>::type, uint8_t>::value,
 ///
 /// This template needs to be specialized for every type that can
 /// participate in this kind of run-time type information, e.g., so
-/// that it can be stored in \c AnyValue.
+/// that it can be stored in a request.
 template<typename T>
 struct TypeID;
 

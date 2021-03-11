@@ -257,18 +257,19 @@ HeapLayout::HeapLayout(IRGenModule &IGM, LayoutStrategy strategy,
                        ArrayRef<SILType> fieldTypes,
                        ArrayRef<const TypeInfo *> fieldTypeInfos,
                        llvm::StructType *typeToFill,
-                       NecessaryBindings &&bindings)
-  : StructLayout(IGM, /*decl=*/nullptr, LayoutKind::HeapObject, strategy,
-                 fieldTypeInfos, typeToFill),
-    ElementTypes(fieldTypes.begin(), fieldTypes.end()),
-    Bindings(std::move(bindings))
-{
+                       NecessaryBindings &&bindings, unsigned bindingsIndex)
+    : StructLayout(IGM, /*decl=*/nullptr, LayoutKind::HeapObject, strategy,
+                   fieldTypeInfos, typeToFill),
+      ElementTypes(fieldTypes.begin(), fieldTypes.end()),
+      Bindings(std::move(bindings)), BindingsIndex(bindingsIndex) {
 #ifndef NDEBUG
   assert(fieldTypeInfos.size() == fieldTypes.size()
          && "type infos don't match types");
   if (!Bindings.empty()) {
-    assert(fieldTypeInfos.size() >= 1 && "no field for bindings");
-    auto fixedBindingsField = dyn_cast<FixedTypeInfo>(fieldTypeInfos[0]);
+    assert(fieldTypeInfos.size() >= (bindingsIndex + 1) &&
+           "no field for bindings");
+    auto fixedBindingsField =
+        dyn_cast<FixedTypeInfo>(fieldTypeInfos[bindingsIndex]);
     assert(fixedBindingsField
            && "bindings field is not fixed size");
     assert(fixedBindingsField->getFixedSize()
@@ -292,7 +293,7 @@ static llvm::Value *calcInitOffset(swift::irgen::IRGenFunction &IGF,
   auto &prevElt = layout.getElement(i - 1);
   auto prevType = layout.getElementTypes()[i - 1];
   // Start calculating offsets from the last fixed-offset field.
-  Size lastFixedOffset = layout.getElement(i - 1).getByteOffset();
+  Size lastFixedOffset = layout.getElement(i - 1).getByteOffsetDuringLayout();
   if (auto *fixedType = dyn_cast<FixedTypeInfo>(&prevElt.getType())) {
     // If the last fixed-offset field is also fixed-size, we can
     // statically compute the end of the fixed-offset fields.
@@ -425,7 +426,8 @@ static llvm::Function *createDtorFn(IRGenModule &IGM,
   if (layout.hasBindings()) {
     // The type metadata bindings should be at a fixed offset, so we can pass
     // None for NonFixedOffsets. If we didn't, we'd have a chicken-egg problem.
-    auto bindingsAddr = layout.getElement(0).project(IGF, structAddr, None);
+    auto bindingsAddr = layout.getElement(layout.getBindingsIndex())
+                            .project(IGF, structAddr, None);
     layout.getBindings().restore(IGF, bindingsAddr, MetadataState::Complete);
   }
 
@@ -1367,16 +1369,16 @@ emitIsUniqueCall(llvm::Value *value, SourceLoc loc, bool isNonNull) {
 llvm::Value *IRGenFunction::emitIsEscapingClosureCall(
     llvm::Value *value, SourceLoc sourceLoc, unsigned verificationType) {
   auto loc = SILLocation::decode(sourceLoc, IGM.Context.SourceMgr);
-  auto line = llvm::ConstantInt::get(IGM.Int32Ty, loc.Line);
-  auto col = llvm::ConstantInt::get(IGM.Int32Ty, loc.Column);
+  auto line = llvm::ConstantInt::get(IGM.Int32Ty, loc.line);
+  auto col = llvm::ConstantInt::get(IGM.Int32Ty, loc.column);
 
   // Only output the filepath in debug mode. It is going to leak into the
   // executable. This is the same behavior as asserts.
   auto filename = IGM.IRGen.Opts.shouldOptimize()
                       ? IGM.getAddrOfGlobalString("")
-                      : IGM.getAddrOfGlobalString(loc.Filename);
+                      : IGM.getAddrOfGlobalString(loc.filename);
   auto filenameLength =
-      llvm::ConstantInt::get(IGM.Int32Ty, loc.Filename.size());
+      llvm::ConstantInt::get(IGM.Int32Ty, loc.filename.size());
   auto type = llvm::ConstantInt::get(IGM.Int32Ty, verificationType);
   llvm::CallInst *call =
       Builder.CreateCall(IGM.getIsEscapingClosureAtFileLocationFn(),
@@ -1731,12 +1733,12 @@ void IRGenFunction::emit##ID(llvm::Value *value, Address src) {       \
 #undef DEFINE_STORE_WEAK_OP
 #undef NEVER_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE_HELPER
 
-llvm::Value *IRGenFunction::getLocalSelfMetadata() {
-  assert(LocalSelf && "no local self metadata");
+llvm::Value *IRGenFunction::getDynamicSelfMetadata() {
+  assert(SelfValue && "no local self metadata");
 
   // If we already have a metatype, just return it.
   if (SelfKind == SwiftMetatype)
-    return LocalSelf;
+    return SelfValue;
 
   // We need to materialize a metatype. Emit the code for that once at the
   // top of the function and cache the result.
@@ -1752,9 +1754,9 @@ llvm::Value *IRGenFunction::getLocalSelfMetadata() {
   // with the correct value.
 
   llvm::IRBuilderBase::InsertPointGuard guard(Builder);
-  auto insertPt = isa<llvm::Instruction>(LocalSelf)
+  auto insertPt = isa<llvm::Instruction>(SelfValue)
                       ? std::next(llvm::BasicBlock::iterator(
-                            cast<llvm::Instruction>(LocalSelf)))
+                            cast<llvm::Instruction>(SelfValue)))
                       : CurFn->getEntryBlock().begin();
   Builder.SetInsertPoint(&CurFn->getEntryBlock(), insertPt);
 
@@ -1762,19 +1764,19 @@ llvm::Value *IRGenFunction::getLocalSelfMetadata() {
   case SwiftMetatype:
     llvm_unreachable("Already handled");
   case ObjCMetatype:
-    LocalSelf = emitObjCMetadataRefForMetadata(*this, LocalSelf);
+    SelfValue = emitObjCMetadataRefForMetadata(*this, SelfValue);
     SelfKind = SwiftMetatype;
     break;
   case ObjectReference:
-    LocalSelf = emitDynamicTypeOfHeapObject(*this, LocalSelf,
+    SelfValue = emitDynamicTypeOfHeapObject(*this, SelfValue,
                                 MetatypeRepresentation::Thick,
-                                SILType::getPrimitiveObjectType(LocalSelfType),
+                                SILType::getPrimitiveObjectType(SelfType),
                                 /*allow artificial*/ false);
     SelfKind = SwiftMetatype;
     break;
   }
 
-  return LocalSelf;
+  return SelfValue;
 }
 
 /// Given a non-tagged object pointer, load a pointer to its class object.

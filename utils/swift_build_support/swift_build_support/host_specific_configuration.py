@@ -10,6 +10,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import re
 import sys
 from argparse import ArgumentError
 
@@ -38,7 +39,20 @@ class HostSpecificConfiguration(object):
             # Otherwise, this is a host we are building as part of
             # cross-compiling, so we only need the target itself.
             stdlib_targets_to_configure = [host_target]
-            stdlib_targets_to_build = set(stdlib_targets_to_configure)
+            if (hasattr(args, 'stdlib_deployment_targets')):
+                # there are some build configs that expect
+                # not to be building the stdlib for the target
+                # since it will be provided by different means
+                stdlib_targets_to_build = set(
+                    stdlib_targets_to_configure).intersection(
+                    set(args.stdlib_deployment_targets))
+            else:
+                stdlib_targets_to_build = set(stdlib_targets_to_configure)
+
+        if (hasattr(args, 'stdlib_deployment_targets') and
+                args.stdlib_deployment_targets == []):
+            stdlib_targets_to_configure = []
+            stdlib_targets_to_build = []
 
         # Compute derived information from the arguments.
         #
@@ -48,7 +62,7 @@ class HostSpecificConfiguration(object):
         platforms_to_skip_build = self.__platforms_to_skip_build(args)
         platforms_to_skip_test = self.__platforms_to_skip_test(args)
         platforms_archs_to_skip_test = \
-            self.__platforms_archs_to_skip_test(args)
+            self.__platforms_archs_to_skip_test(args, host_target)
         platforms_to_skip_test_host = self.__platforms_to_skip_test_host(args)
 
         # Compute the lists of **CMake** targets for each use case (configure
@@ -155,11 +169,13 @@ class HostSpecificConfiguration(object):
 
                 # Support for running the macCatalyst tests with
                 # the iOS-like target triple.
-                if name == "macosx-x86_64" and args.maccatalyst \
+                macosx_platform_match = re.search("macosx-(.*)", name)
+                if macosx_platform_match and args.maccatalyst \
                    and args.maccatalyst_ios_tests:
                     (self.swift_test_run_targets
-                     .append("check-swift{}{}-{}".format(
-                         subset_suffix, suffix, "macosx-maccatalyst-x86_64")))
+                     .append("check-swift{}{}-{}-{}".format(
+                         subset_suffix, suffix, "macosx-maccatalyst",
+                         macosx_platform_match.group(1))))
                 else:
                     (self.swift_test_run_targets
                      .append("check-swift{}{}-{}".format(
@@ -246,11 +262,28 @@ class HostSpecificConfiguration(object):
 
         return platforms_to_skip_test
 
-    def __platforms_archs_to_skip_test(self, args):
+    def __platforms_archs_to_skip_test(self, args, host_target):
         platforms_archs_to_skip_test = set()
         if not args.test_ios_32bit_simulator:
             platforms_archs_to_skip_test.add(
                 StdlibDeploymentTarget.iOSSimulator.i386)
+        if host_target == StdlibDeploymentTarget.OSX.x86_64.name:
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.iOSSimulator.arm64)
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.AppleTVSimulator.arm64)
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.AppleWatchSimulator.arm64)
+        if host_target == StdlibDeploymentTarget.OSX.arm64.name:
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.iOSSimulator.i386)
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.iOSSimulator.x86_64)
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.AppleTVSimulator.x86_64)
+            platforms_archs_to_skip_test.add(
+                StdlibDeploymentTarget.AppleWatchSimulator.i386)
+
         return platforms_archs_to_skip_test
 
     def __platforms_to_skip_test_host(self, args):

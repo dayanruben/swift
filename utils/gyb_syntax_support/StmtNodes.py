@@ -1,5 +1,5 @@
-from Child import Child
-from Node import Node  # noqa: I201
+from .Child import Child
+from .Node import Node  # noqa: I201
 
 STMT_NODES = [
     # continue-stmt -> 'continue' label? ';'?
@@ -74,7 +74,8 @@ STMT_NODES = [
              Child('GuardResult', kind='Expr'),
          ]),
 
-    # for-in-stmt -> label? ':'? 'for' 'case'? pattern 'in' expr 'where'?
+    # for-in-stmt -> label? ':'? 
+    #   'for' 'try'? 'await'? 'case'? pattern 'in' expr 'where'?
     #   expr code-block ';'?
     Node('ForInStmt', kind='Stmt',
          traits=['WithCodeBlock', 'Labeled'],
@@ -84,6 +85,11 @@ STMT_NODES = [
              Child('LabelColon', kind='ColonToken',
                    is_optional=True),
              Child('ForKeyword', kind='ForToken'),
+             Child('TryKeyword', kind='TryToken', 
+                   is_optional=True),
+             Child('AwaitKeyword', kind='IdentifierToken',
+                   classification='Keyword',
+                   text_choices=['await'], is_optional=True),
              Child('CaseKeyword', kind='CaseToken',
                    is_optional=True),
              Child('Pattern', kind='Pattern'),

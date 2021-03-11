@@ -23,6 +23,7 @@
 #define SWIFT_SILOPTIMIZER_UTILS_BASICBLOCKOPTUTILS_H
 
 #include "swift/SIL/SILBasicBlock.h"
+#include "swift/SIL/BasicBlockBits.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
@@ -35,9 +36,11 @@ class SILLoopInfo;
 
 /// Compute the set of reachable blocks.
 class ReachableBlocks {
-  SmallPtrSet<SILBasicBlock *, 32> visited;
+  BasicBlockSet visited;
 
 public:
+  ReachableBlocks(SILFunction *function) : visited(function) {}
+
   /// Invoke \p visitor for each reachable block in \p f in worklist order (at
   /// least one predecessor has been visited--defs are always visited before
   /// uses except for phi-type block args). The \p visitor takes a block
@@ -45,10 +48,10 @@ public:
   /// continue visiting blocks.
   ///
   /// Returns true if all reachable blocks were visited.
-  bool visit(SILFunction *f, function_ref<bool(SILBasicBlock *)> visitor);
+  bool visit(function_ref<bool(SILBasicBlock *)> visitor);
 
   /// Return true if \p bb has been visited.
-  bool isVisited(SILBasicBlock *bb) const { return visited.count(bb); }
+  bool isVisited(SILBasicBlock *bb) const { return visited.contains(bb); }
 };
 
 /// Remove all instructions in the body of \p bb in safe manner by using
@@ -136,9 +139,9 @@ public:
 /// block's branch to jump to the newly cloned block, call cloneBranchTarget
 /// instead.
 ///
-/// After cloning, call splitCriticalEdges, then updateSSAAfterCloning. This is
-/// decoupled from cloning becaused some clients perform CFG edges updates after
-/// cloning but before splitting CFG edges.
+/// After cloning, call updateSSAAfterCloning. This is decoupled from cloning
+/// becaused some clients perform CFG edges updates after cloning but before
+/// splitting CFG edges.
 class BasicBlockCloner : public SILCloner<BasicBlockCloner> {
   using SuperTy = SILCloner<BasicBlockCloner>;
   friend class SILCloner<BasicBlockCloner>;
@@ -225,12 +228,7 @@ public:
 
   bool wasCloned() { return isBlockCloned(origBB); }
 
-  /// Call this after processing all instructions to fix the control flow
-  /// graph. The branch cloner may have left critical edges.
-  bool splitCriticalEdges(DominanceInfo *domInfo, SILLoopInfo *loopInfo);
-
-  /// Helper function to perform SSA updates after calling both
-  /// cloneBranchTarget and splitCriticalEdges.
+  /// Helper function to perform SSA updates after calling cloneBranchTarget.
   void updateSSAAfterCloning();
 
 protected:
@@ -322,7 +320,9 @@ public:
   /// Add \p InitVal and all its operands (transitively) for cloning.
   ///
   /// Note: all init values must are added, before calling clone().
-  void add(SILInstruction *initVal);
+  /// Returns false if cloning is not possible, e.g. if we would end up cloning
+  /// a reference to a private function into a function which is serialized.
+  bool add(SILInstruction *initVal);
 
   /// Clone \p InitVal and all its operands into the initializer of the
   /// SILGlobalVariable.
@@ -334,7 +334,9 @@ public:
   static void appendToInitializer(SILGlobalVariable *gVar,
                                   SingleValueInstruction *initVal) {
     StaticInitCloner cloner(gVar);
-    cloner.add(initVal);
+    bool success = cloner.add(initVal);
+    (void)success;
+    assert(success && "adding initVal cannot fail for a global variable");
     cloner.clone(initVal);
   }
 

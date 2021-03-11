@@ -27,6 +27,7 @@
 #include "swift/AST/TypeRepr.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Config.h"
+#include "swift/Localization/LocalizationFormat.h"
 #include "swift/Parse/Lexer.h" // bad dependency
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Twine.h"
@@ -92,19 +93,13 @@ static_assert(sizeof(storedDiagnosticInfos) / sizeof(StoredDiagnosticInfo) ==
               "array size mismatch");
 
 static constexpr const char * const diagnosticStrings[] = {
-#define ERROR(ID, Options, Text, Signature) Text,
-#define WARNING(ID, Options, Text, Signature) Text,
-#define NOTE(ID, Options, Text, Signature) Text,
-#define REMARK(ID, Options, Text, Signature) Text,
+#define DIAG(KIND, ID, Options, Text, Signature) Text,
 #include "swift/AST/DiagnosticsAll.def"
     "<not a diagnostic>",
 };
 
 static constexpr const char *const debugDiagnosticStrings[] = {
-#define ERROR(ID, Options, Text, Signature) Text " [" #ID "]",
-#define WARNING(ID, Options, Text, Signature) Text " [" #ID "]",
-#define NOTE(ID, Options, Text, Signature) Text " [" #ID "]",
-#define REMARK(ID, Options, Text, Signature) Text " [" #ID "]",
+#define DIAG(KIND, ID, Options, Text, Signature) Text " [" #ID "]",
 #include "swift/AST/DiagnosticsAll.def"
     "<not a diagnostic>",
 };
@@ -141,8 +136,8 @@ static constexpr EducationalNotes<LocalDiagID::NumDiags> _EducationalNotes = Edu
 static constexpr auto educationalNotes = _EducationalNotes.value;
 
 DiagnosticState::DiagnosticState() {
-  // Initialize our per-diagnostic state to default
-  perDiagnosticBehavior.resize(LocalDiagID::NumDiags, Behavior::Unspecified);
+  // Initialize our ignored diagnostics to default
+  ignoredDiagnostics.resize(LocalDiagID::NumDiags);
 }
 
 static CharSourceRange toCharSourceRange(SourceManager &SM, SourceRange SR) {
@@ -294,6 +289,12 @@ InFlightDiagnostic &InFlightDiagnostic::fixItExchange(SourceRange R1,
   return *this;
 }
 
+InFlightDiagnostic &
+InFlightDiagnostic::limitBehavior(DiagnosticBehavior limit) {
+  Engine->getActiveDiagnostic().setBehaviorLimit(limit);
+  return *this;
+}
+
 void InFlightDiagnostic::flush() {
   if (!IsActive)
     return;
@@ -429,10 +430,6 @@ static bool shouldShowAKA(Type type, StringRef typeName) {
   if (type->isCanonical())
     return false;
 
-  // Don't show generic type parameters.
-  if (type->getCanonicalType()->hasTypeParameter())
-    return false;
-
   // Only show 'aka' if there's a typealias involved; other kinds of sugar
   // are easy enough for people to read on their own.
   if (!type.findIf(isInterestingTypealias))
@@ -451,17 +448,31 @@ static bool shouldShowAKA(Type type, StringRef typeName) {
 /// with the same string representation, it should be qualified during
 /// formatting.
 static bool typeSpellingIsAmbiguous(Type type,
-                                    ArrayRef<DiagnosticArgument> Args) {
+                                    ArrayRef<DiagnosticArgument> Args,
+                                    PrintOptions &PO) {
   for (auto arg : Args) {
     if (arg.getKind() == DiagnosticArgumentKind::Type) {
       auto argType = arg.getAsType();
       if (argType && !argType->isEqual(type) &&
-          argType->getWithoutParens().getString() == type.getString()) {
+          argType->getWithoutParens().getString(PO) == type.getString(PO)) {
         return true;
       }
     }
   }
   return false;
+}
+
+/// Walks the type recursivelly desugaring  types to display, but skipping
+/// `GenericTypeParamType` because we would lose association with its original
+/// declaration and end up presenting the parameter in τ_0_0 format on
+/// diagnostic.
+static Type getAkaTypeForDisplay(Type type) {
+  return type.transform([](Type visitTy) -> Type {
+    if (isa<SugarType>(visitTy.getPointer()) &&
+        !isa<GenericTypeParamType>(visitTy.getPointer()))
+      return getAkaTypeForDisplay(visitTy->getDesugaredType());
+    return visitTy;
+  });
 }
 
 /// Format a single diagnostic argument and write it to the given
@@ -531,11 +542,32 @@ static void formatDiagnosticArgument(StringRef Modifier,
     Out << FormatOpts.ClosingQuotationMark;
     break;
 
+  case DiagnosticArgumentKind::FullyQualifiedType:
   case DiagnosticArgumentKind::Type: {
     assert(Modifier.empty() && "Improper modifier for Type argument");
     
     // Strip extraneous parentheses; they add no value.
-    auto type = Arg.getAsType()->getWithoutParens();
+    Type type;
+    bool needsQualification = false;
+
+    // TODO: We should use PrintOptions::printForDiagnostic here, or we should
+    // rename that method.
+    PrintOptions printOptions{};
+
+    if (Arg.getKind() == DiagnosticArgumentKind::Type) {
+      type = Arg.getAsType()->getWithoutParens();
+      if (type->getASTContext().TypeCheckerOpts.PrintFullConvention)
+        printOptions.PrintFunctionRepresentationAttrs =
+            PrintOptions::FunctionRepresentationMode::Full;
+      needsQualification = typeSpellingIsAmbiguous(type, Args, printOptions);
+    } else {
+      assert(Arg.getKind() == DiagnosticArgumentKind::FullyQualifiedType);
+      type = Arg.getAsFullyQualifiedType().getType()->getWithoutParens();
+      if (type->getASTContext().TypeCheckerOpts.PrintFullConvention)
+        printOptions.PrintFunctionRepresentationAttrs =
+            PrintOptions::FunctionRepresentationMode::Full;
+      needsQualification = true;
+    }
 
     // If a type has an unresolved type, print it with syntax sugar removed for
     // clarity. For example, print `Array<_>` instead of `[_]`.
@@ -543,9 +575,7 @@ static void formatDiagnosticArgument(StringRef Modifier,
       type = type->getWithoutSyntaxSugar();
     }
 
-    bool isAmbiguous = typeSpellingIsAmbiguous(type, Args);
-
-    if (isAmbiguous && isa<OpaqueTypeArchetypeType>(type.getPointer())) {
+    if (needsQualification && isa<OpaqueTypeArchetypeType>(type.getPointer())) {
       auto opaqueTypeDecl = type->castTo<OpaqueTypeArchetypeType>()->getDecl();
 
       llvm::SmallString<256> NamingDeclText;
@@ -561,19 +591,19 @@ static void formatDiagnosticArgument(StringRef Modifier,
       auto descriptiveKind = opaqueTypeDecl->getDescriptiveKind();
 
       Out << llvm::format(FormatOpts.OpaqueResultFormatString.c_str(),
-                          type->getString().c_str(),
+                          type->getString(printOptions).c_str(),
                           Decl::getDescriptiveKindName(descriptiveKind).data(),
                           NamingDeclText.c_str());
 
     } else {
-      auto printOptions = PrintOptions();
-      printOptions.FullyQualifiedTypes = isAmbiguous;
+      printOptions.FullyQualifiedTypes = needsQualification;
       std::string typeName = type->getString(printOptions);
 
       if (shouldShowAKA(type, typeName)) {
         llvm::SmallString<256> AkaText;
         llvm::raw_svector_ostream OutAka(AkaText);
-        OutAka << type->getCanonicalType();
+
+        OutAka << getAkaTypeForDisplay(type);
         Out << llvm::format(FormatOpts.AKAFormatString.c_str(),
                             typeName.c_str(), AkaText.c_str());
       } else {
@@ -659,6 +689,31 @@ static void formatDiagnosticArgument(StringRef Modifier,
     Out << FormatOpts.OpeningQuotationMark << Arg.getAsLayoutConstraint()
         << FormatOpts.ClosingQuotationMark;
     break;
+  case DiagnosticArgumentKind::ActorIsolation:
+    switch (auto isolation = Arg.getAsActorIsolation()) {
+    case ActorIsolation::ActorInstance:
+      Out << "actor-isolated";
+      break;
+
+    case ActorIsolation::GlobalActor:
+    case ActorIsolation::GlobalActorUnsafe:
+      Out << "global actor " << FormatOpts.OpeningQuotationMark
+        << isolation.getGlobalActor().getString()
+        << FormatOpts.ClosingQuotationMark << "-isolated";
+      break;
+
+    case ActorIsolation::Independent:
+      Out << "actor-independent";
+      break;
+
+    case ActorIsolation::IndependentUnsafe:
+      Out << "actor-independent-unsafe";
+      break;
+
+    case ActorIsolation::Unspecified:
+      Out << "non-actor-isolated";
+      break;
+    }
   }
 }
 
@@ -730,23 +785,38 @@ void DiagnosticEngine::formatDiagnosticText(
   }
 }
 
-static DiagnosticKind toDiagnosticKind(DiagnosticState::Behavior behavior) {
+static DiagnosticKind toDiagnosticKind(DiagnosticBehavior behavior) {
   switch (behavior) {
-  case DiagnosticState::Behavior::Unspecified:
+  case DiagnosticBehavior::Unspecified:
     llvm_unreachable("unspecified behavior");
-  case DiagnosticState::Behavior::Ignore:
+  case DiagnosticBehavior::Ignore:
     llvm_unreachable("trying to map an ignored diagnostic");
-  case DiagnosticState::Behavior::Error:
-  case DiagnosticState::Behavior::Fatal:
+  case DiagnosticBehavior::Error:
+  case DiagnosticBehavior::Fatal:
     return DiagnosticKind::Error;
-  case DiagnosticState::Behavior::Note:
+  case DiagnosticBehavior::Note:
     return DiagnosticKind::Note;
-  case DiagnosticState::Behavior::Warning:
+  case DiagnosticBehavior::Warning:
     return DiagnosticKind::Warning;
-  case DiagnosticState::Behavior::Remark:
+  case DiagnosticBehavior::Remark:
     return DiagnosticKind::Remark;
   }
 
+  llvm_unreachable("Unhandled DiagnosticKind in switch.");
+}
+
+static
+DiagnosticBehavior toDiagnosticBehavior(DiagnosticKind kind, bool isFatal) {
+  switch (kind) {
+  case DiagnosticKind::Note:
+    return DiagnosticBehavior::Note;
+  case DiagnosticKind::Error:
+    return isFatal ? DiagnosticBehavior::Fatal : DiagnosticBehavior::Error;
+  case DiagnosticKind::Warning:
+    return DiagnosticBehavior::Warning;
+  case DiagnosticKind::Remark:
+    return DiagnosticBehavior::Remark;
+  }
   llvm_unreachable("Unhandled DiagnosticKind in switch.");
 }
 
@@ -759,72 +829,63 @@ llvm::cl::opt<bool> AssertOnError("swift-diagnostics-assert-on-error",
 llvm::cl::opt<bool> AssertOnWarning("swift-diagnostics-assert-on-warning",
                                     llvm::cl::init(false));
 
-DiagnosticState::Behavior DiagnosticState::determineBehavior(DiagID id) {
-  auto set = [this](DiagnosticState::Behavior lvl) {
-    if (lvl == Behavior::Fatal) {
-      fatalErrorOccurred = true;
-      anyErrorOccurred = true;
-    } else if (lvl == Behavior::Error) {
-      anyErrorOccurred = true;
-    }
-
-    assert((!AssertOnError || !anyErrorOccurred) && "We emitted an error?!");
-    assert((!AssertOnWarning || (lvl != Behavior::Warning)) &&
-           "We emitted a warning?!");
-    previousBehavior = lvl;
-    return lvl;
-  };
-
+DiagnosticBehavior DiagnosticState::determineBehavior(const Diagnostic &diag) {
   // We determine how to handle a diagnostic based on the following rules
-  //   1) If current state dictates a certain behavior, follow that
-  //   2) If the user provided a behavior for this specific diagnostic, follow
-  //      that
-  //   3) If the user provided a behavior for this diagnostic's kind, follow
-  //      that
-  //   4) Otherwise remap the diagnostic kind
+  //   1) Map the diagnostic to its "intended" behavior, applying the behavior
+  //      limit for this particular emission
+  //   2) If current state dictates a certain behavior, follow that
+  //   3) If the user ignored this specific diagnostic, follow that
+  //   4) If the user substituted a different behavior for this behavior, apply
+  //      that change
+  //   5) Update current state for use during the next diagnostic
 
-  auto diagInfo = storedDiagnosticInfos[(unsigned)id];
-  bool isNote = diagInfo.kind == DiagnosticKind::Note;
+  //   1) Map the diagnostic to its "intended" behavior, applying the behavior
+  //      limit for this particular emission
+  auto diagInfo = storedDiagnosticInfos[(unsigned)diag.getID()];
+  DiagnosticBehavior lvl =
+      std::max(toDiagnosticBehavior(diagInfo.kind, diagInfo.isFatal),
+               diag.getBehaviorLimit());
+  assert(lvl != DiagnosticBehavior::Unspecified);
 
-  //   1) If current state dictates a certain behavior, follow that
+  //   2) If current state dictates a certain behavior, follow that
 
   // Notes relating to ignored diagnostics should also be ignored
-  if (previousBehavior == Behavior::Ignore && isNote)
-    return set(Behavior::Ignore);
+  if (previousBehavior == DiagnosticBehavior::Ignore
+      && lvl == DiagnosticBehavior::Note)
+    lvl = DiagnosticBehavior::Ignore;
 
   // Suppress diagnostics when in a fatal state, except for follow-on notes
   if (fatalErrorOccurred)
-    if (!showDiagnosticsAfterFatalError && !isNote)
-      return set(Behavior::Ignore);
+    if (!showDiagnosticsAfterFatalError && lvl != DiagnosticBehavior::Note)
+      lvl = DiagnosticBehavior::Ignore;
 
-  //   2) If the user provided a behavior for this specific diagnostic, follow
-  //      that
+  //   3) If the user ignored this specific diagnostic, follow that
+  if (ignoredDiagnostics[(unsigned)diag.getID()])
+    lvl = DiagnosticBehavior::Ignore;
 
-  if (perDiagnosticBehavior[(unsigned)id] != Behavior::Unspecified)
-    return set(perDiagnosticBehavior[(unsigned)id]);
-
-  //   3) If the user provided a behavior for this diagnostic's kind, follow
-  //      that
-  if (diagInfo.kind == DiagnosticKind::Warning) {
-    if (suppressWarnings)
-      return set(Behavior::Ignore);
+  //   4) If the user substituted a different behavior for this behavior, apply
+  //      that change
+  if (lvl == DiagnosticBehavior::Warning) {
     if (warningsAsErrors)
-      return set(Behavior::Error);
+      lvl = DiagnosticBehavior::Error;
+    if (suppressWarnings)
+      lvl = DiagnosticBehavior::Ignore;
   }
 
-  //   4) Otherwise remap the diagnostic kind
-  switch (diagInfo.kind) {
-  case DiagnosticKind::Note:
-    return set(Behavior::Note);
-  case DiagnosticKind::Error:
-    return set(diagInfo.isFatal ? Behavior::Fatal : Behavior::Error);
-  case DiagnosticKind::Warning:
-    return set(Behavior::Warning);
-  case DiagnosticKind::Remark:
-    return set(Behavior::Remark);
+  //   5) Update current state for use during the next diagnostic
+  if (lvl == DiagnosticBehavior::Fatal) {
+    fatalErrorOccurred = true;
+    anyErrorOccurred = true;
+  } else if (lvl == DiagnosticBehavior::Error) {
+    anyErrorOccurred = true;
   }
 
-  llvm_unreachable("Unhandled DiagnosticKind in switch.");
+  assert((!AssertOnError || !anyErrorOccurred) && "We emitted an error?!");
+  assert((!AssertOnWarning || (lvl != DiagnosticBehavior::Warning)) &&
+         "We emitted a warning?!");
+
+  previousBehavior = lvl;
+  return lvl;
 }
 
 void DiagnosticEngine::flushActiveDiagnostic() {
@@ -845,10 +906,24 @@ void DiagnosticEngine::emitTentativeDiagnostics() {
   TentativeDiagnostics.clear();
 }
 
+/// Returns the access level of the least accessible PrettyPrintedDeclarations
+/// buffer that \p decl should appear in.
+///
+/// This is always \c Public unless \p decl is a \c ValueDecl and its
+/// access level is below \c Public. (That can happen with @testable and
+/// @_private imports.)
+static AccessLevel getBufferAccessLevel(const Decl *decl) {
+  AccessLevel level = AccessLevel::Public;
+  if (auto *VD = dyn_cast<ValueDecl>(decl))
+    level = VD->getFormalAccessScope().accessLevelForDiagnostics();
+  if (level > AccessLevel::Public) level = AccessLevel::Public;
+  return level;
+}
+
 Optional<DiagnosticInfo>
 DiagnosticEngine::diagnosticInfoForDiagnostic(const Diagnostic &diagnostic) {
-  auto behavior = state.determineBehavior(diagnostic.getID());
-  if (behavior == DiagnosticState::Behavior::Ignore)
+  auto behavior = state.determineBehavior(diagnostic);
+  if (behavior == DiagnosticBehavior::Ignore)
     return None;
 
   // Figure out the source location.
@@ -866,21 +941,31 @@ DiagnosticEngine::diagnosticInfoForDiagnostic(const Diagnostic &diagnostic) {
       if (ppLoc.isInvalid()) {
         class TrackingPrinter : public StreamPrinter {
           SmallVectorImpl<std::pair<const Decl *, uint64_t>> &Entries;
+          AccessLevel bufferAccessLevel;
 
         public:
           TrackingPrinter(
               SmallVectorImpl<std::pair<const Decl *, uint64_t>> &Entries,
-              raw_ostream &OS) :
-            StreamPrinter(OS), Entries(Entries) {}
+              raw_ostream &OS, AccessLevel bufferAccessLevel) :
+            StreamPrinter(OS), Entries(Entries),
+            bufferAccessLevel(bufferAccessLevel) {}
 
           void printDeclLoc(const Decl *D) override {
-            Entries.push_back({ D, OS.tell() });
+            if (getBufferAccessLevel(D) == bufferAccessLevel)
+              Entries.push_back({ D, OS.tell() });
           }
         };
         SmallVector<std::pair<const Decl *, uint64_t>, 8> entries;
         llvm::SmallString<128> buffer;
         llvm::SmallString<128> bufferName;
         {
+          // The access level of the buffer we want to print. Declarations below
+          // this access level will be omitted from the buffer; declarations
+          // above it will be printed, but (except for Open declarations in the
+          // Public buffer) will not be recorded in PrettyPrintedDeclarations as
+          // the "true" SourceLoc for the declaration.
+          AccessLevel bufferAccessLevel = getBufferAccessLevel(decl);
+
           // Figure out which declaration to print. It's the top-most
           // declaration (not a module).
           const Decl *ppDecl = decl;
@@ -941,10 +1026,24 @@ DiagnosticEngine::diagnosticInfoForDiagnostic(const Diagnostic &diagnostic) {
             bufferName += ext->getExtendedType().getString();
           }
 
+          // If we're using a lowered access level, give the buffer a distinct
+          // name.
+          if (bufferAccessLevel != AccessLevel::Public) {
+            assert(bufferAccessLevel < AccessLevel::Public
+                   && "Above-public access levels should use public buffer");
+            bufferName += " (";
+            bufferName += getAccessLevelSpelling(bufferAccessLevel);
+            bufferName += ")";
+          }
+
           // Pretty-print the declaration we've picked.
           llvm::raw_svector_ostream out(buffer);
-          TrackingPrinter printer(entries, out);
-          ppDecl->print(printer, PrintOptions::printForDiagnostics());
+          TrackingPrinter printer(entries, out, bufferAccessLevel);
+          ppDecl->print(
+              printer,
+              PrintOptions::printForDiagnostics(
+                  bufferAccessLevel,
+                  decl->getASTContext().TypeCheckerOpts.PrintFullConvention));
         }
 
         // Build a buffer with the pretty-printed declaration.
@@ -976,24 +1075,27 @@ DiagnosticEngine::diagnosticInfoForDiagnostic(const Diagnostic &diagnostic) {
 void DiagnosticEngine::emitDiagnostic(const Diagnostic &diagnostic) {
   if (auto info = diagnosticInfoForDiagnostic(diagnostic)) {
     SmallVector<DiagnosticInfo, 1> childInfo;
-    TinyPtrVector<DiagnosticInfo *> childInfoPtrs;
     auto childNotes = diagnostic.getChildNotes();
-    for (unsigned idx = 0; idx < childNotes.size(); ++idx) {
-      if (auto child = diagnosticInfoForDiagnostic(childNotes[idx])) {
-        childInfo.push_back(*child);
-        childInfoPtrs.push_back(&childInfo[idx]);
-      }
+    for (unsigned i : indices(childNotes)) {
+      auto child = diagnosticInfoForDiagnostic(childNotes[i]);
+      assert(child);
+      assert(child->Kind == DiagnosticKind::Note &&
+             "Expected child diagnostics to all be notes?!");
+      childInfo.push_back(*child);
+    }
+    TinyPtrVector<DiagnosticInfo *> childInfoPtrs;
+    for (unsigned i : indices(childInfo)) {
+      childInfoPtrs.push_back(&childInfo[i]);
     }
     info->ChildDiagnosticInfo = childInfoPtrs;
-    
-    SmallVector<std::string, 1> educationalNotePaths;
 
+    SmallVector<std::string, 1> educationalNotePaths;
     auto associatedNotes = educationalNotes[(uint32_t)diagnostic.getID()];
     while (associatedNotes && *associatedNotes) {
       SmallString<128> notePath(getDiagnosticDocumentationPath());
       llvm::sys::path::append(notePath, *associatedNotes);
       educationalNotePaths.push_back(notePath.str().str());
-      associatedNotes++;
+      ++associatedNotes;
     }
     info->EducationalNotePaths = educationalNotePaths;
 
@@ -1009,12 +1111,20 @@ void DiagnosticEngine::emitDiagnostic(const Diagnostic &diagnostic) {
     emitDiagnostic(childNote);
 }
 
-const char *DiagnosticEngine::diagnosticStringFor(const DiagID id,
-                                                  bool printDiagnosticName) {
+llvm::StringRef
+DiagnosticEngine::diagnosticStringFor(const DiagID id,
+                                      bool printDiagnosticName) {
+  // TODO: Print diagnostic names from `localization`.
   if (printDiagnosticName) {
     return debugDiagnosticStrings[(unsigned)id];
   }
-  return diagnosticStrings[(unsigned)id];
+  auto defaultMessage = diagnosticStrings[(unsigned)id];
+  if (localization) {
+    auto localizedMessage =
+        localization.get()->getMessageOr(id, defaultMessage);
+    return localizedMessage;
+  }
+  return defaultMessage;
 }
 
 const char *InFlightDiagnostic::fixItStringFor(const FixItID id) {

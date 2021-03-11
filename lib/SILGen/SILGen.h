@@ -27,6 +27,7 @@
 
 namespace swift {
   class SILBasicBlock;
+  class ForeignAsyncConvention;
 
 namespace Lowering {
   class TypeConverter;
@@ -60,19 +61,16 @@ public:
   /// Mapping from ProtocolConformances to emitted SILWitnessTables.
   llvm::DenseMap<NormalProtocolConformance*, SILWitnessTable*> emittedWitnessTables;
 
-  struct DelayedFunction {
-    /// Insert the entity after the given function when it's emitted.
-    SILDeclRef insertAfter;
-    /// Code that generates the function.
-    std::function<void (SILFunction *)> emitter;
-  };
-
-  /// Mapping from SILDeclRefs to delayed SILFunction generators for
-  /// non-externally-visible symbols.
-  llvm::DenseMap<SILDeclRef, DelayedFunction> delayedFunctions;
+  /// Mapping from SILDeclRefs to where the given function will be inserted
+  /// when it's emitted. Used for non-externally visible symbols.
+  llvm::DenseMap<SILDeclRef, SILDeclRef> delayedFunctions;
 
   /// Queue of delayed SILFunctions that need to be forced.
-  std::deque<std::pair<SILDeclRef, DelayedFunction>> forcedFunctions;
+  std::deque<SILDeclRef> forcedFunctions;
+
+  /// Mapping global VarDecls to their onceToken and onceFunc, respectively.
+  llvm::DenseMap<VarDecl *, std::pair<SILGlobalVariable *,
+                                      SILFunction *>> delayedGlobals;
 
   /// The most recent declaration we considered for emission.
   SILDeclRef lastEmittedFunction;
@@ -121,6 +119,16 @@ public:
 
   Optional<ProtocolConformance *> NSErrorConformanceToError;
 
+  Optional<FuncDecl*> RunChildTask;
+  Optional<FuncDecl*> TaskFutureGet;
+  Optional<FuncDecl*> TaskFutureGetThrowing;
+
+  Optional<FuncDecl*> RunTaskForBridgedAsyncMethod;
+  Optional<FuncDecl*> ResumeUnsafeContinuation;
+  Optional<FuncDecl*> ResumeUnsafeThrowingContinuation;
+  Optional<FuncDecl*> ResumeUnsafeThrowingContinuationWithError;
+  Optional<FuncDecl*> RunAsyncHandler;
+
 public:
   SILGenModule(SILModule &M, ModuleDecl *SM);
 
@@ -131,8 +139,7 @@ public:
 
   ASTContext &getASTContext() { return M.getASTContext(); }
 
-  llvm::StringMap<std::pair<std::string, /*isWinner=*/bool>>
-    MagicFileStringsByFilePath;
+  llvm::StringMap<std::pair<std::string, /*isWinner=*/bool>> FileIDsByFilePath;
 
   static DeclName getMagicFunctionName(SILDeclRef ref);
   static DeclName getMagicFunctionName(DeclContext *dc);
@@ -167,6 +174,15 @@ public:
                                            CanSILFunctionType fromType,
                                            CanSILFunctionType toType,
                                            CanType dynamicSelfType);
+  
+  /// Get or create the declaration of a completion handler block
+  /// implementation function for an ObjC API that was imported
+  /// as `async` in Swift.
+  SILFunction *getOrCreateForeignAsyncCompletionHandlerImplFunction(
+                                           CanSILFunctionType blockType,
+                                           CanType continuationTy,
+                                           CanGenericSignature sig,
+                                           ForeignAsyncConvention convention);
 
   /// Determine whether the given class has any instance variables that
   /// need to be destroyed.
@@ -221,14 +237,14 @@ public:
   /// - The last parameter in the returned differential.
   /// - The last result in the returned pullback.
   SILFunction *getOrCreateCustomDerivativeThunk(
-      SILFunction *customDerivativeFn, SILFunction *originalFn,
-      const AutoDiffConfig &config, AutoDiffDerivativeFunctionKind kind);
+      AbstractFunctionDecl *originalAFD, SILFunction *originalFn,
+      SILFunction *customDerivativeFn, AutoDiffConfig config,
+      AutoDiffDerivativeFunctionKind kind);
 
   /// Get or create a derivative function vtable entry thunk for the given
   /// SILDeclRef and derivative function type.
-  SILFunction *
-  getOrCreateAutoDiffClassMethodThunk(SILDeclRef derivativeFnRef,
-                                      CanSILFunctionType derivativeFnTy);
+  SILFunction *getOrCreateDerivativeVTableThunk(
+      SILDeclRef derivativeFnRef, CanSILFunctionType derivativeFnTy);
 
   /// Determine whether we need to emit an ivar destroyer for the given class.
   /// An ivar destroyer is needed if a superclass of this class may define a
@@ -241,7 +257,7 @@ public:
 
   // These are either not allowed at global scope or don't require
   // code emission.
-  void visitImportDecl(ImportDecl *d) {}
+  void visitImportDecl(ImportDecl *d);
   void visitEnumCaseDecl(EnumCaseDecl *d) {}
   void visitEnumElementDecl(EnumElementDecl *d) {}
   void visitOperatorDecl(OperatorDecl *d) {}
@@ -274,7 +290,10 @@ public:
   /// curried functions, curried entry point Functions are also generated and
   /// added to the current SILModule.
   void emitFunction(FuncDecl *fd);
-  
+
+  /// Emits the function definition for a given SILDeclRef.
+  void emitFunctionDefinition(SILDeclRef constant, SILFunction *f);
+
   /// Generates code for the given closure expression and adds the
   /// SILFunction to the current SILModule under the name SILDeclRef(ce).
   SILFunction *emitClosure(AbstractClosureExpr *ce);
@@ -286,10 +305,6 @@ public:
   /// the SILFunction to the current SILModule under the name
   /// SILDeclRef(cd, Destructor).
   void emitDestructor(ClassDecl *cd, DestructorDecl *dd);
-
-  /// Generates the enum constructor for the given
-  /// EnumElementDecl under the name SILDeclRef(decl).
-  void emitEnumConstructor(EnumElementDecl *decl);
 
   /// Emits the default argument generator with the given expression.
   void emitDefaultArgGenerator(SILDeclRef constant, ParamDecl *param);
@@ -309,12 +324,8 @@ public:
 
   /// Emits a thunk from a Swift function to the native Swift convention.
   void emitNativeToForeignThunk(SILDeclRef thunk);
-
-  void preEmitFunction(SILDeclRef constant,
-                       llvm::PointerUnion<ValueDecl *,
-                                          Expr *> astNode,
-                       SILFunction *F,
-                       SILLocation L);
+  
+  void preEmitFunction(SILDeclRef constant, SILFunction *F, SILLocation L);
   void postEmitFunction(SILDeclRef constant, SILFunction *F);
   
   /// Add a global variable to the SILModule.
@@ -410,6 +421,7 @@ public:
   /// functions (null if undefined).
   void emitDifferentiabilityWitness(AbstractFunctionDecl *originalAFD,
                                     SILFunction *originalFunction,
+                                    DifferentiabilityKind diffKind,
                                     const AutoDiffConfig &config,
                                     SILFunction *jvp, SILFunction *vjp,
                                     const DeclAttribute *diffAttr);
@@ -468,6 +480,26 @@ public:
 
   /// Retrieve the conformance of NSError to the Error protocol.
   ProtocolConformance *getNSErrorConformanceToError();
+
+  /// Retrieve the _Concurrency._runChildTask intrinsic.
+  FuncDecl *getRunChildTask();
+
+  /// Retrieve the _Concurrency._taskFutureGet intrinsic.
+  FuncDecl *getTaskFutureGet();
+
+  /// Retrieve the _Concurrency._taskFutureGetThrowing intrinsic.
+  FuncDecl *getTaskFutureGetThrowing();
+
+  /// Retrieve the _Concurrency._resumeUnsafeContinuation intrinsic.
+  FuncDecl *getResumeUnsafeContinuation();
+  /// Retrieve the _Concurrency._resumeUnsafeThrowingContinuation intrinsic.
+  FuncDecl *getResumeUnsafeThrowingContinuation();
+  /// Retrieve the _Concurrency._resumeUnsafeThrowingContinuationWithError intrinsic.
+  FuncDecl *getResumeUnsafeThrowingContinuationWithError();
+  /// Retrieve the _Concurrency._runAsyncHandler intrinsic.
+  FuncDecl *getRunAsyncHandler();
+  /// Retrieve the _Concurrency._runTaskForBridgedAsyncMethod intrinsic.
+  FuncDecl *getRunTaskForBridgedAsyncMethod();
 
   SILFunction *getKeyPathProjectionCoroutine(bool isReadAccess,
                                              KeyPathTypeKind typeKind);

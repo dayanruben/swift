@@ -62,11 +62,14 @@ SILType SILBuilder::getPartialApplyResultType(
   auto params = FTI->getParameters();
   auto newParams = params.slice(0, params.size() - argCount);
 
-  auto extInfo = FTI->getExtInfo()
-    .withRepresentation(SILFunctionType::Representation::Thick)
-    .withIsPseudogeneric(false);
+  auto extInfoBuilder =
+      FTI->getExtInfo()
+          .intoBuilder()
+          .withRepresentation(SILFunctionType::Representation::Thick)
+          .withIsPseudogeneric(false);
   if (onStack)
-    extInfo = extInfo.withNoEscape();
+    extInfoBuilder = extInfoBuilder.withNoEscape();
+  auto extInfo = extInfoBuilder.build();
 
   // If the original method has an @unowned_inner_pointer return, the partial
   // application thunk will lifetime-extend 'self' for us, converting the
@@ -78,10 +81,10 @@ SILType SILBuilder::getPartialApplyResultType(
   results.append(FTI->getResults().begin(), FTI->getResults().end());
   for (auto &result : results) {
     if (result.getConvention() == ResultConvention::UnownedInnerPointer)
-      result = SILResultInfo(result.getReturnValueType(M, FTI),
+      result = SILResultInfo(result.getReturnValueType(M, FTI, context),
                              ResultConvention::Unowned);
     else if (result.getConvention() == ResultConvention::Autoreleased)
-      result = SILResultInfo(result.getReturnValueType(M, FTI),
+      result = SILResultInfo(result.getReturnValueType(M, FTI, context),
                              ResultConvention::Owned);
   }
   
@@ -141,7 +144,8 @@ SILBuilder::createClassifyBridgeObject(SILLocation Loc, SILValue value) {
 
 // Create the appropriate cast instruction based on result type.
 SingleValueInstruction *
-SILBuilder::createUncheckedBitCast(SILLocation Loc, SILValue Op, SILType Ty) {
+SILBuilder::createUncheckedReinterpretCast(SILLocation Loc, SILValue Op,
+                                           SILType Ty) {
   assert(isLoadableOrOpaque(Ty));
   if (Ty.isTrivial(getFunction()))
     return insert(UncheckedTrivialBitCastInst::create(
@@ -154,6 +158,26 @@ SILBuilder::createUncheckedBitCast(SILLocation Loc, SILValue Op, SILType Ty) {
   // type, so RC identity cannot be assumed.
   return insert(UncheckedBitwiseCastInst::create(
       getSILDebugLocation(Loc), Op, Ty, getFunction(), C.OpenedArchetypes));
+}
+
+// Create the appropriate cast instruction based on result type.
+SingleValueInstruction *
+SILBuilder::createUncheckedBitCast(SILLocation Loc, SILValue Op, SILType Ty) {
+  // Without ownership, delegate to unchecked reinterpret cast.
+  if (!hasOwnership())
+    return createUncheckedReinterpretCast(Loc, Op, Ty);
+
+  assert(isLoadableOrOpaque(Ty));
+  if (Ty.isTrivial(getFunction()))
+    return insert(UncheckedTrivialBitCastInst::create(
+        getSILDebugLocation(Loc), Op, Ty, getFunction(), C.OpenedArchetypes));
+
+  if (SILType::canRefCast(Op->getType(), Ty, getModule()))
+    return createUncheckedRefCast(Loc, Op, Ty);
+
+  // The destination type is nontrivial, and may be smaller than the source
+  // type, so RC identity cannot be assumed.
+  return createUncheckedValueCast(Loc, Op, Ty);
 }
 
 BranchInst *SILBuilder::createBranch(SILLocation Loc,
@@ -613,15 +637,18 @@ DebugValueAddrInst *SILBuilder::createDebugValueAddr(SILLocation Loc,
 
 void SILBuilder::emitScopedBorrowOperation(SILLocation loc, SILValue original,
                                            function_ref<void(SILValue)> &&fun) {
-  if (original->getType().isAddress()) {
-    original = createLoadBorrow(loc, original);
+  SILValue value = original;
+  if (value->getType().isAddress()) {
+    value = createLoadBorrow(loc, value);
   } else {
-    original = createBeginBorrow(loc, original);
+    value = emitBeginBorrowOperation(loc, value);
   }
 
-  fun(original);
+  fun(value);
 
-  createEndBorrow(loc, original);
+  // If we actually inserted a borrowing operation... insert the end_borrow.
+  if (value != original)
+    createEndBorrow(loc, value);
 }
 
 CheckedCastBranchInst *SILBuilder::createCheckedCastBranch(
@@ -629,11 +656,37 @@ CheckedCastBranchInst *SILBuilder::createCheckedCastBranch(
     SILType destLoweredTy, CanType destFormalTy,
     SILBasicBlock *successBB, SILBasicBlock *failureBB,
     ProfileCounter target1Count, ProfileCounter target2Count) {
+  return createCheckedCastBranch(Loc, isExact, op, destLoweredTy, destFormalTy,
+                                 successBB, failureBB, op.getOwnershipKind(),
+                                 target1Count, target2Count);
+}
+
+CheckedCastBranchInst *SILBuilder::createCheckedCastBranch(
+    SILLocation Loc, bool isExact, SILValue op, SILType destLoweredTy,
+    CanType destFormalTy, SILBasicBlock *successBB, SILBasicBlock *failureBB,
+    ValueOwnershipKind forwardingOwnershipKind, ProfileCounter target1Count,
+    ProfileCounter target2Count) {
   assert((!hasOwnership() || !failureBB->getNumArguments() ||
           failureBB->getArgument(0)->getType() == op->getType()) &&
          "failureBB's argument doesn't match incoming argument type");
   return insertTerminator(CheckedCastBranchInst::create(
-      getSILDebugLocation(Loc), isExact, op,
-      destLoweredTy, destFormalTy, successBB, failureBB,
-      getFunction(), C.OpenedArchetypes, target1Count, target2Count));
+      getSILDebugLocation(Loc), isExact, op, destLoweredTy, destFormalTy,
+      successBB, failureBB, getFunction(), C.OpenedArchetypes, target1Count,
+      target2Count, forwardingOwnershipKind));
+}
+
+void SILBuilderWithScope::insertAfter(SILInstruction *inst,
+                                      function_ref<void(SILBuilder &)> func) {
+  if (isa<TermInst>(inst)) {
+    for (const SILSuccessor &succ : inst->getParent()->getSuccessors()) {
+      SILBasicBlock *succBlock = succ;
+      assert(succBlock->getSinglePredecessorBlock() == inst->getParent() &&
+             "the terminator instruction must not have critical successors");
+      SILBuilderWithScope builder(succBlock->begin());
+      func(builder);
+    }
+  } else {
+    SILBuilderWithScope builder(std::next(inst->getIterator()));
+    func(builder);
+  }
 }

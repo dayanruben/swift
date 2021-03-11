@@ -15,7 +15,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if !defined(_WIN32) && !defined(__wasi__)
+#if __has_include(<unistd.h>)
+#include <unistd.h>
+#endif
+
+#if defined(_POSIX_THREADS) && !defined(SWIFT_STDLIB_SINGLE_THREADED_RUNTIME)
 #include "swift/Runtime/Mutex.h"
 
 #include "swift/Runtime/Debug.h"
@@ -109,6 +113,29 @@ bool MutexPlatformHelper::try_lock(pthread_mutex_t &mutex) {
   returnTrueOrReportError(pthread_mutex_trylock(&mutex),
                           /* returnFalseOnEBUSY = */ true);
 }
+
+#if HAS_OS_UNFAIR_LOCK
+
+void MutexPlatformHelper::init(os_unfair_lock &lock, bool checked) {
+  (void)checked; // Unfair locks are always checked.
+  lock = OS_UNFAIR_LOCK_INIT;
+}
+
+void MutexPlatformHelper::destroy(os_unfair_lock &lock) {}
+
+void MutexPlatformHelper::lock(os_unfair_lock &lock) {
+  os_unfair_lock_lock(&lock);
+}
+
+void MutexPlatformHelper::unlock(os_unfair_lock &lock) {
+  os_unfair_lock_unlock(&lock);
+}
+
+bool MutexPlatformHelper::try_lock(os_unfair_lock &lock) {
+  return os_unfair_lock_trylock(&lock);
+}
+
+#endif
 
 void ReadWriteLockPlatformHelper::init(pthread_rwlock_t &rwlock) {
   reportError(pthread_rwlock_init(&rwlock, nullptr));

@@ -40,10 +40,15 @@ function(add_swift_unittest test_dirname)
   endif()
 
   if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
+    # Add an @rpath to the swift library directory.
     set_target_properties(${test_dirname} PROPERTIES
       BUILD_RPATH ${SWIFT_LIBRARY_OUTPUT_INTDIR}/swift/macosx)
+    # Force all the swift libraries to be found via rpath.
+    add_custom_command(TARGET "${test_dirname}" POST_BUILD
+      COMMAND "${SWIFT_SOURCE_DIR}/utils/swift-rpathize.py"
+              "$<TARGET_FILE:${test_dirname}>")
   elseif("${SWIFT_HOST_VARIANT}" STREQUAL "android")
-    swift_android_lib_for_arch(${SWIFT_HOST_VARIANT_ARCH} android_system_libs)
+    swift_android_libgcc_for_arch_cross_compile(${SWIFT_HOST_VARIANT_ARCH} android_system_libs)
     set_property(TARGET "${test_dirname}" APPEND PROPERTY LINK_DIRECTORIES
       "${android_system_libs}")
     set_property(TARGET "${test_dirname}" APPEND PROPERTY LINK_LIBRARIES "log")
@@ -57,15 +62,11 @@ function(add_swift_unittest test_dirname)
       _ENABLE_EXTENDED_ALIGNED_STORAGE)
   endif()
 
-  find_program(LDLLD_PATH "ld.lld")
-  # Strangely, macOS finds lld and then can't find it when using -fuse-ld=
-  if(SWIFT_ENABLE_LLD_LINKER AND LDLLD_PATH AND NOT APPLE)
-    set_property(TARGET "${test_dirname}" APPEND_STRING PROPERTY
-      LINK_FLAGS " -fuse-ld=lld")
-  elseif(SWIFT_ENABLE_GOLD_LINKER AND
-     "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_OBJECT_FORMAT}" STREQUAL "ELF")
-    set_property(TARGET "${test_dirname}" APPEND_STRING PROPERTY
-      LINK_FLAGS " -fuse-ld=gold")
+  if(NOT SWIFT_COMPILER_IS_MSVC_LIKE)
+    if(SWIFT_USE_LINKER)
+      target_link_options(${test_dirname} PRIVATE
+        -fuse-ld=${SWIFT_USE_LINKER}$<$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>:.exe>)
+    endif()
   endif()
 
   if(SWIFT_ANALYZE_CODE_COVERAGE)

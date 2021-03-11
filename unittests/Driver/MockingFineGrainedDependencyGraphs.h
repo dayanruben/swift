@@ -35,9 +35,8 @@ namespace mocking_fine_grained_dependency_graphs {
 /// \param cmd The \c Job whose dependency info will be loaded.
 /// \param dependencyDescriptions Dependency info, see below
 /// \param interfaceHashIfNonEmpty If non-empty, overrides the default simulated
-/// interface hash \param includePrivateDeps Include file-private declarations
-/// in the dependency information. \param hadCompilationError Simulate a
-/// compilation error.
+/// in the dependency information.
+/// \param hadCompilationError Simulate a compilation error.
 ///
 /// Fails an assertion if the information is not valid (for instance a
 /// fingerprint where it should not be).
@@ -67,8 +66,7 @@ namespace mocking_fine_grained_dependency_graphs {
 
 void simulateLoad(ModuleDepGraph &g, const driver::Job *cmd,
                   const DependencyDescriptions &dependencyDescriptions,
-                  StringRef interfaceHashIfNonEmpty = StringRef(),
-                  const bool includePrivateDeps = true,
+                  Optional<Fingerprint> interfaceHashIfNonEmpty = None,
                   const bool hadCompilationError = false);
 
 /// Same as \ref simulateLoad, but returns the specifically changed nodes or
@@ -77,8 +75,7 @@ void simulateLoad(ModuleDepGraph &g, const driver::Job *cmd,
 ModuleDepGraph::Changes
 getChangesForSimulatedLoad(ModuleDepGraph &g, const driver::Job *cmd,
                            const DependencyDescriptions &dependencyDescriptions,
-                           StringRef interfaceHashIfNonEmpty = StringRef(),
-                           const bool includePrivateDeps = true,
+                           Optional<Fingerprint> interfaceHashIfNonEmpty = None,
                            const bool hadCompilationError = false);
 
 /// Simulates the driver reloading a swiftdeps file after a job has run.
@@ -90,8 +87,7 @@ getChangesForSimulatedLoad(ModuleDepGraph &g, const driver::Job *cmd,
 std::vector<const driver::Job *>
 simulateReload(ModuleDepGraph &g, const driver::Job *cmd,
                const DependencyDescriptions &dependencyDescriptions,
-               StringRef interfaceHashIfNonEmpty = StringRef(),
-               const bool includePrivateDeps = true,
+               Optional<Fingerprint> interfaceHashIfNonEmpty = None,
                const bool hadCompilationError = false);
 
 std::vector<const driver::Job *>
@@ -99,6 +95,24 @@ printJobsForDebugging(const std::vector<const driver::Job *> &jobs);
 
 } // end namespace mocking_fine_grained_dependency_graphs
 } // namespace fine_grained_dependencies
+
+/// Aborts if unconvertible, returns \c None for an empty string.
+inline Optional<Fingerprint> mockFingerprintFromString(llvm::StringRef value) {
+  auto contents = value.str();
+  const auto n = value.size();
+  if (n == 0 || n > Fingerprint::DIGEST_LENGTH)
+    return None;
+  // Insert at start so that "1" and "10" are distinct
+  contents.insert(0, Fingerprint::DIGEST_LENGTH - n, '0');
+  auto fingerprint = Fingerprint::fromString(contents);
+    if (!fingerprint) {
+    llvm::errs() << "unconvertable fingerprint from switdeps ':"
+                 << contents << "'\n";
+    abort();
+  }
+  return fingerprint;
+}
+
 } // end namespace swift
 
 #endif /* MOCKING_FINE_GRAINED_DEPENDENCY_GRAPHS_H */

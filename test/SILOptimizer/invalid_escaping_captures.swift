@@ -1,5 +1,5 @@
 // RUN: %target-swift-frontend -emit-sil %s -verify
-// RUN: %target-swift-frontend -emit-sil %s -verify -enable-ownership-stripping-after-serialization
+// RUN: %target-swift-frontend -emit-sil %s -verify
 
 func takesEscaping(_: @escaping () -> ()) {}
 
@@ -245,5 +245,14 @@ struct S {
     autoclosureTakesEscaping(i)
       // expected-error@-1 {{escaping autoclosure captures mutating 'self' parameter}}
       // expected-note@-2 {{pass a copy of 'self'}}
+  }
+}
+
+// Test that we look through the SILBoxType used for a 'var' binding
+func badNoEscapeCaptureThroughVar(_ fn: () -> ()) {
+  var myFunc = fn // expected-warning {{never mutated}} // expected-note {{captured here}}
+
+  takesEscaping { // expected-error {{escaping closure captures non-escaping value}}
+    myFunc()
   }
 }

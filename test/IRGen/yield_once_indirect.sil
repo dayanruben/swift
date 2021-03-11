@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-ir -disable-llvm-optzns %s | %FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-ptrsize --check-prefix=CHECK-%target-ptrsize-%target-ptrauth -DINT=i%target-ptrsize
+// RUN: %target-swift-frontend -emit-ir -disable-llvm-optzns -disable-swift-specific-llvm-optzns %s | %FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-ptrsize --check-prefix=CHECK-%target-ptrsize-%target-ptrauth -DINT=i%target-ptrsize
 
 import Builtin
 import Swift
@@ -43,7 +43,7 @@ entry:
   // CHECK-NEXT:    call void @llvm.lifetime.start.p0i8(i64 {{.*}}, i8* [[T0]])
   %temp = alloc_stack $Indirect<C>
 
-  // CHECK-NEXT:    call swiftcc void @make_indirect([[INDIRECT]]* noalias nocapture sret [[TEMP]], %swift.type* %C)
+  // CHECK-NEXT:    call swiftcc void @make_indirect([[INDIRECT]]* noalias nocapture sret({{.*}}) [[TEMP]], %swift.type* %C)
   %make = function_ref @make_indirect : $@convention(thin) <T: SomeClass> () -> (@out Indirect<T>)
   apply %make<C>(%temp) : $@convention(thin) <T: SomeClass> () -> (@out Indirect<T>)
 

@@ -19,6 +19,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/VersionTuple.h"
 #include "swift/AST/GenericSignature.h"
+#include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/Type.h"
 
 namespace swift {
@@ -41,15 +42,27 @@ void serialize(const llvm::VersionTuple &VT, llvm::json::OStream &OS);
 void serialize(const llvm::Triple &T, llvm::json::OStream &OS);
 void serialize(const ExtensionDecl *Extension, llvm::json::OStream &OS);
 void serialize(const Requirement &Req, llvm::json::OStream &OS);
-void serialize(const swift::GenericTypeParamType *Param,
-               llvm::json::OStream &OS);
+void serialize(const swift::GenericTypeParamType *Param, llvm::json::OStream &OS);
 
+void filterGenericParams(
+    TypeArrayView<GenericTypeParamType> GenericParams,
+    SmallVectorImpl<const GenericTypeParamType*> &FilteredParams,
+    SubstitutionMap SubMap = {});
 
-/// Filter generic requirements that aren't relevant for documentation.
+/// Filter generic requirements on an extension that aren't relevant
+/// for documentation.
+void filterGenericRequirements(
+    ArrayRef<Requirement> Requirements, const NominalTypeDecl *Self,
+    SmallVectorImpl<Requirement> &FilteredRequirements,
+    SubstitutionMap SubMap = {},
+    ArrayRef<const GenericTypeParamType *> FilteredParams = {});
+
+/// Filter generic requirements on an extension that aren't relevant
+/// for documentation.
 void
-filterGenericRequirements(ArrayRef<Requirement> Requirements,
-                          const NominalTypeDecl *Self,
+filterGenericRequirements(const ExtensionDecl *Extension,
                           SmallVectorImpl<Requirement> &FilteredRequirements);
+
 } // end namespace symbolgraphgen
 } // end namespace swift
 

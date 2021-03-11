@@ -1,7 +1,9 @@
 # Differentiable Programming Manifesto
 
 *   Authors: [Richard Wei], [Dan Zheng], [Marc Rasi], [Bart Chrzaszcz]
-*   Status: Partially implemented
+*   Status:
+    * Partially implemented on main, feature gated under `import _Differentiation`
+    * Initial proposal [pitched](https://forums.swift.org/t/differentiable-programming-for-gradient-based-machine-learning/42147) with a significantly scoped-down subset of features. Please refer to the linked pitch thread for the latest design discussions and changes.
 
 ## Table of contents
 
@@ -139,11 +141,11 @@ The ability to get derivatives of programs enables a new world of numerical
 computing applications, notably machine learning. With first-class support,
 gradient-based learning algorithms can even be built using standard library
 types such as `Float` and `SIMD64<Float>` and be differentiated using
-protocol-oriented APIs such as `valueWithGradient(at:in:)`.
+protocol-oriented APIs such as `valueWithGradient(at:of:)`.
 
 ```swift
 struct Perceptron: @memberwise Differentiable {
-    var weight: SIMD2<Float> = .random(in: -1..<1)
+    var weight: SIMD2<Float> = .random(of: -1..<1)
     var bias: Float = 0
 
     @differentiable
@@ -893,8 +895,15 @@ extension Perceptron {
 
 ### `@differentiable` function types
 
-A subtype of normal function types with a different runtime representation,
-which stores metadata that allows their values to be differentiated anywhere.
+Differentiable functions are first-class values, identified by a
+`@differentiable` attribute in the function type. A `@differentiable` function
+type is a subtype of its corresponding normal function type (i.e. without a
+`@differentiable` attribute) with an extended ABI, which stores metadata that
+allows their values to be differentiated anywhere the function is passed. A
+`@differentiable(linear)` function type is a subtype of its corresponding
+`@differentiable` function type. A normal function can be implicitly converted
+to a `@differentiable` or `@differentiable(linear)` function with appropriate
+compile-time checks.
 
 ```swift
 func addOne(_ x: Float) -> Float { x + 1 }
@@ -920,8 +929,9 @@ func _(_ x: Float) -> (value: Float,
 
 ### Differential operators
 
-Standard library differentiation APIs that take `@differentiable` functions and
-return derivative functions or compute derivative values.
+Differential operators are APIs defined in the standard library that take
+`@differentiable` functions and return derivative functions or compute
+derivative values.
 
 ```swift
 // In the standard library:
@@ -972,48 +982,10 @@ public protocol Differentiable {
     associatedtype TangentVector: Differentiable & AdditiveArithmetic
         where TangentVector == TangentVector.TangentVector
 
-    /// Moves `self` along the given direction. In Riemannian geometry, this is
+    /// Moves `self` by the given offset. In Riemannian geometry, this is
     /// equivalent to exponential map, which moves `self` on the geodesic
-    /// surface along the given tangent vector.
-    mutating func move(along direction: TangentVector)
-    
-    /// A closure that produces a zero tangent vector and does not capture `self`.
-    ///
-    /// In some cases, the zero tangent vector of `self` is equal to
-    /// `TangentVector.zero`. In other cases, the zero tangent vector depends on
-    /// information in `self`, such as shape for an n-dimensional array type.
-    /// For differentiable programming, it is more memory-efficient to define a
-    /// custom `zeroTangentVectorInitializer` property which returns a closure
-    /// that captures and uses only the necessary information to create a zero
-    /// tangent vector. For example:
-    ///
-    /// ```swift
-    /// struct Vector {
-    ///     var scalars: [Float]
-    ///     var count: Int { scalars.count }
-    ///     init(repeating repeatedElement: Float, count: Int) { ... }
-    /// }
-    /// 
-    /// extension Vector: Differentiable {
-    ///     typealias TangentVector = Vector
-    ///
-    ///     @noDerivative
-    ///     var zeroTangentVectorInitializer: () -> TangentVector {
-    ///         let count = self.count
-    ///         return { TangentVector(repeating: 0, count: count) }
-    ///     }
-    /// }
-    /// ```
-    ///
-    @noDerivative
-    var zeroTangentVectorInitializer: () -> TangentVector { get }
-}
-
-extension Differentiable {
-    /// A tangent vector such that `move(along: zeroTangentVector)` will not modify
-    /// `self`.
-    @noDerivative
-    var zeroTangentVector: TangentVector { zeroTangentVectorInitializer() }
+    /// surface by the given tangent vector.
+    mutating func move(by offset: TangentVector)
 }
 ```
 
@@ -1065,34 +1037,22 @@ and
 [`+(_:_:)`](https://developer.apple.com/documentation/swift/additivearithmetic/3126821)
 are necessary for initializing and accumulating derivative values.
 
-The `move(along:)` method is equivalent to the mathematical notion of
+The `move(by:)` method is equivalent to the mathematical notion of
 [exponential map](https://en.wikipedia.org/wiki/Exponential_map_\(Riemannian_geometry\)),
 which takes a tangent vector (e.g. a derivative), and moves the value along the
 direction specified by the tangent vector on the geodesic surface of the
 manifold. In vector spaces where the tangent vector is of the same vector space
-as the original differentiable space, `move(along:)` is equivalent to vector
+as the original differentiable space, `move(by:)` is equivalent to vector
 addition. Mathematical optimization algorithms such as gradient descent will
 make use of this method.
 
 ```swift
 public extension Differentiable where Self == TangentVector {
-    mutating func move(along direction: TangentVector) {
-        self += direction
-    }
-
-    @noDerivative
-    var zeroTangentVectorInitializer: () -> TangentVector {
-        { .zero }
+    mutating func move(by offset: TangentVector) {
+        self += offset
     }
 }
 ```
-
-The `zeroTangentVector` property returns a tangent vector such that calling
-`move(along:)` on the vector will not modify `self`. A zero tangent vector is
-often used in the initialization of mathematical optimization, where tangent
-vectors are initially zero and modified iteratively. This property may be
-different from `TangentVector.zero` because some tangent vectors depend on
-instance properties of `self`, e.g. the `count` property in `Array`.
 
 #### `Differentiable` conformances
 
@@ -1136,16 +1096,9 @@ extension Array: Differentiable where Element: Differentiable {
         ...
     }
 
-    public mutating func move(along direction: TangentVector) {
+    public mutating func move(by offset: TangentVector) {
         for i in indices {
-            self[i].move(along: Element.TangentVector(direction.elements[i]))
-        }
-    }
-
-    @noDerivative
-    public var zeroTangentVectorInitializer: () -> TangentVector {
-        { [count = self.count] in
-            TangentVector(Array(repeating: .zero, count: count))
+            self[i].move(by: Element.TangentVector(offset.elements[i]))
         }
     }
 }
@@ -1163,17 +1116,9 @@ extension Dictionary: Differentiable where Value: Differentiable {
         ...
     }
 
-    public mutating func move(along direction: TangentVector) {
+    public mutating func move(by offset: TangentVector) {
         for i in indices {
-            self[i].move(along: Value.TangentVector(direction.elements[i]))
-        }
-    }
-
-    @noDerivative
-    public var zeroTangentVectorInitializer: () -> TangentVector {
-        { [keys = self.keys] in
-            let pairs = zip(keys, sequence(first: .zero, next: {$0}))
-            return TangentVector(Dictionary(uniqueKeysWithValues: pairs))
+            self[i].move(by: Value.TangentVector(offset.elements[i]))
         }
     }
 }
@@ -1189,15 +1134,10 @@ extension Optional: Differentiable where Wrapped: Differentiable {
         ...
     }
 
-    public mutating func move(along direction: TangentVector) {
-        if let value = direction.value {
-            self?.move(along: value)
+    public mutating func move(by offset: TangentVector) {
+        if let value = offset.value {
+            self?.move(by: value)
         }
-    }
-
-    @noDerivative
-    public var zeroTangentVectorInitializer: () -> TangentVector {
-        { TangentVector(.zero) }
     }
 }
 ```
@@ -1209,64 +1149,153 @@ network layers and models are formed from smaller components stored as
 properties in structure types and class types. In order to use these types for
 differentiation, one must extend these types to conform to the `Differentiable`
 protocol. Luckily, this need not be done manually in most cases—the compiler
-automatically synthesizes conformances when a memberwise `Differentiable`
-conformance is declared.
+automatically synthesizes conformances when a `Differentiable` conformance is
+declared.
 
 ##### Synthesis conditions
 
 The compiler automatically synthesizes implementations of `Differentiable`
-protocol requirements for struct and class types. Here are the conditions for
-synthesis: The type must declare a conformance to `Differentiable` with a
-`@memberwise` attribute before the protocol name, either on the type declaration
-or on an extension in the same file. All stored properties of the conforming
-type must either be a `var` that conforms to `Differentiable` or be marked with
-the `@noDerivative` attribute. If a non-`Differentiable` or a `let` stored
-property is not marked with `@noDerivative`, then it is treated as if it has
-`@noDerivative` and the compiler emits a warning (with a fix-it in IDEs) asking
-the user to make the attribute explicit.
+protocol requirements for struct and class types. For a type, conditions for the
+synthesis are:
+
+1. There is a conformance to `Differentiable` declared for the type, either in
+   the original type declaration or in an extension.
+
+2. There is a `@memberwise` attribute in the conformance clause before the
+   protocol name.
+
+3. The conformance must be declared in the same file.
+
+Here is an example where the synthesis conditions are satisfied.
+
+```swift
+struct Model: @memberwise Differentiable {
+    var weight: SIMD4<Double>
+    var bias: Double
+    let metadata1: Float
+    let metadata2: Float
+    let usesBias: Bool
+}
+```
 
 ##### Default synthesis
 
-By default, the compiler synthesizes a nested `TangentVector` structure type
-that contains the `TangentVector`s of all stored properties that are not marked
-with `@noDerivative`. In other words, `@noDerivative` makes a stored property
-not be included in a type's tangent vectors.
+The compiler synthesizes a nested `TangentVector` structure type that contains
+the `TangentVector`s of all stored properties (terms and conditions apply) that
+conform to `Differentiable`, which we call **differentiable variables**.
+
+Mathematically, the synthesized implementation treats the data structure as a
+product manifold of the manifolds each differentiable variable's type
+represents. Differentiable variables' types are required to conform to
+`Differentiable` because the synthesized implementation needs to access each
+differentiable variable's type's `TangentVector` associated type and invoke each
+differentiable variable's implementation of `move(by:)`. Because the
+synthesized implementation needs to invoke `move(by:)` on each differentiable
+variable, the differentiable variables must have a `move(by:)` which satisfies the
+protocol requirement and can be invoked on the property. That is, the property
+must be either a variable (`var`) or a constant (`let`) with a non-`mutating`
+implementation of the `move(by:)` protocol requirement.
 
 The synthesized `TangentVector` has the same effective access level as the
 original type declaration. Properties in the synthesized `TangentVector` have
 the same effective access level as their corresponding original properties.
 
-A `move(along:)` method is synthesized with a body that calls `move(along:)` for
-each pair of the original property and its corresponding property in
-`TangentVector`. Similarly, `zeroTangentVector` is synthesized to return a
-tangent vector that consists of each stored property's `zeroTangentVector`.
-Here's an example:
+The synthesized `TangentVector` adopts protocols from all `TangentVector`
+conformance constraints implied by the declaration that triggers synthesis. For
+example, synthesized `TangentVector`s always adopt the `AdditiveArithmetic` and
+`Differentiable` protocols because the `Differentiable` protocol requires that
+`TangentVector` conforms to `AdditiveArithmetic` and `Differentiable`.
+
+The synthesized `move(by:)` method calls `move(by:)` for each pair of a
+differentiable variable and its corresponding property in `TangentVector`.
 
 ```swift
 struct Foo<T: Differentiable, U: Differentiable>: @memberwise Differentiable {
-    // `x` and `y` are the "differentiation properties".
+    // `x` and `y` are the "differentiable variables".
     var x: T
     var y: U
-    @noDerivative var customFlag: Bool
-    @noDerivative let helperVariable: T
+    let customFlag: Bool
 
     // The compiler synthesizes:
+    //
     //     struct TangentVector: Differentiable, AdditiveArithmetic {
     //         var x: T.TangentVector
     //         var y: U.TangentVector
     //     }
-    //     mutating func move(along direction: TangentVector) {
-    //         x.move(along: direction.x)
-    //         y.move(along: direction.y)
-    //     }
-    //     @noDerivative
-    //     var zeroTangentVectorInitializer: () -> TangentVector {
-    //         { [xTanInit = x.zeroTangentVectorInitializer,
-    //            yTanInit = y.zeroTangentVectorInitializer] in
-    //             TangentVector(x: xTanInit(), y: yTanInit())
-    //         }
+    //
+    //     mutating func move(by offset: TangentVector) {
+    //         x.move(by: offset.x)
+    //         y.move(by: offset.y)
     //     }
 }
+```
+
+###### Opt out of synthesis for a stored property
+
+The synthesized implementation of `Differentiable` protocol requirements already
+excludes stored properties that are not differentiable variables, such as stored
+properties that do not conform to `Differentiable` and `let`
+properties that do not have a non-mutating `move(by:)`. In addition to this
+behavior, we also introduce a `@noDerivative` declaration attribute, which can
+be attached to properties that the programmer does not wish to include in the
+synthesized `Differentiable` protocol requirement implementation.
+
+When a stored property is marked with `@noDerivative` in a type that declares a
+conformance to `Differentiable`, it will not be treated as a differentiable
+variable regardless of whether it conforms to `Differentiable`. That is, the
+synthesized implementation of protocol requirements will not include this
+property.
+
+```swift
+struct Foo<T: Differentiable, U: Differentiable>: @memberwise Differentiable {
+    // `x` and `y` are the "differentiable variables".
+    var x: T
+    var y: U
+    @noDerivative var customFlag: Bool
+    @noDerivative let helperVariable: T
+}
+```
+
+For clarity as to which stored properties are to be included for
+differentiation, the compiler will recommend that all stored properties that
+cannot be included as differentiable variables (due to either lacking a
+conformance to `Differentiable` or being a non-`class`-bound `let` property) be
+marked with `@noDerivative`. When a property is not included as a differentiable
+variable and is not marked with `@noDerivative`, the compiler produces a warning
+asking the user to make the exclusion explicit along with fix-it suggestions in
+IDEs.
+
+```swift
+struct Foo<T: Differentiable, U: Differentiable>: @memberwise Differentiable {
+    // `x` and `y` are the "differentiable variables".
+    var x: T
+    var y: U
+    var customFlag: Bool
+    let helperVariable: T
+}
+```
+
+```console
+test.swift:5:4: warning: stored property 'customFlag' has no derivative because 'Bool' does not conform to 'Differentiable'
+    var customFlag: Bool
+
+test.swift:5:4: note: add a '@noDerivative' attribute to make it explicit
+    var customFlag: Bool
+    ^
+    @noDerivative
+
+test.swift:6:4: warning: synthesis of the 'Differentiable.move(by:)' requirement for 'Foo' requires all stored properties not marked with `@noDerivative` to be mutable
+    let helperVariable: T
+
+test.swift:6:4: note: change 'let' to 'var' to make it mutable
+    let helperVariable: T
+    ^~~
+    var
+
+test.swift:6:4: note: add a '@noDerivative' attribute to make it explicit
+    let helperVariable: T
+    ^
+    @noDerivative
 ```
 
 ##### Shortcut synthesis
@@ -1278,8 +1307,8 @@ properties are declared to conform to `AdditiveArithmetic`. There are no
 `@noDerivative` stored properties.
 
 In these cases, the compiler will make `TangentVector` be a type alias for Self.
-Method `move(along:)` and property `zeroTangentVector` will not be synthesized
-because a default implementation already exists.
+Method `move(by:)` will not be synthesized because a default implementation
+already exists.
 
 ```swift
 struct Point<T: Real>: @memberwise Differentiable, @memberwise AdditiveArithmetic {
@@ -1287,6 +1316,7 @@ struct Point<T: Real>: @memberwise Differentiable, @memberwise AdditiveArithmeti
     var x, y: T
 
     // The compiler synthesizes:
+    //
     //     typealias TangentVector = Self
 }
 ```
@@ -1761,9 +1791,9 @@ Since complex numbers are not yet defined in the standard library, we extended
 the complex number type defined in the
 [NumericAnnex](https://github.com/xwu/NumericAnnex) library to be
 differentiable.
-[The full implementation is here](https://github.com/tensorflow/swift-apis/blob/master/Sources/third_party/Experimental/Complex.swift).
+[The full implementation is here](https://github.com/tensorflow/swift-apis/blob/main/Sources/third_party/Experimental/Complex.swift).
 The implementation adopts the
-[Autograd convention](https://github.com/HIPS/autograd/blob/master/docs/tutorial.md#complex-numbers)
+[Autograd convention](https://github.com/HIPS/autograd/blob/main/docs/tutorial.md#complex-numbers)
 for derivatives of functions with complex arguments or results, so that we can
 define derivatives for non-holomorphic primitives.
 
@@ -1935,7 +1965,7 @@ One concrete example is `sinf(_:)` from the C standard library. It can be made
 differentiable by defining a derivative retroactively.
 
 ```swift
-#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
+#if canImport(Darwin)
 import func Darwin.sinf
 #else
 import func Glibc.sinf
@@ -1982,7 +2012,7 @@ func foo<T: Differentiable, U, V: Differentiable>(
 ##### Examples
 
 The `ElementaryFunctions` protocol introduced in
-[SE-0246](https://github.com/apple/swift-evolution/blob/master/proposals/0246-mathable.md)
+[SE-0246](https://github.com/apple/swift-evolution/blob/main/proposals/0246-mathable.md)
 defines generic elementary functions, which are non-linear. By defining
 derivatives using the `@derivative` attribute for these protocol
 requirements in an extension, all conforming types now have differentiable
@@ -2141,7 +2171,7 @@ derivative in `B.swift`.
 internal func foo(_ x: Float) -> Float {
     x * x
 }
-let dfdx_A = derivative(at: 3, in: foo)
+let dfdx_A = derivative(at: 3, of: foo)
 // dfdx_A ==> 6
 
 // File B.swift:
@@ -2152,11 +2182,11 @@ fileprivate func _(_ x: Float) -> (
 ) {
     (value: foo(x), differential: { _ in 42 })
 }
-let dfdx_B = derivative(at: 3, in: foo)
+let dfdx_B = derivative(at: 3, of: foo)
 // dfdx_B ==> 42
 
 // File C.swift:
-let dfdx_C = derivative(at: 3, in: foo)
+let dfdx_C = derivative(at: 3, of: foo)
 // dfdx_C ==> 6
 ```
 
@@ -2297,7 +2327,7 @@ As shown in the
 subsection, a `@differentiable` function value's runtime representation contains
 the original function along with extra information that allows the function to
 be differentiated (or transposed, if it is `@differentiable(linear)`). A
-@differentiable or `@differentiable(linear)` function value can be called like a
+`@differentiable` or `@differentiable(linear)` function value can be called like a
 non-`@differentiable` function. A `@differentiable(linear)` function value can
 be implicitly converted to a `@differentiable` one, which can be implicitly
 converted to a non-`@differentiable` one.
@@ -2426,7 +2456,7 @@ As defined above, the `@differentiable` function type attributes requires all
 non-`@noDerivative` arguments and results to conform to the `@differentiable`
 attribute. However, there is one exception: when the type of an argument or
 result is a function type, e.g. `@differentiable (T) -> @differentiable (U) ->
-V`. This is because we need to differentiate higher-order funtions.
+V`. This is because we need to differentiate higher-order functions.
 
 Mathematically, the differentiability of `@differentiable (T, U) -> V` is
 similar to that of `@differentiable (T) -> @differentiable (U) -> V` in that
@@ -2466,13 +2496,13 @@ inputs and return derivative functions or evaluate derivative values.
 #### Differential-producing differential operators
 
 Among these differential operators, two base APIs,
-`valueWithDifferential(at:in:)` and `transpose(of:)`, are used for implementing
+`valueWithDifferential(at:of:)` and `transpose(of:)`, are used for implementing
 *all other differential operators and differentiation APIs*.
 
 ```swift
 /// Returns `body(x)` and the differential of `body` at `x`.
 func valueWithDifferential<T, R>(
-    at x: T, in body: @differentiable (T) -> R
+    at x: T, of body: @differentiable (T) -> R
 ) -> (value: R,
       differential: @differentiable(linear) (T.TangentVector) -> R.TangentVector) {
     // Compiler built-in.
@@ -2495,22 +2525,22 @@ function whose parameter is a real number.
 
 ```swift
 func valueWithDerivative<T: FloatingPoint, R>(
-    at x: T, in body: @differentiable (T) -> R
+    at x: T, of body: @differentiable (T) -> R
 ) -> (value: R, derivative: R.TangentVector) where T.TangentVector: FloatingPoint {
-    let (value, df) = valueWithDifferential(at: x, in: body)
+    let (value, df) = valueWithDifferential(at: x, of: body)
     return (value, df(T.TangentVector(1)))
 }
 
 func derivative<T: FloatingPoint, R>(
-    at x: T, in body: @differentiable (T) -> R
+    at x: T, of body: @differentiable (T) -> R
 ) -> R.TangentVector where T.TangentVector: FloatingPoint {
-    valueWithDerivative(at: x, in: body).derivative
+    valueWithDerivative(at: x, of: body).derivative
 }
 
 func derivative<T: FloatingPoint, R>(
     of body: @escaping @differentiable (T) -> R
 ) -> (T) -> R.TangentVector where T.TangentVector: FloatingPoint {
-    return { x in derivative(at: x, in: body) }
+    return { x in derivative(at: x, of: body) }
 }
 ```
 
@@ -2518,37 +2548,37 @@ func derivative<T: FloatingPoint, R>(
 
 Unlike directional derivatives, gradients are computed by pullbacks. Based on
 the differential-producing differential operator
-`valueWithDifferential(at:in:)`, `valueWithPullback(at:in:)` is defined as
+`valueWithDifferential(at:of:)`, `valueWithPullback(at:of:)` is defined as
 returning the original value and the transpose of the differential, and
-`valueWithGradient(at:in:)` is defined as evaluating the pullback at `1` when
+`valueWithGradient(at:of:)` is defined as evaluating the pullback at `1` when
 the function being differentiated returns a real number.
 
 ```swift
 func valueWithPullback<T, R>(
-    at x: T, in body: @differentiable (T) -> R
+    at x: T, of body: @differentiable (T) -> R
 ) -> (value: R,
       pullback: @differentiable(linear) (R.TangentVector) -> T.TangentVector) {
-    let (value, df) = valueWithDifferential(at: x, in: body)
+    let (value, df) = valueWithDifferential(at: x, of: body)
     return (value, transpose(of: df))
 }
 
 func valueWithGradient<T, R: FloatingPoint>(
-    at x: T, in body: @differentiable (T) -> R
+    at x: T, of body: @differentiable (T) -> R
 ) -> (value: R, gradient: T.TangentVector) where R.TangentVector: FloatingPoint {
-    let (value, pullback) = valueWithPullback(at: x, in: body)
+    let (value, pullback) = valueWithPullback(at: x, of: body)
     return (value, pullback(R.TangentVector(1)))
 }
 
 func gradient<T, R: FloatingPoint>(
-    at x: T, in body: @differentiable (T) -> R
+    at x: T, of body: @differentiable (T) -> R
 ) -> T.TangentVector where R.TangentVector: FloatingPoint {
-    return valueWithGradient(at: x, in: body).gradient
+    return valueWithGradient(at: x, of: body).gradient
 }
 
 func gradient<T, R: FloatingPoint>(
     of body: @escaping @differentiable (T) -> R
 ) -> (T) -> T.TangentVector where R.TangentVector: FloatingPoint {
-    return { x in gradient(at: x, in: body) }
+    return { x in gradient(at: x, of: body) }
 }
 ```
 
@@ -2578,14 +2608,14 @@ for _ in 0..<1000 {
 Differential operators                                                                                                                                                                                                                                                                                                         | Description
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -----------
 [`transpose(of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L374)                                                                                                                                                                                        | Returns transpose of linear map.
-[`valueWithDifferential(at:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L383) <br> [`valueWithDifferential(at:_:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L390) (arity 2) | Returns original result and differential function.
-[`valueWithPullback(at:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L276) <br> [`valueWithPullback(at:_:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L283)                   | Returns original result and pullback function.
-[`differential(at:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L435) <br> [`differential(at:_:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L442) (arity 2)                   | Returns differential function.
-[`pullback(at:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L302) <br> [`pullback(at:_:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L309)                                     | Returns pullback function.
-[`derivative(at:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L483) <br> [`derivative(at:_:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L491) (arity 2)                       | Returns partial derivatives with respect to arguments ("forward-mode").
-[`gradient(at:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L384) <br> [`gradient(at:_:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L392)                                     | Returns partial derivatives with respect to arguments ("reverse-mode").
-[`valueWithDerivative(at:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L538) <br> [`valueWithDerivative(at:_:in:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L547) (arity 2)     | Returns original result and partial derivatives with respect to arguments ("forward-mode").
-[`valueWithGradient(at:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L327) <br> [`valueWithGradient(at:_:in:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L335)                   | Returns original result and partial derivatives with respect to arguments ("reverse-mode").
+[`valueWithDifferential(at:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L383) <br> [`valueWithDifferential(at:_:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L390) (arity 2) | Returns original result and differential function.
+[`valueWithPullback(at:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L276) <br> [`valueWithPullback(at:_:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L283)                   | Returns original result and pullback function.
+[`differential(at:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L435) <br> [`differential(at:_:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L442) (arity 2)                   | Returns differential function.
+[`pullback(at:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L302) <br> [`pullback(at:_:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L309)                                     | Returns pullback function.
+[`derivative(at:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L483) <br> [`derivative(at:_:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L491) (arity 2)                       | Returns partial derivatives with respect to arguments ("forward-mode").
+[`gradient(at:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L384) <br> [`gradient(at:_:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L392)                                     | Returns partial derivatives with respect to arguments ("reverse-mode").
+[`valueWithDerivative(at:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L538) <br> [`valueWithDerivative(at:_:of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L547) (arity 2)     | Returns original result and partial derivatives with respect to arguments ("forward-mode").
+[`valueWithGradient(at:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L327) <br> [`valueWithGradient(at:_:of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L335)                   | Returns original result and partial derivatives with respect to arguments ("reverse-mode").
 [`derivative(of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L601) <br> [`derivative(of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L609) (arity 2)                               | Returns derivative function, taking original arguments and returning and partial derivatives with respect to arguments ("forward-mode").
 [`gradient(of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L410) <br> [`gradient(of:)`](https://github.com/apple/swift/blob/c1211a3f78992c89a3ab4d638c378c6f45ab8fe8/stdlib/public/core/AutoDiff.swift#L418)                                             | Returns gradient function, taking original arguments and returning and partial derivatives with respect to arguments ("reverse-mode").
 [`valueWithDerivative(of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L656) <br> [`valueWithDerivative(of:)`](https://github.com/apple/swift/blob/9c95e27601e9623f5b53c9cc531d185e267a83d6/stdlib/public/core/AutoDiff.swift#L664) (arity 2)             | Returns function taking original arguments and returning original result and partial derivatives with respect to arguments ("forward-mode").
@@ -2610,7 +2640,7 @@ transpose function or a derivative function, but not of functions that have not
 been marked this way without defining a custom derivative for it. For example,
 if we try to differentiate
 [`sinf(_:)`](https://en.cppreference.com/w/c/numeric/math/sin) with the
-`derivative(at:in:)` API, the compiler will produce error messages at
+`derivative(at:of:)` API, the compiler will produce error messages at
 compile-time instead of producing zero derivatives.
 
 ```swift
@@ -2713,7 +2743,7 @@ for i in 0..<iterationCount {
     }
     𝛁loss.weight *= -learningRate
     𝛁loss.bias *= -learningRate
-    model.move(along: 𝛁loss)
+    model.move(by: 𝛁loss)
     if i.isMultiple(of: 10) {
         print("Iteration: \(iteration) Avg Loss: \(loss / Float(data.count))")
     }
@@ -2935,26 +2965,26 @@ mean infinite differentiability.
 func derivative<T: FloatingPoint, U: Differentiable>(
     _ f: @differentiable (T) -> U
 ) -> @differentiable (T) -> U where T: FloatingPoint, T == T.TangentVector {
-    { x in differential(at: x, in: f) }
+    { x in differential(at: x, of: f) }
 }
 ```
 
-Since `derivative(of:)` is implemented in term of `derivative(at:in:)`, which is
-implemented in terms of `valueWithDifferential(at:in:)`, both
-`derivative(at:in:)` and `valueWithDifferential(at:in:)` would need to be marked
+Since `derivative(of:)` is implemented in term of `derivative(at:of:)`, which is
+implemented in terms of `valueWithDifferential(at:of:)`, both
+`derivative(at:of:)` and `valueWithDifferential(at:of:)` would need to be marked
 with `@differentiatiable` with respect to its `x` argument.
 
 ```swift
 @differentiable(wrt: x)
 func derivative<T: FloatingPoint, U: Differentiable>(
-    at x: T, in body: @differentiable (T) -> U) -> U
+    at x: T, of body: @differentiable (T) -> U) -> U
 ) -> U.TangentVector where T: FloatingPoint, T == T.TangentVector {
-    valueWithDifferential(at: x, in: body).differential(T(1))
+    valueWithDifferential(at: x, of: body).differential(T(1))
 }
 
 @differentiable(wrt: x)
 func valueWithDifferential<T: FloatingPoint, U: Differentiable>(
-    at x: T, in body: @differentiable (T) -> U) -> U
+    at x: T, of body: @differentiable (T) -> U) -> U
 ) -> (value: U, differential: @differentiable(linear) (T.TangentVector) -> U.TangentVector)
 ```
 
@@ -3078,7 +3108,7 @@ Parker Schuh, and Dimitrios Vytiniotis.
 [Bart Chrzaszcz]: https://github.com/bartchr808
 
 [swift-numerics]: https://github.com/apple/swift-numerics
-[SE-0229]: https://github.com/apple/swift-evolution/blob/master/proposals/0229-simd.md
-[SE-0233]: https://github.com/apple/swift-evolution/blob/master/proposals/0233-additive-arithmetic-protocol.md
-[SE-0246]: https://github.com/apple/swift-evolution/blob/master/proposals/0246-mathable.md
-[SE-0251]: https://github.com/apple/swift-evolution/blob/master/proposals/0251-simd-additions.md
+[SE-0229]: https://github.com/apple/swift-evolution/blob/main/proposals/0229-simd.md
+[SE-0233]: https://github.com/apple/swift-evolution/blob/main/proposals/0233-additive-arithmetic-protocol.md
+[SE-0246]: https://github.com/apple/swift-evolution/blob/main/proposals/0246-mathable.md
+[SE-0251]: https://github.com/apple/swift-evolution/blob/main/proposals/0251-simd-additions.md

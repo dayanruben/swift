@@ -293,6 +293,7 @@ internal struct _Buffer72 {
   }
 }
 
+#if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
 // Note that this takes a Float32 argument instead of Float16, because clang
 // doesn't have _Float16 on all platforms yet.
 @_silgen_name("swift_float16ToString")
@@ -303,7 +304,7 @@ internal func _float16ToStringImpl(
   _ debug: Bool
 ) -> Int
 
-@available(macOS 9999, iOS 9999, tvOS 9999, watchOS 9999, *)
+@available(macOS 11.0, iOS 14.0, watchOS 7.0, tvOS 14.0, *)
 internal func _float16ToString(
   _ value: Float16,
   debug: Bool
@@ -315,6 +316,7 @@ internal func _float16ToString(
   }
   return (buffer, length)
 }
+#endif
 
 // Returns a UInt64, but that value is the length of the string, so it's
 // guaranteed to fit into an Int. This is part of the ABI, so we can't

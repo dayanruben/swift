@@ -30,10 +30,8 @@ class SourceFile;
 
 // MARK: - DependencyVerifier
 
-bool verifyDependencies(SourceManager &SM, const DependencyTracker &DT,
-                        ArrayRef<FileUnit *> SFs);
-bool verifyDependencies(SourceManager &SM, const DependencyTracker &DT,
-                        ArrayRef<SourceFile *> SFs);
+bool verifyDependencies(SourceManager &SM, ArrayRef<FileUnit *> SFs);
+bool verifyDependencies(SourceManager &SM, ArrayRef<SourceFile *> SFs);
 
 // MARK: - DiagnosticVerifier
 struct ExpectedFixIt;
@@ -67,6 +65,7 @@ class DiagnosticVerifier : public DiagnosticConsumer {
   SourceManager &SM;
   std::vector<CapturedDiagnosticInfo> CapturedDiagnostics;
   ArrayRef<unsigned> BufferIDs;
+  SmallVector<unsigned, 4> AdditionalBufferIDs;
   bool AutoApplyFixes;
   bool IgnoreUnknown;
 
@@ -75,6 +74,10 @@ public:
                               bool AutoApplyFixes, bool IgnoreUnknown)
       : SM(SM), BufferIDs(BufferIDs), AutoApplyFixes(AutoApplyFixes),
         IgnoreUnknown(IgnoreUnknown) {}
+
+  void appendAdditionalBufferID(unsigned bufferID) {
+    AdditionalBufferIDs.push_back(bufferID);
+  }
 
   virtual void handleDiagnostic(SourceManager &SM,
                                 const DiagnosticInfo &Info) override;

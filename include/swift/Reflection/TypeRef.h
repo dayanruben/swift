@@ -18,11 +18,13 @@
 #ifndef SWIFT_REFLECTION_TYPEREF_H
 #define SWIFT_REFLECTION_TYPEREF_H
 
+#include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Compiler.h"
 #include "swift/ABI/MetadataValues.h"
 #include "swift/Remote/MetadataReader.h"
-#include "swift/Runtime/Unreachable.h"
+#include "swift/Basic/Unreachable.h"
 
 namespace swift {
 namespace reflection {
@@ -137,7 +139,34 @@ class TypeRefBuilder;
 using DepthAndIndex = std::pair<unsigned, unsigned>;
 using GenericArgumentMap = llvm::DenseMap<DepthAndIndex, const TypeRef *>;
 
-class alignas(void *) TypeRef {
+/// FIXME: Implement me!
+struct TypeRefLayoutConstraint {
+  friend llvm::hash_code hash_value(const TypeRefLayoutConstraint &layout) {
+    return llvm::hash_value(0);
+  }
+  operator bool() const { return true; }
+  bool operator==(TypeRefLayoutConstraint rhs) const {
+    return true;
+  }
+};
+
+class TypeRefRequirement
+    : public RequirementBase<
+          const TypeRef *,
+          llvm::PointerIntPair<const TypeRef *, 3, RequirementKind>,
+          TypeRefLayoutConstraint> {
+public:
+  TypeRefRequirement(RequirementKind kind, const TypeRef *first,
+                     const TypeRef *second)
+      : RequirementBase(kind, first, second) {}
+  TypeRefRequirement(RequirementKind kind, const TypeRef *first,
+                     TypeRefLayoutConstraint second)
+      : RequirementBase(kind, first, second) {}
+};
+
+// On 32-bit systems this needs more than just pointer alignment to fit the
+// extra bits needed by TypeRefRequirement.
+class alignas(8) TypeRef {
   TypeRefKind Kind;
 
 public:
@@ -156,8 +185,8 @@ public:
   bool isConcrete() const;
   bool isConcreteAfterSubstitutions(const GenericArgumentMap &Subs) const;
 
-  const TypeRef *
-  subst(TypeRefBuilder &Builder, const GenericArgumentMap &Subs) const;
+  const TypeRef *subst(TypeRefBuilder &Builder,
+                       const GenericArgumentMap &Subs) const;
 
   llvm::Optional<GenericArgumentMap> getSubstMap() const;
 
@@ -301,38 +330,49 @@ public:
 };
 
 class TupleTypeRef final : public TypeRef {
+protected:
   std::vector<const TypeRef *> Elements;
-  bool Variadic;
+  std::string Labels;
 
   static TypeRefID Profile(const std::vector<const TypeRef *> &Elements,
-                           bool Variadic) {
+                           const std::string &Labels) {
     TypeRefID ID;
     for (auto Element : Elements)
       ID.addPointer(Element);
-
-    ID.addInteger(static_cast<uint32_t>(Variadic));
+    ID.addString(Labels);
     return ID;
   }
 
 public:
-  TupleTypeRef(std::vector<const TypeRef *> Elements, bool Variadic=false)
-    : TypeRef(TypeRefKind::Tuple), Elements(std::move(Elements)),
-      Variadic(Variadic) {}
+  TupleTypeRef(std::vector<const TypeRef *> Elements, std::string &&Labels)
+      : TypeRef(TypeRefKind::Tuple), Elements(std::move(Elements)),
+        Labels(Labels) {}
 
   template <typename Allocator>
   static const TupleTypeRef *create(Allocator &A,
                                     std::vector<const TypeRef *> Elements,
-                                    bool Variadic = false) {
-    FIND_OR_CREATE_TYPEREF(A, TupleTypeRef, Elements, Variadic);
+                                    std::string &&Labels) {
+    FIND_OR_CREATE_TYPEREF(A, TupleTypeRef, Elements, Labels);
   }
 
-  const std::vector<const TypeRef *> &getElements() const {
-    return Elements;
+  const std::vector<const TypeRef *> &getElements() const { return Elements; };
+  const std::string &getLabelString() const { return Labels; };
+  std::vector<llvm::StringRef> getLabels() const {
+    std::vector<llvm::StringRef> Vec;
+    std::string::size_type End, Start = 0;
+    while (true) {
+      End = Labels.find(' ', Start);
+      if (End == std::string::npos)
+        break;
+      Vec.push_back(llvm::StringRef(Labels.data() + Start, End - Start));
+      Start = End + 1;
+    }
+    // A canonicalized TypeRef has an empty label string.
+    // Pad the vector with empty labels.
+    for (unsigned N = Vec.size(); N < Elements.size(); ++N)
+      Vec.push_back({});
+    return Vec;
   };
-
-  bool isVariadic() const {
-    return Variadic;
-  }
 
   static bool classof(const TypeRef *TR) {
     return TR->getKind() == TypeRefKind::Tuple;
@@ -346,11 +386,11 @@ class OpaqueArchetypeTypeRef final : public TypeRef {
   // Each ArrayRef in ArgumentLists references into the buffer owned by this
   // vector, which must not be modified after construction.
   std::vector<const TypeRef *> AllArgumentsBuf;
-  std::vector<ArrayRef<const TypeRef *>> ArgumentLists;
-  
-  static TypeRefID Profile(StringRef idString,
-                           StringRef description, unsigned ordinal,
-                           ArrayRef<ArrayRef<const TypeRef *>> argumentLists) {
+  std::vector<llvm::ArrayRef<const TypeRef *>> ArgumentLists;
+
+  static TypeRefID
+  Profile(StringRef idString, StringRef description, unsigned ordinal,
+          llvm::ArrayRef<llvm::ArrayRef<const TypeRef *>> argumentLists) {
     TypeRefID ID;
     ID.addString(idString.str());
     ID.addInteger(ordinal);
@@ -362,14 +402,13 @@ class OpaqueArchetypeTypeRef final : public TypeRef {
     
     return ID;
   }
-  
+
 public:
-  OpaqueArchetypeTypeRef(StringRef id,
-                         StringRef description, unsigned ordinal,
-                         ArrayRef<ArrayRef<const TypeRef *>> argumentLists)
-    : TypeRef(TypeRefKind::OpaqueArchetype),
-      ID(id), Description(description), Ordinal(ordinal)
-  {
+  OpaqueArchetypeTypeRef(
+      StringRef id, StringRef description, unsigned ordinal,
+      llvm::ArrayRef<llvm::ArrayRef<const TypeRef *>> argumentLists)
+      : TypeRef(TypeRefKind::OpaqueArchetype), ID(id), Description(description),
+        Ordinal(ordinal) {
     std::vector<unsigned> argumentListLengths;
     
     for (auto argList : argumentLists) {
@@ -379,25 +418,24 @@ public:
     }
     auto *data = AllArgumentsBuf.data();
     for (auto length : argumentListLengths) {
-      ArgumentLists.push_back(ArrayRef<const TypeRef *>(data, length));
+      ArgumentLists.push_back(llvm::ArrayRef<const TypeRef *>(data, length));
       data += length;
     }
     assert(data == AllArgumentsBuf.data() + AllArgumentsBuf.size());
   }
-  
+
   template <typename Allocator>
-  static const OpaqueArchetypeTypeRef *create(Allocator &A,
-                                     StringRef id, StringRef description,
-                                     unsigned ordinal,
-                                     ArrayRef<ArrayRef<const TypeRef *>> arguments) {
+  static const OpaqueArchetypeTypeRef *
+  create(Allocator &A, StringRef id, StringRef description, unsigned ordinal,
+         llvm::ArrayRef<llvm::ArrayRef<const TypeRef *>> arguments) {
     FIND_OR_CREATE_TYPEREF(A, OpaqueArchetypeTypeRef,
                            id, description, ordinal, arguments);
   }
 
-  ArrayRef<ArrayRef<const TypeRef *>> getArgumentLists() const {
+  llvm::ArrayRef<llvm::ArrayRef<const TypeRef *>> getArgumentLists() const {
     return ArgumentLists;
   }
-  
+
   unsigned getOrdinal() const {
     return Ordinal;
   }
@@ -833,6 +871,67 @@ public:
   }
 };
 
+class SILBoxTypeWithLayoutTypeRef final : public TypeRef {
+public:
+  struct Field : public llvm::PointerIntPair<const TypeRef *, 1> {
+    Field(const TypeRef *Type, bool Mutable)
+        : llvm::PointerIntPair<const TypeRef *, 1>(Type, (unsigned)Mutable) {}
+    const TypeRef *getType() const { return getPointer(); }
+    bool isMutable() const { return getInt() == 1; }
+  };
+  using Substitution = std::pair<const TypeRef *, const TypeRef *>;
+
+  const std::vector<Field> &getFields() const { return Fields; }
+  const std::vector<Substitution> &getSubstitutions() const {
+    return Substitutions;
+  }
+  const std::vector<TypeRefRequirement> &getRequirements() const {
+    return Requirements;
+  }
+protected:
+  std::vector<Field> Fields;
+  std::vector<Substitution> Substitutions;
+  std::vector<TypeRefRequirement> Requirements;
+
+  static TypeRefID
+  Profile(const std::vector<Field> &Fields,
+          const std::vector<Substitution> &Substitutions,
+          const std::vector<TypeRefRequirement> &Requirements) {
+    TypeRefID ID;
+    for (auto &f : Fields)
+      ID.addPointer(f.getOpaqueValue());
+    for (auto &s : Substitutions) {
+      ID.addPointer(s.first);
+      ID.addPointer(s.second);
+    }
+    for (auto &r : Requirements)
+      ID.addInteger((uint64_t)(size_t)hash_value(hash_value(r)));
+    return ID;
+  }
+
+public:
+  SILBoxTypeWithLayoutTypeRef(llvm::ArrayRef<Field> Fields,
+                              llvm::ArrayRef<Substitution> Substitutions,
+                              llvm::ArrayRef<TypeRefRequirement> Requirements)
+      : TypeRef(TypeRefKind::SILBoxTypeWithLayout),
+        Fields(Fields.begin(), Fields.end()),
+        Substitutions(Substitutions.begin(), Substitutions.end()),
+        Requirements(Requirements.begin(), Requirements.end()) {}
+
+  template <typename Allocator>
+  static const SILBoxTypeWithLayoutTypeRef *
+  create(Allocator &A, llvm::ArrayRef<Field> Fields,
+         llvm::ArrayRef<Substitution> Substitutions,
+         llvm::ArrayRef<TypeRefRequirement> Requirements) {
+    FIND_OR_CREATE_TYPEREF(A, SILBoxTypeWithLayoutTypeRef, Fields,
+                           Substitutions, Requirements);
+  }
+
+  static bool classof(const TypeRef *TR) {
+    return TR->getKind() == TypeRefKind::SILBoxTypeWithLayout;
+  }
+};
+
 template <typename ImplClass, typename RetTy = void, typename... Args>
 class TypeRefVisitor {
 public:
@@ -847,7 +946,7 @@ public:
 #include "swift/Reflection/TypeRefs.def"
     }
 
-    swift_runtime_unreachable("Unhandled TypeRefKind in switch.");
+    swift_unreachable("Unhandled TypeRefKind in switch.");
   }
 };
 

@@ -62,7 +62,7 @@ struct TestSingleExprClosureRet {
 // TestSingleExprClosureRet: Begin completions
 // TestSingleExprClosureRet-DAG: Decl[InstanceMethod]/CurrNominal:   str()[#String#];
 // TestSingleExprClosureRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Identical]: int()[#Int#];
-// TestSingleExprClosureRet-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: void()[#Void#];
+// TestSingleExprClosureRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: void()[#Void#];
 // TestSingleExprClosureRet: End completions
 }
 
@@ -153,7 +153,7 @@ struct TestSingleExprClosureUnresolved {
 }
 // TestSingleExprClosureUnresolved: Begin completions
 // TestSingleExprClosureUnresolved-NOT: notMine
-// TestSingleExprClosureUnresolved: Decl[EnumElement]/CurrNominal/TypeRelation[Identical]: myEnum[#MyEnum#];
+// TestSingleExprClosureUnresolved: Decl[EnumElement]/ExprSpecific/TypeRelation[Identical]: myEnum[#MyEnum#];
 // TestSingleExprClosureUnresolved-NOT: notMine
 // TestSingleExprClosureUnresolved: End completions
 
@@ -236,7 +236,7 @@ struct TestSingleExprFuncRet {
 // TestSingleExprFuncRet: Begin completions
 // TestSingleExprFuncRet-DAG: Decl[InstanceMethod]/CurrNominal:   str()[#String#];
 // TestSingleExprFuncRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Identical]: int()[#Int#];
-// TestSingleExprFuncRet-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: void()[#Void#];
+// TestSingleExprFuncRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: void()[#Void#];
 // TestSingleExprFuncRet: End completions
 }
 
@@ -268,7 +268,7 @@ struct TestSingleExprFuncUnresolved {
 
 // TestSingleExprFuncUnresolved: Begin completions
 // TestSingleExprFuncUnresolved-NOT: notMine
-// TestSingleExprFuncUnresolved: Decl[EnumElement]/CurrNominal/TypeRelation[Identical]: myEnum[#MyEnum#];
+// TestSingleExprFuncUnresolved: Decl[EnumElement]/ExprSpecific/TypeRelation[Identical]: myEnum[#MyEnum#];
 // TestSingleExprFuncUnresolved-NOT: notMine
 // TestSingleExprFuncUnresolved: End completions
 }
@@ -346,7 +346,7 @@ struct TestSingleExprAccessorRet {
 // TestSingleExprAccessorRet: Begin completions
 // TestSingleExprAccessorRet-DAG: Decl[InstanceMethod]/CurrNominal:   str()[#String#];
 // TestSingleExprAccessorRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Identical]: int()[#Int#];
-// TestSingleExprAccessorRet-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: void()[#Void#];
+// TestSingleExprAccessorRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: void()[#Void#];
 // TestSingleExprAccessorRet: End completions
 }
 
@@ -378,7 +378,7 @@ struct TestSingleExprAccessorUnresolved {
 
 // TestSingleExprAccessorUnresolved: Begin completions
 // TestSingleExprAccessorUnresolved-NOT: notMine
-// TestSingleExprAccessorUnresolved: Decl[EnumElement]/CurrNominal/TypeRelation[Identical]: myEnum[#MyEnum#];
+// TestSingleExprAccessorUnresolved: Decl[EnumElement]/ExprSpecific/TypeRelation[Identical]: myEnum[#MyEnum#];
 // TestSingleExprAccessorUnresolved-NOT: notMine
 // TestSingleExprAccessorUnresolved: End completions
 }
@@ -498,7 +498,7 @@ struct TestSingleExprSubscriptRet {
 // TestSingleExprSubscriptRet: Begin completions
 // TestSingleExprSubscriptRet-DAG: Decl[InstanceMethod]/CurrNominal:   str()[#String#];
 // TestSingleExprSubscriptRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Identical]: int()[#Int#];
-// TestSingleExprSubscriptRet-DAG: Decl[InstanceMethod]/CurrNominal/NotRecommended/TypeRelation[Invalid]: void()[#Void#];
+// TestSingleExprSubscriptRet-DAG: Decl[InstanceMethod]/CurrNominal/TypeRelation[Invalid]: void()[#Void#];
 // TestSingleExprSubscriptRet: End completions
 }
 
@@ -530,7 +530,7 @@ struct TestSingleExprSubscriptUnresolved {
 
 // TestSingleExprSubscriptUnresolved: Begin completions
 // TestSingleExprSubscriptUnresolved-NOT: notMine
-// TestSingleExprSubscriptUnresolved: Decl[EnumElement]/CurrNominal/TypeRelation[Identical]: myEnum[#MyEnum#];
+// TestSingleExprSubscriptUnresolved: Decl[EnumElement]/ExprSpecific/TypeRelation[Identical]: myEnum[#MyEnum#];
 // TestSingleExprSubscriptUnresolved-NOT: notMine
 // TestSingleExprSubscriptUnresolved: End completions
 }
@@ -635,7 +635,7 @@ enum TopLevelEnum {
   case foo
 }
 
-// TopLevelEnum: Decl[EnumElement]/CurrNominal/TypeRelation[Identical]: foo[#TopLevelEnum#];
+// TopLevelEnum: Decl[EnumElement]/ExprSpecific/TypeRelation[Identical]: foo[#TopLevelEnum#];
 
 var testAccessorUnresolvedTopLevel: TopLevelEnum {
   .#^testAccessorUnresolvedTopLevel^#

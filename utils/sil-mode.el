@@ -150,6 +150,7 @@
                     "unchecked_ref_cast"
                     "unchecked_trivial_bit_cast"
                     "unchecked_bitwise_cast"
+                    "unchecked_value_cast"
                     "ref_to_raw_pointer" "raw_pointer_to_ref"
                     "unowned_to_ref" "ref_to_unowned"
                     "convert_function" "convert_escape_to_noescape"
@@ -258,6 +259,7 @@
 ;; *NOTE* viewcfg must be in the $PATH and .dot files should be associated with
 ;; the graphviz app.
 (defvar sil-mode-viewcfg-program-name "viewcfg")
+(defvar sil-mode-viewcfg-renderer "dot")
 (defvar sil-mode-viewcfg-buffer-name "*viewcfg*")
 
 (defcustom sil-mode-viewcfg-command-default "viewcfg"
@@ -273,15 +275,20 @@
 
 (defun sil-mode-display-function-cfg()
   (interactive)
-  ;; First we need to find the previous '{' and then the next '}'
+  ;; First we need to find the previous '{' and then the next '}'.
   (save-mark-and-excursion
-   (let ((brace-start (search-backward "{"))
-         (brace-end (search-forward "}"))
-         (process-connection-type nil))
-     (let ((p (start-process sil-mode-viewcfg-program-name
-                             sil-mode-viewcfg-buffer-name
-                             sil-mode-viewcfg-command)))
-       (process-send-region p brace-start brace-end)
+    (let ((brace-start (re-search-backward "{\s*$"))
+          (brace-end (re-search-forward "^} // end sil function '" nil t))
+          (process-connection-type nil))
+      ;; See if we failed to find } // end sil function. If we did, search again
+      ;; for ^} itself and see if we find anything.
+      (if (null brace-end)
+          (setq brace-end (re-search-forward "^}")))
+      (let ((p (start-process sil-mode-viewcfg-program-name
+                              sil-mode-viewcfg-buffer-name
+                              sil-mode-viewcfg-command
+                              (concat "--renderer=" sil-mode-viewcfg-renderer))))
+        (process-send-region p brace-start brace-end)
        (process-send-eof p)))))
 
 ;;; Top Level Entry point

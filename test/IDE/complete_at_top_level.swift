@@ -1,3 +1,5 @@
+// RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=TOP_LEVEL_VAR_INIT_3 | %FileCheck %s -check-prefix=TOP_LEVEL_VAR_INIT_3_NEGATIVE
+
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=TYPE_CHECKED_EXPR_1 | %FileCheck %s -check-prefix=TYPE_CHECKED_EXPR_1
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=TYPE_CHECKED_EXPR_2 | %FileCheck %s -check-prefix=TYPE_CHECKED_EXPR_2
 // RUN: %target-swift-ide-test -code-completion -source-filename %s -code-completion-token=TYPE_CHECKED_EXPR_3 | %FileCheck %s -check-prefix=TYPE_CHECKED_EXPR_3
@@ -152,6 +154,9 @@
 //
 // This test is not meant to test that we can correctly form all kinds of
 // completion results in general; that should be tested elsewhere.
+
+var topLevelVar3 = #^TOP_LEVEL_VAR_INIT_3^#
+// TOP_LEVEL_VAR_INIT_3_NEGATIVE-NOT: topLevelVar3
 
 struct FooStruct {
   var instanceVar = 0
@@ -435,8 +440,8 @@ func resyncParserB11() {}
 // rdar://21346928
 func optStr() -> String? { return nil }
 let x = (optStr() ?? "autoclosure").#^TOP_LEVEL_AUTOCLOSURE_1^#
-// AUTOCLOSURE_STRING: Decl[InstanceVar]/CurrNominal:      unicodeScalars[#String.UnicodeScalarView#]
-// AUTOCLOSURE_STRING: Decl[InstanceVar]/CurrNominal:      utf16[#String.UTF16View#]
+// AUTOCLOSURE_STRING: Decl[InstanceVar]/CurrNominal/IsSystem: unicodeScalars[#String.UnicodeScalarView#]
+// AUTOCLOSURE_STRING: Decl[InstanceVar]/CurrNominal/IsSystem: utf16[#String.UTF16View#]
 
 func resyncParserB12() {}
 
@@ -470,9 +475,9 @@ func resyncParserB14() {}
 var stringInterp = "\(#^STRING_INTERP_3^#)"
 _ = "" + "\(#^STRING_INTERP_4^#)" + ""
 // STRING_INTERP: Begin completions
-// STRING_INTERP-DAG: Decl[InstanceMethod]/CurrNominal:   ['(']{#(value): T#}[')'][#Void#];
-// STRING_INTERP-DAG: Decl[Struct]/CurrModule: FooStruct[#FooStruct#];
-// STRING_INTERP-DAG: Decl[FreeFunction]/CurrModule/NotRecommended/TypeRelation[Invalid]: fooFunc1()[#Void#];
+// STRING_INTERP-DAG: Decl[InstanceMethod]/CurrNominal/IsSystem: ['(']{#(value): T#}[')'][#Void#];
+// STRING_INTERP-DAG: Decl[Struct]/CurrModule/TypeRelation[Convertible]: FooStruct[#FooStruct#]; name=FooStruct
+// STRING_INTERP-DAG: Decl[FreeFunction]/CurrModule/TypeRelation[Invalid]: fooFunc1()[#Void#];
 // STRING_INTERP-DAG: Decl[FreeFunction]/CurrModule: optStr()[#String?#];
 // STRING_INTERP-DAG: Decl[GlobalVar]/Local: fooObject[#FooStruct#];
 // STRING_INTERP: End completions

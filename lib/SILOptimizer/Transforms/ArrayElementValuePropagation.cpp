@@ -125,9 +125,21 @@ bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
   for (auto *Opd : Def->getUses()) {
     auto *User = Opd->getUser();
     // Ignore reference counting and debug instructions.
-    if (isa<RefCountingInst>(User) ||
-        isa<DebugValueInst>(User))
+    if (isa<RefCountingInst>(User) || isa<DebugValueInst>(User) ||
+        isa<DestroyValueInst>(User) || isa<EndBorrowInst>(User))
       continue;
+
+    if (auto *CVI = dyn_cast<CopyValueInst>(User)) {
+      if (!recursivelyCollectUses(CVI))
+        return false;
+      continue;
+    }
+
+    if (auto *BBI = dyn_cast<BeginBorrowInst>(User)) {
+      if (!recursivelyCollectUses(BBI))
+        return false;
+      continue;
+    }
 
     // Array value projection.
     if (auto *SEI = dyn_cast<StructExtractInst>(User)) {
@@ -138,20 +150,24 @@ bool ArrayAllocation::recursivelyCollectUses(ValueBase *Def) {
 
     // Check array semantic calls.
     ArraySemanticsCall ArrayOp(User);
-    if (ArrayOp) {
-      if (ArrayOp.getKind() == ArrayCallKind::kAppendContentsOf) {
+    switch (ArrayOp.getKind()) {
+      case ArrayCallKind::kNone:
+        return false;
+      case ArrayCallKind::kAppendContentsOf:
         AppendContentsOfCalls.push_back(ArrayOp);
-        continue;
-      } else if (ArrayOp.getKind() == ArrayCallKind::kGetElement) {
+        break;
+      case ArrayCallKind::kGetElement:
         GetElementCalls.insert(ArrayOp);
-        continue;
-      } else if (ArrayOp.doesNotChangeArray()) {
-        continue;
-      }
+        break;
+      case ArrayCallKind::kArrayFinalizeIntrinsic:
+        if (!recursivelyCollectUses(cast<SingleValueInstruction>(User)))
+          return false;
+        break;
+      default:
+        if (ArrayOp.doesNotChangeArray())
+          break;
+        return false;
     }
-
-    // An operation that escapes or modifies the array value.
-    return false;
   }
   return true;
 }
@@ -308,11 +324,6 @@ public:
 
   void run() override {
     auto &Fn = *getFunction();
-
-    // FIXME: Update for ownership.
-    if (Fn.hasOwnership())
-      return;
-
     bool Changed = false;
 
     for (auto &BB :Fn) {
@@ -322,7 +333,7 @@ public:
           if (!ALit.analyze(Apply))
             continue;
 
-          // First optimization: replace getElemente calls.
+          // First optimization: replace getElement calls.
           if (ALit.replaceGetElements()) {
             Changed = true;
             // Re-do the analysis if the SIL changed.

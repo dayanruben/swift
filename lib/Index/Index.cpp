@@ -124,11 +124,11 @@ public:
   }
 
   void
-  getImportedModules(SmallVectorImpl<ModuleDecl::ImportedModule> &Modules) const {
-    ModuleDecl::ImportFilter ImportFilter;
-    ImportFilter |= ModuleDecl::ImportFilterKind::Public;
-    ImportFilter |= ModuleDecl::ImportFilterKind::Private;
-    ImportFilter |= ModuleDecl::ImportFilterKind::ImplementationOnly;
+  getImportedModules(SmallVectorImpl<ImportedModule> &Modules) const {
+    constexpr ModuleDecl::ImportFilter ImportFilter = {
+        ModuleDecl::ImportFilterKind::Exported,
+        ModuleDecl::ImportFilterKind::Default,
+        ModuleDecl::ImportFilterKind::ImplementationOnly};
 
     if (auto *SF = SFOrMod.dyn_cast<SourceFile *>()) {
       SF->getImportedModules(Modules, ImportFilter);
@@ -343,13 +343,13 @@ private:
       if (customAttr->isImplicit())
         continue;
 
-      auto &Loc = customAttr->getTypeLoc();
       if (auto *semanticInit = dyn_cast_or_null<CallExpr>(customAttr->getSemanticInit())) {
         if (auto *CD = semanticInit->getCalledValue()) {
           if (!shouldIndex(CD, /*IsRef*/true))
             continue;
           IndexSymbol Info;
-          if (initIndexSymbol(CD, Loc.getLoc(), /*IsRef=*/true, Info))
+          const auto reprLoc = customAttr->getTypeRepr()->getLoc();
+          if (initIndexSymbol(CD, reprLoc, /*IsRef=*/true, Info))
             continue;
           Info.roles |= (unsigned)SymbolRole::Call;
           if (semanticInit->isImplicit())
@@ -602,7 +602,7 @@ private:
   getLineColAndOffset(SourceLoc Loc) {
     if (Loc.isInvalid())
       return std::make_tuple(0, 0, None);
-    auto lineAndColumn = SrcMgr.getLineAndColumn(Loc, BufferID);
+    auto lineAndColumn = SrcMgr.getPresumedLineAndColumnForLoc(Loc, BufferID);
     unsigned offset = SrcMgr.getLocOffsetInBuffer(Loc, BufferID);
     return std::make_tuple(lineAndColumn.first, lineAndColumn.second, offset);
   }
@@ -629,6 +629,22 @@ private:
       return false;
 
     return true;
+  }
+
+  // Are there members or conformances in \c D that should be indexed?
+  bool shouldIndexMembers(ExtensionDecl *D) {
+    for (auto Member : D->getMembers())
+      if (auto VD = dyn_cast<ValueDecl>(Member))
+        if (shouldIndex(VD, /*IsRef=*/false))
+          return true;
+
+    for (auto Inherit : D->getInherited())
+      if (auto T = Inherit.getType())
+        if (T->getAnyNominal() &&
+            shouldIndex(T->getAnyNominal(), /*IsRef=*/false))
+          return true;
+
+    return false;
   }
 
   /// Reports all implicit member value decl conformances that \p D introduces
@@ -715,7 +731,7 @@ bool IndexSwiftASTWalker::visitImports(
   if (!IsNew)
     return true;
 
-  SmallVector<ModuleDecl::ImportedModule, 8> Imports;
+  SmallVector<ImportedModule, 8> Imports;
   TopMod.getImportedModules(Imports);
 
   llvm::SmallPtrSet<ModuleDecl *, 8> Reported;
@@ -777,11 +793,12 @@ bool IndexSwiftASTWalker::visitImports(
 }
 
 bool IndexSwiftASTWalker::handleWitnesses(Decl *D, SmallVectorImpl<IndexedWitness> &explicitWitnesses) {
-  auto DC = dyn_cast<DeclContext>(D);
-  if (!DC)
+  const auto *const IDC = dyn_cast<IterableDeclContext>(D);
+  if (!IDC)
     return true;
 
-  for (auto *conf : DC->getLocalConformances()) {
+  const auto DC = IDC->getAsGenericContext();
+  for (auto *conf : IDC->getLocalConformances()) {
     if (conf->isInvalid())
       continue;
 
@@ -1065,6 +1082,10 @@ bool IndexSwiftASTWalker::reportExtension(ExtensionDecl *D) {
   if (!NTD)
     return true;
   if (!shouldIndex(NTD, /*IsRef=*/false))
+    return true;
+
+  // Don't index "empty" extensions in imported modules.
+  if (IsModuleFile && !shouldIndexMembers(D))
     return true;
 
   IndexSymbol Info;
@@ -1598,10 +1619,10 @@ void IndexSwiftASTWalker::collectRecursiveModuleImports(
   }
 
   ModuleDecl::ImportFilter ImportFilter;
-  ImportFilter |= ModuleDecl::ImportFilterKind::Public;
-  ImportFilter |= ModuleDecl::ImportFilterKind::Private;
-  // FIXME: ImportFilterKind::ShadowedBySeparateOverlay?
-  SmallVector<ModuleDecl::ImportedModule, 8> Imports;
+  ImportFilter |= ModuleDecl::ImportFilterKind::Exported;
+  ImportFilter |= ModuleDecl::ImportFilterKind::Default;
+  // FIXME: ImportFilterKind::ShadowedByCrossImportOverlay?
+  SmallVector<ImportedModule, 8> Imports;
   TopMod.getImportedModules(Imports);
 
   for (auto Import : Imports) {

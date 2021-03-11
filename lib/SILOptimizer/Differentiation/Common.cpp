@@ -17,6 +17,8 @@
 #define DEBUG_TYPE "differentiation"
 
 #include "swift/SILOptimizer/Differentiation/Common.h"
+#include "swift/AST/TypeCheckRequests.h"
+#include "swift/SILOptimizer/Differentiation/ADContext.h"
 
 namespace swift {
 namespace autodiff {
@@ -27,18 +29,6 @@ raw_ostream &getADDebugStream() { return llvm::dbgs() << "[AD] "; }
 // Helpers
 //===----------------------------------------------------------------------===//
 
-bool isArrayLiteralIntrinsic(FullApplySite applySite) {
-  return doesApplyCalleeHaveSemantics(applySite.getCalleeOrigin(),
-                                      "array.uninitialized_intrinsic");
-}
-
-ApplyInst *getAllocateUninitializedArrayIntrinsic(SILValue v) {
-  if (auto *ai = dyn_cast<ApplyInst>(v))
-    if (isArrayLiteralIntrinsic(ai))
-      return ai;
-  return nullptr;
-}
-
 ApplyInst *getAllocateUninitializedArrayIntrinsicElementAddress(SILValue v) {
   // Find the `pointer_to_address` result, peering through `index_addr`.
   auto *ptai = dyn_cast<PointerToAddressInst>(v);
@@ -48,10 +38,9 @@ ApplyInst *getAllocateUninitializedArrayIntrinsicElementAddress(SILValue v) {
     return nullptr;
   // Return the `array.uninitialized_intrinsic` application, if it exists.
   if (auto *dti = dyn_cast<DestructureTupleInst>(
-          ptai->getOperand()->getDefiningInstruction())) {
-    if (auto *ai = getAllocateUninitializedArrayIntrinsic(dti->getOperand()))
-      return ai;
-  }
+          ptai->getOperand()->getDefiningInstruction()))
+    return ArraySemanticsCall(dti->getOperand(),
+                              semantics::ARRAY_UNINITIALIZED_INTRINSIC);
   return nullptr;
 }
 
@@ -69,6 +58,44 @@ DestructureTupleInst *getSingleDestructureTupleUser(SILValue value) {
     }
   }
   return result;
+}
+
+bool isSemanticMemberAccessor(SILFunction *original) {
+  auto *dc = original->getDeclContext();
+  if (!dc)
+    return false;
+  auto *decl = dc->getAsDecl();
+  if (!decl)
+    return false;
+  auto *accessor = dyn_cast<AccessorDecl>(decl);
+  if (!accessor)
+    return false;
+  // Currently, only getters and setters are supported.
+  // TODO(SR-12640): Support `modify` accessors.
+  if (accessor->getAccessorKind() != AccessorKind::Get &&
+      accessor->getAccessorKind() != AccessorKind::Set)
+    return false;
+  // Accessor must come from a `var` declaration.
+  auto *varDecl = dyn_cast<VarDecl>(accessor->getStorage());
+  if (!varDecl)
+    return false;
+  // Return true for stored property accessors.
+  if (varDecl->hasStorage() && varDecl->isInstanceMember())
+    return true;
+  // Return true for properties that have attached property wrappers.
+  if (varDecl->hasAttachedPropertyWrapper())
+    return true;
+  // Otherwise, return false.
+  // User-defined accessors can never be supported because they may use custom
+  // logic that does not semantically perform a member access.
+  return false;
+}
+
+bool hasSemanticMemberAccessorCallee(ApplySite applySite) {
+  if (auto *FRI = dyn_cast<FunctionRefBaseInst>(applySite.getCallee()))
+    if (auto *F = FRI->getReferencedFunctionOrNull())
+      return isSemanticMemberAccessor(F);
+  return false;
 }
 
 void forEachApplyDirectResult(
@@ -157,7 +184,7 @@ void collectAllActualResultsInTypeOrder(
 }
 
 void collectMinimalIndicesForFunctionCall(
-    ApplyInst *ai, SILAutoDiffIndices parentIndices,
+    ApplyInst *ai, AutoDiffConfig parentConfig,
     const DifferentiableActivityInfo &activityInfo,
     SmallVectorImpl<SILValue> &results, SmallVectorImpl<unsigned> &paramIndices,
     SmallVectorImpl<unsigned> &resultIndices) {
@@ -168,7 +195,7 @@ void collectMinimalIndicesForFunctionCall(
   // Record all parameter indices in type order.
   unsigned currentParamIdx = 0;
   for (auto applyArg : ai->getArgumentsWithoutIndirectResults()) {
-    if (activityInfo.isActive(applyArg, parentIndices))
+    if (activityInfo.isActive(applyArg, parentConfig))
       paramIndices.push_back(currentParamIdx);
     ++currentParamIdx;
   }
@@ -189,12 +216,12 @@ void collectMinimalIndicesForFunctionCall(
     if (res.isFormalDirect()) {
       results.push_back(directResults[dirResIdx]);
       if (auto dirRes = directResults[dirResIdx])
-        if (dirRes && activityInfo.isActive(dirRes, parentIndices))
+        if (dirRes && activityInfo.isActive(dirRes, parentConfig))
           resultIndices.push_back(idx);
       ++dirResIdx;
     } else {
       results.push_back(indirectResults[indResIdx]);
-      if (activityInfo.isActive(indirectResults[indResIdx], parentIndices))
+      if (activityInfo.isActive(indirectResults[indResIdx], parentConfig))
         resultIndices.push_back(idx);
       ++indResIdx;
     }
@@ -211,12 +238,127 @@ void collectMinimalIndicesForFunctionCall(
     resultIndices.push_back(inoutParamResultIndex++);
   }
   // Make sure the function call has active results.
+#ifndef NDEBUG
   auto numResults = calleeFnTy->getNumResults() +
                     calleeFnTy->getNumIndirectMutatingParameters();
   assert(results.size() == numResults);
   assert(llvm::any_of(results, [&](SILValue result) {
-    return activityInfo.isActive(result, parentIndices);
+    return activityInfo.isActive(result, parentConfig);
   }));
+#endif
+}
+
+Optional<std::pair<SILDebugLocation, SILDebugVariable>>
+findDebugLocationAndVariable(SILValue originalValue) {
+  if (auto *asi = dyn_cast<AllocStackInst>(originalValue))
+    return asi->getVarInfo().map([&](SILDebugVariable var) {
+      return std::make_pair(asi->getDebugLocation(), var);
+    });
+  for (auto *use : originalValue->getUses()) {
+    if (auto *dvi = dyn_cast<DebugValueInst>(use->getUser()))
+      return dvi->getVarInfo().map([&](SILDebugVariable var) {
+        return std::make_pair(dvi->getDebugLocation(), var);
+      });
+    if (auto *dvai = dyn_cast<DebugValueAddrInst>(use->getUser()))
+      return dvai->getVarInfo().map([&](SILDebugVariable var) {
+        return std::make_pair(dvai->getDebugLocation(), var);
+      });
+  }
+  return None;
+}
+
+//===----------------------------------------------------------------------===//
+// Diagnostic utilities
+//===----------------------------------------------------------------------===//
+
+SILLocation getValidLocation(SILValue v) {
+  auto loc = v.getLoc();
+  if (loc.isNull() || loc.getSourceLoc().isInvalid())
+    loc = v->getFunction()->getLocation();
+  return loc;
+}
+
+SILLocation getValidLocation(SILInstruction *inst) {
+  auto loc = inst->getLoc();
+  if (loc.isNull() || loc.getSourceLoc().isInvalid())
+    loc = inst->getFunction()->getLocation();
+  return loc;
+}
+
+//===----------------------------------------------------------------------===//
+// Tangent property lookup utilities
+//===----------------------------------------------------------------------===//
+
+VarDecl *getTangentStoredProperty(ADContext &context, VarDecl *originalField,
+                                  CanType baseType, SILLocation loc,
+                                  DifferentiationInvoker invoker) {
+  auto &astCtx = context.getASTContext();
+  auto tanFieldInfo = evaluateOrDefault(
+      astCtx.evaluator, TangentStoredPropertyRequest{originalField, baseType},
+      TangentPropertyInfo(nullptr));
+  // If no error, return the tangent property.
+  if (tanFieldInfo)
+    return tanFieldInfo.tangentProperty;
+  // Otherwise, diagnose error and return nullptr.
+  assert(tanFieldInfo.error);
+  auto *parentDC = originalField->getDeclContext();
+  assert(parentDC->isTypeContext());
+  auto parentDeclName = parentDC->getSelfNominalTypeDecl()->getNameStr();
+  auto fieldName = originalField->getNameStr();
+  auto sourceLoc = loc.getSourceLoc();
+  switch (tanFieldInfo.error->kind) {
+  case TangentPropertyInfo::Error::Kind::NoDerivativeOriginalProperty:
+    llvm_unreachable(
+        "`@noDerivative` stored property accesses should not be "
+        "differentiated; activity analysis should not mark as varied");
+  case TangentPropertyInfo::Error::Kind::NominalParentNotDifferentiable:
+    context.emitNondifferentiabilityError(
+        sourceLoc, invoker,
+        diag::autodiff_stored_property_parent_not_differentiable,
+        parentDeclName, fieldName);
+    break;
+  case TangentPropertyInfo::Error::Kind::OriginalPropertyNotDifferentiable:
+    context.emitNondifferentiabilityError(
+        sourceLoc, invoker, diag::autodiff_stored_property_not_differentiable,
+        parentDeclName, fieldName, originalField->getInterfaceType());
+    break;
+  case TangentPropertyInfo::Error::Kind::ParentTangentVectorNotStruct:
+    context.emitNondifferentiabilityError(
+        sourceLoc, invoker, diag::autodiff_stored_property_tangent_not_struct,
+        parentDeclName, fieldName);
+    break;
+  case TangentPropertyInfo::Error::Kind::TangentPropertyNotFound:
+    context.emitNondifferentiabilityError(
+        sourceLoc, invoker,
+        diag::autodiff_stored_property_no_corresponding_tangent, parentDeclName,
+        fieldName);
+    break;
+  case TangentPropertyInfo::Error::Kind::TangentPropertyWrongType:
+    context.emitNondifferentiabilityError(
+        sourceLoc, invoker, diag::autodiff_tangent_property_wrong_type,
+        parentDeclName, fieldName, tanFieldInfo.error->getType());
+    break;
+  case TangentPropertyInfo::Error::Kind::TangentPropertyNotStored:
+    context.emitNondifferentiabilityError(
+        sourceLoc, invoker, diag::autodiff_tangent_property_not_stored,
+        parentDeclName, fieldName);
+    break;
+  }
+  return nullptr;
+}
+
+VarDecl *getTangentStoredProperty(ADContext &context,
+                                  SingleValueInstruction *projectionInst,
+                                  CanType baseType,
+                                  DifferentiationInvoker invoker) {
+  assert(isa<StructExtractInst>(projectionInst) ||
+         isa<StructElementAddrInst>(projectionInst) ||
+         isa<RefElementAddrInst>(projectionInst));
+  Projection proj(projectionInst);
+  auto loc = getValidLocation(projectionInst);
+  auto *field = proj.getVarDecl(projectionInst->getOperand(0)->getType());
+  return getTangentStoredProperty(context, field, baseType,
+                                  loc, invoker);
 }
 
 //===----------------------------------------------------------------------===//
@@ -246,36 +388,33 @@ void extractAllElements(SILValue value, SILBuilder &builder,
     results.push_back(builder.createTupleExtract(value.getLoc(), value, i));
 }
 
-void emitZeroIntoBuffer(SILBuilder &builder, CanType type,
-                        SILValue bufferAccess, SILLocation loc) {
-  auto &astCtx = builder.getASTContext();
-  auto *swiftMod = builder.getModule().getSwiftModule();
-  auto &typeConverter = builder.getModule().Types;
-  // Look up conformance to `AdditiveArithmetic`.
-  auto *additiveArithmeticProto =
-      astCtx.getProtocol(KnownProtocolKind::AdditiveArithmetic);
-  auto confRef = swiftMod->lookupConformance(type, additiveArithmeticProto);
-  assert(!confRef.isInvalid() && "Missing conformance to `AdditiveArithmetic`");
-  // Look up `AdditiveArithmetic.zero.getter`.
-  auto zeroDeclLookup = additiveArithmeticProto->lookupDirect(astCtx.Id_zero);
-  auto *zeroDecl = cast<VarDecl>(zeroDeclLookup.front());
-  assert(zeroDecl->isProtocolRequirement());
-  auto *accessorDecl = zeroDecl->getAccessor(AccessorKind::Get);
-  SILDeclRef accessorDeclRef(accessorDecl, SILDeclRef::Kind::Func);
-  auto silFnType = typeConverter.getConstantType(
-      TypeExpansionContext::minimal(), accessorDeclRef);
-  // %wm = witness_method ...
-  auto *getter = builder.createWitnessMethod(loc, type, confRef,
-                                             accessorDeclRef, silFnType);
-  // %metatype = metatype $T
-  auto metatypeType = CanMetatypeType::get(type, MetatypeRepresentation::Thick);
-  auto metatype = builder.createMetatype(
-      loc, SILType::getPrimitiveObjectType(metatypeType));
-  auto subMap = SubstitutionMap::getProtocolSubstitutions(
-      additiveArithmeticProto, type, confRef);
-  builder.createApply(loc, getter, subMap, {bufferAccess, metatype},
-                      /*isNonThrowing*/ false);
-  builder.emitDestroyValueOperation(loc, getter);
+SILValue emitMemoryLayoutSize(
+    SILBuilder &builder, SILLocation loc, CanType type) {
+  auto &ctx = builder.getASTContext();
+  auto id = ctx.getIdentifier(getBuiltinName(BuiltinValueKind::Sizeof));
+  auto *builtin = cast<FuncDecl>(getBuiltinValueDecl(ctx, id));
+  auto metatypeTy = SILType::getPrimitiveObjectType(
+      CanMetatypeType::get(type, MetatypeRepresentation::Thin));
+  auto metatypeVal = builder.createMetatype(loc, metatypeTy);
+  return builder.createBuiltin(
+      loc, id, SILType::getBuiltinWordType(ctx),
+      SubstitutionMap::get(
+          builtin->getGenericSignature(), ArrayRef<Type>{type}, {}),
+      {metatypeVal});
+}
+
+SILValue emitProjectTopLevelSubcontext(
+    SILBuilder &builder, SILLocation loc, SILValue context,
+    SILType subcontextType) {
+  assert(context.getOwnershipKind() == OwnershipKind::Guaranteed);
+  auto &ctx = builder.getASTContext();
+  auto id = ctx.getIdentifier(
+      getBuiltinName(BuiltinValueKind::AutoDiffProjectTopLevelSubcontext));
+  assert(context->getType() == SILType::getNativeObjectType(ctx));
+  auto *subcontextAddr = builder.createBuiltin(
+      loc, id, SILType::getRawPointerType(ctx), SubstitutionMap(), {context});
+  return builder.createPointerToAddress(
+      loc, subcontextAddr, subcontextType.getAddressType(), /*isStrict*/ true);
 }
 
 //===----------------------------------------------------------------------===//
@@ -331,16 +470,19 @@ findMinimalDerivativeConfiguration(AbstractFunctionDecl *original,
          silParameterIndices->getNumIndices() <
              minimalConfig->parameterIndices->getNumIndices())) {
       minimalASTParameterIndices = config.parameterIndices;
-      minimalConfig = AutoDiffConfig(silParameterIndices, config.resultIndices,
-                                     config.derivativeGenericSignature);
+      minimalConfig =
+          AutoDiffConfig(silParameterIndices, config.resultIndices,
+                         autodiff::getDifferentiabilityWitnessGenericSignature(
+                             original->getGenericSignature(),
+                             config.derivativeGenericSignature));
     }
   }
   return minimalConfig;
 }
 
 SILDifferentiabilityWitness *getOrCreateMinimalASTDifferentiabilityWitness(
-    SILModule &module, SILFunction *original, IndexSubset *parameterIndices,
-    IndexSubset *resultIndices) {
+    SILModule &module, SILFunction *original, DifferentiabilityKind kind,
+    IndexSubset *parameterIndices, IndexSubset *resultIndices) {
   // AST differentiability witnesses always have a single result.
   if (resultIndices->getCapacity() != 1 || !resultIndices->contains(0))
     return nullptr;
@@ -365,8 +507,8 @@ SILDifferentiabilityWitness *getOrCreateMinimalASTDifferentiabilityWitness(
     original = module.lookUpFunction(SILDeclRef(originalAFD).asForeign());
   }
 
-  auto *existingWitness =
-      module.lookUpDifferentiabilityWitness({originalName, *minimalConfig});
+  auto *existingWitness = module.lookUpDifferentiabilityWitness(
+      {originalName, kind, *minimalConfig});
   if (existingWitness)
     return existingWitness;
 
@@ -375,7 +517,7 @@ SILDifferentiabilityWitness *getOrCreateMinimalASTDifferentiabilityWitness(
          "definitions with explicit differentiable attributes");
 
   return SILDifferentiabilityWitness::createDeclaration(
-      module, SILLinkage::PublicExternal, original,
+      module, SILLinkage::PublicExternal, original, kind,
       minimalConfig->parameterIndices, minimalConfig->resultIndices,
       minimalConfig->derivativeGenericSignature);
 }

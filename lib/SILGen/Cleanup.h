@@ -19,6 +19,7 @@
 
 #include "swift/Basic/DiverseStack.h"
 #include "swift/SIL/SILLocation.h"
+#include "swift/SIL/SILValue.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace swift {
@@ -75,13 +76,26 @@ llvm::raw_ostream &operator<<(raw_ostream &os, CleanupState state);
 
 class LLVM_LIBRARY_VISIBILITY Cleanup {
   friend class CleanupManager;
-
-  unsigned allocatedSize;
-
-  CleanupState state;
+  friend class CleanupCloner;
 
 protected:
-  Cleanup() {}
+  // A set of flags that categorize the type of cleanup such that it can be
+  // recreated via SILGenFunction methods based on the type of argument input.
+  //
+  // Example: Distinguishing in between @owned cleanups with a writeback buffer
+  // (ExclusiveBorrowCleanup) or ones that involve formal access cleanups.
+  enum Flags : uint8_t {
+    None = 0,
+    FormalAccessCleanup = 1,
+  };
+
+private:
+  CleanupState state;
+  unsigned allocatedSize : 24;
+  Flags flags : 8;
+
+protected:
+  Cleanup() : flags(Flags::None) {}
   virtual ~Cleanup() {}
 
 public:
@@ -99,6 +113,24 @@ public:
   virtual void emit(SILGenFunction &SGF, CleanupLocation loc,
                     ForUnwind_t forUnwind) = 0;
   virtual void dump(SILGenFunction &SGF) const = 0;
+
+protected:
+  Flags getFlags() const { return flags; }
+
+  /// Call func passing in the SILValue address that this cleanup will write
+  /// back to if supported and any flags associated with the cleanup. Returns
+  /// false otherwise.
+  virtual bool getWritebackBuffer(function_ref<void(SILValue)> func) {
+    return false;
+  }
+
+  bool isFormalAccess() const {
+    return getFlags() & Flags::FormalAccessCleanup;
+  }
+
+  void setIsFormalAccess() {
+    flags = Flags(flags | Flags::FormalAccessCleanup);
+  }
 };
 
 /// A cleanup depth is generally used to denote the set of cleanups
@@ -117,6 +149,7 @@ typedef DiverseStackImpl<Cleanup>::stable_iterator CleanupHandle;
 
 class LLVM_LIBRARY_VISIBILITY CleanupManager {
   friend class Scope;
+  friend class CleanupCloner;
 
   SILGenFunction &SGF;
 
@@ -229,7 +262,7 @@ public:
   /// Set the state of the cleanup at the given depth.
   /// The transition must be non-trivial and legal.
   void setCleanupState(CleanupHandle depth, CleanupState state);
-  
+
   /// True if there are any active cleanups in the scope between the two
   /// cleanup handles.
   bool hasAnyActiveCleanups(CleanupsDepth from, CleanupsDepth to);
@@ -246,6 +279,12 @@ public:
 
   /// Verify that the given cleanup handle is valid.
   void checkIterator(CleanupHandle handle) const;
+
+private:
+  // Look up the flags and optionally the writeback address associated with the
+  // cleanup at \p depth. If
+  std::tuple<Cleanup::Flags, Optional<SILValue>>
+  getFlagsAndWritebackBuffer(CleanupHandle depth);
 };
 
 /// An RAII object that allows the state of a cleanup to be
@@ -274,10 +313,15 @@ private:
   void popImpl();
 };
 
+/// Extract enough information from a managed value to reliably clone its
+/// cleanup (if it has any) on a newly computed type. This includes modeling
+/// writeback buffers.
 class CleanupCloner {
   SILGenFunction &SGF;
+  Optional<SILValue> writebackBuffer;
   bool hasCleanup;
   bool isLValue;
+  bool isFormalAccess;
 
 public:
   CleanupCloner(SILGenFunction &SGF, const ManagedValue &mv);

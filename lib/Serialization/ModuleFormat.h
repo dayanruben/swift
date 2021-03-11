@@ -20,10 +20,11 @@
 #define SWIFT_SERIALIZATION_MODULEFORMAT_H
 
 #include "swift/AST/Decl.h"
+#include "swift/AST/FineGrainedDependencyFormat.h"
 #include "swift/AST/Types.h"
-#include "llvm/Bitcode/RecordLayout.h"
-#include "llvm/Bitstream/BitCodes.h"
 #include "llvm/ADT/PointerEmbeddedInt.h"
+#include "llvm/Bitcode/BitcodeConvenience.h"
+#include "llvm/Bitstream/BitCodes.h"
 
 namespace swift {
 namespace serialization {
@@ -55,7 +56,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 556; // dont serialize Pattern::isImplicit
+const uint16_t SWIFTMODULE_VERSION_MINOR = 602; // noasync apply
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -208,8 +209,8 @@ enum class ReadWriteImplKind : uint8_t {
   MutableAddress,
   MaterializeToTemporary,
   Modify,
-  StoredWithSimpleDidSet,
-  InheritedWithSimpleDidSet,
+  StoredWithDidSet,
+  InheritedWithDidSet,
 };
 using ReadWriteImplKindField = BCFixed<3>;
 
@@ -236,10 +237,12 @@ using FunctionTypeRepresentationField = BCFixed<4>;
 // the module version.
 enum class DifferentiabilityKind : uint8_t {
   NonDifferentiable = 0,
+  Forward,
+  Reverse,
   Normal,
   Linear,
 };
-using DifferentiabilityKindField = BCFixed<2>;
+using DifferentiabilityKindField = BCFixed<3>;
 
 // These IDs must \em not be renumbered or reordered without incrementing the
 // module version.
@@ -356,7 +359,7 @@ using ParameterConventionField = BCFixed<4>;
 // These IDs must \em not be renumbered or reordered without incrementing
 // the module version.
 enum class SILParameterDifferentiability : uint8_t {
-  DifferentiableOrNotApplicable,
+  DifferentiableOrNotApplicable = 0,
   NotDifferentiable,
 };
 
@@ -370,6 +373,13 @@ enum class ResultConvention : uint8_t {
   Autoreleased,
 };
 using ResultConventionField = BCFixed<3>;
+
+// These IDs must \em not be renumbered or reordered without incrementing
+// the module version.
+enum class SILResultDifferentiability : uint8_t {
+  DifferentiableOrNotApplicable = 0,
+  NotDifferentiable,
+};
 
 // These IDs must \em not be renumbered or reordered without incrementing
 // the module version.
@@ -397,6 +407,21 @@ static inline OperatorKind getStableFixity(OperatorFixity fixity) {
     return Postfix;
   case OperatorFixity::Infix:
     return Infix;
+  }
+  llvm_unreachable("Unhandled case in switch");
+}
+
+/// Translates a stable Serialization fixity back to an AST operator fixity.
+static inline OperatorFixity getASTOperatorFixity(OperatorKind fixity) {
+  switch (fixity) {
+  case Prefix:
+    return OperatorFixity::Prefix;
+  case Postfix:
+    return OperatorFixity::Postfix;
+  case Infix:
+    return OperatorFixity::Infix;
+  case PrecedenceGroup:
+    llvm_unreachable("Not an operator kind");
   }
   llvm_unreachable("Unhandled case in switch");
 }
@@ -459,8 +484,10 @@ using ValueOwnershipField = BCFixed<2>;
 enum class DefaultArgumentKind : uint8_t {
   None = 0,
   Normal,
-  File,
+  FileID,
+  FileIDSpelledAsFile,
   FilePath,
+  FilePathSpelledAsFile,
   Line,
   Column,
   Function,
@@ -700,11 +727,19 @@ enum BlockID {
   /// This is part of a stable format and should not be renumbered.
   ///
   /// Though we strive to keep the format stable, breaking the format of
-  /// .swiftsourceinfo doesn't have consequences as serious as breaking the format
-  /// of .swiftdoc because .swiftsourceinfo file is for local development use only.
+  /// .swiftsourceinfo doesn't have consequences as serious as breaking the
+  /// format
+  /// of .swiftdoc because .swiftsourceinfo file is for local development use
+  /// only.
   ///
   /// \sa decl_locs_block
   DECL_LOCS_BLOCK_ID,
+
+  /// The incremental dependency information block.
+  ///
+  /// This is part of a stable format and should not be renumbered.
+  INCREMENTAL_INFORMATION_BLOCK_ID =
+      fine_grained_dependencies::INCREMENTAL_INFORMATION_BLOCK_ID,
 };
 
 /// The record types within the control block.
@@ -753,7 +788,9 @@ namespace options_block {
     IS_SIB,
     IS_TESTABLE,
     RESILIENCE_STRATEGY,
-    ARE_PRIVATE_IMPORTS_ENABLED
+    ARE_PRIVATE_IMPORTS_ENABLED,
+    IS_IMPLICIT_DYNAMIC_ENABLED,
+    IS_ALLOW_MODULE_WITH_COMPILER_ERRORS_ENABLED
   };
 
   using SDKPathLayout = BCRecordLayout<
@@ -779,9 +816,17 @@ namespace options_block {
     ARE_PRIVATE_IMPORTS_ENABLED
   >;
 
+  using IsImplicitDynamicEnabledLayout = BCRecordLayout<
+    IS_IMPLICIT_DYNAMIC_ENABLED
+  >;
+
   using ResilienceStrategyLayout = BCRecordLayout<
     RESILIENCE_STRATEGY,
     BCFixed<2>
+  >;
+
+  using IsAllowModuleWithCompilerErrorsEnabledLayout = BCRecordLayout<
+    IS_ALLOW_MODULE_WITH_COMPILER_ERRORS_ENABLED
   >;
 }
 
@@ -881,6 +926,17 @@ namespace decls_block {
     BCArray<BCVBR<6>>
   >;
 
+  /// A flag to mark a decl as being invalid
+  using ErrorFlagLayout = BCRecordLayout<
+    ERROR_FLAG
+  >;
+
+  /// A placeholder for invalid types
+  using ErrorTypeLayout = BCRecordLayout<
+    ERROR_TYPE,
+    TypeIDField // original type (if any)
+  >;
+
   using BuiltinAliasTypeLayout = BCRecordLayout<
     BUILTIN_ALIAS_TYPE,
     DeclIDField, // typealias decl
@@ -934,6 +990,8 @@ namespace decls_block {
     FunctionTypeRepresentationField, // representation
     ClangTypeIDField, // type
     BCFixed<1>,  // noescape?
+    BCFixed<1>,   // concurrent?
+    BCFixed<1>,   // async?
     BCFixed<1>,   // throws?
     DifferentiabilityKindField // differentiability kind
 
@@ -1009,6 +1067,8 @@ namespace decls_block {
     GENERIC_FUNCTION_TYPE,
     TypeIDField,         // output
     FunctionTypeRepresentationField, // representation
+    BCFixed<1>,          // concurrent?
+    BCFixed<1>,          // async?
     BCFixed<1>,          // throws?
     DifferentiabilityKindField, // differentiability kind
     GenericSignatureIDField // generic signture
@@ -1018,6 +1078,8 @@ namespace decls_block {
 
   using SILFunctionTypeLayout = BCRecordLayout<
     SIL_FUNCTION_TYPE,
+    BCFixed<1>,                         // concurrent?
+    BCFixed<1>,                         // async?
     SILCoroutineKindField, // coroutine kind
     ParameterConventionField, // callee convention
     SILFunctionTypeRepresentationField, // representation
@@ -1151,6 +1213,7 @@ namespace decls_block {
     DeclContextIDField,     // context decl
     BCFixed<1>,             // implicit?
     BCFixed<1>,             // explicitly objc?
+    BCFixed<1>,             // Explicitly actor?
     BCFixed<1>,             // inherits convenience initializers from its superclass?
     BCFixed<1>,             // has missing designated initializers?
     GenericSignatureIDField, // generic environment
@@ -1218,7 +1281,6 @@ namespace decls_block {
     BCFixed<1>,   // explicitly objc?
     BCFixed<1>,   // static?
     VarDeclIntroducerField,   // introducer
-    BCFixed<1>,   // HasNonPatternBindingInit?
     BCFixed<1>,   // is getter mutating?
     BCFixed<1>,   // is setter mutating?
     BCFixed<1>,   // is this the backing storage for a lazy property?
@@ -1263,6 +1325,7 @@ namespace decls_block {
     BCFixed<1>,   // isObjC?
     SelfAccessKindField,   // self access kind
     BCFixed<1>,   // has forced static dispatch?
+    BCFixed<1>,   // async?
     BCFixed<1>,   // throws?
     GenericSignatureIDField, // generic environment
     TypeIDField,  // result interface type
@@ -1275,6 +1338,7 @@ namespace decls_block {
     AccessLevelField, // access level
     BCFixed<1>,   // requires a new vtable slot
     DeclIDField,  // opaque result type decl
+    BCFixed<1>,   // isUserAccessible?
     BCArray<IdentifierIDField> // name components,
                                // followed by TypeID dependencies
     // The record is trailed by:
@@ -1483,7 +1547,7 @@ namespace decls_block {
     // The sub-pattern trails the record.
   >;
 
-  using VarPatternLayout = BCRecordLayout<
+  using BindingPatternLayout = BCRecordLayout<
     VAR_PATTERN,
     BCFixed<1>  // isLet?
     // The sub-pattern trails the record.
@@ -1711,6 +1775,15 @@ namespace decls_block {
     TypeIDField                       // result type
   >;
 
+  using ForeignAsyncConventionLayout = BCRecordLayout<
+    FOREIGN_ASYNC_CONVENTION,
+    TypeIDField, // completion handler type
+    BCVBR<4>,    // completion handler parameter index
+    BCVBR<4>,    // completion handler error parameter index (+1)
+    BCVBR<4>,    // completion handler error flag parameter index (+1)
+    BCFixed<1>   // completion handler error flag polarity
+  >;
+
   using AbstractClosureExprLayout = BCRecordLayout<
     ABSTRACT_CLOSURE_EXPR_CONTEXT,
     TypeIDField, // type
@@ -1765,6 +1838,11 @@ namespace decls_block {
     BCFixed<2>  // inline value
   >;
 
+  using ActorIndependentDeclAttrLayout = BCRecordLayout<
+    ActorIndependent_DECL_ATTR,
+    BCFixed<1>  // unsafe flag
+  >;
+
   using OptimizeDeclAttrLayout = BCRecordLayout<
     Optimize_DECL_ATTR,
     BCFixed<2>  // optimize value
@@ -1806,13 +1884,17 @@ namespace decls_block {
     Specialize_DECL_ATTR,
     BCFixed<1>, // exported flag
     BCFixed<1>, // specialization kind
-    GenericSignatureIDField // specialized signature
+    GenericSignatureIDField, // specialized signature
+    DeclIDField, // target function
+    BCVBR<4>,   // # of arguments (+1) or 1 if simple decl name, 0 if no target
+    BCVBR<4>,   // # of SPI groups
+    BCArray<IdentifierIDField> // target function pieces, spi groups
   >;
 
   using DifferentiableDeclAttrLayout = BCRecordLayout<
     Differentiable_DECL_ATTR,
     BCFixed<1>, // Implicit flag.
-    BCFixed<1>, // Linear flag.
+    DifferentiabilityKindField, // Differentiability kind.
     GenericSignatureIDField, // Derivative generic signature.
     BCArray<BCFixed<1>> // Differentiation parameter indices' bitvector.
   >;
@@ -1821,6 +1903,8 @@ namespace decls_block {
     Derivative_DECL_ATTR,
     BCFixed<1>, // Implicit flag.
     IdentifierIDField, // Original name.
+    BCFixed<1>, // Has original accessor kind?
+    AccessorKindField, // Original accessor kind.
     DeclIDField, // Original function declaration.
     AutoDiffDerivativeFunctionKindField, // Derivative function kind.
     BCArray<BCFixed<1>> // Differentiation parameter indices' bitvector.
@@ -1832,6 +1916,12 @@ namespace decls_block {
     IdentifierIDField, // Original name.
     DeclIDField, // Original function declaration.
     BCArray<BCFixed<1>> // Transposed parameter indices' bitvector.
+  >;
+
+  using HasAsyncAlternativeDeclAttrLayout = BCRecordLayout<
+    HasAsyncAlternative_DECL_ATTR,
+    BCFixed<1>,                // True if compound name
+    BCArray<IdentifierIDField> // Name and parameters
   >;
 
 #define SIMPLE_DECL_ATTR(X, CLASS, ...)         \
@@ -1858,9 +1948,9 @@ namespace decls_block {
   using CustomDeclAttrLayout = BCRecordLayout<
     Custom_DECL_ATTR,
     BCFixed<1>,  // implicit flag
-    TypeIDField // type referenced by this custom attribute
+    TypeIDField, // type referenced by this custom attribute
+    BCFixed<1>   // is the argument (unsafe)
   >;
-
 }
 
 /// Returns the encoding kind for the given decl.
@@ -1946,14 +2036,16 @@ namespace index_block {
     PRECEDENCE_GROUPS,
     NESTED_TYPE_DECLS,
     DECL_MEMBER_NAMES,
+    DECL_FINGERPRINTS,
 
     ORDERED_TOP_LEVEL_DECLS,
 
     SUBSTITUTION_MAP_OFFSETS,
     CLANG_TYPE_OFFSETS,
-    LastRecordKind = CLANG_TYPE_OFFSETS,
+    EXPORTED_PRESPECIALIZATION_DECLS,
+    LastRecordKind = EXPORTED_PRESPECIALIZATION_DECLS,
   };
-  
+
   constexpr const unsigned RecordIDFieldWidth = 5;
   static_assert(LastRecordKind < (1 << RecordIDFieldWidth),
                 "not enough bits for all record kinds");
@@ -2013,6 +2105,12 @@ namespace index_block {
   using OrderedDeclsLayout = BCGenericRecordLayout<
     RecordIDField,        // record ID
     BCArray<DeclIDField>  // list of decls by ID
+  >;
+
+  using DeclFingerprintsLayout = BCRecordLayout<
+    DECL_FINGERPRINTS, // record ID
+    BCVBR<16>,   // table offset within the blob (see below)
+    BCBlob       // map from member DeclIDs to strings
   >;
 }
 

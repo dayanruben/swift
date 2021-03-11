@@ -80,6 +80,7 @@ set(SWIFT_BENCH_MODULES
     single-source/DictionaryRemove
     single-source/DictionarySubscriptDefault
     single-source/DictionarySwap
+    single-source/Differentiation
     single-source/Diffing
     single-source/DiffingMyers
     single-source/DropFirst
@@ -91,12 +92,14 @@ set(SWIFT_BENCH_MODULES
     single-source/Fibonacci
     single-source/FindStringNaive
     single-source/FlattenList
+    single-source/FloatingPointConversion
     single-source/FloatingPointParsing
     single-source/FloatingPointPrinting
     single-source/Hanoi
     single-source/Hash
     single-source/Histogram
     single-source/HTTP2StateMachine
+    single-source/IndexPathTest
     single-source/InsertCharacter
     single-source/IntegerParsing
     single-source/Integrate
@@ -108,6 +111,7 @@ set(SWIFT_BENCH_MODULES
     single-source/LuhnAlgoLazy
     single-source/MapReduce
     single-source/Memset
+    single-source/Mirror
     single-source/MonteCarloE
     single-source/MonteCarloPi
     single-source/NSDictionaryCastToSwift
@@ -135,6 +139,7 @@ set(SWIFT_BENCH_MODULES
     single-source/PrefixWhile
     single-source/Prims
     single-source/PrimsNonStrongRef
+    single-source/ProtocolConformance
     single-source/ProtocolDispatch
     single-source/ProtocolDispatch2
     single-source/Queue
@@ -174,6 +179,8 @@ set(SWIFT_BENCH_MODULES
     single-source/StringMatch
     single-source/StringRemoveDupes
     single-source/StringReplaceSubrange
+    single-source/StringSplitting
+    single-source/StringSwitch
     single-source/StringTests
     single-source/StringWalk
     single-source/Substring
@@ -185,6 +192,7 @@ set(SWIFT_BENCH_MODULES
     single-source/Walsh
     single-source/WordCount
     single-source/XorLoop
+    cxx-source/CreateObjects
 )
 
 set(SWIFT_MULTISOURCE_SWIFT_BENCHES

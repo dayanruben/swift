@@ -15,6 +15,7 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
+#define SECTIONS_PER_INFO 6
 
 #include "swift/SwiftRemoteMirror/SwiftRemoteMirror.h"
 #include "swift/Demangling/ManglingMacros.h"
@@ -23,6 +24,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,22 +57,6 @@ typedef struct PipeMemoryReader {
   int from_child[2];
 } PipeMemoryReader;
 
-typedef struct RemoteSection {
-  uintptr_t StartAddress;
-  uintptr_t Size;
-  uintptr_t EndAddress;
-} RemoteSection;
-
-typedef struct RemoteReflectionInfo {
-  RemoteSection fieldmd;
-  RemoteSection assocty;
-  RemoteSection builtin;
-  RemoteSection capture;
-  RemoteSection typeref;
-  RemoteSection reflstr;
-  uintptr_t StartAddress;
-  size_t TotalSize;
-} RemoteReflectionInfo;
 
 NORETURN
 static void errorAndExit(const char *message) {
@@ -85,7 +71,6 @@ static void errnoAndExit(const char *message) {
 }
 
 #if 0
-#include <inttypes.h>
 #define DEBUG_LOG(fmt, ...) fprintf(stderr, "%s: " fmt "\n",\
                                     __func__, __VA_ARGS__)
 #else
@@ -147,7 +132,7 @@ static int PipeMemoryReader_queryDataLayout(void *Context,
 #else
   int applePlatform = 0;
 #endif
-#if defined(__APPLE__) && __APPLE__ && ((defined(TARGET_OS_IOS) && TARGET_OS_IOS) || (defined(TARGET_OS_IOS) && TARGET_OS_WATCH) || (defined(TARGET_OS_TV) && TARGET_OS_TV))
+#if defined(__APPLE__) && __APPLE__ && ((defined(TARGET_OS_IOS) && TARGET_OS_IOS) || (defined(TARGET_OS_IOS) && TARGET_OS_WATCH) || (defined(TARGET_OS_TV) && TARGET_OS_TV) || defined(__arm64__))
   int iosDerivedPlatform = 1;
 #else
   int iosDerivedPlatform = 0;
@@ -296,7 +281,7 @@ PipeMemoryReader_receiveImages(SwiftReflectionContextRef RC,
   size_t NumReflectionInfos;
   PipeMemoryReader_collectBytesFromPipe(Reader, &NumReflectionInfos,
                                         sizeof(NumReflectionInfos));
-  DEBUG_LOG("Receiving %z images from child", NumReflectionInfos);
+  DEBUG_LOG("Receiving %zu images from child", NumReflectionInfos);
 
   if (NumReflectionInfos == 0)
     return;
@@ -317,86 +302,62 @@ PipeMemoryReader_receiveImages(SwiftReflectionContextRef RC,
 #else
 
 static swift_reflection_section_t
-makeLocalSection(const void *Buffer, RemoteSection Section,
-                 RemoteReflectionInfo Info) {
+makeLocalSection(const void *Buffer,
+                 swift_remote_reflection_section_t Section) {
   if (Section.Size == 0) {
     swift_reflection_section_t LS = {NULL, NULL};
     return LS;
   }
 
-  uintptr_t Base
-    = (uintptr_t)Buffer + Section.StartAddress - Info.StartAddress;
-  swift_reflection_section_t LS = {
-    (void *)Base,
-    (void *)(Base + Section.Size)
-  };
+  swift_reflection_section_t LS = {(void *)Buffer,
+                                   (void *)((uint8_t *)Buffer + Section.Size)};
   return LS;
 }
 
-static
-uintptr_t getStartAddress(const RemoteSection Sections[], size_t Count) {
-  uintptr_t Start = 0;
-  for (size_t i = 0; i < Count; ++i) {
-    if (Sections[i].StartAddress != 0) {
-      if (Start != 0)
-        Start = MIN(Start, Sections[i].StartAddress);
-      else
-        Start = Sections[i].StartAddress;
-    }
+static swift_reflection_mapping_info_t makeNonContiguousReflectionInfo(
+    swift_remote_reflection_section_t *remote_sections,
+    swift_reflection_section_t *local_sections) {
+  swift_reflection_section_mapping_t sections[SECTIONS_PER_INFO];
+  for (size_t i = 0; i < SECTIONS_PER_INFO; ++i) {
+    swift_reflection_section_mapping_t section = {local_sections[i],
+                                                           remote_sections[i]};
+    sections[i] = section;
   }
-  return Start;
+
+  swift_reflection_mapping_info_t ReflectionMappingInfo = {
+      sections[0], sections[1], sections[2],
+      sections[3], sections[4], sections[5]};
+
+  return ReflectionMappingInfo;
 }
 
-static
-uintptr_t getEndAddress(const RemoteSection Sections[], size_t Count) {
-  uintptr_t End = 0;
-  for (size_t i = 0; i < Count; ++i) {
-    if (Sections[i].StartAddress != 0)
-      End = MAX(End, Sections[i].EndAddress);
-  }
-  return End;
-}
-
-static
-RemoteReflectionInfo makeRemoteReflectionInfo(RemoteSection fieldmd,
-                                              RemoteSection assocty,
-                                              RemoteSection builtin,
-                                              RemoteSection capture,
-                                              RemoteSection typeref,
-                                              RemoteSection reflstr) {
-  RemoteReflectionInfo Info = {
-    fieldmd,
-    assocty,
-    builtin,
-    capture,
-    typeref,
-    reflstr,
-    0,
-    0
-  };
-
-  const RemoteSection Sections[6] = {
-    fieldmd, assocty, builtin, capture, typeref, reflstr
-  };
-
-  Info.StartAddress = getStartAddress(Sections, 6);
-
-  uintptr_t EndAddress = getEndAddress(Sections, 6);
-  Info.TotalSize = EndAddress - Info.StartAddress;
-
-  return Info;
-}
-
-static
-RemoteSection makeRemoteSection(const PipeMemoryReader *Reader) {
+static swift_remote_reflection_section_t
+makeRemoteSection(const PipeMemoryReader *Reader) {
   uintptr_t Start;
   size_t Size;
 
   PipeMemoryReader_collectBytesFromPipe(Reader, &Start, sizeof(Start));
   PipeMemoryReader_collectBytesFromPipe(Reader, &Size, sizeof(Size));
 
-  RemoteSection RS = {Start, Size, Start + Size};
+  swift_remote_reflection_section_t RS = {Start, Size};
+  DEBUG_LOG("Making remote section with Start = 0x%" PRIxPTR
+            " End = 0x%" PRIxPTR " and  Size = %lu",
+            RS.StartAddress, RS.StartAddress + RS.Size, RS.Size);
+
   return RS;
+}
+
+static const void *PipeMemoryReader_readRemoteSection(
+    const PipeMemoryReader *Reader,
+    swift_remote_reflection_section_t *RemoteSection, void **outFreeContext) {
+
+  const void *Buffer =
+      PipeMemoryReader_readBytes((void *)Reader, RemoteSection->StartAddress,
+                                 RemoteSection->Size, outFreeContext);
+  if (!Buffer)
+    errorAndExit("Couldn't read reflection information");
+
+  return Buffer;
 }
 
 static void
@@ -411,48 +372,39 @@ PipeMemoryReader_receiveReflectionInfo(SwiftReflectionContextRef RC,
   if (NumReflectionInfos == 0)
     return;
 
-  RemoteReflectionInfo *RemoteInfos = calloc(NumReflectionInfos,
-                                             sizeof(RemoteReflectionInfo));
-  if (RemoteInfos == NULL)
+  swift_remote_reflection_section_t *RemoteSections =
+      calloc(NumReflectionInfos * SECTIONS_PER_INFO,
+             sizeof(swift_remote_reflection_section_t));
+  if (RemoteSections == NULL)
     errnoAndExit("malloc failed");
 
-  for (size_t i = 0; i < NumReflectionInfos; ++i) {
-    RemoteInfos[i] = makeRemoteReflectionInfo(
-      makeRemoteSection(Reader),
-      makeRemoteSection(Reader),
-      makeRemoteSection(Reader),
-      makeRemoteSection(Reader),
-      makeRemoteSection(Reader),
-      makeRemoteSection(Reader));
+  // We first read all remote reflection sections, there are 6 for every
+  // complete reflection info.
+  // They come ordered as: fieldmd, assocty, builtin, capture, typeref, reflstr.
+  for (size_t i = 0; i < NumReflectionInfos * SECTIONS_PER_INFO; ++i) {
+    RemoteSections[i] = makeRemoteSection(Reader);
   }
-
   // Now pull in the remote sections into our address space.
-
-  for (size_t i = 0; i < NumReflectionInfos; ++i) {
-    RemoteReflectionInfo RemoteInfo = RemoteInfos[i];
-
+  swift_reflection_section_t *LocalSections =
+      calloc(NumReflectionInfos * SECTIONS_PER_INFO,
+             sizeof(swift_reflection_section_t));
+  for (size_t i = 0; i < NumReflectionInfos * SECTIONS_PER_INFO; ++i) {
     void *outFreeContext = NULL;
-    const void *Buffer = PipeMemoryReader_readBytes((void *)Reader,
-                                                    RemoteInfo.StartAddress,
-                                                    RemoteInfo.TotalSize,
-                                                    &outFreeContext);
-    if (!Buffer)
-      errorAndExit("Couldn't read reflection information");
-
-    swift_reflection_info_t Info = {
-      {makeLocalSection(Buffer, RemoteInfo.fieldmd, RemoteInfo), 0},
-      {makeLocalSection(Buffer, RemoteInfo.assocty, RemoteInfo), 0},
-      {makeLocalSection(Buffer, RemoteInfo.builtin, RemoteInfo), 0},
-      {makeLocalSection(Buffer, RemoteInfo.capture, RemoteInfo), 0},
-      {makeLocalSection(Buffer, RemoteInfo.typeref, RemoteInfo), 0},
-      {makeLocalSection(Buffer, RemoteInfo.reflstr, RemoteInfo), 0},
-      /*LocalStartAddress*/ (uintptr_t) Buffer,
-      /*RemoteStartAddress*/ RemoteInfo.StartAddress,
-    };
-    swift_reflection_addReflectionInfo(RC, Info);
+    const void *Buffer = PipeMemoryReader_readRemoteSection(
+        (void *)Reader, &RemoteSections[i], &outFreeContext);
+    LocalSections[i] = makeLocalSection(Buffer, RemoteSections[i]);
   }
 
-  free(RemoteInfos);
+  // Finally, we zip them in a complete reflection info, with a stride of 6.
+  for (size_t i = 0; i < NumReflectionInfos * SECTIONS_PER_INFO;
+       i += SECTIONS_PER_INFO) {
+    swift_reflection_mapping_info_t Info =
+        makeNonContiguousReflectionInfo(&RemoteSections[i], &LocalSections[i]);
+    swift_reflection_addReflectionMappingInfo(RC, Info);
+  }
+
+  free(RemoteSections);
+  free(LocalSections);
 }
 #endif
 
@@ -676,6 +628,29 @@ int reflectEnumValue(SwiftReflectionContextRef RC,
 
 }
 
+static void
+asyncTaskIterationCallback(swift_reflection_ptr_t AllocationPtr, unsigned Count,
+                           swift_async_task_allocation_chunk_t Chunks[],
+                           void *ContextPtr) {
+  printf("  Allocation block %#" PRIx64 "\n", (uint64_t)AllocationPtr);
+  for (unsigned i = 0; i < Count; i++)
+    printf("    Chunk at %#" PRIx64 " length %u kind %u\n",
+           (uint64_t)Chunks[i].Start, Chunks[i].Length, Chunks[i].Kind);
+}
+
+int reflectAsyncTask(SwiftReflectionContextRef RC,
+                     const PipeMemoryReader Pipe) {
+  uintptr_t AsyncTaskInstance = PipeMemoryReader_receiveInstanceAddress(&Pipe);
+  printf("Async task %#" PRIx64 "\n", (uint64_t)AsyncTaskInstance);
+  swift_reflection_iterateAsyncTaskAllocations(
+      RC, AsyncTaskInstance, asyncTaskIterationCallback, NULL);
+
+  printf("\n\n");
+  PipeMemoryReader_sendDoneMessage(&Pipe);
+  fflush(stdout);
+  return 1;
+}
+
 
 int doDumpHeapInstance(const char *BinaryFilename) {
   PipeMemoryReader Pipe = createPipeMemoryReader();
@@ -691,8 +666,15 @@ int doDumpHeapInstance(const char *BinaryFilename) {
       close(PipeMemoryReader_getParentReadFD(&Pipe));
       dup2(PipeMemoryReader_getChildReadFD(&Pipe), STDIN_FILENO);
       dup2(PipeMemoryReader_getChildWriteFD(&Pipe), STDOUT_FILENO);
-      _execv(BinaryFilename, NULL);
-      exit(EXIT_SUCCESS);
+
+      char *const argv[] = {strdup(BinaryFilename), NULL};
+      int r = _execv(BinaryFilename, argv);
+      int status = EXIT_SUCCESS;
+      if (r == -1) {
+        perror("child process");
+        status = EXIT_FAILURE;
+      }
+      exit(status);
     }
     default: { // Parent
       close(PipeMemoryReader_getChildReadFD(&Pipe));
@@ -757,6 +739,12 @@ int doDumpHeapInstance(const char *BinaryFilename) {
         case EnumValue: {
           printf("Reflecting an enum value.\n");
           if (!reflectEnumValue(RC, Pipe))
+            return EXIT_SUCCESS;
+          break;
+        }
+        case AsyncTask: {
+          printf("Reflecting an async task.\n");
+          if (!reflectAsyncTask(RC, Pipe))
             return EXIT_SUCCESS;
           break;
         }

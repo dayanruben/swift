@@ -1,5 +1,4 @@
 // RUN: %target-swift-frontend -emit-sil -verify %s
-// RUN: %target-swift-frontend -emit-sil -verify %s -enable-ownership-stripping-after-serialization
 
 @propertyWrapper
 final class ClassWrapper<T> {
@@ -23,22 +22,22 @@ struct IntStructWithClassWrapper {
   @ClassWrapper var wrapped: Int
 
   init() {
-    wrapped = 42 // expected-error{{variable 'self.wrapped' used before being initialized}}
+    wrapped = 42
   }
 
   init(conditional b: Bool) {
      if b {
        self._wrapped = ClassWrapper(wrappedValue: 32)
      } else {
-       wrapped = 42 // expected-error{{variable 'self.wrapped' used before being initialized}}
+       wrapped = 42
      }
   }
 
   init(dynamic b: Bool) {
     if b {
-      wrapped = 42 // expected-error{{variable 'self.wrapped' used before being initialized}}
+      wrapped = 42
     }
-    wrapped = 27 // expected-error{{variable 'self.wrapped' used before being initialized}}
+    wrapped = 27
   }
 }
 
@@ -98,4 +97,24 @@ struct UseWrapperWithAutoclosure {
     // expected-note@-1{{'self.wrapped' not initialized}}
   } // expected-error{{return from initializer without initializing all stored properties}}
   // expected-note@-1{{'self.wrapped' not initialized}}  
+}
+
+@propertyWrapper
+struct Wrapper<T> {
+  var wrappedValue: T
+}
+
+func local() {
+  var anotherVar: String // expected-note {{variable defined here}}
+
+  @Wrapper var value = 10 {
+    didSet {
+      anotherVar = "hello!"
+    }
+  }
+
+  value = 15 // expected-error {{variable 'anotherVar' used by function definition before being initialized}}
+
+  anotherVar = "hello!"
+  _ = anotherVar
 }

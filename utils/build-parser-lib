@@ -40,6 +40,7 @@ from swift_build_support.swift_build_support import shell
 from swift_build_support.swift_build_support.toolchain import host_toolchain
 
 isDarwin = platform.system() == "Darwin"
+isSwiftContainedInLLVMProject = os.path.exists(os.path.join(SWIFT_SOURCE_ROOT, "llvm"))
 
 
 class Builder(object):
@@ -74,6 +75,7 @@ class Builder(object):
             shell.call(command, env=env, dry_run=self.dry_run, echo=self.verbose)
 
     def configure(self, enable_debuginfo, instrumentation=None, profile_data=None):
+        environment = {}
         cmake_args = [self.toolchain.cmake, "-G", "Ninja"]
         cmake_args += ["-DCMAKE_MAKE_PROGRAM=" + self.ninja_path]
 
@@ -90,6 +92,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_OSX=" + deployment_version,
             ]
+            environment["SDKROOT"] = "macosx"
 
         elif self.host == "linux":
             host_triple = "%s-unknown-linux" % (self.arch)
@@ -103,7 +106,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_IOS=" + deployment_version,
             ]
-            llvm_c_flags += " -mios-simulator-version-min=" + deployment_version
+            llvm_c_flags += " -target " + host_triple
 
         elif self.host == "iphoneos":
             deployment_version = "10.0"
@@ -113,7 +116,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_IOS=" + deployment_version,
             ]
-            llvm_c_flags += " -miphoneos-version-min==" + deployment_version
+            llvm_c_flags += " -target " + host_triple
 
         elif self.host == "appletvsimulator":
             deployment_version = "10.0"
@@ -123,7 +126,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_TVOS=" + deployment_version,
             ]
-            llvm_c_flags += " -mtvos-simulator-version-min=" + deployment_version
+            llvm_c_flags += " -target " + host_triple
 
         elif self.host == "appletvos":
             deployment_version = "10.0"
@@ -133,7 +136,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_TVOS=" + deployment_version,
             ]
-            llvm_c_flags += " -mtvos-version-min=" + deployment_version
+            llvm_c_flags += " -target " + host_triple
 
         elif self.host == "watchsimulator":
             deployment_version = "3.0"
@@ -146,7 +149,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_WATCHOS=" + deployment_version,
             ]
-            llvm_c_flags += " -mwatchos-simulator-version-min=" + deployment_version
+            llvm_c_flags += " -target " + host_triple
 
         elif self.host == "watchos":
             deployment_version = "3.0"
@@ -156,7 +159,7 @@ class Builder(object):
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + deployment_version,
                 "-DSWIFT_DARWIN_DEPLOYMENT_VERSION_WATCHOS=" + deployment_version,
             ]
-            llvm_c_flags += " -mwatchos-version-min=" + deployment_version
+            llvm_c_flags += " -target " + host_triple
 
         assert host_triple
         assert host_sdk
@@ -225,7 +228,10 @@ class Builder(object):
             "-DLLVM_ENABLE_PROJECTS=clang;swift",
             "-DLLVM_EXTERNAL_PROJECTS=swift",
         ]
-        cmake_args += ["-DSWIFT_BUILD_ONLY_SYNTAXPARSERLIB=TRUE"]
+        cmake_args += [
+            "-DSWIFT_BUILD_ONLY_SYNTAXPARSERLIB=TRUE",
+            "-DSWIFT_BUILD_SYNTAXPARSERTEST=TRUE",
+        ]
         cmake_args += ["-DSWIFT_BUILD_PERF_TESTSUITE=NO", "-DSWIFT_INCLUDE_DOCS=NO"]
         cmake_args += [
             "-DSWIFT_BUILD_REMOTE_MIRROR=FALSE",
@@ -234,7 +240,12 @@ class Builder(object):
             "-DSWIFT_BUILD_DYNAMIC_SDK_OVERLAY=FALSE",
             "-DSWIFT_BUILD_STATIC_SDK_OVERLAY=FALSE",
         ]
-        cmake_args += ["-DLLVM_ENABLE_LIBXML2=FALSE"]
+        cmake_args += [
+            "-DLLVM_ENABLE_LIBXML2=FALSE",
+            "-DLLVM_ENABLE_LIBEDIT=FALSE",
+            "-DLLVM_ENABLE_TERMINFO=FALSE",
+            "-DLLVM_ENABLE_ZLIB=FALSE",
+        ]
         # We are not using cmark but initialize the CMARK variables to something so
         # that configure can succeed.
         cmake_args += [
@@ -246,8 +257,11 @@ class Builder(object):
             "-DCLANG_INCLUDE_TESTS=FALSE",
             "-DSWIFT_INCLUDE_TESTS=FALSE",
         ]
-        cmake_args += [os.path.join(SWIFT_SOURCE_ROOT, "llvm")]
-        self.call(cmake_args)
+        llvm_src_path = os.path.join(SWIFT_SOURCE_ROOT, "llvm") \
+            if isSwiftContainedInLLVMProject \
+            else os.path.join(SWIFT_SOURCE_ROOT, "llvm-project", "llvm")
+        cmake_args += [llvm_src_path]
+        self.call(cmake_args, env=environment)
 
     def build_target(self, build_dir, target, env=None):
         invocation = [self.toolchain.cmake, "--build", build_dir]
@@ -322,7 +336,23 @@ def extract_symbols(install_destdir, install_prefix, install_symroot, jobs):
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="""Builds Swift Syntax Parser library.""",
+        description="""
+Builds Swift Syntax Parser library.
+
+Example invocations:
+
+* Building for host (macOS, linux):
+
+  $ utils/build-parser-lib --release --no-assertions --build-dir /tmp/parser-lib-build
+
+* Building for iOS
+
+  $ utils/build-parser-lib --release --no-assertions --build-dir \
+/tmp/parser-lib-build-iossim --host iphonesimulator --architectures x86_64
+  $ utils/build-parser-lib --release --no-assertions --build-dir \
+/tmp/parser-lib-build-ios --host iphoneos --architectures arm64
+
+""",
     )
     optbuilder = parser.to_builder()
     option = optbuilder.add_option
@@ -420,6 +450,7 @@ def main():
         help="space-separated list of architectures to build for. (default = %s)"
         % default_architectures,
     )
+    option("--no-install", store_true, help="disable install step")
     option(
         "--install-symroot", store_path, help="the path to install debug symbols into"
     )
@@ -446,8 +477,20 @@ def main():
     parser = optbuilder.build()
     args = parser.parse_args()
 
-    if not args.install_destdir:
+    if not args.install_destdir and not args.no_install:
         args.install_destdir = os.path.join(args.build_dir, "install")
+
+    if not isSwiftContainedInLLVMProject:
+        swift_src_path = os.path.join(SWIFT_SOURCE_ROOT, "swift")
+        swift_src_in_llvm_project_path = \
+            os.path.join(SWIFT_SOURCE_ROOT, "llvm-project", "swift")
+        # Need to symlink 'swift' into 'llvm-project' since we will be doing
+        # a unified configure with 'swift' as an external project.
+        if not os.path.exists(swift_src_in_llvm_project_path):
+            print("Symlinking '%s' to '%s'" %
+                  (swift_src_path, swift_src_in_llvm_project_path), file=sys.stderr)
+            shell.symlink(swift_src_path, swift_src_in_llvm_project_path,
+                          dry_run=args.dry_run, echo=args.verbose)
 
     architectures = args.architectures.split(" ")
     architectures = [arch for arch in architectures if arch != ""]
@@ -471,8 +514,9 @@ def main():
             arch = architectures.pop(0)
             tmpargs = copy.copy(args)
             tmpargs.build_dir = os.path.join(objroot, arch, "obj")
-            tmpargs.install_destdir = os.path.join(objroot, arch, "dst")
-            tmpargs.install_prefix = "/"
+            if not args.no_install:
+                tmpargs.install_destdir = os.path.join(objroot, arch, "dst")
+                tmpargs.install_prefix = "/"
 
             native_build_dir = tmpargs.build_dir
             dst_dirs.append(tmpargs.install_destdir)
@@ -512,8 +556,9 @@ def main():
 
         for arch in architectures:
             args.build_dir = os.path.join(objroot, arch, "obj")
-            args.install_destdir = os.path.join(objroot, arch, "dst")
-            args.install_prefix = "/"
+            if not args.no_install:
+                args.install_destdir = os.path.join(objroot, arch, "dst")
+                args.install_prefix = "/"
 
             dst_dirs.append(args.install_destdir)
 
@@ -527,11 +572,12 @@ def main():
             )
             builder.run()
 
-        lipo = os.path.join(SWIFT_SOURCE_ROOT, "swift", "utils", "recursive-lipo")
-        shell.call(
-            [lipo, "-v", "--destination", os.path.join(dstroot, "./" + prefix)]
-            + dst_dirs
-        )
+        if not args.no_install:
+            lipo = os.path.join(SWIFT_SOURCE_ROOT, "swift", "utils", "recursive-lipo")
+            shell.call(
+                [lipo, "-v", "--destination", os.path.join(dstroot, "./" + prefix)]
+                + dst_dirs
+            )
 
         if args.install_symroot:
             extract_symbols(dstroot, prefix, symroot, args.build_jobs)

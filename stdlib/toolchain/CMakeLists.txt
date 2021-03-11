@@ -15,11 +15,7 @@ set(compile_flags
   # C++ code in the runtime and standard library should generally avoid
   # introducing static constructors or destructors.
   "-Wglobal-constructors"
-  "-Wexit-time-destructors"
-
-  # We don't want runtime C++ code to export symbols we didn't explicitly
-  # choose to.
-  "-fvisibility=hidden")
+  "-Wexit-time-destructors")
 
 
 # Build the runtime with -Wall to catch, e.g., uninitialized variables
@@ -42,18 +38,6 @@ unset(compile_flags)
 
 if("Thread" IN_LIST SWIFT_RUNTIME_USE_SANITIZERS)
   list(APPEND CXX_LINK_FLAGS "-fsanitize=thread")
-endif()
-
-# Do not enforce checks for LLVM's ABI-breaking build settings.
-# The Swift runtime uses some header-only code from LLVM's ADT classes,
-# but we do not want to link libSupport into the runtime. These checks rely
-# on the presence of symbols in libSupport to identify how the code was
-# built and cause link failures for mismatches. Without linking that library,
-# we get link failures regardless, so instead, this just disables the checks.
-if(CMAKE_VERSION VERSION_LESS 3.12)
-  append("-DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
-else()
-  add_compile_definitions(LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1)
 endif()
 
 # Compatibility libraries build in a special alternate universe that can't

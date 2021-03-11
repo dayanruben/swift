@@ -27,6 +27,10 @@ SILValue getUnderlyingObject(SILValue V);
 
 SILValue getUnderlyingObjectStopAtMarkDependence(SILValue V);
 
+/// Given an address look through address to address projections and indexing
+/// insts.
+SILValue getUnderlyingObjectStoppingAtObjectToAddrProjections(SILValue v);
+
 SILValue stripSinglePredecessorArgs(SILValue V);
 
 /// Return the underlying SILValue after stripping off all casts from the
@@ -37,9 +41,13 @@ SILValue stripCasts(SILValue V);
 /// mark_dependence) from the current SILValue.
 SILValue stripCastsWithoutMarkDependence(SILValue V);
 
-/// Return the underlying SILValue after stripping off all copy_value and
+/// Return the underlying SILValue after looking through all copy_value and
 /// begin_borrow instructions.
-SILValue stripOwnershipInsts(SILValue v);
+SILValue lookThroughOwnershipInsts(SILValue v);
+
+/// Return the underlying SILValue after looking through all copy_value
+/// instructions.
+SILValue lookThroughCopyValueInsts(SILValue v);
 
 /// Return the underlying SILValue after stripping off all upcasts from the
 /// current SILValue.
@@ -51,7 +59,13 @@ SILValue stripClassCasts(SILValue V);
 
 /// Return the underlying SILValue after stripping off all address projection
 /// instructions.
+///
+/// FIXME: Today address projections are referring to the result of the
+/// projection and doesn't consider the operand. Should we change this?
 SILValue stripAddressProjections(SILValue V);
+
+/// Look through any projections that transform an address -> an address.
+SILValue lookThroughAddressToAddressProjections(SILValue v);
 
 /// Return the underlying SILValue after stripping off all aggregate projection
 /// instructions.
@@ -117,6 +131,10 @@ bool mayCheckRefCount(SILInstruction *User);
 /// Return true when the instruction represents added instrumentation for
 /// run-time sanitizers.
 bool isSanitizerInstrumentation(SILInstruction *Instruction);
+
+/// Return true when the instruction represents added instrumentation for
+/// run-time sanitizers or code coverage.
+bool isInstrumentation(SILInstruction *Instruction);
 
 /// Check that this is a partial apply of a reabstraction thunk and return the
 /// argument of the partial apply if it is.

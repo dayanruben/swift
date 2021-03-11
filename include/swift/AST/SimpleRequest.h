@@ -24,6 +24,7 @@
 #include "swift/Basic/TypeID.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Error.h"
 #include <tuple>
 #include <type_traits>
 
@@ -232,7 +233,7 @@ SourceLoc extractNearestSourceLoc(const std::tuple<First, Rest...> &value) {
 /// the 3 caching kinds defined above.
 /// \code
 ///   evaluator::DependencySource
-///   readDependencySource(const evaluator::DependencyCollector &) const;
+///   readDependencySource(const evaluator::DependencyRecorder &) const;
 /// \endcode
 ///
 /// Requests that define dependency sinks should instead override

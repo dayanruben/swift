@@ -10,6 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#define DEBUG_TYPE "sil-function"
+
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILFunction.h"
@@ -24,6 +26,7 @@
 #include "swift/Basic/OptimizationMode.h"
 #include "swift/Basic/Statistic.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/GraphWriter.h"
 #include "clang/AST/Decl.h"
@@ -31,16 +34,26 @@
 using namespace swift;
 using namespace Lowering;
 
-SILSpecializeAttr::SILSpecializeAttr(bool exported, SpecializationKind kind,
-                                     GenericSignature specializedSig)
-    : kind(kind), exported(exported), specializedSignature(specializedSig) { }
+STATISTIC(MaxBitfieldID, "Max value of SILFunction::currentBitfieldID");
 
-SILSpecializeAttr *SILSpecializeAttr::create(SILModule &M,
-                                             GenericSignature specializedSig,
-                                             bool exported,
-                                             SpecializationKind kind) {
+SILSpecializeAttr::SILSpecializeAttr(bool exported, SpecializationKind kind,
+                                     GenericSignature specializedSig,
+                                     SILFunction *target, Identifier spiGroup,
+                                     const ModuleDecl *spiModule)
+    : kind(kind), exported(exported), specializedSignature(specializedSig),
+      spiGroup(spiGroup), spiModule(spiModule), targetFunction(target) {
+  if (targetFunction)
+    targetFunction->incrementRefCount();
+}
+
+SILSpecializeAttr *
+SILSpecializeAttr::create(SILModule &M, GenericSignature specializedSig,
+                          bool exported, SpecializationKind kind,
+                          SILFunction *target, Identifier spiGroup,
+                          const ModuleDecl *spiModule) {
   void *buf = M.allocate(sizeof(SILSpecializeAttr), alignof(SILSpecializeAttr));
-  return ::new (buf) SILSpecializeAttr(exported, kind, specializedSig);
+  return ::new (buf) SILSpecializeAttr(exported, kind, specializedSig, target,
+                                       spiGroup, spiModule);
 }
 
 void SILFunction::addSpecializeAttr(SILSpecializeAttr *Attr) {
@@ -48,6 +61,19 @@ void SILFunction::addSpecializeAttr(SILSpecializeAttr *Attr) {
     Attr->F = this;
     SpecializeAttrSet.push_back(Attr);
   }
+}
+
+void SILFunction::removeSpecializeAttr(SILSpecializeAttr *attr) {
+  // Drop the reference to the _specialize(target:) function.
+  if (auto *targetFun = attr->getTargetFunction()) {
+    targetFun->decrementRefCount();
+  }
+  SpecializeAttrSet.erase(std::remove_if(SpecializeAttrSet.begin(),
+                                         SpecializeAttrSet.end(),
+                                         [attr](SILSpecializeAttr *member) {
+                                           return member == attr;
+                                         }),
+                          SpecializeAttrSet.end());
 }
 
 SILFunction *
@@ -72,13 +98,29 @@ SILFunction::create(SILModule &M, SILLinkage linkage, StringRef name,
     name = entry->getKey();
   }
 
-  auto fn = new (M) SILFunction(M, linkage, name, loweredType, genericEnv, loc,
+  SILFunction *fn = M.removeFromZombieList(name);
+  if (fn) {
+    // Resurrect a zombie function.
+    // This happens for example if a specialized function gets dead and gets
+    // deleted. And afterwards the same specialization is created again.
+    fn->init(linkage, name, loweredType, genericEnv, loc, isBareSILFunction,
+             isTrans, isSerialized, entryCount, isThunk, classSubclassScope,
+             inlineStrategy, E, debugScope, isDynamic, isExactSelfClass);
+    assert(fn->empty());
+  } else {
+    fn = new (M) SILFunction(M, linkage, name, loweredType, genericEnv, loc,
                                 isBareSILFunction, isTrans, isSerialized,
                                 entryCount, isThunk, classSubclassScope,
-                                inlineStrategy, E, insertBefore, debugScope,
+                                inlineStrategy, E, debugScope,
                                 isDynamic, isExactSelfClass);
-
+  }
   if (entry) entry->setValue(fn);
+
+  if (insertBefore)
+    M.functions.insert(SILModule::iterator(insertBefore), fn);
+  else
+    M.functions.push_back(fn);
+
   return fn;
 }
 
@@ -90,39 +132,58 @@ SILFunction::SILFunction(SILModule &Module, SILLinkage Linkage, StringRef Name,
                          ProfileCounter entryCount, IsThunk_t isThunk,
                          SubclassScope classSubclassScope,
                          Inline_t inlineStrategy, EffectsKind E,
-                         SILFunction *InsertBefore,
                          const SILDebugScope *DebugScope,
                          IsDynamicallyReplaceable_t isDynamic,
                          IsExactSelfClass_t isExactSelfClass)
-    : Module(Module), Name(Name), LoweredType(LoweredType),
-      GenericEnv(genericEnv), SpecializationInfo(nullptr),
-      EntryCount(entryCount),
-      Availability(AvailabilityContext::alwaysAvailable()),
-      Bare(isBareSILFunction), Transparent(isTrans),
-      Serialized(isSerialized), Thunk(isThunk),
-      ClassSubclassScope(unsigned(classSubclassScope)), GlobalInitFlag(false),
-      InlineStrategy(inlineStrategy), Linkage(unsigned(Linkage)),
-      HasCReferences(false), IsWeakImported(false),
-      IsDynamicReplaceable(isDynamic),
-      ExactSelfClass(isExactSelfClass),
-      Inlined(false), Zombie(false), HasOwnership(true),
-      WasDeserializedCanonical(false), IsWithoutActuallyEscapingThunk(false),
-      OptMode(unsigned(OptimizationMode::NotSet)),
-      EffectsKindAttr(unsigned(E)) {
-  assert(!Transparent || !IsDynamicReplaceable);
-  validateSubclassScope(classSubclassScope, isThunk, nullptr);
-  setDebugScope(DebugScope);
-
-  if (InsertBefore)
-    Module.functions.insert(SILModule::iterator(InsertBefore), this);
-  else
-    Module.functions.push_back(this);
-
-  Module.removeFromZombieList(Name);
-
+    : Module(Module), Availability(AvailabilityContext::alwaysAvailable())  {
+  init(Linkage, Name, LoweredType, genericEnv, Loc, isBareSILFunction, isTrans,
+       isSerialized, entryCount, isThunk, classSubclassScope, inlineStrategy,
+       E, DebugScope, isDynamic, isExactSelfClass);
+  
   // Set our BB list to have this function as its parent. This enables us to
   // splice efficiently basic blocks in between functions.
   BlockList.Parent = this;
+}
+
+void SILFunction::init(SILLinkage Linkage, StringRef Name,
+                         CanSILFunctionType LoweredType,
+                         GenericEnvironment *genericEnv,
+                         Optional<SILLocation> Loc, IsBare_t isBareSILFunction,
+                         IsTransparent_t isTrans, IsSerialized_t isSerialized,
+                         ProfileCounter entryCount, IsThunk_t isThunk,
+                         SubclassScope classSubclassScope,
+                         Inline_t inlineStrategy, EffectsKind E,
+                         const SILDebugScope *DebugScope,
+                         IsDynamicallyReplaceable_t isDynamic,
+                         IsExactSelfClass_t isExactSelfClass) {
+  this->Name = Name;
+  this->LoweredType = LoweredType;
+  this->GenericEnv = genericEnv;
+  this->SpecializationInfo = nullptr;
+  this->EntryCount = entryCount;
+  this->Availability = AvailabilityContext::alwaysAvailable();
+  this->Bare = isBareSILFunction;
+  this->Transparent = isTrans;
+  this->Serialized = isSerialized;
+  this->Thunk = isThunk;
+  this->ClassSubclassScope = unsigned(classSubclassScope);
+  this->GlobalInitFlag = false;
+  this->InlineStrategy = inlineStrategy;
+  this->Linkage = unsigned(Linkage);
+  this->HasCReferences = false;
+  this->IsWeakImported = false;
+  this->IsDynamicReplaceable = isDynamic;
+  this->ExactSelfClass = isExactSelfClass;
+  this->Inlined = false;
+  this->Zombie = false;
+  this->HasOwnership = true,
+  this->WasDeserializedCanonical = false;
+  this->IsWithoutActuallyEscapingThunk = false;
+  this->OptMode = unsigned(OptimizationMode::NotSet);
+  this->EffectsKindAttr = unsigned(E);
+  assert(!Transparent || !IsDynamicReplaceable);
+  validateSubclassScope(classSubclassScope, isThunk, nullptr);
+  setDebugScope(DebugScope);
 }
 
 SILFunction::~SILFunction() {
@@ -154,6 +215,10 @@ SILFunction::~SILFunction() {
 
   assert(RefCount == 0 &&
          "Function cannot be deleted while function_ref's still exist");
+  assert(!newestAliveBitfield &&
+         "Not all BasicBlockBitfields deleted at function destruction");
+  if (currentBitfieldID > MaxBitfieldID)
+    MaxBitfieldID = currentBitfieldID;
 }
 
 void SILFunction::createProfiler(ASTNode Root, SILDeclRef forDecl,
@@ -188,10 +253,10 @@ void SILFunction::numberValues(llvm::DenseMap<const SILNode*, unsigned> &
     for (auto &I : BB) {
       auto results = I.getResults();
       if (results.empty()) {
-        ValueToNumberMap[&I] = idx++;
+        ValueToNumberMap[I.asSILNode()] = idx++;
       } else {
         // Assign the instruction node the first result ID.
-        ValueToNumberMap[&I] = idx;
+        ValueToNumberMap[I.asSILNode()] = idx;
         for (auto result : results) {
           ValueToNumberMap[result] = idx++;
         }
@@ -238,9 +303,9 @@ SILType GenericEnvironment::mapTypeIntoContext(SILModule &M,
                     genericSig);
 }
 
-bool SILFunction::isNoReturnFunction() const {
+bool SILFunction::isNoReturnFunction(TypeExpansionContext context) const {
   return SILType::getPrimitiveObjectType(getLoweredFunctionType())
-      .isNoReturnFunction(getModule());
+      .isNoReturnFunction(getModule(), context);
 }
 
 const TypeLowering &
@@ -301,17 +366,29 @@ bool SILFunction::isWeakImported() const {
 }
 
 SILBasicBlock *SILFunction::createBasicBlock() {
-  return new (getModule()) SILBasicBlock(this, nullptr, false);
+  SILBasicBlock *newBlock = new (getModule()) SILBasicBlock(this);
+  BlockList.push_back(newBlock);
+  return newBlock;
 }
 
 SILBasicBlock *SILFunction::createBasicBlockAfter(SILBasicBlock *afterBB) {
-  assert(afterBB);
-  return new (getModule()) SILBasicBlock(this, afterBB, /*after*/ true);
+  SILBasicBlock *newBlock = new (getModule()) SILBasicBlock(this);
+  BlockList.insertAfter(afterBB->getIterator(), newBlock);
+  return newBlock;
 }
 
 SILBasicBlock *SILFunction::createBasicBlockBefore(SILBasicBlock *beforeBB) {
-  assert(beforeBB);
-  return new (getModule()) SILBasicBlock(this, beforeBB, /*after*/ false);
+  SILBasicBlock *newBlock = new (getModule()) SILBasicBlock(this);
+  BlockList.insert(beforeBB->getIterator(), newBlock);
+  return newBlock;
+}
+
+void SILFunction::moveBlockBefore(SILBasicBlock *BB, SILFunction::iterator IP) {
+  assert(BB->getParent() == this);
+  if (SILFunction::iterator(BB) == IP)
+    return;
+  BlockList.remove(BB);
+  BlockList.insert(IP, BB);
 }
 
 //===----------------------------------------------------------------------===//
@@ -515,8 +592,9 @@ void SILFunction::viewCFGOnly() const {
 }
 
 
-bool SILFunction::hasSelfMetadataParam() const {
-  auto paramTypes = getConventions().getParameterSILTypes();
+bool SILFunction::hasDynamicSelfMetadata() const {
+  auto paramTypes =
+      getConventions().getParameterSILTypes(TypeExpansionContext::minimal());
   if (paramTypes.empty())
     return false;
 
@@ -585,10 +663,9 @@ bool SILFunction::isExternallyUsedSymbol() const {
                                          getModule().isWholeModule());
 }
 
-void SILFunction::convertToDeclaration() {
-  assert(isDefinition() && "Can only convert definitions to declarations");
+void SILFunction::clear() {
   dropAllReferences();
-  getBlocks().clear();
+  BlockList.clear();
 }
 
 SubstitutionMap SILFunction::getForwardingSubstitutionMap() {
@@ -628,7 +705,7 @@ void SILFunction::setObjCReplacement(Identifier replacedFunc) {
 // linkage dependency.
 
 struct SILFunctionTraceFormatter : public UnifiedStatsReporter::TraceFormatter {
-  void traceName(const void *Entity, raw_ostream &OS) const {
+  void traceName(const void *Entity, raw_ostream &OS) const override {
     if (!Entity)
       return;
     const SILFunction *F = static_cast<const SILFunction *>(Entity);
@@ -636,7 +713,7 @@ struct SILFunctionTraceFormatter : public UnifiedStatsReporter::TraceFormatter {
   }
 
   void traceLoc(const void *Entity, SourceManager *SM,
-                clang::SourceManager *CSM, raw_ostream &OS) const {
+                clang::SourceManager *CSM, raw_ostream &OS) const override {
     if (!Entity)
       return;
     const SILFunction *F = static_cast<const SILFunction *>(Entity);
@@ -652,4 +729,21 @@ template<>
 const UnifiedStatsReporter::TraceFormatter*
 FrontendStatsTracer::getTraceFormatter<const SILFunction *>() {
   return &TF;
+}
+
+bool SILFunction::hasPrespecialization() const {
+  for (auto *attr : getSpecializeAttrs()) {
+    if (attr->isExported())
+      return true;
+  }
+  return false;
+}
+
+void SILFunction::forEachSpecializeAttrTargetFunction(
+      llvm::function_ref<void(SILFunction *)> action) {
+  for (auto *attr : getSpecializeAttrs()) {
+    if (auto *f = attr->getTargetFunction()) {
+      action(f);
+    }
+  }
 }

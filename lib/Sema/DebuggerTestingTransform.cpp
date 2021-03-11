@@ -15,6 +15,7 @@
 ///
 //===----------------------------------------------------------------------===//
 
+#include "CodeSynthesis.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTNode.h"
 #include "swift/AST/ASTWalker.h"
@@ -36,7 +37,7 @@ namespace {
 /// Find available closure discriminators.
 ///
 /// The parser typically takes care of assigning unique discriminators to
-/// closures, but the parser is unavailable to this transform.
+/// closures, but the parser is unavailable during semantic analysis.
 class DiscriminatorFinder : public ASTWalker {
   unsigned NextDiscriminator = 0;
 
@@ -225,9 +226,10 @@ private:
     // Create the closure.
     auto *Params = ParameterList::createEmpty(Ctx);
     auto *Closure = new (Ctx)
-        ClosureExpr(SourceRange(), nullptr, Params, SourceLoc(), SourceLoc(),
-                    SourceLoc(), nullptr, DF.getNextDiscriminator(),
-                    getCurrentDeclContext());
+        ClosureExpr(DeclAttributes(), SourceRange(), nullptr, Params,
+                    SourceLoc(), SourceLoc(),
+                    SourceLoc(), SourceLoc(), nullptr,
+                    DF.getNextDiscriminator(), getCurrentDeclContext());
     Closure->setImplicit(true);
 
     // TODO: Save and return the value of $OriginalExpr.
@@ -243,7 +245,8 @@ private:
     // TODO: typeCheckExpression() seems to assign types to everything here,
     // but may not be sufficient in some cases.
     Expr *FinalExpr = ClosureCall;
-    if (!TypeChecker::typeCheckExpression(FinalExpr, getCurrentDeclContext()))
+    if (!TypeChecker::typeCheckExpression(FinalExpr, getCurrentDeclContext(),
+                                          /*contextualInfo=*/{}))
       llvm::report_fatal_error("Could not type-check instrumentation");
 
     // Captures have to be computed after the closure is type-checked. This

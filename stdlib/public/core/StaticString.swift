@@ -69,7 +69,7 @@
 ///         utf8[4]     //-> Fatal error!
 ///     }
 @frozen
-public struct StaticString {
+public struct StaticString: ConcurrentValue {
 
   /// Either a pointer to the start of UTF-8 data, represented as an integer,
   /// or an integer representation of a single Unicode scalar.
@@ -172,20 +172,7 @@ public struct StaticString {
       return body(UnsafeBufferPointer(
         start: utf8Start, count: utf8CodeUnitCount))
     } else {
-      var buffer: UInt64 = 0
-      var i = 0
-      let sink: (UInt8) -> Void = {
-#if _endian(little)
-        buffer = buffer | (UInt64($0) << (UInt64(i) * 8))
-#else
-        buffer = buffer | (UInt64($0) << (UInt64(7-i) * 8))
-#endif
-        i += 1
-      }
-      UTF8.encode(unicodeScalar, into: sink)
-      return body(UnsafeBufferPointer(
-        start: UnsafePointer(Builtin.addressof(&buffer)),
-        count: i))
+      return unicodeScalar.withUTF8CodeUnits { body($0) }
     }
   }
 

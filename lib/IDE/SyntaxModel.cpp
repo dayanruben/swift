@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/IDE/SyntaxModel.h"
+#include "swift/Basic/Defer.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Decl.h"
@@ -538,8 +539,8 @@ static bool shouldTreatAsSingleToken(const SyntaxStructureNode &Node,
   // Avoid passing the individual syntax tokens corresponding to single-line
   // object literal expressions, as they will be reported as a single token.
   return Node.Kind == SyntaxStructureKind::ObjectLiteralExpression &&
-    SM.getLineNumber(Node.Range.getStart()) ==
-    SM.getLineNumber(Node.Range.getEnd());
+         SM.getLineAndColumnInBuffer(Node.Range.getStart()).first ==
+             SM.getLineAndColumnInBuffer(Node.Range.getEnd()).first;
 }
 
 std::pair<bool, Expr *> ModelASTWalker::walkToExprPre(Expr *E) {
@@ -905,7 +906,7 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
                         AFD->getSignatureSourceRange());
     if (FD) {
       SN.TypeRange = charSourceRangeFromSourceRange(SM,
-                                    FD->getBodyResultTypeLoc().getSourceRange());
+                                    FD->getResultTypeSourceRange());
     }
     pushStructureNode(SN, AFD);
   } else if (auto *NTD = dyn_cast<NominalTypeDecl>(D)) {
@@ -990,7 +991,9 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
     if (bracesRange.isValid())
       SN.BodyRange = innerCharSourceRangeFromSourceRange(SM, bracesRange);
     SourceLoc NRStart = VD->getNameLoc();
-    SourceLoc NREnd = NRStart.getAdvancedLoc(VD->getName().getLength());
+    SourceLoc NREnd = (!VD->getName().empty()
+                       ? NRStart.getAdvancedLoc(VD->getName().getLength())
+                       : NRStart);
     SN.NameRange = CharSourceRange(SM, NRStart, NREnd);
     SN.TypeRange = charSourceRangeFromSourceRange(SM,
                                         VD->getTypeSourceRangeForDiagnostics());
@@ -1096,7 +1099,7 @@ bool ModelASTWalker::walkToDeclPre(Decl *D) {
     SN.NameRange = charSourceRangeFromSourceRange(SM,
                                         SubscriptD->getSignatureSourceRange());
     SN.TypeRange = charSourceRangeFromSourceRange(SM,
-                            SubscriptD->getElementTypeLoc().getSourceRange());
+                            SubscriptD->getElementTypeSourceRange());
     pushStructureNode(SN, SubscriptD);
   } else if (auto *AssociatedTypeD = dyn_cast<AssociatedTypeDecl>(D)) {
     SyntaxStructureNode SN;
@@ -1199,7 +1202,7 @@ bool ModelASTWalker::handleSpecialDeclAttribute(const DeclAttribute *D,
                              ExcludeNodeAtLocation).shouldContinue)
       return false;
     if (auto *CA = dyn_cast<CustomAttr>(D)) {
-      if (auto *Repr = CA->getTypeLoc().getTypeRepr()) {
+      if (auto *Repr = CA->getTypeRepr()) {
         if (!Repr->walk(*this))
           return false;
       }
@@ -1416,7 +1419,7 @@ bool ModelASTWalker::pushStructureNode(const SyntaxStructureNode &Node,
                                        const ASTNodeType& ASTNode) {
   SubStructureStack.emplace_back(Node, ASTNode);
   if (shouldTreatAsSingleToken(Node, SM))
-    AvoidPassingSyntaxToken ++;
+    ++AvoidPassingSyntaxToken;
 
   if (!passTokenNodesUntil(Node.Range.getStart(),
                            ExcludeNodeAtLocation).shouldContinue)
@@ -1509,7 +1512,6 @@ bool ModelASTWalker::processComment(CharSourceRange Range) {
 bool ModelASTWalker::findUrlStartingLoc(StringRef Text,
                                         unsigned &Start,
                                         std::regex &Regex) {
-#ifdef SWIFT_HAVE_WORKING_STD_REGEX
   static const auto MailToPosition = std::find(URLProtocols.begin(),
                                                URLProtocols.end(),
                                                "mailto");
@@ -1541,7 +1543,6 @@ bool ModelASTWalker::findUrlStartingLoc(StringRef Text,
       }
     }
   }
-#endif
   return false;
 }
 
@@ -1554,12 +1555,12 @@ static CharSourceRange sanitizeUnpairedParenthesis(CharSourceRange Range) {
   unsigned TrimLen = 0;
   for (char C : Text) {
     if (C == '(') {
-      Pairs ++;
+      ++Pairs;
     } else if (C == ')') {
       if (Pairs == 0)
-        TrimLen ++;
+        ++TrimLen;
       else
-        Pairs --;
+        --Pairs;
     } else {
       TrimLen = 0;
     }
@@ -1619,8 +1620,7 @@ class DocFieldParser {
 
 public:
   DocFieldParser(StringRef text) : ptr(text.begin()), end(text.end()) {
-    assert(text.rtrim().find('\n') == StringRef::npos &&
-           "expected single line");
+    assert(!text.rtrim().contains('\n') && "expected single line");
   }
 
   // Case-insensitively match one of the following patterns:

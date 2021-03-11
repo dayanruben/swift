@@ -190,27 +190,57 @@ public:
 
   /// Returns true if the given value is varied for any of the given parameter
   /// (independent variable) indices.
-  bool isVaried(SILValue value, IndexSubset *parameterIndices) const;
+  bool isVaried(SILValue value, IndexSubset *independentVariableIndices) const;
 
   /// Returns true if the given value is useful for the given dependent variable
   /// index.
   bool isUseful(SILValue value, unsigned dependentVariableIndex) const;
 
-  /// Returns true if the given value is active for the given
-  /// `SILAutoDiffIndices` (parameter indices and result index).
-  bool isActive(SILValue value, const SILAutoDiffIndices &indices) const;
+  /// Returns true if the given value is varied for any of the given result
+  /// (dependent variable) indices.
+  bool isUseful(SILValue value, IndexSubset *dependentVariableIndices) const;
 
-  /// Returns the activity of the given value for the given `SILAutoDiffIndices`
-  /// (parameter indices and result index).
-  Activity getActivity(SILValue value, const SILAutoDiffIndices &indices) const;
+  /// Returns true if the given value is active for the given parameter indices
+  /// and result indices.
+  bool isActive(SILValue value,
+                IndexSubset *parameterIndices,
+                IndexSubset *resultIndices) const;
 
-  /// Prints activity information for the `indices` of the given `value`.
-  void dump(SILValue value, const SILAutoDiffIndices &indices,
+  /// Returns true if the given value is active for the given config.
+  bool isActive(SILValue value, AutoDiffConfig config) const {
+    return isActive(value, config.parameterIndices, config.resultIndices);
+  }
+
+  /// Returns the activity of the given value for the given config.
+  Activity getActivity(SILValue value,
+                       IndexSubset *parameterIndices,
+                       IndexSubset *resultIndices) const;
+
+  /// Returns the activity of the given value for the given config.
+  Activity getActivity(SILValue value, AutoDiffConfig config) const {
+    return getActivity(value, config.parameterIndices, config.resultIndices);
+  }
+
+  /// Prints activity information for the config of the given value.
+  void dump(SILValue value,
+            IndexSubset *parameterIndices, IndexSubset *resultIndices,
             llvm::raw_ostream &s = llvm::dbgs()) const;
 
-  /// Prints activity information for the given `indices`.
-  void dump(SILAutoDiffIndices indices,
+  /// Prints activity information for the config of the given value.
+  void dump(SILValue value, AutoDiffConfig config,
+            llvm::raw_ostream &s = llvm::dbgs()) const {
+    return dump(value, config.parameterIndices, config.resultIndices, s);
+  }
+
+  /// Prints all activity information for the given parameter indices and result
+  /// indices.
+  void dump(IndexSubset *parameterIndices, IndexSubset *resultIndices,
             llvm::raw_ostream &s = llvm::dbgs()) const;
+
+  /// Prints all activity information for the given config.
+  void dump(AutoDiffConfig config, llvm::raw_ostream &s = llvm::dbgs()) const {
+    return dump(config.parameterIndices, config.resultIndices, s);
+  }
 };
 
 class DifferentiableActivityCollection {

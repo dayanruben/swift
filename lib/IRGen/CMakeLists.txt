@@ -1,3 +1,4 @@
+set_swift_llvm_is_available()
 add_swift_host_library(swiftIRGen STATIC
   AllocStackHoisting.cpp
   ClassLayout.cpp
@@ -69,4 +70,5 @@ target_link_libraries(swiftIRGen PRIVATE
   swiftLLVMPasses
   swiftSIL
   swiftSILGen
-  swiftSILOptimizer)
+  swiftSILOptimizer
+  swiftTBDGen)

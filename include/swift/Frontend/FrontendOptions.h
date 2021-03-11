@@ -27,20 +27,18 @@ namespace llvm {
 }
 
 namespace swift {
-
+enum class IntermoduleDepTrackingMode;
 
 /// Options for controlling the behavior of the frontend.
 class FrontendOptions {
   friend class ArgsToFrontendOptionsConverter;
 
   /// A list of arbitrary modules to import and make implicitly visible.
-  std::vector<std::string> ImplicitImportModuleNames;
+  std::vector<std::pair<std::string, bool /*testable*/>>
+      ImplicitImportModuleNames;
 
 public:
   FrontendInputsAndOutputs InputsAndOutputs;
-
-  /// The kind of input on which the frontend should operate.
-  InputFileKind InputKind = InputFileKind::Swift;
 
   void forAllOutputPaths(const InputFile &input,
                          llvm::function_ref<void(StringRef)> fn) const;
@@ -72,6 +70,9 @@ public:
   /// The path to which we should store indexing data, if any.
   std::string IndexStorePath;
 
+  /// The path to load access notes from.
+  std::string AccessNotesPath;
+
   /// The path to look in when loading a module interface file, to see if a
   /// binary module has already been built for use by the compiler.
   std::string PrebuiltModuleCachePath;
@@ -88,6 +89,9 @@ public:
   /// The module for which we should verify all of the generic signatures.
   std::string VerifyGenericSignaturesInModule;
 
+  /// Number of retry opening an input file if the previous opening returns
+  /// bad file descriptor error.
+  unsigned BadFileDescriptorRetryCount = 0;
   enum class ActionType {
     NoneAction,        ///< No specific action
     Parse,             ///< Parse only
@@ -116,6 +120,8 @@ public:
 
     /// Build from a swiftinterface, as close to `import` as possible
     CompileModuleFromInterface,
+    /// Same as CompileModuleFromInterface, but stopping after typechecking
+    TypecheckModuleFromInterface,
 
     EmitSIBGen, ///< Emit serialized AST + raw SIL
     EmitSIB,    ///< Emit serialized AST + canonical SIL
@@ -133,11 +139,21 @@ public:
     EmitPCM, ///< Emit precompiled Clang module from a module map
     DumpPCM, ///< Dump information about a precompiled Clang module
 
-    ScanDependencies,   ///< Scan dependencies of Swift source files
+    ScanDependencies,        ///< Scan dependencies of Swift source files
+    PrintVersion,       ///< Print version information.
+    PrintFeature,       ///< Print supported feature of this compiler
   };
 
   /// Indicates the action the user requested that the frontend perform.
   ActionType RequestedAction = ActionType::NoneAction;
+
+  enum class ParseInputMode {
+    Swift,
+    SwiftLibrary,
+    SwiftModuleInterface,
+    SIL,
+  };
+  ParseInputMode InputMode = ParseInputMode::Swift;
 
   /// Indicates that the input(s) should be parsed as the Swift stdlib.
   bool ParseStdlib = false;
@@ -160,12 +176,6 @@ public:
   /// If set, dumps wall time taken to check each expression.
   bool DebugTimeExpressionTypeChecking = false;
 
-  /// If set, prints the time taken in each major compilation phase to 
-  /// llvm::errs().
-  ///
-  /// \sa swift::SharedTimer
-  bool DebugTimeCompilation = false;
-
   /// The path to which we should output statistics files.
   std::string StatsOutputDir;
 
@@ -178,6 +188,11 @@ public:
   /// Profile changes to stats to files in StatsOutputDir, grouped by source
   /// entity.
   bool ProfileEntities = false;
+
+  /// Emit parseable-output directly from the frontend, instead of relying
+  /// the driver to emit it. This is used in context where frontend jobs are executed by
+  /// clients other than the driver.
+  bool FrontendParseableOutput = false;
 
   /// Indicates whether or not an import statement can pick up a Swift source
   /// file (as opposed to a module file).
@@ -236,9 +251,13 @@ public:
   /// See the \ref SILOptions.EmitSortedSIL flag.
   bool EmitSortedSIL = false;
 
-  /// Indicates whether the dependency tracker should track system
-  /// dependencies as well.
-  bool TrackSystemDeps = false;
+  /// Specifies the collection mode for the intermodule dependency tracker.
+  /// Note that if set, the dependency tracker will be enabled even if no
+  /// output path is configured.
+  Optional<IntermoduleDepTrackingMode> IntermoduleDependencyTracking;
+
+  /// Should we emit the cType when printing @convention(c) or no?
+  bool PrintFullConvention = false;
 
   /// Should we serialize the hashes of dependencies (vs. the modification
   /// times) when compiling a module interface?
@@ -254,9 +273,38 @@ public:
   /// Should we enable the dependency verifier for all primary files known to this frontend?
   bool EnableIncrementalDependencyVerifier = false;
 
+  /// The path of the swift-frontend executable.
+  std::string MainExecutablePath;
+
   /// The directory path we should use when print #include for the bridging header.
   /// By default, we include ImplicitObjCHeaderPath directly.
   llvm::Optional<std::string> BridgingHeaderDirForPrint;
+
+  /// Disable implicitly built Swift modules because they are explicitly
+  /// built and given to the compiler invocation.
+  bool DisableImplicitModules = false;
+
+  /// Disable building Swift modules from textual interfaces. This should be
+  /// for testing purposes only.
+  bool DisableBuildingInterface = false;
+
+  /// When performing a dependency scanning action, only identify and output all imports
+  /// of the main Swift module's source files.
+  bool ImportPrescan = false;
+
+  /// When performing an incremental build, ensure that cross-module incremental
+  /// build metadata is available in any swift modules emitted by this frontend
+  /// job.
+  ///
+  /// This flag is currently only propagated from the driver to
+  /// any merge-modules jobs.
+  bool DisableCrossModuleIncrementalBuild = false;
+
+  /// Best effort to output a .swiftmodule regardless of any compilation
+  /// errors. SIL generation and serialization is skipped entirely when there
+  /// are errors. The resulting serialized AST may include errors types and
+  /// skip nodes entirely, depending on the errors involved.
+  bool AllowModuleWithCompilerErrors = false;
 
   /// The different modes for validating TBD against the LLVM IR.
   enum class TBDValidationMode {
@@ -283,11 +331,23 @@ public:
   /// -dump-scope-maps.
   SmallVector<std::pair<unsigned, unsigned>, 2> DumpScopeMapLocations;
 
-  /// Indicates whether the action will immediately run code.
-  static bool isActionImmediate(ActionType);
+  /// Determines whether the static or shared resource folder is used.
+  /// When set to `true`, the default resource folder will be set to
+  /// '.../lib/swift', otherwise '.../lib/swift_static'.
+  bool UseSharedResourceFolder = true;
 
-  /// \return true if action only parses without doing other compilation steps.
+  /// \return true if the given action only parses without doing other compilation steps.
   static bool shouldActionOnlyParse(ActionType);
+
+  /// \return true if the given action requires the standard library to be
+  /// loaded before it is run.
+  static bool doesActionRequireSwiftStandardLibrary(ActionType);
+
+  /// \return true if the given action requires input files to be provided.
+  static bool doesActionRequireInputs(ActionType action);
+
+  /// \return true if the given action requires input files to be provided.
+  static bool doesActionPerformEndOfPipelineActions(ActionType action);
 
   /// Return a hash code of any components from these options that should
   /// contribute to a Swift Bridging PCH hash.
@@ -298,8 +358,8 @@ public:
   StringRef determineFallbackModuleName() const;
 
   bool isCompilingExactlyOneSwiftFile() const {
-    return InputKind == InputFileKind::Swift &&
-           InputsAndOutputs.hasSingleInput();
+    return InputsAndOutputs.hasSingleInput() &&
+           InputMode == ParseInputMode::Swift;
   }
 
   const PrimarySpecificPaths &
@@ -309,19 +369,35 @@ public:
 
   /// Retrieves the list of arbitrary modules to import and make implicitly
   /// visible.
-  ArrayRef<std::string> getImplicitImportModuleNames() const {
+  ArrayRef<std::pair<std::string, bool /*testable*/>>
+  getImplicitImportModuleNames() const {
     return ImplicitImportModuleNames;
   }
+
+  /// Whether we're configured to track system intermodule dependencies.
+  bool shouldTrackSystemDependencies() const;
+  
+  /// Whether to emit symbol graphs for the output module.
+  bool EmitSymbolGraph = false;
+
+  /// The directory to which we should emit a symbol graph JSON files.
+  /// It is valid whenever there are any inputs.
+  ///
+  /// These are JSON file that describes the public interface of a module for
+  /// curating documentation, separated into files for each module this module
+  /// extends.
+  ///
+  /// \sa SymbolGraphASTWalker
+  std::string SymbolGraphOutputDir;
 
 private:
   static bool canActionEmitDependencies(ActionType);
   static bool canActionEmitReferenceDependencies(ActionType);
-  static bool canActionEmitSwiftRanges(ActionType);
-  static bool canActionEmitCompiledSource(ActionType);
   static bool canActionEmitObjCHeader(ActionType);
   static bool canActionEmitLoadedModuleTrace(ActionType);
   static bool canActionEmitModule(ActionType);
   static bool canActionEmitModuleDoc(ActionType);
+  static bool canActionEmitModuleSummary(ActionType);
   static bool canActionEmitInterface(ActionType);
 
 public:

@@ -14,8 +14,11 @@
 #define SWIFT_AST_SOURCEFILE_H
 
 #include "swift/AST/FileUnit.h"
+#include "swift/AST/Import.h"
 #include "swift/AST/SynthesizedFileUnit.h"
 #include "swift/Basic/Debug.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 namespace swift {
 
@@ -30,61 +33,6 @@ class SourceFile final : public FileUnit {
   friend class ParseSourceFileRequest;
 
 public:
-  class Impl;
-  struct SourceFileSyntaxInfo;
-
-  /// Possible attributes for imports in source files.
-  enum class ImportFlags {
-    /// The imported module is exposed to anyone who imports the parent module.
-    Exported = 0x1,
-
-    /// This source file has access to testable declarations in the imported
-    /// module.
-    Testable = 0x2,
-
-    /// This source file has access to private declarations in the imported
-    /// module.
-    PrivateImport = 0x4,
-
-    /// The imported module is an implementation detail of this file and should
-    /// not be required to be present if the main module is ever imported
-    /// elsewhere.
-    ///
-    /// Mutually exclusive with Exported.
-    ImplementationOnly = 0x8,
-
-    // The module is imported to have access to named SPIs which is an
-    // implementation detail of this file.
-    SPIAccessControl = 0x10,
-
-    /// Used for DenseMap.
-    Reserved = 0x80
-  };
-
-  /// \see ImportFlags
-  using ImportOptions = OptionSet<ImportFlags>;
-
-  struct ImportedModuleDesc {
-    ModuleDecl::ImportedModule module;
-    ImportOptions importOptions;
-
-    // Filename for a @_private import.
-    StringRef filename;
-
-    // Names of explicitly imported SPIs.
-    ArrayRef<Identifier> spiGroups;
-
-    ImportedModuleDesc(ModuleDecl::ImportedModule module, ImportOptions options,
-                       StringRef filename = {},
-                       ArrayRef<Identifier> spiGroups = {})
-        : module(module), importOptions(options), filename(filename),
-          spiGroups(spiGroups) {
-      assert(!(importOptions.contains(ImportFlags::Exported) &&
-               importOptions.contains(ImportFlags::ImplementationOnly)) ||
-             importOptions.contains(ImportFlags::Reserved));
-    }
-  };
-
   /// Flags that direct how the source file is parsed.
   enum class ParsingFlags : uint8_t {
     /// Whether to disable delayed parsing for nominal type, extension, and
@@ -106,14 +54,26 @@ public:
     /// decl.
     ///
     /// FIXME: When condition evaluation moves to a later phase, remove this
-    /// and adjust the client call 'performParseOnly'.
+    /// and the associated language option.
     DisablePoundIfEvaluation = 1 << 1,
+
+    /// Whether to build a syntax tree.
+    BuildSyntaxTree = 1 << 2,
+
+    /// Whether to save the file's parsed tokens.
+    CollectParsedTokens = 1 << 3,
+
+    /// Whether to compute the interface hash of the file.
+    EnableInterfaceHash = 1 << 4,
 
     /// Whether to suppress warnings when parsing. This is set for secondary
     /// files, as they get parsed multiple times.
-    SuppressWarnings = 1 << 2
+    SuppressWarnings = 1 << 5,
   };
   using ParsingOptions = OptionSet<ParsingFlags>;
+
+  /// Retrieve the parsing options specified in the LangOptions.
+  static ParsingOptions getDefaultParsingOptions(const LangOptions &langOpts);
 
 private:
   std::unique_ptr<SourceLookupCache> Cache;
@@ -122,7 +82,7 @@ private:
   /// This is the list of modules that are imported by this module.
   ///
   /// This is \c None until it is filled in by the import resolution phase.
-  Optional<ArrayRef<ImportedModuleDesc>> Imports;
+  Optional<ArrayRef<AttributedImport<ImportedModule>>> Imports;
 
   /// A unique identifier representing this file; used to mark private decls
   /// within the file to keep them from conflicting with other files in the
@@ -137,9 +97,6 @@ private:
   /// This is set during type checking.
   TypeRefinementContext *TRC = nullptr;
 
-  /// If non-null, used to track name lookups that happen within this file.
-  Optional<ReferencedNameTracker> RequestReferencedNames;
-
   /// Either the class marked \@NS/UIApplicationMain or the synthesized FuncDecl
   /// that calls main on the type marked @main.
   Decl *MainDecl = nullptr;
@@ -148,9 +105,10 @@ private:
   SourceLoc MainDeclDiagLoc;
 
   /// A hash of all interface-contributing tokens that have been lexed for
-  /// this source file so far.
+  /// this source file.
+  ///
   /// We only collect interface hash for primary input files.
-  llvm::Optional<llvm::MD5> InterfaceHash;
+  llvm::Optional<StableHasher> InterfaceHasher;
 
   /// The ID for the memory buffer containing this file's source.
   ///
@@ -160,8 +118,11 @@ private:
   /// The parsing options for the file.
   ParsingOptions ParsingOpts;
 
+  /// Whether this is a primary source file which we'll be generating code for.
+  bool IsPrimary;
+
   /// The scope map that describes this source file.
-  std::unique_ptr<ASTScope> Scope;
+  NullablePtr<ASTScope> Scope = nullptr;
 
   /// The set of validated opaque return type decls in the source file.
   llvm::SmallVector<OpaqueTypeDecl *, 4> OpaqueReturnTypes;
@@ -172,9 +133,13 @@ private:
 
   /// The list of top-level declarations in the source file. This is \c None if
   /// they have not yet been parsed.
-  /// FIXME: Once addTopLevelDecl/prependTopLevelDecl/truncateTopLevelDecls
+  /// FIXME: Once addTopLevelDecl/prependTopLevelDecl
   /// have been removed, this can become an optional ArrayRef.
   Optional<std::vector<Decl *>> Decls;
+
+  /// The list of hoisted declarations. See Decl::isHoisted().
+  /// This is only used by lldb.
+  std::vector<Decl *> Hoisted;
 
   using SeparatelyImportedOverlayMap =
     llvm::SmallDenseMap<ModuleDecl *, llvm::SmallPtrSet<ModuleDecl *, 1>>;
@@ -198,7 +163,6 @@ private:
       ParserStatePtr(/*ptr*/ nullptr, /*deleter*/ nullptr);
 
   friend ASTContext;
-  friend Impl;
 
 public:
   /// Appends the given declaration to the end of the top-level decls list. Do
@@ -221,8 +185,15 @@ public:
     Decls->insert(Decls->begin(), d);
   }
 
+  /// Add a hoisted declaration. See Decl::isHoisted().
+  void addHoistedDecl(Decl *d);
+
   /// Retrieves an immutable view of the list of top-level decls in this file.
   ArrayRef<Decl *> getTopLevelDecls() const;
+
+  /// Retrieves an immutable view of the list of hoisted decls in this file.
+  /// See Decl::isHoisted().
+  ArrayRef<Decl *> getHoistedDecls() const;
 
   /// Retrieves an immutable view of the top-level decls if they have already
   /// been parsed, or \c None if they haven't. Should only be used for dumping.
@@ -232,17 +203,12 @@ public:
     return llvm::makeArrayRef(*Decls);
   }
 
-  /// Truncates the list of top-level decls so it contains \c count elements. Do
-  /// not add any additional uses of this function.
-  void truncateTopLevelDecls(unsigned count) {
-    // Force decl parsing if we haven't already.
-    (void)getTopLevelDecls();
-    assert(count <= Decls->size() && "Can only truncate top-level decls!");
-    Decls->resize(count);
-  }
-
   /// Retrieve the parsing options for the file.
   ParsingOptions getParsingOptions() const { return ParsingOpts; }
+
+  /// Whether this source file is a primary file, meaning that we're generating
+  /// code for it. Note this method returns \c false in WMO.
+  bool isPrimary() const { return IsPrimary; }
 
   /// A cache of syntax nodes that can be reused when creating the syntax tree
   /// for this file.
@@ -318,17 +284,18 @@ public:
   llvm::StringMap<SourceFilePathInfo> getInfoForUsedFilePaths() const;
 
   SourceFile(ModuleDecl &M, SourceFileKind K, Optional<unsigned> bufferID,
-             bool KeepParsedTokens = false, bool KeepSyntaxTree = false,
-             ParsingOptions parsingOpts = {});
+             ParsingOptions parsingOpts = {}, bool isPrimary = false);
 
   ~SourceFile();
 
   /// Retrieve an immutable view of the source file's imports.
-  ArrayRef<ImportedModuleDesc> getImports() const { return *Imports; }
+  ArrayRef<AttributedImport<ImportedModule>> getImports() const {
+    return *Imports;
+  }
 
   /// Set the imports for this source file. This gets called by import
   /// resolution.
-  void setImports(ArrayRef<ImportedModuleDesc> imports);
+  void setImports(ArrayRef<AttributedImport<ImportedModule>> imports);
 
   enum ImportQueryKind {
     /// Return the results for testable or private imports.
@@ -352,8 +319,9 @@ public:
   /// Find all SPI names imported from \p importedModule by this file,
   /// collecting the identifiers in \p spiGroups.
   virtual void
-  lookupImportedSPIGroups(const ModuleDecl *importedModule,
-                         SmallVectorImpl<Identifier> &spiGroups) const override;
+  lookupImportedSPIGroups(
+                const ModuleDecl *importedModule,
+                llvm::SmallSetVector<Identifier, 4> &spiGroups) const override;
 
   // Is \p targetDecl accessible as an explictly imported SPI from this file?
   bool isImportedAsSPI(const ValueDecl *targetDecl) const;
@@ -391,14 +359,14 @@ public:
   virtual void lookupValue(DeclName name, NLKind lookupKind,
                            SmallVectorImpl<ValueDecl*> &result) const override;
 
-  virtual void lookupVisibleDecls(ModuleDecl::AccessPathTy accessPath,
+  virtual void lookupVisibleDecls(ImportPath::Access accessPath,
                                   VisibleDeclConsumer &consumer,
                                   NLKind lookupKind) const override;
 
-  virtual void lookupClassMembers(ModuleDecl::AccessPathTy accessPath,
+  virtual void lookupClassMembers(ImportPath::Access accessPath,
                                   VisibleDeclConsumer &consumer) const override;
   virtual void
-  lookupClassMember(ModuleDecl::AccessPathTy accessPath, DeclName name,
+  lookupClassMember(ImportPath::Access accessPath, DeclName name,
                     SmallVectorImpl<ValueDecl*> &results) const override;
 
   void lookupObjCMethods(
@@ -431,7 +399,7 @@ public:
   getOpaqueReturnTypeDecls(SmallVectorImpl<OpaqueTypeDecl*> &results) const override;
 
   virtual void
-  getImportedModules(SmallVectorImpl<ModuleDecl::ImportedModule> &imports,
+  getImportedModules(SmallVectorImpl<ImportedModule> &imports,
                      ModuleDecl::ImportFilter filter) const override;
 
   virtual void
@@ -448,25 +416,6 @@ public:
 
   virtual bool walk(ASTWalker &walker) override;
 
-  ReferencedNameTracker *getRequestBasedReferencedNameTracker() {
-    return RequestReferencedNames ? RequestReferencedNames.getPointer() : nullptr;
-  }
-  const ReferencedNameTracker *getRequestBasedReferencedNameTracker() const {
-    return RequestReferencedNames ? RequestReferencedNames.getPointer() : nullptr;
-  }
-
-  /// Creates and installs the referenced name trackers in this source file.
-  ///
-  /// This entrypoint must be called before incremental compilation can proceed,
-  /// else reference dependencies will not be registered.
-  void createReferencedNameTracker();
-
-  /// Retrieves the appropriate referenced name tracker instance.
-  ///
-  /// If incremental dependencies tracking is not enabled or \c createReferencedNameTracker()
-  /// has not been invoked on this source file, the result is \c nullptr.
-  const ReferencedNameTracker *getConfiguredReferencedNameTracker() const;
-
   /// The buffer ID for the file that was imported, or None if there
   /// is no associated buffer.
   Optional<unsigned> getBufferID() const {
@@ -481,6 +430,10 @@ public:
 
   /// Retrieve the scope that describes this source file.
   ASTScope &getScope();
+
+  void clearScope() {
+    Scope = nullptr;
+  }
 
   /// Retrieves the previously set delayed parser state, asserting that it
   /// exists.
@@ -504,7 +457,7 @@ public:
   }
 
   SWIFT_DEBUG_DUMP;
-  void dump(raw_ostream &os) const;
+  void dump(raw_ostream &os, bool parseIfNeeded = false) const;
 
   /// Pretty-print the contents of this source file.
   ///
@@ -524,7 +477,6 @@ public:
   bool isScriptMode() const {
     switch (Kind) {
     case SourceFileKind::Main:
-    case SourceFileKind::REPL:
       return true;
 
     case SourceFileKind::Library:
@@ -568,52 +520,48 @@ public:
   /// Set the root refinement context for the file.
   void setTypeRefinementContext(TypeRefinementContext *TRC);
 
-  void enableInterfaceHash() {
-    assert(!hasInterfaceHash());
-    InterfaceHash.emplace();
-  }
-
+  /// Whether this file can compute an interface hash.
   bool hasInterfaceHash() const {
-    return InterfaceHash.hasValue();
+    return ParsingOpts.contains(ParsingFlags::EnableInterfaceHash);
   }
 
-  NullablePtr<llvm::MD5> getInterfaceHashPtr() {
-    return InterfaceHash ? InterfaceHash.getPointer() : nullptr;
-  }
-
-  void getInterfaceHash(llvm::SmallString<32> &str) const {
-    // Copy to preserve idempotence.
-    llvm::MD5 md5 = *InterfaceHash;
-    llvm::MD5::MD5Result result;
-    md5.final(result);
-    llvm::MD5::stringifyResult(result, str);
-  }
+  /// Retrieve a fingerprint value that summarizes the declarations in this
+  /// source file.
+  ///
+  /// Note that the interface hash merely summarizes the top-level declarations
+  /// in this file. Type body fingerprints are currently implemented such that
+  /// they divert tokens away from the hasher used for fingerprints. That is,
+  /// changes to the bodies of types and extensions will not result in a change
+  /// to the interface hash.
+  ///
+  /// In order for the interface hash to be enabled, this source file must be a
+  /// primary and the compiler must be set in incremental mode. If this is not
+  /// the case, this function will try to signal with an assert. It is useful
+  /// to guard requests for the interface hash with \c hasInterfaceHash().
+  Fingerprint getInterfaceHash() const;
 
   void dumpInterfaceHash(llvm::raw_ostream &out) {
-    llvm::SmallString<32> str;
-    getInterfaceHash(str);
-    out << str << '\n';
+    out << getInterfaceHash() << '\n';
   }
 
-  std::vector<Token> &getTokenVector();
+  /// Get this file's interface hash including the type members in the file.
+  Fingerprint getInterfaceHashIncludingTypeMembers() const;
 
+  /// If this source file has been told to collect its parsed tokens, retrieve
+  /// those tokens.
   ArrayRef<Token> getAllTokens() const;
 
-  bool shouldCollectToken() const;
+  /// Whether the parsed tokens of this source file should be saved, allowing
+  /// them to be accessed from \c getAllTokens.
+  bool shouldCollectTokens() const;
 
   bool shouldBuildSyntaxTree() const;
-
-  bool canBeParsedInFull() const;
-
-  bool isSuitableForASTScopes() const { return canBeParsedInFull(); }
 
   /// Whether the bodies of types and functions within this file can be lazily
   /// parsed.
   bool hasDelayedBodyParsing() const;
 
   syntax::SourceFileSyntax getSyntaxRoot() const;
-  void setSyntaxRoot(syntax::SourceFileSyntax &&Root);
-  bool hasSyntaxRoot() const;
 
   OpaqueTypeDecl *lookupOpaqueResultType(StringRef MangledName) override;
 
@@ -628,10 +576,12 @@ public:
 
 private:
 
-  /// If not None, the underlying vector should contain tokens of this source file.
-  Optional<std::vector<Token>> AllCorrectedTokens;
+  /// If not \c None, the underlying vector contains the parsed tokens of this
+  /// source file.
+  Optional<ArrayRef<Token>> AllCollectedTokens;
 
-  std::unique_ptr<SourceFileSyntaxInfo> SyntaxInfo;
+  /// The root of the syntax tree representing the source file.
+  std::unique_ptr<syntax::SourceFileSyntax> SyntaxRoot;
 };
 
 inline SourceFile::ParsingOptions operator|(SourceFile::ParsingFlags lhs,
@@ -639,10 +589,8 @@ inline SourceFile::ParsingOptions operator|(SourceFile::ParsingFlags lhs,
   return SourceFile::ParsingOptions(lhs) | rhs;
 }
 
-inline SourceFile &
-ModuleDecl::getMainSourceFile(SourceFileKind expectedKind) const {
+inline SourceFile &ModuleDecl::getMainSourceFile() const {
   assert(!Files.empty() && "No files added yet");
-  assert(cast<SourceFile>(Files.front())->Kind == expectedKind);
   return *cast<SourceFile>(Files.front());
 }
 
@@ -676,59 +624,5 @@ inline void simple_display(llvm::raw_ostream &out, const SourceFile *SF) {
   out << "source_file " << '\"' << SF->getFilename() << '\"';
 }
 } // end namespace swift
-
-namespace llvm {
-
-template<>
-struct DenseMapInfo<swift::SourceFile::ImportOptions> {
-  using ImportOptions = swift::SourceFile::ImportOptions;
-
-  using UnsignedDMI = DenseMapInfo<uint8_t>;
-
-  static inline ImportOptions getEmptyKey() {
-    return ImportOptions(UnsignedDMI::getEmptyKey());
-  }
-  static inline ImportOptions getTombstoneKey() {
-    return ImportOptions(UnsignedDMI::getTombstoneKey());
-  }
-  static inline unsigned getHashValue(ImportOptions options) {
-    return UnsignedDMI::getHashValue(options.toRaw());
-  }
-  static bool isEqual(ImportOptions a, ImportOptions b) {
-    return UnsignedDMI::isEqual(a.toRaw(), b.toRaw());
-  }
-};
-
-template<>
-struct DenseMapInfo<swift::SourceFile::ImportedModuleDesc> {
-  using ImportedModuleDesc = swift::SourceFile::ImportedModuleDesc;
-
-  using ImportedModuleDMI = DenseMapInfo<swift::ModuleDecl::ImportedModule>;
-  using ImportOptionsDMI = DenseMapInfo<swift::SourceFile::ImportOptions>;
-  using StringRefDMI = DenseMapInfo<StringRef>;
-
-  static inline ImportedModuleDesc getEmptyKey() {
-    return ImportedModuleDesc(ImportedModuleDMI::getEmptyKey(),
-                              ImportOptionsDMI::getEmptyKey(),
-                              StringRefDMI::getEmptyKey());
-  }
-  static inline ImportedModuleDesc getTombstoneKey() {
-    return ImportedModuleDesc(ImportedModuleDMI::getTombstoneKey(),
-                              ImportOptionsDMI::getTombstoneKey(),
-                              StringRefDMI::getTombstoneKey());
-  }
-  static inline unsigned getHashValue(const ImportedModuleDesc &import) {
-    return combineHashValue(ImportedModuleDMI::getHashValue(import.module),
-           combineHashValue(ImportOptionsDMI::getHashValue(import.importOptions),
-                            StringRefDMI::getHashValue(import.filename)));
-  }
-  static bool isEqual(const ImportedModuleDesc &a,
-                      const ImportedModuleDesc &b) {
-    return ImportedModuleDMI::isEqual(a.module, b.module) &&
-           ImportOptionsDMI::isEqual(a.importOptions, b.importOptions) &&
-           StringRefDMI::isEqual(a.filename, b.filename);
-  }
-};
-}
 
 #endif

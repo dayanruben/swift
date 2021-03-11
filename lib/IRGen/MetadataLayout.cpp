@@ -267,6 +267,8 @@ ClassMetadataLayout::ClassMetadataLayout(IRGenModule &IGM, ClassDecl *decl)
 
     ClassMetadataLayout &Layout;
 
+    bool IsInTargetFields = false;
+
     Scanner(IRGenModule &IGM, ClassDecl *decl, ClassMetadataLayout &layout)
       : super(IGM, decl), Layout(layout) {}
 
@@ -317,7 +319,7 @@ ClassMetadataLayout::ClassMetadataLayout(IRGenModule &IGM, ClassDecl *decl)
     void addGenericWitnessTable(GenericRequirement requirement,
                                 ClassDecl *forClass) {
       if (forClass == Target) {
-        Layout.NumImmediateMembers++;
+        ++Layout.NumImmediateMembers;
       }
       super::addGenericWitnessTable(requirement, forClass);
     }
@@ -325,31 +327,57 @@ ClassMetadataLayout::ClassMetadataLayout(IRGenModule &IGM, ClassDecl *decl)
     void addGenericArgument(GenericRequirement requirement,
                             ClassDecl *forClass) {
       if (forClass == Target) {
-        Layout.NumImmediateMembers++;
+        ++Layout.NumImmediateMembers;
       }
       super::addGenericArgument(requirement, forClass);
     }
 
-    void addMethod(SILDeclRef fn) {
+    void addReifiedVTableEntry(SILDeclRef fn) {
       if (fn.getDecl()->getDeclContext() == Target) {
-        Layout.NumImmediateMembers++;
+        ++Layout.NumImmediateMembers;
         Layout.MethodInfos.try_emplace(fn, getNextOffset());
       }
-      super::addMethod(fn);
+      super::addReifiedVTableEntry(fn);
+    }
+    
+    void noteNonoverriddenMethod(SILDeclRef fn) {
+      if (fn.getDecl()->getDeclContext() == Target) {
+        auto impl = VTable->getEntry(IGM.getSILModule(), fn);
+        Layout.MethodInfos.try_emplace(fn,
+         IGM.getAddrOfSILFunction(impl->getImplementation(), NotForDefinition));
+      }
     }
 
     void noteStartOfFieldOffsets(ClassDecl *forClass) {
-      if (forClass == Target)
+      if (forClass == Target) {
+        assert(!IsInTargetFields);
+        IsInTargetFields = true;
         Layout.FieldOffsetVector = getNextOffset();
+      }
       super::noteStartOfFieldOffsets(forClass);
     }
 
+    void noteEndOfFieldOffsets(ClassDecl *forClass) {
+      assert(IsInTargetFields == (forClass == Target));
+      if (IsInTargetFields)
+        IsInTargetFields = false;
+      super::noteEndOfFieldOffsets(forClass);
+    }
+
     void addFieldOffset(VarDecl *field) {
-      if (field->getDeclContext() == Target) {
-        Layout.NumImmediateMembers++;
+      assert(IsInTargetFields == (field->getDeclContext() == Target));
+      if (IsInTargetFields) {
+        ++Layout.NumImmediateMembers;
         Layout.FieldOffsets.try_emplace(field, getNextOffset());
       }
       super::addFieldOffset(field);
+    }
+
+    void addDefaultActorStorageFieldOffset() {
+      if (IsInTargetFields) {
+        ++Layout.NumImmediateMembers;
+      }
+      super::addDefaultActorStorageFieldOffset();
     }
 
     void addFieldOffsetPlaceholders(MissingMemberDecl *placeholder) {
@@ -398,8 +426,15 @@ Size ClassMetadataLayout::getInstanceAlignMaskOffset() const {
 ClassMetadataLayout::MethodInfo
 ClassMetadataLayout::getMethodInfo(IRGenFunction &IGF, SILDeclRef method) const{
   auto &stored = getStoredMethodInfo(method);
-  auto offset = emitOffset(IGF, stored.TheOffset);
-  return MethodInfo(offset);
+  switch (stored.TheKind) {
+  case MethodInfo::Kind::Offset: {
+    auto offset = emitOffset(IGF, stored.TheOffset);
+    return MethodInfo(offset);
+  }
+  case MethodInfo::Kind::DirectImpl:
+    return MethodInfo(stored.TheImpl);
+  }
+  llvm_unreachable("unhandled method info kind!");
 }
 
 Offset ClassMetadataLayout::getFieldOffset(IRGenFunction &IGF,

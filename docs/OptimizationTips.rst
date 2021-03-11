@@ -245,7 +245,7 @@ this allows the compiler to elide unnecessary copies by retaining the container
 instead of performing a deep copy. This is done by only copying the underlying
 container if the reference count of the container is greater than 1 and the
 container is mutated. For instance in the following, no copying will occur when
-``d`` is assigned to ``c``, but when ``d`` undergoes structural mutation by
+``c`` is assigned to ``d``, but when ``d`` undergoes structural mutation by
 appending ``2``, ``d`` will be copied and then ``2`` will be appended to ``d``:
 
 ::
@@ -263,6 +263,7 @@ end of the callee. This means that if one writes a function like the following:
 ::
 
   func append_one(_ a: [Int]) -> [Int] {
+    var a = a
     a.append(1)
     return a
   }
@@ -283,18 +284,19 @@ through the usage of ``inout`` parameters:
   var a = [1, 2, 3]
   append_one_in_place(&a)
 
-Unchecked operations
+Wrapping operations
 ====================
 
 Swift eliminates integer overflow bugs by checking for overflow when performing
-normal arithmetic. These checks are not appropriate in high performance code
-where one knows that no memory safety issues can result.
+normal arithmetic. These checks may not be appropriate in high performance code
+if one either knows that overflow cannot occur, or that the result of
+allowing the operation to wrap around is correct.
 
-Advice: Use unchecked integer arithmetic when you can prove that overflow cannot occur
+Advice: Use wrapping integer arithmetic when you can prove that overflow cannot occur
 ---------------------------------------------------------------------------------------
 
-In performance-critical code you can elide overflow checks if you know it is
-safe.
+In performance-critical code you can use wrapping arithmetic to avoid overflow
+checks if you know it is safe.
 
 ::
 
@@ -302,10 +304,16 @@ safe.
   b: [Int]
   c: [Int]
 
-  // Precondition: for all a[i], b[i]: a[i] + b[i] does not overflow!
+  // Precondition: for all a[i], b[i]: a[i] + b[i] either does not overflow,
+  // or the result of wrapping is desired.
   for i in 0 ... n {
     c[i] = a[i] &+ b[i]
   }
+
+It's important to note that the behavior of the ``&+``, ``&-``, and ``&*``
+operators is fully-defined; the result simply wraps around if it would overflow.
+Thus, ``Int.max &+ 1`` is guaranteed to be ``Int.min`` (unlike in C, where
+``INT_MAX + 1`` is undefined behavior).
 
 Generics
 ========
@@ -540,7 +548,7 @@ alive.
     }
 
 
-.. _Unmanaged.swift: https://github.com/apple/swift/blob/master/stdlib/public/core/Unmanaged.swift
+.. _Unmanaged.swift: https://github.com/apple/swift/blob/main/stdlib/public/core/Unmanaged.swift
 
 Protocols
 =========

@@ -26,7 +26,9 @@
 #include "swift/AST/TypeAlignments.h"
 #include "swift/Basic/Range.h"
 #include "swift/Basic/SourceLoc.h"
+#include "swift/Demangling/Demangle.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/Error.h"
 
 namespace swift {
 
@@ -34,12 +36,19 @@ class AnyFunctionType;
 class SourceFile;
 class SILFunctionType;
 class TupleType;
+class VarDecl;
 
 /// A function type differentiability kind.
 enum class DifferentiabilityKind : uint8_t {
   NonDifferentiable = 0,
-  Normal = 1,
-  Linear = 2
+  // '@differentiable(_forward)', rejected by parser.
+  Forward = 1,
+  // '@differentiable(reverse)', supported.
+  Reverse = 2,
+  // '@differentiable', unsupported.
+  Normal = 3,
+  // '@differentiable(_linear)', unsupported.
+  Linear = 4,
 };
 
 /// The kind of an linear map.
@@ -71,8 +80,14 @@ struct AutoDiffDerivativeFunctionKind {
       : rawValue(static_cast<innerty>(linMapKind.rawValue)) {}
   explicit AutoDiffDerivativeFunctionKind(StringRef string);
   operator innerty() const { return rawValue; }
-  AutoDiffLinearMapKind getLinearMapKind() {
+  AutoDiffLinearMapKind getLinearMapKind() const {
     return (AutoDiffLinearMapKind::innerty)rawValue;
+  }
+  DifferentiabilityKind getMinimalDifferentiabilityKind() const {
+    switch (rawValue) {
+    case JVP: return DifferentiabilityKind::Forward;
+    case VJP: return DifferentiabilityKind::Reverse;
+    }
   }
 };
 
@@ -95,7 +110,7 @@ struct NormalDifferentiableFunctionTypeComponent {
   Optional<AutoDiffDerivativeFunctionKind> getAsDerivativeFunctionKind() const;
 };
 
-/// A component of a SIL `@differentiable(linear)` function-typed value.
+/// A component of a SIL `@differentiable(_linear)` function-typed value.
 struct LinearDifferentiableFunctionTypeComponent {
   enum innerty : unsigned {
     Original = 0,
@@ -171,45 +186,6 @@ enum class AutoDiffGeneratedDeclarationKind : uint8_t {
   BranchingTraceEnum
 };
 
-/// SIL-level automatic differentiation indices. Consists of:
-/// - Parameter indices: indices of parameters to differentiate with respect to.
-/// - Result index: index of the result to differentiate from.
-// TODO(TF-913): Remove `SILAutoDiffIndices` in favor of `AutoDiffConfig`.
-// `AutoDiffConfig` supports multiple result indices.
-struct SILAutoDiffIndices {
-  /// The index of the dependent result to differentiate from.
-  unsigned source;
-  /// The indices for independent parameters to differentiate with respect to.
-  IndexSubset *parameters;
-
-  /*implicit*/ SILAutoDiffIndices(unsigned source, IndexSubset *parameters)
-      : source(source), parameters(parameters) {}
-
-  bool operator==(const SILAutoDiffIndices &other) const;
-
-  bool operator!=(const SILAutoDiffIndices &other) const {
-    return !(*this == other);
-  };
-
-  /// Returns true if `parameterIndex` is a differentiability parameter index.
-  bool isWrtParameter(unsigned parameterIndex) const {
-    return parameterIndex < parameters->getCapacity() &&
-           parameters->contains(parameterIndex);
-  }
-
-  void print(llvm::raw_ostream &s = llvm::outs()) const;
-  SWIFT_DEBUG_DUMP;
-
-  std::string mangle() const {
-    std::string result = "src_" + llvm::utostr(source) + "_wrt_";
-    llvm::interleave(
-        parameters->getIndices(),
-        [&](unsigned idx) { result += llvm::utostr(idx); },
-        [&] { result += '_'; });
-    return result;
-  }
-};
-
 /// Identifies an autodiff derivative function configuration:
 /// - Parameter indices.
 /// - Result indices.
@@ -219,24 +195,51 @@ struct AutoDiffConfig {
   IndexSubset *resultIndices;
   GenericSignature derivativeGenericSignature;
 
-  /*implicit*/ AutoDiffConfig(IndexSubset *parameterIndices,
-                              IndexSubset *resultIndices,
-                              GenericSignature derivativeGenericSignature)
+  /*implicit*/ AutoDiffConfig() = default;
+  /*implicit*/ AutoDiffConfig(
+      IndexSubset *parameterIndices, IndexSubset *resultIndices,
+      GenericSignature derivativeGenericSignature = GenericSignature())
       : parameterIndices(parameterIndices), resultIndices(resultIndices),
         derivativeGenericSignature(derivativeGenericSignature) {}
 
-  /// Returns the `SILAutoDiffIndices` corresponding to this config's indices.
-  // TODO(TF-913): This is a temporary shim for incremental removal of
-  // `SILAutoDiffIndices`. Eventually remove this.
-  SILAutoDiffIndices getSILAutoDiffIndices() const;
+  /// Returns true if `parameterIndex` is a differentiability parameter index.
+  bool isWrtParameter(unsigned parameterIndex) const {
+    return parameterIndex < parameterIndices->getCapacity() &&
+           parameterIndices->contains(parameterIndex);
+  }
+
+  /// Returns true if `resultIndex` is a differentiability result index.
+  bool isWrtResult(unsigned resultIndex) const {
+    return resultIndex < resultIndices->getCapacity() &&
+           resultIndices->contains(resultIndex);
+  }
+
+  AutoDiffConfig withGenericSignature(GenericSignature signature) const {
+    return AutoDiffConfig(parameterIndices, resultIndices, signature);
+  }
+
+  // TODO(SR-13506): Use principled mangling for AD-generated symbols.
+  std::string mangle() const {
+    std::string result = "src_";
+    interleave(
+        resultIndices->getIndices(),
+        [&](unsigned idx) { result += llvm::utostr(idx); },
+        [&] { result += '_'; });
+    result += "_wrt_";
+    llvm::interleave(
+        parameterIndices->getIndices(),
+        [&](unsigned idx) { result += llvm::utostr(idx); },
+        [&] { result += '_'; });
+    return result;
+  }
 
   void print(llvm::raw_ostream &s = llvm::outs()) const;
   SWIFT_DEBUG_DUMP;
 };
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &s,
-                                     const SILAutoDiffIndices &indices) {
-  indices.print(s);
+                                     const AutoDiffConfig &config) {
+  config.print(s);
   return s;
 }
 
@@ -388,10 +391,175 @@ public:
   NominalTypeDecl *getNominal() const;
 };
 
-/// The key type used for uniquing `SILDifferentiabilityWitness` in
-/// `SILModule`: original function name, parameter indices, result indices, and
-/// derivative generic signature.
-using SILDifferentiabilityWitnessKey = std::pair<StringRef, AutoDiffConfig>;
+/// A derivative function type calculation error.
+class DerivativeFunctionTypeError
+    : public llvm::ErrorInfo<DerivativeFunctionTypeError> {
+public:
+  enum class Kind {
+    /// Original function type has no semantic results.
+    NoSemanticResults,
+    /// Original function type has multiple semantic results.
+    // TODO(TF-1250): Support function types with multiple semantic results.
+    MultipleSemanticResults,
+    /// Differentiability parmeter indices are empty.
+    NoDifferentiabilityParameters,
+    /// A differentiability parameter does not conform to `Differentiable`.
+    NonDifferentiableDifferentiabilityParameter,
+    /// The original result type does not conform to `Differentiable`.
+    NonDifferentiableResult
+  };
+
+  static const char ID;
+  /// The original function type.
+  AnyFunctionType *functionType;
+  /// The error kind.
+  Kind kind;
+
+  /// The type and index of a differentiability parameter or result.
+  using TypeAndIndex = std::pair<Type, unsigned>;
+
+private:
+  union Value {
+    TypeAndIndex typeAndIndex;
+    Value(TypeAndIndex typeAndIndex) : typeAndIndex(typeAndIndex) {}
+    Value() {}
+  } value;
+
+public:
+  explicit DerivativeFunctionTypeError(AnyFunctionType *functionType, Kind kind)
+      : functionType(functionType), kind(kind), value(Value()) {
+    assert(kind == Kind::NoSemanticResults ||
+           kind == Kind::MultipleSemanticResults ||
+           kind == Kind::NoDifferentiabilityParameters);
+  };
+
+  explicit DerivativeFunctionTypeError(AnyFunctionType *functionType, Kind kind,
+                                       TypeAndIndex nonDiffTypeAndIndex)
+      : functionType(functionType), kind(kind), value(nonDiffTypeAndIndex) {
+    assert(kind == Kind::NonDifferentiableDifferentiabilityParameter ||
+           kind == Kind::NonDifferentiableResult);
+  };
+
+  TypeAndIndex getNonDifferentiableTypeAndIndex() const {
+    assert(kind == Kind::NonDifferentiableDifferentiabilityParameter ||
+           kind == Kind::NonDifferentiableResult);
+    return value.typeAndIndex;
+  }
+
+  void log(raw_ostream &OS) const override;
+
+  std::error_code convertToErrorCode() const override {
+    return llvm::inconvertibleErrorCode();
+  }
+};
+
+/// Describes the "tangent stored property" corresponding to an original stored
+/// property in a `Differentiable`-conforming type.
+///
+/// The tangent stored property is the stored property in the `TangentVector`
+/// struct of the `Differentiable`-conforming type, with the same name as the
+/// original stored property and with the original stored property's
+/// `TangentVector` type.
+struct TangentPropertyInfo {
+  struct Error {
+    enum class Kind {
+      /// The original property is `@noDerivative`.
+      NoDerivativeOriginalProperty,
+      /// The nominal parent type does not conform to `Differentiable`.
+      NominalParentNotDifferentiable,
+      /// The original property's type does not conform to `Differentiable`.
+      OriginalPropertyNotDifferentiable,
+      /// The parent `TangentVector` type is not a struct.
+      ParentTangentVectorNotStruct,
+      /// The parent `TangentVector` struct does not declare a stored property
+      /// with the same name as the original property.
+      TangentPropertyNotFound,
+      /// The tangent property's type is not equal to the original property's
+      /// `TangentVector` type.
+      TangentPropertyWrongType,
+      /// The tangent property is not a stored property.
+      TangentPropertyNotStored
+    };
+
+    /// The error kind.
+    Kind kind;
+
+  private:
+    union Value {
+      Type type;
+      Value(Type type) : type(type) {}
+      Value() {}
+    } value;
+
+  public:
+    Error(Kind kind) : kind(kind), value() {
+      assert(kind == Kind::NoDerivativeOriginalProperty ||
+             kind == Kind::NominalParentNotDifferentiable ||
+             kind == Kind::OriginalPropertyNotDifferentiable ||
+             kind == Kind::ParentTangentVectorNotStruct ||
+             kind == Kind::TangentPropertyNotFound ||
+             kind == Kind::TangentPropertyNotStored);
+    };
+
+    Error(Kind kind, Type type) : kind(kind), value(type) {
+      assert(kind == Kind::TangentPropertyWrongType);
+    };
+
+    Type getType() const {
+      assert(kind == Kind::TangentPropertyWrongType);
+      return value.type;
+    }
+
+    friend bool operator==(const Error &lhs, const Error &rhs);
+  };
+
+  /// The tangent stored property.
+  VarDecl *tangentProperty = nullptr;
+
+  /// An optional error.
+  Optional<Error> error = None;
+
+private:
+  TangentPropertyInfo(VarDecl *tangentProperty, Optional<Error> error)
+      : tangentProperty(tangentProperty), error(error) {}
+
+public:
+  TangentPropertyInfo(VarDecl *tangentProperty)
+      : TangentPropertyInfo(tangentProperty, None) {}
+
+  TangentPropertyInfo(Error::Kind errorKind)
+      : TangentPropertyInfo(nullptr, Error(errorKind)) {}
+
+  TangentPropertyInfo(Error::Kind errorKind, Type errorType)
+      : TangentPropertyInfo(nullptr, Error(errorKind, errorType)) {}
+
+  /// Returns `true` iff this tangent property info is valid.
+  bool isValid() const { return tangentProperty && !error; }
+
+  explicit operator bool() const { return isValid(); }
+
+  friend bool operator==(const TangentPropertyInfo &lhs,
+                         const TangentPropertyInfo &rhs) {
+    return lhs.tangentProperty == rhs.tangentProperty && lhs.error == rhs.error;
+  }
+};
+
+void simple_display(llvm::raw_ostream &OS, TangentPropertyInfo info);
+
+/// The key type used for uniquing `SILDifferentiabilityWitness` in `SILModule`.
+struct SILDifferentiabilityWitnessKey {
+  StringRef originalFunctionName;
+  DifferentiabilityKind kind;
+  AutoDiffConfig config;
+
+  void print(llvm::raw_ostream &s = llvm::outs()) const;
+};
+
+inline llvm::raw_ostream &operator<<(
+    llvm::raw_ostream &s, const SILDifferentiabilityWitnessKey &key) {
+  key.print(s);
+  return s;
+}
 
 /// Returns `true` iff differentiable programming is enabled.
 bool isDifferentiableProgrammingEnabled(SourceFile &SF);
@@ -450,8 +618,8 @@ IndexSubset *getLoweredParameterIndices(IndexSubset *astParameterIndices,
 ///
 /// Returns the "constrained" derivative/transpose generic signature given:
 /// - An original SIL function type.
-/// - Differentiability parameter indices.
-/// - A possibly "unconstrained" derivative generic signature.
+/// - Differentiability/linearity parameter indices.
+/// - A possibly "unconstrained" derivative/transpose generic signature.
 GenericSignature getConstrainedDerivativeGenericSignature(
     SILFunctionType *originalFnTy, IndexSubset *diffParamIndices,
     GenericSignature derivativeGenSig, LookupConformanceFn lookupConformance,
@@ -484,8 +652,45 @@ bool getBuiltinDifferentiableOrLinearFunctionConfig(
 bool getBuiltinDifferentiableOrLinearFunctionConfig(
     StringRef operationName, unsigned &arity, bool &throws);
 
+/// Returns the SIL differentiability witness generic signature given the
+/// original declaration's generic signature and the derivative generic
+/// signature.
+///
+/// In general, the differentiability witness generic signature is equal to the
+/// derivative generic signature.
+///
+/// Edge case, if two conditions are satisfied:
+/// 1. The derivative generic signature is equal to the original generic
+///    signature.
+/// 2. The derivative generic signature has *all concrete* generic parameters
+///    (i.e. all generic parameters are bound to concrete types via same-type
+///    requirements).
+///
+/// Then the differentiability witness generic signature is `nullptr`.
+///
+/// Both the original and derivative declarations are lowered to SIL functions
+/// with a fully concrete type and no generic signature, so the
+/// differentiability witness should similarly have no generic signature.
+GenericSignature
+getDifferentiabilityWitnessGenericSignature(GenericSignature origGenSig,
+                                            GenericSignature derivativeGenSig);
+
 } // end namespace autodiff
 
+} // end namespace swift
+
+namespace swift {
+namespace Demangle {
+
+AutoDiffFunctionKind
+getAutoDiffFunctionKind(AutoDiffDerivativeFunctionKind kind);
+
+AutoDiffFunctionKind getAutoDiffFunctionKind(AutoDiffLinearMapKind kind);
+
+MangledDifferentiabilityKind
+getMangledDifferentiabilityKind(DifferentiabilityKind kind);
+
+} // end namespace autodiff
 } // end namespace swift
 
 namespace llvm {
@@ -497,6 +702,8 @@ using swift::GenericSignature;
 using swift::IndexSubset;
 using swift::SILAutoDiffDerivativeFunctionKey;
 using swift::SILFunctionType;
+using swift::DifferentiabilityKind;
+using swift::SILDifferentiabilityWitnessKey;
 
 template <typename T> struct DenseMapInfo;
 
@@ -569,8 +776,8 @@ template <> struct DenseMapInfo<AutoDiffDerivativeFunctionKind> {
 };
 
 template <> struct DenseMapInfo<SILAutoDiffDerivativeFunctionKey> {
-  static bool isEqual(const SILAutoDiffDerivativeFunctionKey lhs,
-                      const SILAutoDiffDerivativeFunctionKey rhs) {
+  static bool isEqual(const SILAutoDiffDerivativeFunctionKey &lhs,
+                      const SILAutoDiffDerivativeFunctionKey &rhs) {
     return lhs.originalType == rhs.originalType &&
            lhs.parameterIndices == rhs.parameterIndices &&
            lhs.resultIndices == rhs.resultIndices &&
@@ -609,6 +816,36 @@ template <> struct DenseMapInfo<SILAutoDiffDerivativeFunctionKey> {
         DenseMapInfo<GenericSignature>::getHashValue(Val.derivativeFnGenSig),
         DenseMapInfo<unsigned>::getHashValue(
             (unsigned)Val.isReabstractionThunk));
+  }
+};
+
+template <> struct DenseMapInfo<SILDifferentiabilityWitnessKey> {
+  static bool isEqual(const SILDifferentiabilityWitnessKey &lhs,
+                      const SILDifferentiabilityWitnessKey &rhs) {
+    return DenseMapInfo<StringRef>::isEqual(
+               lhs.originalFunctionName, rhs.originalFunctionName) &&
+           DenseMapInfo<unsigned>::isEqual(
+               (unsigned)lhs.kind, (unsigned)rhs.kind) &&
+           DenseMapInfo<AutoDiffConfig>::isEqual(lhs.config, rhs.config);
+  }
+
+  static inline SILDifferentiabilityWitnessKey getEmptyKey() {
+    return {DenseMapInfo<StringRef>::getEmptyKey(),
+            (DifferentiabilityKind)DenseMapInfo<unsigned>::getEmptyKey(),
+            DenseMapInfo<AutoDiffConfig>::getEmptyKey()};
+  }
+
+  static inline SILDifferentiabilityWitnessKey getTombstoneKey() {
+    return {DenseMapInfo<StringRef>::getTombstoneKey(),
+            (DifferentiabilityKind)DenseMapInfo<unsigned>::getTombstoneKey(),
+            DenseMapInfo<AutoDiffConfig>::getTombstoneKey()};
+  }
+
+  static unsigned getHashValue(const SILDifferentiabilityWitnessKey &val) {
+    return hash_combine(
+        DenseMapInfo<StringRef>::getHashValue(val.originalFunctionName),
+        DenseMapInfo<unsigned>::getHashValue((unsigned)val.kind),
+        DenseMapInfo<AutoDiffConfig>::getHashValue(val.config));
   }
 };
 

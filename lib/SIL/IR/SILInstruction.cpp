@@ -22,6 +22,7 @@
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/SILDebugScope.h"
 #include "swift/SIL/SILVisitor.h"
+#include "swift/SIL/DynamicCasts.h"
 #include "swift/Basic/AssertImplements.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/SILModule.h"
@@ -35,12 +36,6 @@ using namespace Lowering;
 // Instruction-specific properties on SILValue
 //===----------------------------------------------------------------------===//
 
-SILLocation SILInstruction::getLoc() const { return Location.getLocation(); }
-
-const SILDebugScope *SILInstruction::getDebugScope() const {
-  return Location.getScope();
-}
-
 void SILInstruction::setDebugScope(const SILDebugScope *DS) {
   if (getDebugScope() && getDebugScope()->InlinedCallSite)
     assert(DS->InlinedCallSite && "throwing away inlined scope info");
@@ -48,7 +43,7 @@ void SILInstruction::setDebugScope(const SILDebugScope *DS) {
   assert(DS->getParentFunction() == getFunction() &&
          "scope belongs to different function");
 
-  Location = SILDebugLocation(getLoc(), DS);
+  debugScope = DS;
 }
 
 //===----------------------------------------------------------------------===//
@@ -98,13 +93,10 @@ transferNodesFromList(llvm::ilist_traits<SILInstruction> &L2,
 
 // Assert that all subclasses of ValueBase implement classof.
 #define NODE(CLASS, PARENT) \
-  ASSERT_IMPLEMENTS_STATIC(CLASS, PARENT, classof, bool(const SILNode*));
+  ASSERT_IMPLEMENTS_STATIC(CLASS, PARENT, classof, bool(SILNodePointer));
 #include "swift/SIL/SILNodes.def"
 
-SILFunction *SILInstruction::getFunction() {
-  return getParent()->getParent();
-}
-const SILFunction *SILInstruction::getFunction() const {
+SILFunction *SILInstruction::getFunction() const {
   return getParent()->getParent();
 }
 
@@ -371,6 +363,14 @@ namespace {
       return true;
     }
 
+    bool visitDestructureStructInst(const DestructureStructInst *RHS) {
+      return true;
+    }
+
+    bool visitDestructureTupleInst(const DestructureTupleInst *RHS) {
+      return true;
+    }
+
     bool visitAllocRefInst(const AllocRefInst *RHS) {
       auto *LHSInst = cast<AllocRefInst>(LHS);
       auto LHSTypes = LHSInst->getTailAllocatedTypes();
@@ -382,6 +382,21 @@ namespace {
           return false;
       }
       return true;
+    }
+    
+    bool visitDestroyValueInst(const DestroyValueInst *RHS) {
+      auto *left = cast<DestroyValueInst>(LHS);
+      return left->poisonRefs() == RHS->poisonRefs();
+    }
+
+    bool visitBeginCOWMutationInst(const BeginCOWMutationInst *RHS) {
+      auto *left = cast<BeginCOWMutationInst>(LHS);
+      return left->isNative() == RHS->isNative();
+    }
+
+    bool visitEndCOWMutationInst(const EndCOWMutationInst *RHS) {
+      auto *left = cast<EndCOWMutationInst>(LHS);
+      return left->doKeepUnique() == RHS->doKeepUnique();
     }
 
     bool visitAllocRefDynamicInst(const AllocRefDynamicInst *RHS) {
@@ -465,8 +480,7 @@ namespace {
 
     bool visitFunctionRefInst(const FunctionRefInst *RHS) {
       auto *X = cast<FunctionRefInst>(LHS);
-      return X->getInitiallyReferencedFunction() ==
-             RHS->getInitiallyReferencedFunction();
+      return X->getReferencedFunction() == RHS->getReferencedFunction();
     }
     bool visitDynamicFunctionRefInst(const DynamicFunctionRefInst *RHS) {
       auto *X = cast<DynamicFunctionRefInst>(LHS);
@@ -534,8 +548,6 @@ namespace {
       auto *X = cast<RefElementAddrInst>(LHS);
       if (X->getField() != RHS->getField())
         return false;
-      if (X->getOperand() != RHS->getOperand())
-        return false;
       return true;
     }
 
@@ -569,7 +581,7 @@ namespace {
       auto *X = cast<TupleExtractInst>(LHS);
       if (X->getTupleType() != RHS->getTupleType())
         return false;
-      if (X->getFieldNo() != RHS->getFieldNo())
+      if (X->getFieldIndex() != RHS->getFieldIndex())
         return false;
       return true;
     }
@@ -580,7 +592,7 @@ namespace {
       auto *X = cast<TupleElementAddrInst>(LHS);
       if (X->getTupleType() != RHS->getTupleType())
         return false;
-      if (X->getFieldNo() != RHS->getFieldNo())
+      if (X->getFieldIndex() != RHS->getFieldIndex())
         return false;
       return true;
     }
@@ -1018,6 +1030,36 @@ SILInstruction::MemoryBehavior SILInstruction::getMemoryBehavior() const {
                              MemoryBehavior::MayHaveSideEffects;
   }
 
+  if (auto *li = dyn_cast<LoadInst>(this)) {
+    switch (li->getOwnershipQualifier()) {
+    case LoadOwnershipQualifier::Unqualified:
+    case LoadOwnershipQualifier::Trivial:
+      return MemoryBehavior::MayRead;
+    case LoadOwnershipQualifier::Take:
+      // Take deinitializes the underlying memory. Until we separate notions of
+      // memory writing from deinitialization (since a take doesn't actually
+      // write to the memory), lets be conservative and treat it as may read
+      // write.
+      return MemoryBehavior::MayReadWrite;
+    case LoadOwnershipQualifier::Copy:
+      return MemoryBehavior::MayHaveSideEffects;
+    }
+    llvm_unreachable("Covered switch isn't covered?!");
+  }
+
+  if (auto *si = dyn_cast<StoreInst>(this)) {
+    switch (si->getOwnershipQualifier()) {
+    case StoreOwnershipQualifier::Unqualified:
+    case StoreOwnershipQualifier::Trivial:
+    case StoreOwnershipQualifier::Init:
+      return MemoryBehavior::MayWrite;
+    case StoreOwnershipQualifier::Assign:
+      // For the release.
+      return MemoryBehavior::MayHaveSideEffects;
+    }
+    llvm_unreachable("Covered switch isn't covered?!");
+  }
+
   switch (getKind()) {
 #define FULL_INST(CLASS, TEXTUALNAME, PARENT, MEMBEHAVIOR, RELEASINGBEHAVIOR)  \
   case SILInstructionKind::CLASS:                                              \
@@ -1049,6 +1091,13 @@ bool SILInstruction::mayHaveSideEffects() const {
 }
 
 bool SILInstruction::mayRelease() const {
+  // Overrule a "DoesNotRelease" of dynamic casts. If a dynamic cast is not
+  // RC identity preserving it can release it's source (in some cases - we are
+  // conservative here).
+  auto dynCast = SILDynamicCastInst::getAs(const_cast<SILInstruction *>(this));
+  if (dynCast && !dynCast.isRCIdentityPreserving())
+    return true;
+
   if (getReleasingBehavior() ==
       SILInstruction::ReleasingBehavior::DoesNotRelease)
     return false;
@@ -1056,6 +1105,11 @@ bool SILInstruction::mayRelease() const {
   switch (getKind()) {
   default:
     llvm_unreachable("Unhandled releasing instruction!");
+
+  case SILInstructionKind::GetAsyncContinuationInst:
+  case SILInstructionKind::GetAsyncContinuationAddrInst:
+  case SILInstructionKind::AwaitAsyncContinuationInst:
+    return false;
 
   case SILInstructionKind::ApplyInst:
   case SILInstructionKind::TryApplyInst:
@@ -1065,6 +1119,8 @@ bool SILInstruction::mayRelease() const {
   case SILInstructionKind::YieldInst:
   case SILInstructionKind::DestroyAddrInst:
   case SILInstructionKind::StrongReleaseInst:
+#define UNCHECKED_REF_STORAGE(Name, ...)                                       \
+  case SILInstructionKind::Name##ReleaseValueInst:
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
   case SILInstructionKind::Name##ReleaseInst:
 #include "swift/AST/ReferenceStorage.def"
@@ -1073,11 +1129,11 @@ bool SILInstruction::mayRelease() const {
     return true;
 
   case SILInstructionKind::DestroyValueInst:
-    assert(!SILModuleConventions(getModule()).useLoweredAddresses());
     return true;
 
   case SILInstructionKind::UnconditionalCheckedCastAddrInst:
   case SILInstructionKind::UnconditionalCheckedCastValueInst:
+  case SILInstructionKind::UncheckedOwnershipConversionInst:
     return true;
 
   case SILInstructionKind::CheckedCastAddrBranchInst: {
@@ -1120,12 +1176,25 @@ bool SILInstruction::mayRelease() const {
     }
     return true;
   }
+  case SILInstructionKind::StoreInst:
+    switch (cast<StoreInst>(this)->getOwnershipQualifier()) {
+    case StoreOwnershipQualifier::Unqualified:
+    case StoreOwnershipQualifier::Init:
+    case StoreOwnershipQualifier::Trivial:
+      return false;
+    case StoreOwnershipQualifier::Assign:
+      // Assign destroys the old value that was in the memory location before we
+      // write the new value into the location.
+      return true;
+    }
+    llvm_unreachable("Covered switch isn't covered?!");
   }
 }
 
 bool SILInstruction::mayReleaseOrReadRefCount() const {
   switch (getKind()) {
   case SILInstructionKind::IsUniqueInst:
+  case SILInstructionKind::BeginCOWMutationInst:
   case SILInstructionKind::IsEscapingClosureInst:
     return true;
   default:
@@ -1138,11 +1207,14 @@ namespace {
     friend class SILCloner<TrivialCloner>;
     friend class SILInstructionVisitor<TrivialCloner>;
     SILInstruction *Result = nullptr;
-    TrivialCloner(SILFunction *F) : SILCloner(*F) {}
+    TrivialCloner(SILFunction *F, SILInstruction *InsertPt) : SILCloner(*F) {
+      Builder.setInsertionPoint(InsertPt);
+    }
+
   public:
 
-    static SILInstruction *doIt(SILInstruction *I) {
-      TrivialCloner TC(I->getFunction());
+    static SILInstruction *doIt(SILInstruction *I, SILInstruction *InsertPt) {
+      TrivialCloner TC(I->getFunction(), InsertPt);
       TC.visit(I);
       return TC.Result;
     }
@@ -1193,10 +1265,7 @@ bool SILInstruction::isDeallocatingStack() const {
 /// then the new instruction is inserted before the specified point, otherwise
 /// the new instruction is returned without a parent.
 SILInstruction *SILInstruction::clone(SILInstruction *InsertPt) {
-  SILInstruction *NewInst = TrivialCloner::doIt(this);
-
-  if (NewInst && InsertPt)
-    InsertPt->getParent()->insert(InsertPt, NewInst);
+  SILInstruction *NewInst = TrivialCloner::doIt(this, InsertPt);
   return NewInst;
 }
 
@@ -1245,6 +1314,12 @@ bool SILInstruction::isTriviallyDuplicatable() const {
   if (isa<DynamicMethodBranchInst>(this))
     return false;
 
+  // Can't duplicate get/await_async_continuation.
+  if (isa<AwaitAsyncContinuationInst>(this) ||
+      isa<GetAsyncContinuationAddrInst>(this) ||
+      isa<GetAsyncContinuationInst>(this))
+    return false;
+
   // If you add more cases here, you should also update SILLoop:canDuplicate.
 
   return true;
@@ -1255,6 +1330,7 @@ bool SILInstruction::mayTrap() const {
   case SILInstructionKind::CondFailInst:
   case SILInstructionKind::UnconditionalCheckedCastInst:
   case SILInstructionKind::UnconditionalCheckedCastAddrInst:
+  case SILInstructionKind::UnconditionalCheckedCastValueInst:
     return true;
   default:
     return false;
@@ -1460,7 +1536,7 @@ MultipleValueInstruction::getIndexOfResult(SILValue Target) const {
 MultipleValueInstructionResult::MultipleValueInstructionResult(
     ValueKind valueKind, unsigned index, SILType type,
     ValueOwnershipKind ownershipKind)
-    : ValueBase(valueKind, type, IsRepresentative::No) {
+    : ValueBase(valueKind, type) {
   setOwnershipKind(ownershipKind);
   setIndex(index);
 }
@@ -1507,6 +1583,21 @@ MultipleValueInstruction *MultipleValueInstructionResult::getParent() {
   return reinterpret_cast<MultipleValueInstruction *>(value);
 }
 
+/// Returns true if evaluation of this node may cause suspension of an
+/// async task.
+bool SILInstruction::maySuspend() const {
+  // await_async_continuation always suspends the current task.
+  if (isa<AwaitAsyncContinuationInst>(this))
+    return true;
+  
+  // Fully applying an async function may suspend the caller.
+  if (auto applySite = FullApplySite::isa(const_cast<SILInstruction*>(this))) {
+    return applySite.getOrigCalleeType()->isAsync();
+  }
+  
+  return false;
+}
+
 #ifndef NDEBUG
 
 //---
@@ -1524,7 +1615,7 @@ MultipleValueInstruction *MultipleValueInstructionResult::getParent() {
 // Check that all subclasses of MultipleValueInstructionResult are the same size
 // as MultipleValueInstructionResult.
 //
-// If this changes, we just need to expand the size fo SILInstructionResultArray
+// If this changes, we just need to expand the size of SILInstructionResultArray
 // to contain a stride. But we assume this now so we should enforce it.
 #define MULTIPLE_VALUE_INST_RESULT(ID, PARENT)                                 \
   static_assert(                                                               \

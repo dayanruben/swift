@@ -61,6 +61,19 @@ class ReabstractionInfo {
   /// argument has a trivial type.
   SmallBitVector TrivialArgs;
 
+  /// Set to true if the function has a re-abstracted (= converted from
+  /// indirect to direct) resilient argument or return type. This can happen if
+  /// the function is compiled within the type's resilience domain, i.e. in
+  /// its module (where the type is loadable).
+  /// In this case we need to generate a different mangled name for the
+  /// function to distinguish it from functions in other modules, which cannot
+  /// re-abstract this resilient type.
+  /// Fortunately, a flag is sufficient to describe this: either a function has
+  /// re-abstracted resilient types or not. It cannot happen that two
+  /// functions have two different subsets of re-abstracted resilient parameter
+  /// types.
+  bool hasConvertedResilientParams = false;
+
   /// If set, indirect to direct conversions should be performed by the generic
   /// specializer.
   bool ConvertIndirectToDirect;
@@ -123,8 +136,16 @@ class ReabstractionInfo {
   // It uses interface types.
   SubstitutionMap CallerInterfaceSubs;
 
+  bool isPrespecialization = false;
+
   // Is the generated specialization going to be serialized?
   IsSerialized_t Serialized;
+  
+  enum TypeCategory {
+    NotLoadable,
+    Loadable,
+    LoadableAndTrivial
+  };
   
   unsigned param2ArgIndex(unsigned ParamIdx) const  {
     return ParamIdx + NumFormalIndirectResults;
@@ -136,6 +157,15 @@ class ReabstractionInfo {
                                            bool HasUnboundGenericParams);
 
   void createSubstitutedAndSpecializedTypes();
+  
+  TypeCategory getReturnTypeCategory(const SILResultInfo &RI,
+                                     const SILFunctionConventions &substConv,
+                                     TypeExpansionContext typeExpansion);
+
+  TypeCategory getParamTypeCategory(const SILParameterInfo &PI,
+                                    const SILFunctionConventions &substConv,
+                                    TypeExpansionContext typeExpansion);
+
   bool prepareAndCheck(ApplySite Apply, SILFunction *Callee,
                        SubstitutionMap ParamSubs,
                        OptRemark::Emitter *ORE = nullptr);
@@ -147,8 +177,9 @@ class ReabstractionInfo {
   void finishPartialSpecializationPreparation(
       FunctionSignaturePartialSpecializer &FSPS);
 
-  ReabstractionInfo() {}
 public:
+  ReabstractionInfo() {}
+
   /// Constructs the ReabstractionInfo for generic function \p Callee with
   /// substitutions \p ParamSubs.
   /// If specialization is not possible getSpecializedType() will return an
@@ -164,10 +195,19 @@ public:
   /// Constructs the ReabstractionInfo for generic function \p Callee with
   /// a specialization signature.
   ReabstractionInfo(ModuleDecl *targetModule, bool isModuleWholeModule,
-                    SILFunction *Callee, GenericSignature SpecializedSig);
+                    SILFunction *Callee, GenericSignature SpecializedSig,
+                    bool isPrespecialization = false);
+
+  bool isPrespecialized() const { return isPrespecialization; }
 
   IsSerialized_t isSerialized() const {
     return Serialized;
+  }
+  
+  /// Returns true if the specialized function needs an alternative mangling.
+  /// See hasConvertedResilientParams.
+  bool needAlternativeMangling() const {
+    return hasConvertedResilientParams;
   }
 
   TypeExpansionContext getResilienceExpansion() const {
@@ -306,17 +346,17 @@ public:
   SILFunction *lookupSpecialization();
 
   /// Return a newly created specialized function.
-  SILFunction *tryCreateSpecialization();
+  SILFunction *tryCreateSpecialization(bool forcePrespecialization = false);
 
   /// Try to specialize GenericFunc given a list of ParamSubs.
   /// Returns either a new or existing specialized function, or nullptr.
-  SILFunction *trySpecialization() {
+  SILFunction *trySpecialization(bool forcePrespecialization = false) {
     if (!ReInfo.getSpecializedType())
       return nullptr;
 
     SILFunction *SpecializedF = lookupSpecialization();
     if (!SpecializedF)
-      SpecializedF = tryCreateSpecialization();
+      SpecializedF = tryCreateSpecialization(forcePrespecialization);
 
     return SpecializedF;
   }

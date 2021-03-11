@@ -25,7 +25,6 @@
 #include "swift/Basic/Sanitizers.h"
 #include "swift/Driver/Util.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <functional>
@@ -102,6 +101,14 @@ public:
   /// The output type which should be used for compile actions.
   file_types::ID CompilerOutputType = file_types::ID::TY_INVALID;
 
+  enum class LTOKind {
+    None,
+    LLVMThin,
+    LLVMFull,
+  };
+
+  LTOKind LTOVariant = LTOKind::None;
+
   /// Describes if and how the output of compile actions should be
   /// linked together.
   LinkKind LinkAction = LinkKind::None;
@@ -159,7 +166,8 @@ public:
     Batch,           // swiftc
     AutolinkExtract, // swift-autolink-extract
     SwiftIndent,     // swift-indent
-    SymbolGraph      // swift-symbolgraph
+    SymbolGraph,     // swift-symbolgraph
+    APIExtract       // swift-api-extract
   };
 
   class InputInfoMap;
@@ -298,8 +306,7 @@ public:
   /// Construct the OutputFileMap for the driver from the given arguments.
   Optional<OutputFileMap>
   buildOutputFileMap(const llvm::opt::DerivedArgList &Args,
-                     StringRef workingDirectory,
-                     bool addEntriesForSourceRangeDependencies) const;
+                     StringRef workingDirectory) const;
 
   /// Add top-level Jobs to Compilation \p C for the given \p Actions and
   /// OutputInfo.
@@ -366,6 +373,11 @@ private:
                                  llvm::SmallString<128> &buffer,
                                  file_types::ID fileType,
                                  CommandOutput *output) const;
+
+  void chooseModuleSummaryPath(Compilation &C, const TypeToPathMap *OutputMap,
+                               StringRef workingDirectory,
+                               llvm::SmallString<128> &Buf,
+                               CommandOutput *Output) const;
 
   void chooseRemappingOutputPath(Compilation &C, const TypeToPathMap *OutputMap,
                                  CommandOutput *Output) const;

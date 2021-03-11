@@ -63,6 +63,11 @@ public class KlassBar : KlassFoo {
   init()
 }
 
+indirect public enum IndirectEnum : Hashable {
+  case A
+  case B(IndirectEnum)
+}
+
 sil @use_Int : $@convention(thin) (Int) -> ()
 sil @use_Int64 : $@convention(thin) (Int64) -> ()
 sil @use_Generic : $@convention(thin) <T>(@in_guaranteed T) -> ()
@@ -514,6 +519,39 @@ bb0(%0 : $boo):
   return %0 : $boo
 }
 
+// CHECK-LABEL: sil @no_fso_recursive_result_is_not_returned :
+// CHECK-NOT:  release_value
+// CHECK:      bb2:
+// CHECK-NEXT:   retain_value %0
+// CHECK: return
+// CHECK-LABEL: } // end sil function 'no_fso_recursive_result_is_not_returned'
+sil @no_fso_recursive_result_is_not_returned : $@convention(method) (@guaranteed IndirectEnum, @guaranteed IndirectEnum) -> @owned IndirectEnum {
+bb0(%0 : $IndirectEnum, %1 : $IndirectEnum):
+  switch_enum %1 : $IndirectEnum, case #IndirectEnum.B!enumelt: bb1, default bb2
+
+bb1(%3 : ${ var IndirectEnum }):
+  %4 = project_box %3 : ${ var IndirectEnum }, 0
+  %5 = load %4 : $*IndirectEnum
+  %6 = function_ref @no_fso_recursive_result_is_not_returned : $@convention(method) (@guaranteed IndirectEnum, @guaranteed IndirectEnum) -> @owned IndirectEnum
+
+  // The result of the self-recursion is not returned (but put in a box).
+  // This prevents guaranteed -> owned return value specialization.
+  %7 = apply %6(%0, %5) : $@convention(method) (@guaranteed IndirectEnum, @guaranteed IndirectEnum) -> @owned IndirectEnum
+  %8 = alloc_box ${ var IndirectEnum }
+  %9 = project_box %8 : ${ var IndirectEnum }, 0
+  store %7 to %9 : $*IndirectEnum
+  %11 = enum $IndirectEnum, #IndirectEnum.B!enumelt, %8 : ${ var IndirectEnum }
+  br bb3(%11 : $IndirectEnum)
+
+bb2:
+  retain_value %0 : $IndirectEnum
+  br bb3(%0 : $IndirectEnum)
+
+bb3(%35 : $IndirectEnum):
+  return %35 : $IndirectEnum
+}
+
+
 // Make sure we do not move the retain_value in the throw block.
 //
 // CHECK-LABEL: sil [serialized] [signature_optimized_thunk] [always_inline] @owned_to_unowned_retval_with_error_result : $@convention(thin) (@owned boo) -> (@owned boo, @error Error) {
@@ -906,6 +944,48 @@ bb0(%0 : $Builtin.NativeObject, %1 : $Int):
   %r1 = apply [nothrow] %f1(%0, %1) : $@convention(thin) (@owned Builtin.NativeObject, Int) -> (Int, @error Error)
   return %r1 : $Int
 }
+
+//=======================================================================
+// dont convert @owned => @guaranteed when there is a dealloc_partial_ref
+
+sil @test_dealloc_partial_ref_callee : $@convention(thin) () -> ((), @error Error)
+
+// CHECK-LABEL: sil hidden @test_dealloc_partial_ref : $@convention(thin) (@owned foo) -> (@owned foo, @error Error) {
+// CHECK-NOT: @guaranteed
+// CHECK:     function_ref @test_dealloc_partial_ref_callee   
+// CHECK-NOT: @guaranteed
+
+sil hidden @test_dealloc_partial_ref : $@convention(thin) (@owned foo) -> (@owned foo, @error Error) {
+bb0(%1 : $foo):
+  strong_retain %1 : $foo
+  %f = function_ref @test_dealloc_partial_ref_callee : $@convention(thin) () -> ((), @error Error)
+  try_apply %f() : $@convention(thin) () -> ((), @error Error), normal bb1, error bb2
+
+bb1(%27 : $()):
+  strong_release %1 : $foo
+  return %1 : $foo
+
+bb2(%157 : $Error):
+  strong_release %1 : $foo
+  %mt = metatype $@thick foo.Type
+  dealloc_partial_ref %1 : $foo, %mt : $@thick foo.Type
+  throw %157 : $Error
+}
+
+sil @test_dealloc_partial_ref_caller : $@convention(thin) () -> (@owned foo, @error Error) {
+bb0:
+  %2 = alloc_ref $foo
+  %3 = function_ref @test_dealloc_partial_ref : $@convention(thin) (@owned foo) -> (@owned foo, @error Error)
+  try_apply %3(%2) : $@convention(thin) (@owned foo) -> (@owned foo, @error Error), normal bb1, error bb2
+
+bb1(%5 : $foo):
+  return %5 : $foo
+
+bb2(%7 : $Error):
+  throw %7 : $Error
+}
+
+// CHECK: } // end sil function 'test_dealloc_partial_ref_caller'
 
 //======================
 // @owned => @guaranteed

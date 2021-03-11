@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -187,7 +187,7 @@ extension LazyFilterCollection: Collection {
   internal func _ensureBidirectional(step: Int) {
     // FIXME: This seems to be the best way of checking whether _base is
     // forward only without adding an extra protocol requirement.
-    // index(_:offsetBy:limitedBy:) is chosen becuase it is supposed to return
+    // index(_:offsetBy:limitedBy:) is chosen because it is supposed to return
     // nil when the resulting index lands outside the collection boundaries,
     // and therefore likely does not trap in these cases.
     if step < 0 {
@@ -231,7 +231,7 @@ extension LazyFilterCollection: Collection {
     // _base at least once, to trigger a _precondition in forward only
     // collections.
     _ensureBidirectional(step: step)
-    for _ in 0 ..< abs(numericCast(n)) {
+    for _ in 0 ..< abs(n) {
       _advanceIndex(&i, step: step)
     }
     return i
@@ -252,7 +252,7 @@ extension LazyFilterCollection: Collection {
     // invoked on the _base at least once, to trigger a _precondition in
     // forward only collections.
     _ensureBidirectional(step: step)
-    for _ in 0 ..< abs(numericCast(n)) {
+    for _ in 0 ..< abs(n) {
       if i == limit {
         return nil
       }

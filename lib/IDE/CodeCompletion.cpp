@@ -30,11 +30,13 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangModule.h"
+#include "swift/Frontend/FrontendOptions.h"
 #include "swift/IDE/CodeCompletionCache.h"
 #include "swift/IDE/CodeCompletionResultPrinter.h"
 #include "swift/IDE/Utils.h"
 #include "swift/Parse/CodeCompletionCallbacks.h"
 #include "swift/Sema/IDETypeChecking.h"
+#include "swift/Sema/CodeCompletionTypeChecking.h"
 #include "swift/Syntax/SyntaxKind.h"
 #include "swift/Strings.h"
 #include "swift/Subsystems.h"
@@ -193,7 +195,7 @@ public:
       return;
     auto &Parent = Parents.back();
     for (auto CIT = std::find(Parent->child_begin(), Parent->child_end(), C) + 1;
-         CIT != Parent->child_end(); CIT++) {
+         CIT != Parent->child_end(); ++CIT) {
       if (auto TC = dyn_cast<TextComment>(*CIT)) {
         auto Text = TC->getText();
         std::vector<StringRef> Subs;
@@ -330,7 +332,7 @@ std::string swift::ide::removeCodeCompletionTokens(
     }
     if (C == '#' && Ptr <= End - 2 && Ptr[1] == '^') {
       do {
-        Ptr++;
+        ++Ptr;
       } while (Ptr < End && *Ptr != '#');
       if (Ptr == End)
         break;
@@ -339,6 +341,21 @@ std::string swift::ide::removeCodeCompletionTokens(
     CleanFile += C;
   }
   return CleanFile;
+}
+
+llvm::StringRef swift::ide::copyString(llvm::BumpPtrAllocator &Allocator,
+                                       llvm::StringRef Str) {
+  char *Buffer = Allocator.Allocate<char>(Str.size());
+  std::copy(Str.begin(), Str.end(), Buffer);
+  return llvm::StringRef(Buffer, Str.size());
+}
+
+const char *swift::ide::copyCString(llvm::BumpPtrAllocator &Allocator,
+                                    llvm::StringRef Str) {
+  char *Buffer = Allocator.Allocate<char>(Str.size() + 1);
+  std::copy(Str.begin(), Str.end(), Buffer);
+  Buffer[Str.size()] = '\0';
+  return Buffer;
 }
 
 CodeCompletionString::CodeCompletionString(ArrayRef<Chunk> Chunks) {
@@ -356,19 +373,20 @@ CodeCompletionString *CodeCompletionString::create(llvm::BumpPtrAllocator &Alloc
 
 void CodeCompletionString::print(raw_ostream &OS) const {
   unsigned PrevNestingLevel = 0;
-  for (auto C : getChunks()) {
+  auto chunks = getChunks();
+  for (auto I = chunks.begin(), E = chunks.end(); I != E; ++I) {
     bool AnnotatedTextChunk = false;
-    if (C.getNestingLevel() < PrevNestingLevel) {
+
+    if (I->getNestingLevel() < PrevNestingLevel) {
       OS << "#}";
     }
-    switch (C.getKind()) {
+    switch (I->getKind()) {
     using ChunkKind = Chunk::ChunkKind;
     case ChunkKind::AccessControlKeyword:
     case ChunkKind::DeclAttrKeyword:
     case ChunkKind::DeclAttrParamKeyword:
     case ChunkKind::OverrideKeyword:
-    case ChunkKind::ThrowsKeyword:
-    case ChunkKind::RethrowsKeyword:
+    case ChunkKind::EffectsSpecifierKeyword:
     case ChunkKind::DeclIntroducer:
     case ChunkKind::Text:
     case ChunkKind::LeftParen:
@@ -390,7 +408,7 @@ void CodeCompletionString::print(raw_ostream &OS) const {
     case ChunkKind::BaseName:
     case ChunkKind::TypeIdSystem:
     case ChunkKind::TypeIdUser:
-      AnnotatedTextChunk = C.isAnnotation();
+      AnnotatedTextChunk = I->isAnnotation();
       LLVM_FALLTHROUGH;
     case ChunkKind::CallParameterName:
     case ChunkKind::CallParameterInternalName:
@@ -401,11 +419,11 @@ void CodeCompletionString::print(raw_ostream &OS) const {
     case ChunkKind::GenericParameterName:
       if (AnnotatedTextChunk)
         OS << "['";
-      else if (C.getKind() == ChunkKind::CallParameterInternalName)
+      else if (I->getKind() == ChunkKind::CallParameterInternalName)
         OS << "(";
-      else if (C.getKind() == ChunkKind::CallParameterClosureType)
+      else if (I->getKind() == ChunkKind::CallParameterClosureType)
         OS << "##";
-      for (char Ch : C.getText()) {
+      for (char Ch : I->getText()) {
         if (Ch == '\n')
           OS << "\\n";
         else
@@ -413,7 +431,7 @@ void CodeCompletionString::print(raw_ostream &OS) const {
       }
       if (AnnotatedTextChunk)
         OS << "']";
-      else if (C.getKind() == ChunkKind::CallParameterInternalName)
+      else if (I->getKind() == ChunkKind::CallParameterInternalName)
         OS << ")";
       break;
     case ChunkKind::OptionalBegin:
@@ -424,22 +442,36 @@ void CodeCompletionString::print(raw_ostream &OS) const {
       break;
     case ChunkKind::DynamicLookupMethodCallTail:
     case ChunkKind::OptionalMethodCallTail:
-      OS << C.getText();
+      OS << I->getText();
       break;
+    case ChunkKind::TypeAnnotationBegin: {
+      OS << "[#";
+      ++I;
+      auto level = I->getNestingLevel();
+      for (; I != E && !I->endsPreviousNestedGroup(level); ++I)
+        if (I->hasText())
+          OS << I->getText();
+      --I;
+      OS << "#]";
+      continue;
+    }
     case ChunkKind::TypeAnnotation:
       OS << "[#";
-      OS << C.getText();
+      OS << I->getText();
       OS << "#]";
+      break;
+    case ChunkKind::CallParameterClosureExpr:
+      OS << " {" << I->getText() << "|}";
       break;
     case ChunkKind::BraceStmtWithCursor:
       OS << " {|}";
       break;
     }
-    PrevNestingLevel = C.getNestingLevel();
+    PrevNestingLevel = I->getNestingLevel();
   }
   while (PrevNestingLevel > 0) {
     OS << "#}";
-    PrevNestingLevel--;
+    --PrevNestingLevel;
   }
 }
 
@@ -534,6 +566,10 @@ CodeCompletionResult::getCodeCompletionDeclKind(const Decl *D) {
     return CodeCompletionDeclKind::Subscript;
   }
   llvm_unreachable("invalid DeclKind");
+}
+
+bool CodeCompletionResult::getDeclIsSystem(const Decl *D) {
+  return D->getModuleContext()->isSystemModule();
 }
 
 void CodeCompletionResult::printPrefix(raw_ostream &OS) const {
@@ -697,6 +733,8 @@ void CodeCompletionResult::printPrefix(raw_ostream &OS) const {
   }
   if (NotRecommended)
     Prefix.append("/NotRecommended");
+  if (IsSystem)
+    Prefix.append("/IsSystem");
   if (NumBytesToErase != 0) {
     Prefix.append("/Erase[");
     Prefix.append(Twine(NumBytesToErase).str());
@@ -747,27 +785,13 @@ void CodeCompletionResult::dump() const {
   llvm::errs() << "\n";
 }
 
-static StringRef copyString(llvm::BumpPtrAllocator &Allocator,
-                            StringRef Str) {
-  char *Mem = Allocator.Allocate<char>(Str.size());
-  std::copy(Str.begin(), Str.end(), Mem);
-  return StringRef(Mem, Str.size());
-}
-
-static ArrayRef<StringRef> copyStringArray(llvm::BumpPtrAllocator &Allocator,
-                                           ArrayRef<StringRef> Arr) {
-  StringRef *Buff = Allocator.Allocate<StringRef>(Arr.size());
-  std::copy(Arr.begin(), Arr.end(), Buff);
-  return llvm::makeArrayRef(Buff, Arr.size());
-}
-
-static ArrayRef<std::pair<StringRef, StringRef>> copyStringPairArray(
-    llvm::BumpPtrAllocator &Allocator,
-    ArrayRef<std::pair<StringRef, StringRef>> Arr) {
-  std::pair<StringRef, StringRef> *Buff = Allocator.Allocate<std::pair<StringRef,
-    StringRef>>(Arr.size());
-  std::copy(Arr.begin(), Arr.end(), Buff);
-  return llvm::makeArrayRef(Buff, Arr.size());
+void CodeCompletionResultBuilder::withNestedGroup(
+    CodeCompletionString::Chunk::ChunkKind Kind,
+    llvm::function_ref<void()> body) {
+  ++CurrentNestingLevel;
+  addSimpleChunk(Kind);
+  body();
+  --CurrentNestingLevel;
 }
 
 void CodeCompletionResultBuilder::addChunkWithText(
@@ -817,22 +841,26 @@ class AnnotatedTypePrinter : public ASTPrinter {
     }
   }
 
+  void flush() {
+    if (Buffer.empty())
+      return;
+    Builder.addChunkWithText(CurrChunkKind, Buffer);
+    Buffer.clear();
+  }
+
 public:
   AnnotatedTypePrinter(CodeCompletionResultBuilder &Builder) : Builder(Builder) {}
 
   ~AnnotatedTypePrinter() {
-    // Add remaining buffer.
-    Builder.addChunkWithText(CurrChunkKind, Buffer);
+    // Flush the remainings.
+    flush();
   }
 
   void printText(StringRef Text) override {
     if (CurrChunkKind != NextChunkKind) {
-      // If the next desired kind is different from the current buffer, flush the
-      // current buffer.
-      if (!Buffer.empty()) {
-        Builder.addChunkWithText(CurrChunkKind, Buffer);
-        Buffer.clear();
-      }
+      // If the next desired kind is different from the current buffer, flush
+      // the current buffer.
+      flush();
       CurrChunkKind = NextChunkKind;
     }
     Buffer.append(Text);
@@ -869,8 +897,10 @@ void CodeCompletionResultBuilder::addCallParameter(Identifier Name,
                                                    bool IsVarArg,
                                                    bool IsInOut,
                                                    bool IsIUO,
-                                                   bool isAutoClosure) {
-  CurrentNestingLevel++;
+                                                   bool isAutoClosure,
+                                                   bool useUnderscoreLabel,
+                                                   bool isLabeledTrailingClosure) {
+  ++CurrentNestingLevel;
   using ChunkKind = CodeCompletionString::Chunk::ChunkKind;
 
   addSimpleChunk(ChunkKind::CallParameterBegin);
@@ -910,6 +940,11 @@ void CodeCompletionResultBuilder::addCallParameter(Identifier Name,
           escapeKeyword(Name.str(), false, EscapedKeyword));
       addChunkWithTextNoCopy(
           CodeCompletionString::Chunk::ChunkKind::CallParameterColon, ": ");
+    } else if (useUnderscoreLabel) {
+      addChunkWithTextNoCopy(
+          CodeCompletionString::Chunk::ChunkKind::CallParameterName, "_");
+      addChunkWithTextNoCopy(
+          CodeCompletionString::Chunk::ChunkKind::CallParameterColon, ": ");
     } else if (!LocalName.empty()) {
       // Use local (non-API) parameter name if we have nothing else.
       llvm::SmallString<16> EscapedKeyword;
@@ -945,13 +980,10 @@ void CodeCompletionResultBuilder::addCallParameter(Identifier Name,
   if (ContextTy)
     PO.setBaseType(ContextTy);
   if (shouldAnnotateResults()) {
-    CurrentNestingLevel++;
-    addSimpleChunk(ChunkKind::CallParameterTypeBegin);
-    {
+    withNestedGroup(ChunkKind::CallParameterTypeBegin, [&]() {
       AnnotatedTypePrinter printer(*this);
       Ty->print(printer, PO);
-    }
-    CurrentNestingLevel--;
+    });
   } else {
     std::string TypeName = Ty->getString(PO);
     addChunkWithText(ChunkKind::CallParameterType, TypeName);
@@ -961,7 +993,8 @@ void CodeCompletionResultBuilder::addCallParameter(Identifier Name,
   // function type.
   Ty = Ty->lookThroughAllOptionalTypes();
   if (auto AFT = Ty->getAs<AnyFunctionType>()) {
-    // If this is a closure type, add ChunkKind::CallParameterClosureType.
+    // If this is a closure type, add ChunkKind::CallParameterClosureType or
+    // ChunkKind::CallParameterClosureExpr for labeled trailing closures.
     PrintOptions PO;
     PO.PrintFunctionRepresentationAttrs =
       PrintOptions::FunctionRepresentationMode::None;
@@ -970,14 +1003,72 @@ void CodeCompletionResultBuilder::addCallParameter(Identifier Name,
         PrintOptions::OpaqueReturnTypePrintingMode::WithoutOpaqueKeyword;
     if (ContextTy)
       PO.setBaseType(ContextTy);
-    addChunkWithText(
-        CodeCompletionString::Chunk::ChunkKind::CallParameterClosureType,
-        AFT->getString(PO));
+
+    if (isLabeledTrailingClosure) {
+      // Expand the closure body.
+      SmallString<32> buffer;
+      llvm::raw_svector_ostream OS(buffer);
+
+      bool firstParam = true;
+      for (const auto &param : AFT->getParams()) {
+        if (!firstParam)
+          OS << ", ";
+        firstParam = false;
+
+        if (param.hasLabel()) {
+          OS << param.getLabel();
+        } else {
+          OS << "<#";
+          if (param.isInOut())
+            OS << "inout ";
+          OS << param.getPlainType()->getString(PO);
+          if (param.isVariadic())
+            OS << "...";
+          OS << "#>";
+        }
+      }
+
+      if (!firstParam)
+        OS << " in";
+
+      addChunkWithText(
+         CodeCompletionString::Chunk::ChunkKind::CallParameterClosureExpr,
+         OS.str());
+    } else {
+      // Add the closure type.
+      addChunkWithText(
+          CodeCompletionString::Chunk::ChunkKind::CallParameterClosureType,
+          AFT->getString(PO));
+    }
   }
 
   if (IsVarArg)
     addEllipsis();
-  CurrentNestingLevel--;
+  --CurrentNestingLevel;
+}
+
+void CodeCompletionResultBuilder::addTypeAnnotation(Type T, PrintOptions PO,
+                                                    StringRef suffix) {
+  T = T->getReferenceStorageReferent();
+
+  // Replace '()' with 'Void'.
+  if (T->isVoid())
+    T = T->getASTContext().getVoidDecl()->getDeclaredInterfaceType();
+
+  if (shouldAnnotateResults()) {
+    withNestedGroup(CodeCompletionString::Chunk::ChunkKind::TypeAnnotationBegin,
+                    [&]() {
+                      AnnotatedTypePrinter printer(*this);
+                      T->print(printer, PO);
+                      if (!suffix.empty())
+                        printer.printText(suffix);
+                    });
+  } else {
+    auto str = T.getString(PO);
+    if (!suffix.empty())
+      str += suffix.str();
+    addTypeAnnotation(str);
+  }
 }
 
 StringRef CodeCompletionContext::copyString(StringRef Str) {
@@ -1027,15 +1118,13 @@ ArrayRef<StringRef> copyAssociatedUSRs(llvm::BumpPtrAllocator &Allocator,
   });
 
   if (!USRs.empty())
-    return copyStringArray(Allocator, USRs);
+    return copyArray(Allocator, ArrayRef<StringRef>(USRs));
 
   return ArrayRef<StringRef>();
 }
 
-static CodeCompletionResult::ExpectedTypeRelation calculateTypeRelation(
-                                                                Type Ty,
-                                                                Type ExpectedTy,
-                                                                DeclContext *DC) {
+static CodeCompletionResult::ExpectedTypeRelation
+calculateTypeRelation(Type Ty, Type ExpectedTy, const DeclContext *DC) {
   if (Ty.isNull() || ExpectedTy.isNull() ||
       Ty->is<ErrorType>() ||
       ExpectedTy->is<ErrorType>())
@@ -1051,7 +1140,8 @@ static CodeCompletionResult::ExpectedTypeRelation calculateTypeRelation(
     isAny |= ExpectedTy->is<ArchetypeType>() &&
              !ExpectedTy->castTo<ArchetypeType>()->hasRequirements();
 
-    if (!isAny && isConvertibleTo(Ty, ExpectedTy, /*openArchetypes=*/true, *DC))
+    if (!isAny && isConvertibleTo(Ty, ExpectedTy, /*openArchetypes=*/true,
+                                  *const_cast<DeclContext *>(DC)))
       return CodeCompletionResult::ExpectedTypeRelation::Convertible;
   }
   if (auto FT = Ty->getAs<AnyFunctionType>()) {
@@ -1062,51 +1152,16 @@ static CodeCompletionResult::ExpectedTypeRelation calculateTypeRelation(
 }
 
 static CodeCompletionResult::ExpectedTypeRelation
-calculateTypeRelationForDecl(const Decl *D, Type ExpectedType,
-                             bool IsImplicitlyCurriedInstanceMethod,
-                             bool UseFuncResultType = true) {
-  auto VD = dyn_cast<ValueDecl>(D);
-  auto DC = D->getDeclContext();
-  if (!VD)
-    return CodeCompletionResult::ExpectedTypeRelation::Unrelated;
-
-  if (auto FD = dyn_cast<AbstractFunctionDecl>(VD)) {
-    auto funcType = FD->getInterfaceType()->getAs<AnyFunctionType>();
-    if (DC->isTypeContext() && funcType && funcType->is<AnyFunctionType>() &&
-        !IsImplicitlyCurriedInstanceMethod)
-      funcType = funcType->getResult()->getAs<AnyFunctionType>();
-    if (funcType) {
-      funcType = funcType->removeArgumentLabels(1)->castTo<AnyFunctionType>();
-      auto relation = calculateTypeRelation(funcType, ExpectedType, DC);
-      if (UseFuncResultType)
-        relation =
-            std::max(relation, calculateTypeRelation(funcType->getResult(),
-                                                     ExpectedType, DC));
-      return relation;
-    }
-  }
-  if (auto EED = dyn_cast<EnumElementDecl>(VD)) {
-    return calculateTypeRelation(
-        EED->getParentEnum()->TypeDecl::getDeclaredInterfaceType(),
-        ExpectedType, DC);
-  }
-  if (auto NTD = dyn_cast<NominalTypeDecl>(VD)) {
-    return std::max(
-        calculateTypeRelation(NTD->getInterfaceType(), ExpectedType, DC),
-        calculateTypeRelation(NTD->getDeclaredInterfaceType(), ExpectedType, DC));
-  }
-  return calculateTypeRelation(VD->getInterfaceType(), ExpectedType, DC);
-}
-
-static CodeCompletionResult::ExpectedTypeRelation
-calculateMaxTypeRelationForDecl(
-    const Decl *D, const ExpectedTypeContext &typeContext,
-    bool IsImplicitlyCurriedInstanceMethod = false) {
+calculateMaxTypeRelation(Type Ty, const ExpectedTypeContext &typeContext,
+                         const DeclContext *DC) {
   if (typeContext.empty())
     return CodeCompletionResult::ExpectedTypeRelation::Unknown;
 
+  if (auto funcTy = Ty->getAs<AnyFunctionType>())
+    Ty = funcTy->removeArgumentLabels(1);
+
   auto Result = CodeCompletionResult::ExpectedTypeRelation::Unrelated;
-  for (auto Type : typeContext.possibleTypes) {
+  for (auto expectedTy : typeContext.possibleTypes) {
     // Do not use Void type context for a single-expression body, since the
     // implicit return does not constrain the expression.
     //
@@ -1116,15 +1171,14 @@ calculateMaxTypeRelationForDecl(
     //
     //     { ... -> Int in x }        // x must be Int
     //     { ... -> ()  in return x } // x must be Void
-    if (typeContext.isSingleExpressionBody && Type->isVoid())
+    if (typeContext.isImplicitSingleExpressionReturn && expectedTy->isVoid())
       continue;
 
-    Result = std::max(Result, calculateTypeRelationForDecl(
-                                  D, Type, IsImplicitlyCurriedInstanceMethod));
+    Result = std::max(Result, calculateTypeRelation(Ty, expectedTy, DC));
 
     // Map invalid -> unrelated when in a single-expression body, since the
     // input may be incomplete.
-    if (typeContext.isSingleExpressionBody &&
+    if (typeContext.isImplicitSingleExpressionReturn &&
         Result == CodeCompletionResult::ExpectedTypeRelation::Invalid)
       Result = CodeCompletionResult::ExpectedTypeRelation::Unrelated;
   }
@@ -1235,33 +1289,27 @@ CodeCompletionResult *CodeCompletionResultBuilder::takeResult() {
       }
     }
 
-    auto typeRelation = ExpectedTypeRelation;
-    if (typeRelation == CodeCompletionResult::Unknown)
-      typeRelation =
-          calculateMaxTypeRelationForDecl(AssociatedDecl, declTypeContext);
-
-    if (typeRelation == CodeCompletionResult::Invalid) {
-      IsNotRecommended = true;
-      NotRecReason = CodeCompletionResult::NotRecommendedReason::TypeMismatch;
-    }
-
     return new (*Sink.Allocator) CodeCompletionResult(
         SemanticContext, NumBytesToErase, CCS, AssociatedDecl, ModuleName,
         /*NotRecommended=*/IsNotRecommended, NotRecReason,
         copyString(*Sink.Allocator, BriefComment),
         copyAssociatedUSRs(*Sink.Allocator, AssociatedDecl),
-        copyStringPairArray(*Sink.Allocator, CommentWords), typeRelation);
+        copyArray(*Sink.Allocator, CommentWords), ExpectedTypeRelation);
   }
 
   case CodeCompletionResult::ResultKind::Keyword:
     return new (*Sink.Allocator)
-        CodeCompletionResult(KeywordKind, SemanticContext, NumBytesToErase,
-                             CCS, ExpectedTypeRelation);
+        CodeCompletionResult(
+          KeywordKind, SemanticContext, NumBytesToErase,
+          CCS, ExpectedTypeRelation,
+          copyString(*Sink.Allocator, BriefDocComment));
 
   case CodeCompletionResult::ResultKind::BuiltinOperator:
   case CodeCompletionResult::ResultKind::Pattern:
     return new (*Sink.Allocator) CodeCompletionResult(
-        Kind, SemanticContext, NumBytesToErase, CCS, ExpectedTypeRelation);
+        Kind, SemanticContext, NumBytesToErase, CCS, ExpectedTypeRelation,
+        CodeCompletionOperatorKind::None,
+        copyString(*Sink.Allocator, BriefDocComment));
 
   case CodeCompletionResult::ResultKind::Literal:
     assert(LiteralKind.hasValue());
@@ -1328,19 +1376,20 @@ Optional<unsigned> CodeCompletionString::getFirstTextChunkIndex(
     case ChunkKind::Whitespace:
     case ChunkKind::AccessControlKeyword:
     case ChunkKind::OverrideKeyword:
-    case ChunkKind::ThrowsKeyword:
-    case ChunkKind::RethrowsKeyword:
+    case ChunkKind::EffectsSpecifierKeyword:
     case ChunkKind::DeclIntroducer:
     case ChunkKind::CallParameterColon:
     case ChunkKind::CallParameterTypeBegin:
     case ChunkKind::DeclAttrParamColon:
     case ChunkKind::CallParameterType:
     case ChunkKind::CallParameterClosureType:
+    case ChunkKind::CallParameterClosureExpr:
     case ChunkKind::OptionalBegin:
     case ChunkKind::GenericParameterBegin:
     case ChunkKind::DynamicLookupMethodCallTail:
     case ChunkKind::OptionalMethodCallTail:
     case ChunkKind::TypeAnnotation:
+    case ChunkKind::TypeAnnotationBegin:
       continue;
 
     case ChunkKind::BraceStmtWithCursor:
@@ -1362,27 +1411,35 @@ void CodeCompletionString::getName(raw_ostream &OS) const {
   auto FirstTextChunk = getFirstTextChunkIndex();
   int TextSize = 0;
   if (FirstTextChunk.hasValue()) {
-    for (auto C : getChunks().slice(*FirstTextChunk)) {
+    auto chunks = getChunks().slice(*FirstTextChunk);
+
+    for (auto i = chunks.begin(), e = chunks.end(); i != e; ++i) {
       using ChunkKind = Chunk::ChunkKind;
 
-      bool shouldPrint = !C.isAnnotation();
-      switch (C.getKind()) {
+      bool shouldPrint = !i->isAnnotation();
+      switch (i->getKind()) {
       case ChunkKind::TypeAnnotation:
       case ChunkKind::CallParameterClosureType:
+      case ChunkKind::CallParameterClosureExpr:
       case ChunkKind::DeclAttrParamColon:
       case ChunkKind::OptionalMethodCallTail:
         continue;
-      case ChunkKind::ThrowsKeyword:
-      case ChunkKind::RethrowsKeyword:
+      case ChunkKind::TypeAnnotationBegin: {
+        auto level = i->getNestingLevel();
+        do { ++i; } while (i != e && !i->endsPreviousNestedGroup(level));
+        --i;
+        continue;
+      }
+      case ChunkKind::EffectsSpecifierKeyword:
         shouldPrint = true; // Even when they're annotations.
         break;
       default:
         break;
       }
 
-      if (C.hasText() && shouldPrint) {
-        TextSize += C.getText().size();
-        OS << C.getText();
+      if (i->hasText() && shouldPrint) {
+        TextSize += i->getText().size();
+        OS << i->getText();
       }
     }
   }
@@ -1417,14 +1474,14 @@ void CodeCompletionContext::sortCompletionResults(
     return Result < 0;
   });
 
-  std::transform(nameCache.begin(), nameCache.end(), Results.begin(),
-                 [](const ResultAndName &entry) { return entry.result; });
+  llvm::transform(nameCache, Results.begin(),
+                  [](const ResultAndName &entry) { return entry.result; });
 }
 
 namespace {
+
 class CodeCompletionCallbacksImpl : public CodeCompletionCallbacks {
   CodeCompletionContext &CompletionContext;
-  std::vector<RequestedCachedModule> RequestedModules;
   CodeCompletionConsumer &Consumer;
   CodeCompletionExpr *CodeCompleteTokenExpr = nullptr;
   CompletionKind Kind = CompletionKind::None;
@@ -1445,6 +1502,7 @@ class CodeCompletionCallbacksImpl : public CodeCompletionCallbacks {
   bool ShouldCompleteCallPatternAfterParen = true;
   bool PreferFunctionReferencesToCalls = false;
   bool AttTargetIsIndependent = false;
+  bool IsAtStartOfLine = false;
   Optional<DeclKind> AttTargetDK;
   Optional<StmtKind> ParentStmtKind;
 
@@ -1469,8 +1527,8 @@ class CodeCompletionCallbacksImpl : public CodeCompletionCallbacks {
                                         SemanticContextKind::CurrentNominal,
                                         {});
     Builder.setKeywordKind(CodeCompletionKeywordKind::kw_super);
-    Builder.addTextChunk("super");
-    Builder.addTypeAnnotation(ST.getString());
+    Builder.addKeyword("super");
+    Builder.addTypeAnnotation(ST, PrintOptions());
   }
 
   Optional<std::pair<Type, ConcreteDeclRef>> typeCheckParsedExpr() {
@@ -1508,17 +1566,36 @@ class CodeCompletionCallbacksImpl : public CodeCompletionCallbacks {
   /// \returns true on success, false on failure.
   bool typecheckParsedType() {
     assert(ParsedTypeLoc.getTypeRepr() && "should have a TypeRepr");
-    if (!performTypeLocChecking(P.Context, ParsedTypeLoc,
-                                   CurDeclContext, false))
+    if (ParsedTypeLoc.wasValidated() && !ParsedTypeLoc.isError()) {
       return true;
+    }
+
+    const auto ty = swift::performTypeResolution(
+        ParsedTypeLoc.getTypeRepr(), P.Context,
+        /*isSILMode=*/false,
+        /*isSILType=*/false,
+        CurDeclContext->getGenericEnvironmentOfContext(),
+        /*GenericParams=*/nullptr,
+        CurDeclContext,
+        /*ProduceDiagnostics=*/false);
+    ParsedTypeLoc.setType(ty);
+    if (!ParsedTypeLoc.isError()) {
+      return true;
+    }
 
     // It doesn't type check as a type, so see if it's a qualifying module name.
     if (auto *ITR = dyn_cast<IdentTypeRepr>(ParsedTypeLoc.getTypeRepr())) {
-      SmallVector<ImportDecl::AccessPathElement, 4> AccessPath;
-      for (auto Component : ITR->getComponentRange())
-        AccessPath.push_back({ Component->getNameRef().getBaseIdentifier(),
-                               Component->getLoc() });
-      if (auto Module = Context.getLoadedModule(AccessPath))
+      const auto &componentRange = ITR->getComponentRange();
+      // If it has more than one component, it can't be a module name.
+      if (std::distance(componentRange.begin(), componentRange.end()) != 1)
+        return false;
+
+      const auto &component = componentRange.front();
+      ImportPath::Module::Builder builder(
+          component->getNameRef().getBaseIdentifier(),
+          component->getLoc());
+
+      if (auto Module = Context.getLoadedModule(builder.get()))
         ParsedTypeLoc.setType(ModuleType::get(Module));
       return true;
     }
@@ -1544,7 +1621,7 @@ public:
       AttTargetDK = DK;
   }
 
-  void completeDotExpr(Expr *E, SourceLoc DotLoc) override;
+  void completeDotExpr(CodeCompletionExpr *E, SourceLoc DotLoc) override;
   void completeStmtOrExpr(CodeCompletionExpr *E) override;
   void completePostfixExprBeginning(CodeCompletionExpr *E) override;
   void completeForEachSequenceBeginning(CodeCompletionExpr *E) override;
@@ -1561,16 +1638,24 @@ public:
   void completeCaseStmtBeginning(CodeCompletionExpr *E) override;
   void completeDeclAttrBeginning(bool Sil, bool isIndependent) override;
   void completeDeclAttrParam(DeclAttrKind DK, int Index) override;
+  void completeEffectsSpecifier(bool hasAsync, bool hasThrows) override;
   void completeInPrecedenceGroup(SyntaxKind SK) override;
   void completeNominalMemberBeginning(
       SmallVectorImpl<StringRef> &Keywords, SourceLoc introducerLoc) override;
   void completeAccessorBeginning(CodeCompletionExpr *E) override;
 
   void completePoundAvailablePlatform() override;
-  void completeImportDecl(std::vector<Located<Identifier>> &Path) override;
+  void completeImportDecl(ImportPath::Builder &Path) override;
   void completeUnresolvedMember(CodeCompletionExpr *E,
                                 SourceLoc DotLoc) override;
   void completeCallArg(CodeCompletionExpr *E, bool isFirst) override;
+  void completeLabeledTrailingClosure(CodeCompletionExpr *E,
+                                      bool isAtStartOfLine) override;
+
+  bool canPerformCompleteLabeledTrailingClosure() const override {
+    return true;
+  }
+
   void completeReturnStmt(CodeCompletionExpr *E) override;
   void completeYieldStmt(CodeCompletionExpr *E,
                          Optional<unsigned> yieldIndex) override;
@@ -1586,12 +1671,12 @@ public:
 
 private:
   void addKeywords(CodeCompletionResultSink &Sink, bool MaybeFuncBody);
-  void deliverCompletionResults();
+  bool trySolverCompletion(bool MaybeFuncBody);
 };
 } // end anonymous namespace
 
 namespace {
-static bool isTopLevelContext(const DeclContext *DC) {
+static bool isTopLevelSubcontext(const DeclContext *DC) {
   for (; DC && DC->isLocalContext(); DC = DC->getParent()) {
     switch (DC->getContextKind()) {
     case DeclContextKind::TopLevelCodeDecl:
@@ -1633,6 +1718,29 @@ protocolForLiteralKind(CodeCompletionLiteralKind kind) {
   llvm_unreachable("Unhandled CodeCompletionLiteralKind in switch.");
 }
 
+static Type
+defaultTypeLiteralKind(CodeCompletionLiteralKind kind, ASTContext &Ctx) {
+  switch (kind) {
+  case CodeCompletionLiteralKind::BooleanLiteral:
+    return Ctx.getBoolDecl()->getDeclaredInterfaceType();
+  case CodeCompletionLiteralKind::IntegerLiteral:
+    return Ctx.getIntDecl()->getDeclaredInterfaceType();
+  case CodeCompletionLiteralKind::StringLiteral:
+    return Ctx.getStringDecl()->getDeclaredInterfaceType();
+  case CodeCompletionLiteralKind::ArrayLiteral:
+    return Ctx.getArrayDecl()->getDeclaredType();
+  case CodeCompletionLiteralKind::DictionaryLiteral:
+    return Ctx.getDictionaryDecl()->getDeclaredType();
+  case CodeCompletionLiteralKind::NilLiteral:
+  case CodeCompletionLiteralKind::ColorLiteral:
+  case CodeCompletionLiteralKind::ImageLiteral:
+  case CodeCompletionLiteralKind::Tuple:
+    return Type();
+  }
+
+  llvm_unreachable("Unhandled CodeCompletionLiteralKind in switch.");
+}
+
 /// Whether funcType has a single argument (not including defaulted arguments)
 /// that is of type () -> ().
 static bool hasTrivialTrailingClosure(const FuncDecl *FD,
@@ -1647,6 +1755,52 @@ static bool hasTrivialTrailingClosure(const FuncDecl *FD,
         return Fn->getParams().empty() && Fn->getResult()->isVoid();
       }
     }
+  }
+
+  return false;
+}
+
+/// Returns \c true if \p DC can handles async call.
+static bool canDeclContextHandlesAsync(const DeclContext *DC) {
+  if (auto *func = dyn_cast<AbstractFunctionDecl>(DC))
+    return func->isAsyncContext();
+
+  if (auto *closure = dyn_cast<ClosureExpr>(DC)) {
+    // See if the closure has 'async' function type.
+    if (auto closureType = closure->getType())
+      if (auto fnType = closureType->getAs<AnyFunctionType>())
+        if (fnType->isAsync())
+          return true;
+
+    // If the closure doesn't contain any async call in the body, closure itself
+    // doesn't have 'async' type even if 'async' closure is expected.
+    //   func foo(fn: () async -> Void)
+    //   foo { <HERE> }
+    // In this case, the closure is wrapped with a 'FunctionConversionExpr'
+    // which has 'async' function type.
+    struct AsyncClosureChecker: public ASTWalker {
+      const ClosureExpr *Target;
+      bool Result = false;
+
+      AsyncClosureChecker(const ClosureExpr *Target) : Target(Target) {}
+
+      std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+        if (E == Target)
+          return {false, E};
+
+        if (auto conversionExpr = dyn_cast<FunctionConversionExpr>(E)) {
+          if (conversionExpr->getSubExpr() == Target) {
+            if (conversionExpr->getType()->is<AnyFunctionType>() &&
+                conversionExpr->getType()->castTo<AnyFunctionType>()->isAsync())
+              Result = true;
+            return {false, E};
+          }
+        }
+        return {true, E};
+      }
+    } checker(closure);
+    closure->getParent()->walkContext(checker);
+    return checker.Result;
   }
 
   return false;
@@ -1704,6 +1858,9 @@ class CompletionLookup final : public swift::VisibleDeclConsumer {
   bool PreferFunctionReferencesToCalls = false;
   bool HaveLeadingSpace = false;
 
+  bool CheckForDuplicates = false;
+  llvm::DenseSet<std::pair<const Decl *, Type>> PreviouslySeen;
+
   bool IncludeInstanceMembers = false;
 
   /// True if we are code completing inside a static method.
@@ -1751,23 +1908,6 @@ private:
       swift::markup::getSwiftDocKeyword(VD, Pairs);
     }
     Builder.addDeclDocCommentWords(llvm::makeArrayRef(Pairs));
-  }
-
-  bool shouldUseFunctionReference(AbstractFunctionDecl *D) {
-    if (PreferFunctionReferencesToCalls)
-      return true;
-    bool isImplicitlyCurriedIM = isImplicitlyCurriedInstanceMethod(D);
-    for (auto expectedType : expectedTypeContext.possibleTypes) {
-      if (expectedType &&
-          expectedType->lookThroughAllOptionalTypes()
-              ->is<AnyFunctionType>() &&
-          calculateTypeRelationForDecl(D, expectedType, isImplicitlyCurriedIM,
-                                       /*UseFuncResultType=*/false) >=
-              CodeCompletionResult::ExpectedTypeRelation::Convertible) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /// Returns \c true if \p TAD is usable as a first type of a requirement in
@@ -1863,8 +2003,12 @@ public:
     IsStaticMetatype = value;
   }
 
-  void setExpectedTypes(ArrayRef<Type> Types, bool isSingleExpressionBody) {
-    expectedTypeContext.isSingleExpressionBody = isSingleExpressionBody;
+  void setExpectedTypes(ArrayRef<Type> Types,
+                        bool isImplicitSingleExpressionReturn,
+                        bool preferNonVoid = false) {
+    expectedTypeContext.isImplicitSingleExpressionReturn =
+        isImplicitSingleExpressionReturn;
+    expectedTypeContext.preferNonVoid = preferNonVoid;
     expectedTypeContext.possibleTypes.clear();
     expectedTypeContext.possibleTypes.reserve(Types.size());
     for (auto T : Types)
@@ -1877,9 +2021,9 @@ public:
   }
 
   CodeCompletionContext::TypeContextKind typeContextKind() const {
-    if (expectedTypeContext.empty()) {
+    if (expectedTypeContext.empty() && !expectedTypeContext.preferNonVoid) {
       return CodeCompletionContext::TypeContextKind::None;
-    } else if (expectedTypeContext.isSingleExpressionBody) {
+    } else if (expectedTypeContext.isImplicitSingleExpressionReturn) {
       return CodeCompletionContext::TypeContextKind::SingleExpressionBody;
     } else {
       return CodeCompletionContext::TypeContextKind::Required;
@@ -1894,14 +2038,18 @@ public:
     HaveLParen = Value;
   }
 
-  void setIsSuperRefExpr() {
-    IsSuperRefExpr = true;
+  void setIsSuperRefExpr(bool Value = true) {
+    IsSuperRefExpr = Value;
   }
 
   void setIsSelfRefExpr(bool value) { IsSelfRefExpr = value; }
 
   void setIsKeyPathExpr() {
     IsKeyPathExpr = true;
+  }
+
+  void shouldCheckForDuplicates(bool value = true) {
+    CheckForDuplicates = value;
   }
 
   void setIsSwiftKeyPathExpr(bool onRoot) {
@@ -1942,15 +2090,13 @@ public:
   }
 
   void collectImportedModules(llvm::StringSet<> &ImportedModules) {
-    ModuleDecl::ImportFilter ImportFilter;
-    ImportFilter |= ModuleDecl::ImportFilterKind::Public;
-    ImportFilter |= ModuleDecl::ImportFilterKind::Private;
-    ImportFilter |= ModuleDecl::ImportFilterKind::ImplementationOnly;
-
-    SmallVector<ModuleDecl::ImportedModule, 16> Imported;
-    SmallVector<ModuleDecl::ImportedModule, 16> FurtherImported;
-    CurrDeclContext->getParentSourceFile()->getImportedModules(Imported,
-                                                               ImportFilter);
+    SmallVector<ImportedModule, 16> Imported;
+    SmallVector<ImportedModule, 16> FurtherImported;
+    CurrDeclContext->getParentSourceFile()->getImportedModules(
+        Imported,
+        {ModuleDecl::ImportFilterKind::Exported,
+         ModuleDecl::ImportFilterKind::Default,
+         ModuleDecl::ImportFilterKind::ImplementationOnly});
     while (!Imported.empty()) {
       ModuleDecl *MD = Imported.back().importedModule;
       Imported.pop_back();
@@ -1958,7 +2104,7 @@ public:
         continue;
       FurtherImported.clear();
       MD->getImportedModules(FurtherImported,
-                             ModuleDecl::ImportFilterKind::Public);
+                             ModuleDecl::ImportFilterKind::Exported);
       Imported.append(FurtherImported.begin(), FurtherImported.end());
     }
   }
@@ -2038,7 +2184,7 @@ public:
       if (CurrDeclContext && D->getModuleContext() == CurrModule) {
         // Treat global variables from the same source file as local when
         // completing at top-level.
-        if (isa<VarDecl>(D) && isTopLevelContext(CurrDeclContext) &&
+        if (isa<VarDecl>(D) && isTopLevelSubcontext(CurrDeclContext) &&
             D->getDeclContext()->getParentSourceFile() ==
                 CurrDeclContext->getParentSourceFile()) {
           return SemanticContextKind::Local;
@@ -2132,22 +2278,21 @@ public:
       Builder.addLeadingDot();
   }
 
-  void addTypeAnnotation(CodeCompletionResultBuilder &Builder, Type T) {
-    T = T->getReferenceStorageReferent();
-    if (T->isVoid()) {
-      Builder.addTypeAnnotation("Void");
-    } else {
-      PrintOptions PO;
-      PO.OpaqueReturnTypePrinting =
-          PrintOptions::OpaqueReturnTypePrintingMode::WithoutOpaqueKeyword;
-      if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
-        PO.setBaseType(typeContext->getDeclaredTypeInContext());
-      Builder.addTypeAnnotation(T.getString(PO));
-    }
+  void addTypeAnnotation(CodeCompletionResultBuilder &Builder, Type T,
+                         GenericSignature genericSig = GenericSignature()) {
+    PrintOptions PO;
+    PO.OpaqueReturnTypePrinting =
+        PrintOptions::OpaqueReturnTypePrintingMode::WithoutOpaqueKeyword;
+    if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
+      PO.setBaseType(typeContext->getDeclaredTypeInContext());
+    Builder.addTypeAnnotation(eraseArchetypes(T, genericSig), PO);
+    Builder.setExpectedTypeRelation(
+        calculateMaxTypeRelation(T, expectedTypeContext, CurrDeclContext));
   }
 
   void addTypeAnnotationForImplicitlyUnwrappedOptional(
       CodeCompletionResultBuilder &Builder, Type T,
+      GenericSignature genericSig = GenericSignature(),
       bool dynamicOrOptional = false) {
 
     std::string suffix;
@@ -2158,14 +2303,15 @@ public:
       suffix = "?";
     }
 
-    T = T->getReferenceStorageReferent();
     PrintOptions PO;
     PO.PrintOptionalAsImplicitlyUnwrapped = true;
     PO.OpaqueReturnTypePrinting =
         PrintOptions::OpaqueReturnTypePrintingMode::WithoutOpaqueKeyword;
     if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
       PO.setBaseType(typeContext->getDeclaredTypeInContext());
-    Builder.addTypeAnnotation(T.getString(PO) + suffix);
+    Builder.addTypeAnnotation(eraseArchetypes(T, genericSig), PO, suffix);
+    Builder.setExpectedTypeRelation(
+        calculateMaxTypeRelation(T, expectedTypeContext, CurrDeclContext));
   }
 
   /// For printing in code completion results, replace archetypes with
@@ -2211,7 +2357,7 @@ public:
       }
 
       if (t->isTypeParameter()) {
-        auto protos = genericSig->getConformsTo(t);
+        const auto protos = genericSig->getRequiredProtocols(t);
         if (!protos.empty())
           return buildProtocolComposition(protos);
       }
@@ -2249,7 +2395,7 @@ public:
       // i.e. cases where 'ExprType' != 'keyPathInfo.baseType'.
 
       auto *SD = keyPathInfo.subscript;
-      auto elementTy = SD->getElementTypeLoc().getType();
+      const auto elementTy = SD->getElementInterfaceType();
       if (!elementTy->hasTypeParameter())
         return elementTy;
 
@@ -2297,9 +2443,6 @@ public:
   }
 
   Type getTypeOfMember(const ValueDecl *VD, Type ExprType) {
-    auto GenericSig = VD->getInnermostDeclContext()
-        ->getGenericSignatureOfContext();
-
     Type T = VD->getInterfaceType();
     assert(!T.isNull());
 
@@ -2345,7 +2488,7 @@ public:
       }
     }
 
-    return eraseArchetypes(T, GenericSig);
+    return T;
   }
 
   Type getAssociatedTypeType(const AssociatedTypeDecl *ATD) {
@@ -2372,9 +2515,7 @@ public:
 
   void addVarDeclRef(const VarDecl *VD, DeclVisibilityKind Reason,
                      DynamicLookupInfo dynamicLookupInfo) {
-    if (!VD->hasName() ||
-        !VD->isAccessibleFrom(CurrDeclContext) ||
-        VD->shouldHideFromEditor())
+    if (!VD->hasName())
       return;
 
     const Identifier Name = VD->getName();
@@ -2416,11 +2557,14 @@ public:
       // Optional<T> type.  Same applies to optional members.
       VarType = OptionalType::get(VarType);
     }
+
+    auto genericSig =
+        VD->getInnermostDeclContext()->getGenericSignatureOfContext();
     if (VD->isImplicitlyUnwrappedOptional())
-      addTypeAnnotationForImplicitlyUnwrappedOptional(Builder, VarType,
-                                                      DynamicOrOptional);
+      addTypeAnnotationForImplicitlyUnwrappedOptional(
+          Builder, VarType, genericSig, DynamicOrOptional);
     else
-      addTypeAnnotation(Builder, VarType);
+      addTypeAnnotation(Builder, VarType, genericSig);
 
     if (isUnresolvedMemberIdealType(VarType))
       Builder.setSemanticContext(SemanticContextKind::ExpressionSpecific);
@@ -2448,6 +2592,7 @@ public:
   bool addCallArgumentPatterns(CodeCompletionResultBuilder &Builder,
                                ArrayRef<AnyFunctionType::Param> typeParams,
                                ArrayRef<const ParamDecl *> declParams,
+                               GenericSignature genericSig,
                                bool includeDefaultArgs = true) {
     assert(declParams.empty() || typeParams.size() == declParams.size());
 
@@ -2467,12 +2612,9 @@ public:
       case DefaultArgumentKind::EmptyDictionary:
         return !includeDefaultArgs;
 
-      case DefaultArgumentKind::File:
-      case DefaultArgumentKind::FilePath:
-      case DefaultArgumentKind::Line:
-      case DefaultArgumentKind::Column:
-      case DefaultArgumentKind::Function:
-      case DefaultArgumentKind::DSOHandle:
+#define MAGIC_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
+      case DefaultArgumentKind::NAME:
+#include "swift/AST/MagicIdentifierKinds.def"
         // Skip parameters that are defaulted to source location or other
         // caller context information.  Users typically don't want to specify
         // these parameters.
@@ -2516,8 +2658,11 @@ public:
       if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
         contextTy = typeContext->getDeclaredTypeInContext();
 
-      Builder.addCallParameter(argName, bodyName, paramTy, contextTy,
-                               isVariadic, isInOut, isIUO, isAutoclosure);
+      Builder.addCallParameter(argName, bodyName,
+                               eraseArchetypes(paramTy, genericSig), contextTy,
+                               isVariadic, isInOut, isIUO, isAutoclosure,
+                               /*useUnderscoreLabel=*/false,
+                               /*isLabeledTrailingClosure=*/false);
 
       modifiedBuilder = true;
       NeedComma = true;
@@ -2530,20 +2675,28 @@ public:
   bool addCallArgumentPatterns(CodeCompletionResultBuilder &Builder,
                                const AnyFunctionType *AFT,
                                const ParameterList *Params,
+                               GenericSignature genericSig,
                                bool includeDefaultArgs = true) {
     ArrayRef<const ParamDecl *> declParams;
     if (Params)
       declParams = Params->getArray();
     return addCallArgumentPatterns(Builder, AFT->getParams(), declParams,
-                                   includeDefaultArgs);
+                                   genericSig, includeDefaultArgs);
   }
 
-  static void addThrows(CodeCompletionResultBuilder &Builder,
-                        const AnyFunctionType *AFT,
-                        const AbstractFunctionDecl *AFD) {
+  static void addEffectsSpecifiers(CodeCompletionResultBuilder &Builder,
+                             const AnyFunctionType *AFT,
+                             const AbstractFunctionDecl *AFD) {
+    assert(AFT != nullptr);
+
+    // 'async'.
+    if ((AFD && AFD->hasAsync()) || AFT->isAsync())
+      Builder.addAnnotatedAsync();
+
+    // 'throws' or 'rethrows'.
     if (AFD && AFD->getAttrs().hasAttribute<RethrowsAttr>())
       Builder.addAnnotatedRethrows();
-    else if (AFT->throws())
+    else if (AFT->isThrowing())
       Builder.addAnnotatedThrows();
   }
 
@@ -2627,43 +2780,47 @@ public:
       const AnyFunctionType *AFT, const SubscriptDecl *SD,
       const Optional<SemanticContextKind> SemanticContext = None) {
     foundFunction(AFT);
-    auto genericSig =
-        SD->getInnermostDeclContext()->getGenericSignatureOfContext();
-    AFT = eraseArchetypes(const_cast<AnyFunctionType *>(AFT), genericSig)
-              ->castTo<AnyFunctionType>();
+    GenericSignature genericSig;
+    if (SD)
+      genericSig = SD->getGenericSignatureOfContext();
 
     CommandWordsPairs Pairs;
     CodeCompletionResultBuilder Builder(
-        Sink, CodeCompletionResult::ResultKind::Declaration,
+        Sink,
+        SD ? CodeCompletionResult::ResultKind::Declaration
+           : CodeCompletionResult::ResultKind::Pattern,
         SemanticContext ? *SemanticContext : getSemanticContextKind(SD),
         expectedTypeContext);
-    Builder.setAssociatedDecl(SD);
-    setClangDeclKeywords(SD, Pairs, Builder);
+    if (SD) {
+      Builder.setAssociatedDecl(SD);
+      setClangDeclKeywords(SD, Pairs, Builder);
+    }
     if (!HaveLParen)
       Builder.addLeftBracket();
     else
       Builder.addAnnotatedLeftBracket();
-    addCallArgumentPatterns(Builder, AFT, SD->getIndices());
+    ArrayRef<const ParamDecl *> declParams;
+    if (SD)
+      declParams = SD->getIndices()->getArray();
+    addCallArgumentPatterns(Builder, AFT->getParams(), declParams, genericSig);
     if (!HaveLParen)
       Builder.addRightBracket();
     else
       Builder.addAnnotatedRightBracket();
     if (SD && SD->isImplicitlyUnwrappedOptional())
       addTypeAnnotationForImplicitlyUnwrappedOptional(Builder,
-                                                      AFT->getResult());
+                                                      AFT->getResult(),
+                                                      genericSig);
     else
-      addTypeAnnotation(Builder, AFT->getResult());
+      addTypeAnnotation(Builder, AFT->getResult(), genericSig);
   }
 
   void addFunctionCallPattern(
       const AnyFunctionType *AFT, const AbstractFunctionDecl *AFD = nullptr,
       const Optional<SemanticContextKind> SemanticContext = None) {
-    if (AFD) {
-      auto genericSig =
-          AFD->getInnermostDeclContext()->getGenericSignatureOfContext();
-      AFT = eraseArchetypes(const_cast<AnyFunctionType *>(AFT), genericSig)
-                ->castTo<AnyFunctionType>();
-    }
+    GenericSignature genericSig;
+    if (AFD)
+      genericSig = AFD->getGenericSignatureOfContext();
 
     // Add the pattern, possibly including any default arguments.
     auto addPattern = [&](ArrayRef<const ParamDecl *> declParams = {},
@@ -2686,7 +2843,7 @@ public:
         Builder.addAnnotatedLeftParen();
 
       addCallArgumentPatterns(Builder, AFT->getParams(), declParams,
-                              includeDefaultArgs);
+                              genericSig, includeDefaultArgs);
 
       // The rparen matches the lparen here so that we insert both or neither.
       if (!HaveLParen)
@@ -2694,14 +2851,21 @@ public:
       else
         Builder.addAnnotatedRightParen();
 
-      addThrows(Builder, AFT, AFD);
+      addEffectsSpecifiers(Builder, AFT, AFD);
 
       if (AFD &&
           AFD->isImplicitlyUnwrappedOptional())
         addTypeAnnotationForImplicitlyUnwrappedOptional(Builder,
-                                                        AFT->getResult());
+                                                        AFT->getResult(),
+                                                        genericSig);
       else
-        addTypeAnnotation(Builder, AFT->getResult());
+        addTypeAnnotation(Builder, AFT->getResult(), genericSig);
+
+      if (AFT->isAsync() &&
+          !canDeclContextHandlesAsync(CurrDeclContext)) {
+        Builder.setNotRecommended(
+            CodeCompletionResult::NotRecommendedReason::InvalidContext);
+      }
     };
 
     if (!AFD || !AFD->getInterfaceType()->is<AnyFunctionType>()) {
@@ -2796,8 +2960,13 @@ public:
       IsImplicitlyCurriedInstanceMethod = isImplicitlyCurriedInstanceMethod(FD);
 
       // Strip off '(_ self: Self)' if needed.
-      if (AFT && !IsImplicitlyCurriedInstanceMethod)
+      if (AFT && !IsImplicitlyCurriedInstanceMethod) {
         AFT = AFT->getResult()->getAs<AnyFunctionType>();
+
+        // Check for duplicates with the adjusted type too.
+        if (isDuplicate(FD, AFT))
+          return;
+      }
     }
 
     bool trivialTrailingClosure = false;
@@ -2821,68 +2990,99 @@ public:
       else if (FD->getAttrs().hasAttribute<OptionalAttr>())
         Builder.addOptionalMethodCallTail();
 
-      llvm::SmallString<32> TypeStr;
-
       if (!AFT) {
-        llvm::raw_svector_ostream OS(TypeStr);
-        FunctionType.print(OS);
-        Builder.addTypeAnnotation(OS.str());
+        addTypeAnnotation(Builder, FunctionType,
+                          FD->getGenericSignatureOfContext());
         return;
       }
-
       if (IsImplicitlyCurriedInstanceMethod) {
         Builder.addLeftParen();
         addCallArgumentPatterns(Builder, AFT->getParams(),
                                 {FD->getImplicitSelfDecl()},
+                                FD->getGenericSignatureOfContext(),
                                 includeDefaultArgs);
         Builder.addRightParen();
       } else if (trivialTrailingClosure) {
         Builder.addBraceStmtWithCursor(" { code }");
-        addThrows(Builder, AFT, FD);
+        addEffectsSpecifiers(Builder, AFT, FD);
       } else {
         Builder.addLeftParen();
         addCallArgumentPatterns(Builder, AFT, FD->getParameters(),
+                                FD->getGenericSignatureOfContext(),
                                 includeDefaultArgs);
         Builder.addRightParen();
-        addThrows(Builder, AFT, FD);
+        addEffectsSpecifiers(Builder, AFT, FD);
       }
 
-      Type ResultType = AFT->getResult();
-
       // Build type annotation.
-      {
+      Type ResultType = AFT->getResult();
+      // As we did with parameters in addParamPatternFromFunction,
+      // for regular methods we'll print '!' after implicitly
+      // unwrapped optional results.
+      bool IsIUO =
+          !IsImplicitlyCurriedInstanceMethod &&
+          FD->isImplicitlyUnwrappedOptional();
+
+      PrintOptions PO;
+      PO.OpaqueReturnTypePrinting =
+          PrintOptions::OpaqueReturnTypePrintingMode::WithoutOpaqueKeyword;
+      PO.PrintOptionalAsImplicitlyUnwrapped = IsIUO;
+      if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
+        PO.setBaseType(typeContext->getDeclaredTypeInContext());
+      Type AnnotationTy =
+          eraseArchetypes(ResultType, FD->getGenericSignatureOfContext());
+      if (Builder.shouldAnnotateResults()) {
+        Builder.withNestedGroup(
+            CodeCompletionString::Chunk::ChunkKind::TypeAnnotationBegin, [&] {
+              AnnotatedTypePrinter printer(Builder);
+              if (IsImplicitlyCurriedInstanceMethod) {
+                auto *FnType = AnnotationTy->castTo<AnyFunctionType>();
+                AnyFunctionType::printParams(FnType->getParams(), printer,
+                                             PrintOptions());
+                AnnotationTy = FnType->getResult();
+                printer.printText(" -> ");
+              }
+
+              // What's left is the result type.
+              if (AnnotationTy->isVoid())
+                AnnotationTy = Ctx.getVoidDecl()->getDeclaredInterfaceType();
+              AnnotationTy.print(printer, PO);
+            });
+      } else {
+        llvm::SmallString<32> TypeStr;
         llvm::raw_svector_ostream OS(TypeStr);
         if (IsImplicitlyCurriedInstanceMethod) {
-          auto *FnType = ResultType->castTo<AnyFunctionType>();
+          auto *FnType = AnnotationTy->castTo<AnyFunctionType>();
           AnyFunctionType::printParams(FnType->getParams(), OS);
-          ResultType = FnType->getResult();
+          AnnotationTy = FnType->getResult();
           OS << " -> ";
         }
 
         // What's left is the result type.
-        if (ResultType->isVoid()) {
-          OS << "Void";
-        } else {
-          // As we did with parameters in addParamPatternFromFunction,
-          // for regular methods we'll print '!' after implicitly
-          // unwrapped optional results.
-          bool IsIUO =
-              !IsImplicitlyCurriedInstanceMethod &&
-              FD->isImplicitlyUnwrappedOptional();
-
-          PrintOptions PO;
-          PO.OpaqueReturnTypePrinting =
-              PrintOptions::OpaqueReturnTypePrintingMode::WithoutOpaqueKeyword;
-          PO.PrintOptionalAsImplicitlyUnwrapped = IsIUO;
-          if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
-            PO.setBaseType(typeContext->getDeclaredTypeInContext());
-          ResultType.print(OS, PO);
-        }
+        if (AnnotationTy->isVoid())
+          AnnotationTy = Ctx.getVoidDecl()->getDeclaredInterfaceType();
+        AnnotationTy.print(OS, PO);
+        Builder.addTypeAnnotation(TypeStr);
       }
-      Builder.addTypeAnnotation(TypeStr);
+
+      Builder.setExpectedTypeRelation(calculateMaxTypeRelation(
+          ResultType, expectedTypeContext, CurrDeclContext));
 
       if (isUnresolvedMemberIdealType(ResultType))
         Builder.setSemanticContext(SemanticContextKind::ExpressionSpecific);
+
+      if (!IsImplicitlyCurriedInstanceMethod &&
+          expectedTypeContext.requiresNonVoid() &&
+          ResultType->isVoid()) {
+        Builder.setExpectedTypeRelation(CodeCompletionResult::Invalid);
+      }
+
+      if (!IsImplicitlyCurriedInstanceMethod &&
+          AFT->isAsync() &&
+          !canDeclContextHandlesAsync(CurrDeclContext)) {
+        Builder.setNotRecommended(
+                CodeCompletionResult::NotRecommendedReason::InvalidContext);
+      }
     };
 
     if (!AFT || IsImplicitlyCurriedInstanceMethod) {
@@ -2939,7 +3139,8 @@ public:
       }
 
       if (!ConstructorType) {
-        addTypeAnnotation(Builder, MemberType);
+        addTypeAnnotation(Builder, MemberType,
+                          CD->getGenericSignatureOfContext());
         return;
       }
 
@@ -2949,6 +3150,7 @@ public:
         Builder.addAnnotatedLeftParen();
 
       addCallArgumentPatterns(Builder, ConstructorType, CD->getParameters(),
+                              CD->getGenericSignatureOfContext(),
                               includeDefaultArgs);
 
       // The rparen matches the lparen here so that we insert both or neither.
@@ -2957,16 +3159,21 @@ public:
       else
         Builder.addAnnotatedRightParen();
 
-      addThrows(Builder, ConstructorType, CD);
+      addEffectsSpecifiers(Builder, ConstructorType, CD);
 
+      if (!Result.hasValue())
+        Result = ConstructorType->getResult();
       if (CD->isImplicitlyUnwrappedOptional()) {
         addTypeAnnotationForImplicitlyUnwrappedOptional(
-            Builder, Result.hasValue() ? Result.getValue()
-                                       : ConstructorType->getResult());
+            Builder, *Result, CD->getGenericSignatureOfContext());
       } else {
-        addTypeAnnotation(Builder, Result.hasValue()
-                                       ? Result.getValue()
-                                       : ConstructorType->getResult());
+        addTypeAnnotation(Builder, *Result, CD->getGenericSignatureOfContext());
+      }
+
+      if (ConstructorType->isAsync() &&
+          !canDeclContextHandlesAsync(CurrDeclContext)) {
+        Builder.setNotRecommended(
+            CodeCompletionResult::NotRecommendedReason::InvalidContext);
       }
     };
 
@@ -3033,7 +3240,8 @@ public:
     }
 
     Builder.addLeftBracket();
-    addCallArgumentPatterns(Builder, subscriptType, SD->getIndices(), true);
+    addCallArgumentPatterns(Builder, subscriptType, SD->getIndices(),
+                            SD->getGenericSignatureOfContext(), true);
     Builder.addRightBracket();
 
     // Add a type annotation.
@@ -3043,7 +3251,7 @@ public:
       // Optional<T> type.
       resultTy = OptionalType::get(resultTy);
     }
-    addTypeAnnotation(Builder, resultTy);
+    addTypeAnnotation(Builder, resultTy, SD->getGenericSignatureOfContext());
   }
 
   void addNominalTypeRef(const NominalTypeDecl *NTD, DeclVisibilityKind Reason,
@@ -3059,7 +3267,21 @@ public:
     setClangDeclKeywords(NTD, Pairs, Builder);
     addLeadingDot(Builder);
     Builder.addBaseName(NTD->getName().str());
+
     addTypeAnnotation(Builder, NTD->getDeclaredType());
+
+    // Override the type relation for NominalTypes. Use the better relation
+    // for the metatypes and the instance type. For example,
+    //
+    //   func receiveInstance(_: Int) {}
+    //   func receiveMetatype(_: Int.Type) {}
+    //
+    // We want to suggest 'Int' as 'Identical' for both arguments.
+    Builder.setExpectedTypeRelation(std::max(
+        calculateMaxTypeRelation(NTD->getDeclaredInterfaceType(),
+                                 expectedTypeContext, CurrDeclContext),
+        calculateMaxTypeRelation(NTD->getInterfaceType(), expectedTypeContext,
+                                 CurrDeclContext)));
   }
 
   void addTypeAliasRef(const TypeAliasDecl *TAD, DeclVisibilityKind Reason,
@@ -3161,14 +3383,15 @@ public:
     if (EnumType->is<FunctionType>()) {
       Builder.addLeftParen();
       addCallArgumentPatterns(Builder, EnumType->castTo<FunctionType>(),
-                              EED->getParameterList());
+                              EED->getParameterList(),
+                              EED->getGenericSignatureOfContext());
       Builder.addRightParen();
 
       // Extract result as the enum type.
       EnumType = EnumType->castTo<FunctionType>()->getResult();
     }
 
-    addTypeAnnotation(Builder, EnumType);
+    addTypeAnnotation(Builder, EnumType, EED->getGenericSignatureOfContext());
 
     if (isUnresolvedMemberIdealType(EnumType))
       Builder.setSemanticContext(SemanticContextKind::ExpressionSpecific);
@@ -3223,9 +3446,31 @@ public:
   }
 
   /// Add the compound function name for the given function.
-  void addCompoundFunctionName(AbstractFunctionDecl *AFD,
-                               DeclVisibilityKind Reason,
-                               DynamicLookupInfo dynamicLookupInfo) {
+  /// Returns \c true if the compound function name is actually used.
+  bool addCompoundFunctionNameIfDesiable(AbstractFunctionDecl *AFD,
+                                         DeclVisibilityKind Reason,
+                                         DynamicLookupInfo dynamicLookupInfo) {
+    auto funcTy =
+        getTypeOfMember(AFD, dynamicLookupInfo)->getAs<AnyFunctionType>();
+    bool dropCurryLevel = funcTy && AFD->getDeclContext()->isTypeContext() &&
+        !isImplicitlyCurriedInstanceMethod(AFD);
+    if (dropCurryLevel)
+      funcTy = funcTy->getResult()->getAs<AnyFunctionType>();
+
+    bool useFunctionReference = PreferFunctionReferencesToCalls;
+    if (!useFunctionReference && funcTy) {
+      auto maxRel = calculateMaxTypeRelation(funcTy, expectedTypeContext,
+                                             CurrDeclContext);
+      useFunctionReference =
+          maxRel >= CodeCompletionResult::ExpectedTypeRelation::Convertible;
+    }
+    if (!useFunctionReference)
+      return false;
+
+    // Check for duplicates with the adjusted type too.
+    if (dropCurryLevel && isDuplicate(AFD, funcTy))
+      return true;
+
     CommandWordsPairs Pairs;
     CodeCompletionResultBuilder Builder(
         Sink, CodeCompletionResult::ResultKind::Declaration,
@@ -3256,7 +3501,35 @@ public:
 
       Builder.addRightParen();
     }
+
+    if (funcTy)
+      addTypeAnnotation(Builder, funcTy, AFD->getGenericSignatureOfContext());
+
+    return true;
   }
+
+private:
+
+  /// Returns true if duplicate checking is enabled (via
+  /// \c shouldCheckForDuplicates) and this decl + type combination has been
+  /// checked previously. Returns false otherwise.
+  bool isDuplicate(const ValueDecl *D, Type Ty) {
+    if (!CheckForDuplicates)
+      return false;
+    return !PreviouslySeen.insert({D, Ty}).second;
+  }
+
+  /// Returns true if duplicate checking is enabled (via
+  /// \c shouldCheckForDuplicates) and this decl has been checked previously
+  /// with the type according to \c getTypeOfMember. Returns false otherwise.
+  bool isDuplicate(const ValueDecl *D, DynamicLookupInfo dynamicLookupInfo) {
+    if (!CheckForDuplicates)
+      return false;
+    Type Ty = getTypeOfMember(D, dynamicLookupInfo);
+    return !PreviouslySeen.insert({D, Ty}).second;
+  }
+
+public:
 
   // Implement swift::VisibleDeclConsumer.
   void foundDecl(ValueDecl *D, DeclVisibilityKind Reason,
@@ -3273,6 +3546,11 @@ public:
 
     if (IsSwiftKeyPathExpr && !SwiftKeyPathFilter(D, Reason))
       return;
+
+    // If we've seen this decl+type before (possible when multiple lookups are
+    // performed e.g. because of ambiguous base types), bail.
+    if (isDuplicate(D, dynamicLookupInfo))
+      return;
     
     // FIXME(InterfaceTypeRequest): Remove this.
     (void)D->getInterfaceType();
@@ -3280,10 +3558,8 @@ public:
     case LookupKind::ValueExpr:
       if (auto *CD = dyn_cast<ConstructorDecl>(D)) {
         // Do we want compound function names here?
-        if (shouldUseFunctionReference(CD)) {
-          addCompoundFunctionName(CD, Reason, dynamicLookupInfo);
+        if (addCompoundFunctionNameIfDesiable(CD, Reason, dynamicLookupInfo))
           return;
-        }
 
         if (auto MT = ExprType->getAs<AnyMetatypeType>()) {
           Type Ty = MT->getInstanceType();
@@ -3354,10 +3630,8 @@ public:
           return;
 
         // Do we want compound function names here?
-        if (shouldUseFunctionReference(FD)) {
-          addCompoundFunctionName(FD, Reason, dynamicLookupInfo);
+        if (addCompoundFunctionNameIfDesiable(FD, Reason, dynamicLookupInfo))
           return;
-        }
 
         addMethodCall(FD, Reason, dynamicLookupInfo);
 
@@ -3367,6 +3641,11 @@ public:
           Type funcType = getTypeOfMember(FD, dynamicLookupInfo)
                               ->castTo<AnyFunctionType>()
                               ->getResult();
+
+          // Check for duplicates with the adjusted type too.
+          if (isDuplicate(FD, funcType))
+            return;
+
           addFunctionCallPattern(
               funcType->castTo<AnyFunctionType>(), FD,
               getSemanticContext(FD, Reason, dynamicLookupInfo));
@@ -3493,7 +3772,7 @@ public:
         Builder.addBaseName(IndexStr.str());
       }
       addTypeAnnotation(Builder, TupleElt.getType());
-      Index++;
+      ++Index;
     }
     return true;
   }
@@ -3567,8 +3846,12 @@ public:
       llvm::SaveAndRestore<bool> ChangeNeedOptionalUnwrap(NeedOptionalUnwrap,
                                                           true);
       if (DotLoc.isValid()) {
+        // Let's not erase the dot if the completion is after a swift key path
+        // root because \A?.?.member is the correct way to access wrapped type
+        // member from an optional key path root.
+        auto loc = IsAfterSwiftKeyPathRoot ? DotLoc.getAdvancedLoc(1) : DotLoc;
         NumBytesToEraseForOptionalUnwrap = Ctx.SourceMgr.getByteDistance(
-            DotLoc, Ctx.SourceMgr.getCodeCompletionLoc());
+            loc, Ctx.SourceMgr.getCodeCompletionLoc());
       } else {
         NumBytesToEraseForOptionalUnwrap = 0;
       }
@@ -3842,8 +4125,7 @@ public:
   }
 
   void addTypeRelationFromProtocol(CodeCompletionResultBuilder &builder,
-                                   CodeCompletionLiteralKind kind,
-                                   StringRef defaultTypeName) {
+                                   CodeCompletionLiteralKind kind) {
     // Check for matching ExpectedTypes.
     auto *P = Ctx.getProtocol(protocolForLiteralKind(kind));
     for (auto T : expectedTypeContext.possibleTypes) {
@@ -3872,8 +4154,8 @@ public:
     }
 
     // Fallback to showing the default type.
-    if (!defaultTypeName.empty()) {
-      builder.addTypeAnnotation(defaultTypeName);
+    if (auto defaultTy = defaultTypeLiteralKind(kind, Ctx)) {
+      builder.addTypeAnnotation(defaultTy, PrintOptions());
       builder.setExpectedTypeRelation(
           expectedTypeContext.possibleTypes.empty()
               ? CodeCompletionResult::ExpectedTypeRelation::Unknown
@@ -3883,43 +4165,60 @@ public:
 
   /// Add '#file', '#line', et at.
   void addPoundLiteralCompletions(bool needPound) {
-    auto addFromProto = [&](StringRef name, CodeCompletionKeywordKind kwKind,
-                            CodeCompletionLiteralKind literalKind,
-                            StringRef defaultTypeName) {
+    auto addFromProto = [&](MagicIdentifierLiteralExpr::Kind magicKind,
+                            Optional<CodeCompletionLiteralKind> literalKind) {
+      CodeCompletionKeywordKind kwKind;
+      switch (magicKind) {
+      case MagicIdentifierLiteralExpr::FileIDSpelledAsFile:
+        kwKind = CodeCompletionKeywordKind::pound_file;
+        break;
+      case MagicIdentifierLiteralExpr::FilePathSpelledAsFile:
+        // Already handled by above case.
+        return;
+#define MAGIC_IDENTIFIER_TOKEN(NAME, TOKEN) \
+      case MagicIdentifierLiteralExpr::NAME: \
+        kwKind = CodeCompletionKeywordKind::TOKEN; \
+        break;
+#define MAGIC_IDENTIFIER_DEPRECATED_TOKEN(NAME, TOKEN)
+#include "swift/AST/MagicIdentifierKinds.def"
+      }
+
+      StringRef name = MagicIdentifierLiteralExpr::getKindString(magicKind);
       if (!needPound)
         name = name.substr(1);
+
+      if (!literalKind) {
+        // Pointer type
+        addKeyword(name, "UnsafeRawPointer", kwKind);
+        return;
+      }
 
       CodeCompletionResultBuilder builder(
           Sink, CodeCompletionResult::ResultKind::Keyword,
           SemanticContextKind::None, {});
-      builder.setLiteralKind(literalKind);
+      builder.setLiteralKind(literalKind.getValue());
       builder.setKeywordKind(kwKind);
       builder.addBaseName(name);
-      addTypeRelationFromProtocol(builder, literalKind, defaultTypeName);
+      addTypeRelationFromProtocol(builder, literalKind.getValue());
     };
 
-    addFromProto("#function", CodeCompletionKeywordKind::pound_function,
-                 CodeCompletionLiteralKind::StringLiteral, "String");
-    addFromProto("#file", CodeCompletionKeywordKind::pound_file,
-                 CodeCompletionLiteralKind::StringLiteral, "String");
-    if (Ctx.LangOpts.EnableConcisePoundFile) {
-      addFromProto("#filePath", CodeCompletionKeywordKind::pound_file,
-                   CodeCompletionLiteralKind::StringLiteral, "String");
-    }
-    addFromProto("#line", CodeCompletionKeywordKind::pound_line,
-                 CodeCompletionLiteralKind::IntegerLiteral, "Int");
-    addFromProto("#column", CodeCompletionKeywordKind::pound_column,
-                 CodeCompletionLiteralKind::IntegerLiteral, "Int");
-
-    addKeyword(needPound ? "#dsohandle" : "dsohandle", "UnsafeRawPointer",
-               CodeCompletionKeywordKind::pound_dsohandle);
+#define MAGIC_STRING_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
+    addFromProto(MagicIdentifierLiteralExpr::NAME, \
+                 CodeCompletionLiteralKind::StringLiteral);
+#define MAGIC_INT_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
+    addFromProto(MagicIdentifierLiteralExpr::NAME, \
+                 CodeCompletionLiteralKind::IntegerLiteral);
+#define MAGIC_POINTER_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
+    addFromProto(MagicIdentifierLiteralExpr::NAME, \
+                 None);
+#include "swift/AST/MagicIdentifierKinds.def"
   }
 
   void addValueLiteralCompletions() {
     auto &context = CurrDeclContext->getASTContext();
 
     auto addFromProto = [&](
-        CodeCompletionLiteralKind kind, StringRef defaultTypeName,
+        CodeCompletionLiteralKind kind,
         llvm::function_ref<void(CodeCompletionResultBuilder &)> consumer,
         bool isKeyword = false) {
 
@@ -3928,7 +4227,7 @@ public:
       builder.setLiteralKind(kind);
 
       consumer(builder);
-      addTypeRelationFromProtocol(builder, kind, defaultTypeName);
+      addTypeRelationFromProtocol(builder, kind);
     };
 
     // FIXME: the pedantically correct way is to resolve Swift.*LiteralType.
@@ -3937,29 +4236,29 @@ public:
     using Builder = CodeCompletionResultBuilder;
 
     // Add literal completions that conform to specific protocols.
-    addFromProto(LK::IntegerLiteral, "Int", [](Builder &builder) {
+    addFromProto(LK::IntegerLiteral, [](Builder &builder) {
       builder.addTextChunk("0");
     });
-    addFromProto(LK::BooleanLiteral, "Bool", [](Builder &builder) {
+    addFromProto(LK::BooleanLiteral, [](Builder &builder) {
       builder.addBaseName("true");
     }, /*isKeyword=*/true);
-    addFromProto(LK::BooleanLiteral, "Bool", [](Builder &builder) {
+    addFromProto(LK::BooleanLiteral, [](Builder &builder) {
       builder.addBaseName("false");
     }, /*isKeyword=*/true);
-    addFromProto(LK::NilLiteral, "", [](Builder &builder) {
+    addFromProto(LK::NilLiteral, [](Builder &builder) {
       builder.addBaseName("nil");
     }, /*isKeyword=*/true);
-    addFromProto(LK::StringLiteral, "String", [&](Builder &builder) {
+    addFromProto(LK::StringLiteral, [&](Builder &builder) {
       builder.addTextChunk("\"");
       builder.addSimpleNamedParameter("abc");
       builder.addTextChunk("\"");
     });
-    addFromProto(LK::ArrayLiteral, "Array", [&](Builder &builder) {
+    addFromProto(LK::ArrayLiteral, [&](Builder &builder) {
       builder.addLeftBracket();
       builder.addSimpleNamedParameter("values");
       builder.addRightBracket();
     });
-    addFromProto(LK::DictionaryLiteral, "Dictionary", [&](Builder &builder) {
+    addFromProto(LK::DictionaryLiteral, [&](Builder &builder) {
       builder.addLeftBracket();
       builder.addSimpleNamedParameter("key");
       builder.addTextChunk(": ");
@@ -3967,8 +4266,8 @@ public:
       builder.addRightBracket();
     });
 
-    auto floatType = context.getFloatDecl()->getDeclaredType();
-    addFromProto(LK::ColorLiteral, "", [&](Builder &builder) {
+    auto floatType = context.getFloatDecl()->getDeclaredInterfaceType();
+    addFromProto(LK::ColorLiteral, [&](Builder &builder) {
       builder.addBaseName("#colorLiteral");
       builder.addLeftParen();
       builder.addCallParameter(context.getIdentifier("red"), floatType);
@@ -3981,8 +4280,8 @@ public:
       builder.addRightParen();
     });
 
-    auto stringType = context.getStringDecl()->getDeclaredType();
-    addFromProto(LK::ImageLiteral, "", [&](Builder &builder) {
+    auto stringType = context.getStringDecl()->getDeclaredInterfaceType();
+    addFromProto(LK::ImageLiteral, [&](Builder &builder) {
       builder.addBaseName("#imageLiteral");
       builder.addLeftParen();
       builder.addCallParameter(context.getIdentifier("resourceName"),
@@ -4060,8 +4359,12 @@ public:
     ExprType = Type();
     Kind = LookupKind::ValueInDeclContext;
     NeedLeadingDot = false;
-    FilteredDeclConsumer Consumer(*this, Filter);
-    lookupVisibleDecls(Consumer, CurrDeclContext,
+
+    AccessFilteringDeclConsumer AccessFilteringConsumer(
+        CurrDeclContext, *this);
+    FilteredDeclConsumer FilteringConsumer(AccessFilteringConsumer, Filter);
+
+    lookupVisibleDecls(FilteringConsumer, CurrDeclContext,
                        /*IncludeTopLevel=*/false, Loc);
     RequestedCachedResults.push_back(RequestedResultsTy::toplevelResults()
                                          .withModuleQualifier(ModuleQualifier));
@@ -4110,14 +4413,28 @@ public:
     if (!T->mayHaveMembers())
       return;
 
-    DeclContext *DC = const_cast<DeclContext *>(CurrDeclContext);
+    if (auto objT = T->getOptionalObjectType()) {
+      // Add 'nil' keyword with erasing '.' instruction.
+      unsigned bytesToErase = 0;
+      auto &SM = CurrDeclContext->getASTContext().SourceMgr;
+      if (DotLoc.isValid())
+        bytesToErase = SM.getByteDistance(DotLoc, SM.getCodeCompletionLoc());
+      addKeyword("nil", T, SemanticContextKind::None,
+                 CodeCompletionKeywordKind::kw_nil, bytesToErase);
+    }
 
     // We can only say .foo where foo is a static member of the contextual
     // type and has the same type (or if the member is a function, then the
     // same result type) as the contextual type.
     FilteredDeclConsumer consumer(*this, [=](ValueDecl *VD,
                                              DeclVisibilityKind Reason) {
-      return isReferenceableByImplicitMemberExpr(CurrModule, DC, T, VD);
+      if (T->getOptionalObjectType() &&
+          VD->getModuleContext()->isStdlibModule()) {
+        // In optional context, ignore '.init(<some>)', 'init(nilLiteral:)',
+        if (isa<ConstructorDecl>(VD))
+          return false;
+      }
+      return true;
     });
 
     auto baseType = MetatypeType::get(T);
@@ -4132,40 +4449,43 @@ public:
 
   void getUnresolvedMemberCompletions(ArrayRef<Type> Types) {
     NeedLeadingDot = !HaveDot;
+
+    SmallPtrSet<CanType, 4> seenTypes;
     for (auto T : Types) {
-      if (!T)
+      if (!T || !seenTypes.insert(T->getCanonicalType()).second)
         continue;
+
       if (auto objT = T->getOptionalObjectType()) {
         // If this is optional type, perform completion for the object type.
         // i.e. 'let _: Enum??? = .enumMember' is legal.
-        getUnresolvedMemberCompletions(objT->lookThroughAllOptionalTypes());
-
-        // Add 'nil' keyword with erasing '.' instruction.
-        unsigned bytesToErase = 0;
-        auto &SM = CurrDeclContext->getASTContext().SourceMgr;
-        if (DotLoc.isValid())
-          bytesToErase = SM.getByteDistance(DotLoc, SM.getCodeCompletionLoc());
-        addKeyword("nil", T, SemanticContextKind::None,
-                   CodeCompletionKeywordKind::kw_nil, bytesToErase);
+        objT = objT->lookThroughAllOptionalTypes();
+        if (seenTypes.insert(objT->getCanonicalType()).second)
+          getUnresolvedMemberCompletions(objT);
       }
       getUnresolvedMemberCompletions(T);
     }
   }
 
   void addCallArgumentCompletionResults(
-      ArrayRef<const AnyFunctionType::Param *> Args) {
+      ArrayRef<PossibleParamInfo> ParamInfos,
+      bool isLabeledTrailingClosure = false) {
     Type ContextType;
     if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
       ContextType = typeContext->getDeclaredTypeInContext();
 
-    for (auto *Arg : Args) {
+    for (auto Info : ParamInfos) {
+      const auto *Arg = Info.Param;
+      if (!Arg)
+        continue;
       CodeCompletionResultBuilder Builder(
           Sink, CodeCompletionResult::ResultKind::Pattern,
           SemanticContextKind::ExpressionSpecific, {});
       Builder.addCallParameter(Arg->getLabel(), Identifier(),
                                Arg->getPlainType(), ContextType,
                                Arg->isVariadic(), Arg->isInOut(),
-                               /*isIUO=*/false, Arg->isAutoClosure());
+                               /*isIUO=*/false, Arg->isAutoClosure(),
+                               /*useUnderscoreLabel=*/true,
+                               isLabeledTrailingClosure);
       auto Ty = Arg->getPlainType();
       if (Arg->isInOut()) {
         Ty = InOutType::get(Ty);
@@ -4229,6 +4549,7 @@ public:
   }
 
   static bool canUseAttributeOnDecl(DeclAttrKind DAK, bool IsInSil,
+                                    bool IsConcurrencyEnabled,
                                     Optional<DeclKind> DK) {
     if (DeclAttribute::isUserInaccessible(DAK))
       return false;
@@ -4237,6 +4558,8 @@ public:
     if (DeclAttribute::shouldBeRejectedByParser(DAK))
       return false;
     if (!IsInSil && DeclAttribute::isSilOnly(DAK))
+      return false;
+    if (!IsConcurrencyEnabled && DeclAttribute::isConcurrencyOnly(DAK))
       return false;
     if (!DK.hasValue())
       return true;
@@ -4255,9 +4578,10 @@ public:
 #include "swift/AST/DeclNodes.def"
       }
     }
+    bool IsConcurrencyEnabled = Ctx.LangOpts.EnableExperimentalConcurrency;
     std::string Description = TargetName.str() + " Attribute";
 #define DECL_ATTR(KEYWORD, NAME, ...)                                         \
-    if (canUseAttributeOnDecl(DAK_##NAME, IsInSil, DK))                       \
+    if (canUseAttributeOnDecl(DAK_##NAME, IsInSil, IsConcurrencyEnabled, DK)) \
       addDeclAttrKeyword(#KEYWORD, Description);
 #include "swift/AST/Attr.def"
   }
@@ -4266,9 +4590,12 @@ public:
     if (AttrKind == DAK_Available) {
       if (ParamIndex == 0) {
         addDeclAttrParamKeyword("*", "Platform", false);
+
 #define AVAILABILITY_PLATFORM(X, PrettyName)                                  \
-        addDeclAttrParamKeyword(#X, "Platform", false);
+        addDeclAttrParamKeyword(swift::platformString(PlatformKind::X),       \
+                                "Platform", false);
 #include "swift/AST/PlatformKinds.def"
+
       } else {
         addDeclAttrParamKeyword("unavailable", "", false);
         addDeclAttrParamKeyword("message", "Specify message", true);
@@ -4340,10 +4667,58 @@ public:
     getAttributeDeclParamCompletions(DAK_Available, 0);
   }
 
+  void getSelfTypeCompletionInDeclContext(SourceLoc Loc, bool isForDeclResult) {
+    const DeclContext *typeDC = CurrDeclContext->getInnermostTypeContext();
+    if (!typeDC)
+      return;
+
+    // For protocols, there's a 'Self' generic parameter.
+    if (typeDC->getSelfProtocolDecl())
+      return;
+
+    Type selfType =
+        CurrDeclContext->mapTypeIntoContext(typeDC->getSelfInterfaceType());
+
+    if (typeDC->getSelfClassDecl()) {
+      // In classes, 'Self' can be used in result type of func, subscript and
+      // computed property, or inside function bodies.
+      bool canUseDynamicSelf = false;
+      if (isForDeclResult) {
+        canUseDynamicSelf = true;
+      } else {
+        const auto *checkDC = CurrDeclContext;
+        if (isa<TypeAliasDecl>(checkDC))
+          checkDC = checkDC->getParent();
+
+        if (const auto *AFD = checkDC->getInnermostMethodContext()) {
+          canUseDynamicSelf = Ctx.SourceMgr.rangeContainsTokenLoc(
+              AFD->getBodySourceRange(), Loc);
+        }
+      }
+      if (!canUseDynamicSelf)
+        return;
+      // 'Self' in class is a dynamic type.
+      selfType = DynamicSelfType::get(selfType, Ctx);
+    } else {
+      // In enums and structs, 'Self' is just an alias for the nominal type,
+      // and can be used anywhere.
+    }
+
+    CodeCompletionResultBuilder Builder(
+        Sink, CodeCompletionResult::ResultKind::Keyword,
+        SemanticContextKind::CurrentNominal, expectedTypeContext);
+    Builder.addKeyword("Self");
+    Builder.setKeywordKind(CodeCompletionKeywordKind::kw_Self);
+    addTypeAnnotation(Builder, selfType);
+  }
+
   void getTypeCompletionsInDeclContext(SourceLoc Loc,
                                        bool ModuleQualifier = true) {
     Kind = LookupKind::TypeInDeclContext;
-    lookupVisibleDecls(*this, CurrDeclContext,
+
+    AccessFilteringDeclConsumer AccessFilteringConsumer(
+        CurrDeclContext, *this);
+    lookupVisibleDecls(AccessFilteringConsumer, CurrDeclContext,
                        /*IncludeTopLevel=*/false, Loc);
 
     RequestedCachedResults.push_back(
@@ -4356,23 +4731,33 @@ public:
     Kind = OnlyTypes ? LookupKind::TypeInDeclContext
                      : LookupKind::ValueInDeclContext;
     NeedLeadingDot = false;
-    AccessFilteringDeclConsumer FilteringConsumer(CurrDeclContext, *this);
-    CurrModule->lookupVisibleDecls({}, FilteringConsumer,
+
+    UsableFilteringDeclConsumer UsableFilteringConsumer(
+        Ctx.SourceMgr, CurrDeclContext, Ctx.SourceMgr.getCodeCompletionLoc(),
+        *this);
+    AccessFilteringDeclConsumer AccessFilteringConsumer(
+        CurrDeclContext, UsableFilteringConsumer);
+
+    CurrModule->lookupVisibleDecls({}, AccessFilteringConsumer,
                                    NLKind::UnqualifiedLookup);
   }
 
-  void getVisibleDeclsOfModule(const ModuleDecl *TheModule,
-                               ArrayRef<std::string> AccessPath,
-                               bool ResultsHaveLeadingDot) {
+  void lookupExternalModuleDecls(const ModuleDecl *TheModule,
+                                 ArrayRef<std::string> AccessPath,
+                                 bool ResultsHaveLeadingDot) {
+    assert(CurrModule != TheModule &&
+           "requested module should be external");
+
     Kind = LookupKind::ImportFromModule;
     NeedLeadingDot = ResultsHaveLeadingDot;
 
-    llvm::SmallVector<Located<Identifier>, 1> LookupAccessPath;
+    ImportPath::Access::Builder builder;
     for (auto Piece : AccessPath) {
-      LookupAccessPath.push_back({Ctx.getIdentifier(Piece), SourceLoc()});
+      builder.push_back(Ctx.getIdentifier(Piece));
     }
+
     AccessFilteringDeclConsumer FilteringConsumer(CurrDeclContext, *this);
-    TheModule->lookupVisibleDecls(LookupAccessPath, FilteringConsumer,
+    TheModule->lookupVisibleDecls(builder.get(), FilteringConsumer,
                                   NLKind::UnqualifiedLookup);
 
     llvm::SmallVector<PrecedenceGroupDecl*, 16> precedenceGroups;
@@ -4578,7 +4963,7 @@ public:
     bool hasExplicitAnyObject = false;
     if (auto superTy = genericSig->getSuperclassBound(ResultT))
       opaqueTypes.push_back(superTy);
-    for (auto proto : genericSig->getConformsTo(ResultT))
+    for (const auto proto : genericSig->getRequiredProtocols(ResultT))
       opaqueTypes.push_back(proto->getDeclaredInterfaceType());
     if (auto layout = genericSig->getLayoutConstraint(ResultT))
       hasExplicitAnyObject = layout->isClass();
@@ -4652,9 +5037,11 @@ public:
       else {
         auto dist = Ctx.SourceMgr.getByteDistance(
             introducerLoc, Ctx.SourceMgr.getCodeCompletionLoc());
-        Builder.setNumBytesToErase(dist);
-        Builder.addOverrideKeyword();
-        Builder.addDeclIntroducer(DeclStr.str().substr(0, NameOffset));
+        if (dist <= CodeCompletionResult::MaxNumBytesToErase) {
+          Builder.setNumBytesToErase(dist);
+          Builder.addOverrideKeyword();
+          Builder.addDeclIntroducer(DeclStr.str().substr(0, NameOffset));
+        }
       }
     }
 
@@ -4881,6 +5268,100 @@ public:
     }
   }
 
+  static StringRef getResultBuilderDocComment(
+      ResultBuilderBuildFunction function) {
+    switch (function) {
+    case ResultBuilderBuildFunction::BuildArray:
+      return "Enables support for..in loops in a result builder by "
+        "combining the results of all iterations into a single result";
+
+    case ResultBuilderBuildFunction::BuildBlock:
+      return "Required by every result builder to build combined results "
+          "from statement blocks";
+
+    case ResultBuilderBuildFunction::BuildEitherFirst:
+      return "With buildEither(second:), enables support for 'if-else' and "
+          "'switch' statements by folding conditional results into a single "
+          "result";
+
+    case ResultBuilderBuildFunction::BuildEitherSecond:
+      return "With buildEither(first:), enables support for 'if-else' and "
+          "'switch' statements by folding conditional results into a single "
+          "result";
+
+    case ResultBuilderBuildFunction::BuildExpression:
+      return "If declared, provides contextual type information for statement "
+          "expressions to translate them into partial results";
+
+    case ResultBuilderBuildFunction::BuildFinalResult:
+      return "If declared, this will be called on the partial result from the "
+          "outermost block statement to produce the final returned result";
+
+    case ResultBuilderBuildFunction::BuildLimitedAvailability:
+      return "If declared, this will be called on the partial result of "
+        "an 'if #available' block to allow the result builder to erase "
+        "type information";
+
+    case ResultBuilderBuildFunction::BuildOptional:
+      return "Enables support for `if` statements that do not have an `else`";
+    }
+  }
+
+  void addResultBuilderBuildCompletion(
+      NominalTypeDecl *builder, Type componentType,
+      ResultBuilderBuildFunction function) {
+    CodeCompletionResultBuilder Builder(
+        Sink,
+        CodeCompletionResult::ResultKind::Pattern,
+        SemanticContextKind::CurrentNominal, {});
+    Builder.setExpectedTypeRelation(
+        CodeCompletionResult::ExpectedTypeRelation::NotApplicable);
+
+    if (!hasFuncIntroducer) {
+      if (!hasAccessModifier &&
+          builder->getFormalAccess() >= AccessLevel::Public)
+        Builder.addAccessControlKeyword(AccessLevel::Public);
+
+      if (!hasStaticOrClass)
+        Builder.addTextChunk("static ");
+
+      Builder.addTextChunk("func ");
+    }
+
+    std::string declStringWithoutFunc;
+    {
+      llvm::raw_string_ostream out(declStringWithoutFunc);
+      printResultBuilderBuildFunction(
+          builder, componentType, function, None, out);
+    }
+    Builder.addTextChunk(declStringWithoutFunc);
+    Builder.addBraceStmtWithCursor();
+    Builder.setBriefDocComment(getResultBuilderDocComment(function));
+  }
+
+  /// Add completions for the various "build" functions in a result builder.
+  void addResultBuilderBuildCompletions(NominalTypeDecl *builder) {
+    Type componentType = inferResultBuilderComponentType(builder);
+
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildBlock);
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildExpression);
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildOptional);
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildEitherFirst);
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildEitherSecond);
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildArray);
+    addResultBuilderBuildCompletion(
+        builder, componentType,
+        ResultBuilderBuildFunction::BuildLimitedAvailability);
+    addResultBuilderBuildCompletion(
+        builder, componentType, ResultBuilderBuildFunction::BuildFinalResult);
+  }
+
   void getOverrideCompletions(SourceLoc Loc) {
     if (!CurrDeclContext->isTypeContext())
       return;
@@ -4898,6 +5379,10 @@ public:
                                /*includeProtocolExtensionMembers*/false);
       addDesignatedInitializers(NTD);
       addAssociatedTypes(NTD);
+    }
+
+    if (NTD && NTD->getAttrs().hasAttribute<ResultBuilderAttr>()) {
+      addResultBuilderBuildCompletions(NTD);
     }
   }
 };
@@ -4919,7 +5404,8 @@ static void addSelectorModifierKeywords(CodeCompletionResultSink &sink) {
   addKeyword("setter", CodeCompletionKeywordKind::None);
 }
 
-void CodeCompletionCallbacksImpl::completeDotExpr(Expr *E, SourceLoc DotLoc) {
+void CodeCompletionCallbacksImpl::completeDotExpr(CodeCompletionExpr *E,
+                                                  SourceLoc DotLoc) {
   assert(P.Tok.is(tok::code_complete));
 
   // Don't produce any results in an enum element.
@@ -4932,9 +5418,10 @@ void CodeCompletionCallbacksImpl::completeDotExpr(Expr *E, SourceLoc DotLoc) {
     CompleteExprSelectorContext = ParseExprSelectorContext;
   }
 
-  ParsedExpr = E;
+  ParsedExpr = E->getBase();
   this->DotLoc = DotLoc;
   CurDeclContext = P.CurDeclContext;
+  CodeCompleteTokenExpr = E;
 }
 
 void CodeCompletionCallbacksImpl::completeStmtOrExpr(CodeCompletionExpr *E) {
@@ -5049,6 +5536,17 @@ void CodeCompletionCallbacksImpl::completeDeclAttrParam(DeclAttrKind DK,
   CurDeclContext = P.CurDeclContext;
 }
 
+void CodeCompletionCallbacksImpl::completeEffectsSpecifier(bool hasAsync,
+                                                           bool hasThrows) {
+  Kind = CompletionKind::EffectsSpecifier;
+  CurDeclContext = P.CurDeclContext;
+  ParsedKeywords.clear();
+  if (hasAsync)
+    ParsedKeywords.emplace_back("async");
+  if (hasThrows)
+    ParsedKeywords.emplace_back("throws");
+}
+
 void CodeCompletionCallbacksImpl::completeDeclAttrBeginning(
     bool Sil, bool isIndependent) {
   Kind = CompletionKind::AttributeBegin;
@@ -5098,7 +5596,7 @@ void CodeCompletionCallbacksImpl::completeCaseStmtBeginning(CodeCompletionExpr *
 }
 
 void CodeCompletionCallbacksImpl::completeImportDecl(
-    std::vector<Located<Identifier>> &Path) {
+    ImportPath::Builder &Path) {
   Kind = CompletionKind::Import;
   CurDeclContext = P.CurDeclContext;
   DotLoc = Path.empty() ? SourceLoc() : Path.back().Loc;
@@ -5107,14 +5605,16 @@ void CodeCompletionCallbacksImpl::completeImportDecl(
   auto Importer = static_cast<ClangImporter *>(CurDeclContext->getASTContext().
                                                getClangModuleLoader());
   std::vector<std::string> SubNames;
-  Importer->collectSubModuleNames(Path, SubNames);
+  Importer->collectSubModuleNames(Path.get().getModulePath(false), SubNames);
   ASTContext &Ctx = CurDeclContext->getASTContext();
+  Path.push_back(Identifier());
   for (StringRef Sub : SubNames) {
-    Path.push_back({ Ctx.getIdentifier(Sub), SourceLoc() });
+    Path.back().Item = Ctx.getIdentifier(Sub);
     SubModuleNameVisibilityPairs.push_back(
-      std::make_pair(Sub.str(), Ctx.getLoadedModule(Path)));
-    Path.pop_back();
+      std::make_pair(Sub.str(),
+                     Ctx.getLoadedModule(Path.get().getModulePath(false))));
   }
+  Path.pop_back();
 }
 
 void CodeCompletionCallbacksImpl::completeUnresolvedMember(CodeCompletionExpr *E,
@@ -5145,6 +5645,14 @@ void CodeCompletionCallbacksImpl::completeCallArg(CodeCompletionExpr *E,
       }
     }
   }
+}
+
+void CodeCompletionCallbacksImpl::completeLabeledTrailingClosure(
+    CodeCompletionExpr *E, bool isAtStartOfLine) {
+  CurDeclContext = P.CurDeclContext;
+  CodeCompleteTokenExpr = E;
+  Kind = CompletionKind::LabeledTrailingClosure;
+  IsAtStartOfLine = isAtStartOfLine;
 }
 
 void CodeCompletionCallbacksImpl::completeReturnStmt(CodeCompletionExpr *E) {
@@ -5242,7 +5750,8 @@ addKeyword(CodeCompletionResultSink &Sink, StringRef Name,
   Builder.setExpectedTypeRelation(TypeRelation);
 }
 
-static void addDeclKeywords(CodeCompletionResultSink &Sink) {
+static void addDeclKeywords(CodeCompletionResultSink &Sink,
+                            bool IsConcurrencyEnabled) {
   auto AddDeclKeyword = [&](StringRef Name, CodeCompletionKeywordKind Kind,
                         Optional<DeclAttrKind> DAK) {
     if (Name == "let" || Name == "var") {
@@ -5250,8 +5759,15 @@ static void addDeclKeywords(CodeCompletionResultSink &Sink) {
       return;
     }
 
+    // FIXME: This should use canUseAttributeOnDecl.
+
     // Remove user inaccessible keywords.
     if (DAK.hasValue() && DeclAttribute::isUserInaccessible(*DAK)) return;
+
+    // Remove keywords only available when concurrency is enabled.
+    if (DAK.hasValue() && !IsConcurrencyEnabled &&
+        DeclAttribute::isConcurrencyOnly(*DAK))
+      return;
 
     addKeyword(Sink, Name, Kind);
   };
@@ -5308,14 +5824,20 @@ static void addExprKeywords(CodeCompletionResultSink &Sink) {
   addKeyword(Sink, "try", CodeCompletionKeywordKind::kw_try);
   addKeyword(Sink, "try!", CodeCompletionKeywordKind::kw_try);
   addKeyword(Sink, "try?", CodeCompletionKeywordKind::kw_try);
+  addKeyword(Sink, "await", CodeCompletionKeywordKind::None);
 }
 
 static void addOpaqueTypeKeyword(CodeCompletionResultSink &Sink) {
   addKeyword(Sink, "some", CodeCompletionKeywordKind::None, "some");
 }
 
-static void addAnyTypeKeyword(CodeCompletionResultSink &Sink) {
-  addKeyword(Sink, "Any", CodeCompletionKeywordKind::None, "Any");
+static void addAnyTypeKeyword(CodeCompletionResultSink &Sink, Type T) {
+  CodeCompletionResultBuilder Builder(Sink,
+                                      CodeCompletionResult::ResultKind::Keyword,
+                                      SemanticContextKind::None, {});
+  Builder.setKeywordKind(CodeCompletionKeywordKind::None);
+  Builder.addKeyword("Any");
+  Builder.addTypeAnnotation(T, PrintOptions());
 }
 
 void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
@@ -5329,6 +5851,7 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
   case CompletionKind::Import:
   case CompletionKind::UnresolvedMember:
   case CompletionKind::CallArg:
+  case CompletionKind::LabeledTrailingClosure:
   case CompletionKind::AfterPoundExpr:
   case CompletionKind::AfterPoundDirective:
   case CompletionKind::PlatformConditon:
@@ -5338,6 +5861,14 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
   case CompletionKind::PrecedenceGroup:
   case CompletionKind::StmtLabel:
     break;
+
+  case CompletionKind::EffectsSpecifier: {
+    if (!llvm::is_contained(ParsedKeywords, "async"))
+      addKeyword(Sink, "async", CodeCompletionKeywordKind::None);
+    if (!llvm::is_contained(ParsedKeywords, "throws"))
+      addKeyword(Sink, "throws", CodeCompletionKeywordKind::kw_throws);
+    break;
+  }
 
   case CompletionKind::AccessorBeginning: {
     // TODO: Omit already declared or mutally exclusive accessors.
@@ -5359,7 +5890,7 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
     LLVM_FALLTHROUGH;
   }
   case CompletionKind::StmtOrExpr:
-    addDeclKeywords(Sink);
+    addDeclKeywords(Sink, Context.LangOpts.EnableExperimentalConcurrency);
     addStmtKeywords(Sink, MaybeFuncBody);
     LLVM_FALLTHROUGH;
   case CompletionKind::ReturnStmtExpr:
@@ -5369,7 +5900,7 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
     addSuperKeyword(Sink);
     addLetVarKeywords(Sink);
     addExprKeywords(Sink);
-    addAnyTypeKeyword(Sink);
+    addAnyTypeKeyword(Sink, CurDeclContext->getASTContext().TheAnyType);
     break;
 
   case CompletionKind::CaseStmtKeyword:
@@ -5394,7 +5925,7 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
     LLVM_FALLTHROUGH;
   }
   case CompletionKind::TypeSimpleBeginning:
-    addAnyTypeKeyword(Sink);
+    addAnyTypeKeyword(Sink, CurDeclContext->getASTContext().TheAnyType);
     break;
 
   case CompletionKind::NominalMemberBeginning: {
@@ -5420,7 +5951,7 @@ void CodeCompletionCallbacksImpl::addKeywords(CodeCompletionResultSink &Sink,
         .Default(false);
     }) != ParsedKeywords.end();
     if (!HasDeclIntroducer) {
-      addDeclKeywords(Sink);
+      addDeclKeywords(Sink, Context.LangOpts.EnableExperimentalConcurrency);
       addLetVarKeywords(Sink);
     }
     break;
@@ -5547,6 +6078,275 @@ static void addConditionalCompilationFlags(ASTContext &Ctx,
   }
 }
 
+static void deliverCompletionResults(CodeCompletionContext &CompletionContext,
+                                     CompletionLookup &Lookup,
+                                     SourceFile &SF,
+                                     CodeCompletionConsumer &Consumer) {
+  llvm::SmallPtrSet<Identifier, 8> seenModuleNames;
+  std::vector<RequestedCachedModule> RequestedModules;
+
+  for (auto &Request: Lookup.RequestedCachedResults) {
+    llvm::DenseSet<CodeCompletionCache::Key> ImportsSeen;
+    auto handleImport = [&](ImportedModule Import) {
+      ModuleDecl *TheModule = Import.importedModule;
+      ImportPath::Access Path = Import.accessPath;
+      if (TheModule->getFiles().empty())
+        return;
+
+      // Clang submodules are ignored and there's no lookup cost involved,
+      // so just ignore them and don't put the empty results in the cache
+      // because putting a lot of objects in the cache will push out
+      // other lookups.
+      if (isClangSubModule(TheModule))
+        return;
+
+      std::vector<std::string> AccessPath;
+      for (auto Piece : Path) {
+        AccessPath.push_back(std::string(Piece.Item));
+      }
+
+      StringRef ModuleFilename = TheModule->getModuleFilename();
+      // ModuleFilename can be empty if something strange happened during
+      // module loading, for example, the module file is corrupted.
+      if (!ModuleFilename.empty()) {
+        auto &Ctx = TheModule->getASTContext();
+        CodeCompletionCache::Key K{
+            ModuleFilename.str(),
+            std::string(TheModule->getName()),
+            AccessPath,
+            Request.NeedLeadingDot,
+            SF.hasTestableOrPrivateImport(
+                AccessLevel::Internal, TheModule,
+                SourceFile::ImportQueryKind::TestableOnly),
+            SF.hasTestableOrPrivateImport(
+                AccessLevel::Internal, TheModule,
+                SourceFile::ImportQueryKind::PrivateOnly),
+            Ctx.LangOpts.CodeCompleteInitsInPostfixExpr,
+            CompletionContext.getAnnotateResult(),
+        };
+
+        using PairType = llvm::DenseSet<swift::ide::CodeCompletionCache::Key,
+            llvm::DenseMapInfo<CodeCompletionCache::Key>>::iterator;
+        std::pair<PairType, bool> Result = ImportsSeen.insert(K);
+        if (!Result.second)
+          return; // already handled.
+        RequestedModules.push_back({std::move(K), TheModule,
+          Request.OnlyTypes, Request.OnlyPrecedenceGroups});
+
+        if (Request.IncludeModuleQualifier &&
+            seenModuleNames.insert(TheModule->getName()).second)
+          Lookup.addModuleName(TheModule);
+      }
+    };
+
+    if (Request.TheModule) {
+      // FIXME: actually check imports.
+      for (auto Import : namelookup::getAllImports(Request.TheModule)) {
+        handleImport(Import);
+      }
+    } else {
+      // Add results from current module.
+      Lookup.getToplevelCompletions(Request.OnlyTypes);
+
+      // Add the qualifying module name
+      auto curModule = SF.getParentModule();
+      if (Request.IncludeModuleQualifier &&
+          seenModuleNames.insert(curModule->getName()).second)
+        Lookup.addModuleName(curModule);
+
+      // Add results for all imported modules.
+      SmallVector<ImportedModule, 4> Imports;
+      SF.getImportedModules(
+          Imports, {ModuleDecl::ImportFilterKind::Exported,
+                    ModuleDecl::ImportFilterKind::Default,
+                    ModuleDecl::ImportFilterKind::ImplementationOnly});
+
+      for (auto Imported : Imports) {
+        for (auto Import : namelookup::getAllImports(Imported.importedModule))
+          handleImport(Import);
+      }
+    }
+  }
+  Lookup.RequestedCachedResults.clear();
+  CompletionContext.typeContextKind = Lookup.typeContextKind();
+
+  // Use the current SourceFile as the DeclContext so that we can use it to
+  // perform qualified lookup, and to get the correct visibility for
+  // @testable imports.
+  DeclContext *DCForModules = &SF;
+  Consumer.handleResultsAndModules(CompletionContext, RequestedModules,
+                                   DCForModules);
+}
+
+void deliverUnresolvedMemberResults(
+    ArrayRef<UnresolvedMemberTypeCheckCompletionCallback::Result> Results,
+    DeclContext *DC, SourceLoc DotLoc,
+    ide::CodeCompletionContext &CompletionCtx,
+    CodeCompletionConsumer &Consumer) {
+  ASTContext &Ctx = DC->getASTContext();
+  CompletionLookup Lookup(CompletionCtx.getResultSink(), Ctx, DC,
+                          &CompletionCtx);
+
+  assert(DotLoc.isValid());
+  Lookup.setHaveDot(DotLoc);
+  Lookup.shouldCheckForDuplicates(Results.size() > 1);
+
+  // Get the canonical versions of the top-level types
+  SmallPtrSet<CanType, 4> originalTypes;
+  for (auto &Result: Results)
+    originalTypes.insert(Result.ExpectedTy->getCanonicalType());
+
+  for (auto &Result: Results) {
+    Lookup.setExpectedTypes({Result.ExpectedTy},
+                            Result.IsImplicitSingleExpressionReturn,
+                            /*expectsNonVoid*/true);
+    Lookup.setIdealExpectedType(Result.ExpectedTy);
+
+    // For optional types, also get members of the unwrapped type if it's not
+    // already equivalent to one of the top-level types. Handling it via the top
+    // level type and not here ensures we give the correct type relation
+    // (identical, rather than convertible).
+    if (Result.ExpectedTy->getOptionalObjectType()) {
+      Type Unwrapped = Result.ExpectedTy->lookThroughAllOptionalTypes();
+      if (originalTypes.insert(Unwrapped->getCanonicalType()).second)
+        Lookup.getUnresolvedMemberCompletions(Unwrapped);
+    }
+    Lookup.getUnresolvedMemberCompletions(Result.ExpectedTy);
+  }
+  SourceFile *SF = DC->getParentSourceFile();
+  deliverCompletionResults(CompletionCtx, Lookup, *SF, Consumer);
+}
+
+void deliverDotExprResults(
+    ArrayRef<DotExprTypeCheckCompletionCallback::Result> Results,
+    Expr *BaseExpr, DeclContext *DC, SourceLoc DotLoc, bool IsInSelector,
+    ide::CodeCompletionContext &CompletionCtx,
+    CodeCompletionConsumer &Consumer) {
+  ASTContext &Ctx = DC->getASTContext();
+  CompletionLookup Lookup(CompletionCtx.getResultSink(), Ctx, DC,
+                          &CompletionCtx);
+
+  if (DotLoc.isValid())
+    Lookup.setHaveDot(DotLoc);
+
+  Lookup.setIsSuperRefExpr(isa<SuperRefExpr>(BaseExpr));
+
+  if (auto *DRE = dyn_cast<DeclRefExpr>(BaseExpr))
+    Lookup.setIsSelfRefExpr(DRE->getDecl()->getName() == Ctx.Id_self);
+
+  if (isa<BindOptionalExpr>(BaseExpr) || isa<ForceValueExpr>(BaseExpr))
+    Lookup.setIsUnwrappedOptional(true);
+
+  if (IsInSelector) {
+    Lookup.includeInstanceMembers();
+    Lookup.setPreferFunctionReferencesToCalls();
+  }
+
+  Lookup.shouldCheckForDuplicates(Results.size() > 1);
+  for (auto &Result: Results) {
+    Lookup.setIsStaticMetatype(Result.BaseIsStaticMetaType);
+    Lookup.getPostfixKeywordCompletions(Result.BaseTy, BaseExpr);
+    Lookup.setExpectedTypes(Result.ExpectedTypes,
+                            Result.IsImplicitSingleExpressionReturn,
+                            Result.ExpectsNonVoid);
+    if (isDynamicLookup(Result.BaseTy))
+      Lookup.setIsDynamicLookup();
+    Lookup.getValueExprCompletions(Result.BaseTy, Result.BaseDecl);
+  }
+
+  SourceFile *SF = DC->getParentSourceFile();
+  deliverCompletionResults(CompletionCtx, Lookup, *SF, Consumer);
+}
+
+bool CodeCompletionCallbacksImpl::trySolverCompletion(bool MaybeFuncBody) {
+  assert(ParsedExpr || CurDeclContext);
+
+  SourceLoc CompletionLoc = ParsedExpr
+    ? ParsedExpr->getLoc()
+    : CurDeclContext->getASTContext().SourceMgr.getCodeCompletionLoc();
+
+  switch (Kind) {
+  case CompletionKind::DotExpr: {
+    assert(CodeCompleteTokenExpr);
+    assert(CurDeclContext);
+
+    DotExprTypeCheckCompletionCallback Lookup(CurDeclContext,
+                                              CodeCompleteTokenExpr);
+    llvm::SaveAndRestore<TypeCheckCompletionCallback*>
+      CompletionCollector(Context.CompletionCallback, &Lookup);
+    typeCheckContextAt(CurDeclContext, CompletionLoc);
+
+    // This (hopefully) only happens in cases where the expression isn't
+    // typechecked during normal compilation either (e.g. member completion in a
+    // switch case where there control expression is invalid). Having normal
+    // typechecking still resolve even these cases would be beneficial for
+    // tooling in general though.
+    if (!Lookup.gotCallback())
+      Lookup.fallbackTypeCheck();
+
+    addKeywords(CompletionContext.getResultSink(), MaybeFuncBody);
+
+    Expr *CheckedBase = CodeCompleteTokenExpr->getBase();
+    deliverDotExprResults(Lookup.getResults(), CheckedBase, CurDeclContext,
+                          DotLoc, isInsideObjCSelector(), CompletionContext,
+                          Consumer);
+    return true;
+  }
+  case CompletionKind::UnresolvedMember: {
+    assert(CodeCompleteTokenExpr);
+    assert(CurDeclContext);
+
+    UnresolvedMemberTypeCheckCompletionCallback Lookup(CodeCompleteTokenExpr);
+    llvm::SaveAndRestore<TypeCheckCompletionCallback*>
+      CompletionCollector(Context.CompletionCallback, &Lookup);
+    typeCheckContextAt(CurDeclContext, CompletionLoc);
+
+    if (!Lookup.gotCallback())
+      Lookup.fallbackTypeCheck(CurDeclContext);
+
+    addKeywords(CompletionContext.getResultSink(), MaybeFuncBody);
+    deliverUnresolvedMemberResults(Lookup.getResults(), CurDeclContext, DotLoc,
+                                   CompletionContext, Consumer);
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
+// Undoes the single-expression closure/function body transformation on the
+// given DeclContext and its parent contexts if they have a single expression
+// body that contains the code completion location.
+//
+// FIXME: Remove this once all expression position completions are migrated
+// to work via TypeCheckCompletionCallback.
+static void undoSingleExpressionReturn(DeclContext *DC) {
+  auto updateBody = [](BraceStmt *BS, ASTContext &Ctx) -> bool {
+    ASTNode LastElem = BS->getLastElement();
+    auto *RS = dyn_cast_or_null<ReturnStmt>(LastElem.dyn_cast<Stmt*>());
+
+    if (!RS || !RS->isImplicit())
+      return false;
+
+    BS->setLastElement(RS->getResult());
+    return true;
+  };
+
+  while (ClosureExpr *CE = dyn_cast_or_null<ClosureExpr>(DC)) {
+    if (CE->hasSingleExpressionBody()) {
+      if (updateBody(CE->getBody(), CE->getASTContext()))
+        CE->setBody(CE->getBody(), false);
+    }
+    DC = DC->getParent();
+  }
+  if (FuncDecl *FD = dyn_cast_or_null<FuncDecl>(DC)) {
+    if (FD->hasSingleExpressionBody()) {
+      if (updateBody(FD->getBody(), FD->getASTContext()))
+        FD->setHasSingleExpressionBody(false);
+    }
+  }
+}
+
 void CodeCompletionCallbacksImpl::doneParsing() {
   CompletionContext.CodeCompletionKind = Kind;
 
@@ -5567,9 +6367,15 @@ void CodeCompletionCallbacksImpl::doneParsing() {
       CurDeclContext = DC;
   }
 
-  typeCheckContextUntil(
+  if (trySolverCompletion(MaybeFuncBody))
+    return;
+
+  undoSingleExpressionReturn(CurDeclContext);
+  typeCheckContextAt(
       CurDeclContext,
-      CurDeclContext->getASTContext().SourceMgr.getCodeCompletionLoc());
+      ParsedExpr
+          ? ParsedExpr->getLoc()
+          : CurDeclContext->getASTContext().SourceMgr.getCodeCompletionLoc());
 
   // Add keywords even if type checking fails completely.
   addKeywords(CompletionContext.getResultSink(), MaybeFuncBody);
@@ -5616,30 +6422,15 @@ void CodeCompletionCallbacksImpl::doneParsing() {
   auto DoPostfixExprBeginning = [&] (){
     SourceLoc Loc = P.Context.SourceMgr.getCodeCompletionLoc();
     Lookup.getValueCompletionsInDeclContext(Loc);
+    Lookup.getSelfTypeCompletionInDeclContext(Loc, /*isForDeclResult=*/false);
   };
 
   switch (Kind) {
   case CompletionKind::None:
+  case CompletionKind::DotExpr:
+  case CompletionKind::UnresolvedMember:
     llvm_unreachable("should be already handled");
     return;
-
-  case CompletionKind::DotExpr: {
-    Lookup.setHaveDot(DotLoc);
-
-    if (isDynamicLookup(*ExprType))
-      Lookup.setIsDynamicLookup();
-
-    Lookup.getPostfixKeywordCompletions(*ExprType, ParsedExpr);
-
-    if (isa<BindOptionalExpr>(ParsedExpr) || isa<ForceValueExpr>(ParsedExpr))
-      Lookup.setIsUnwrappedOptional(true);
-
-    ExprContextInfo ContextInfo(CurDeclContext, ParsedExpr);
-    Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                            ContextInfo.isSingleExpressionBody());
-    Lookup.getValueExprCompletions(*ExprType, ReferencedDecl.getDecl());
-    break;
-  }
 
   case CompletionKind::KeyPathExprSwift: {
     auto KPE = dyn_cast<KeyPathExpr>(ParsedExpr);
@@ -5683,7 +6474,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
     if (!OnRoot && KPE->getComponents().back().getKind() ==
                        KeyPathExpr::Component::Kind::OptionalWrap) {
       // KeyPath expr with '?' (e.g. '\Ty.[0].prop?.another').
-      // Althogh expected type is optional, we should unwrap it because it's
+      // Although expected type is optional, we should unwrap it because it's
       // unwrapped.
       baseType = baseType->getOptionalObjectType();
     }
@@ -5697,7 +6488,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
   case CompletionKind::PostfixExprBeginning: {
     ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
     Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                            ContextInfo.isSingleExpressionBody());
+                            ContextInfo.isImplicitSingleExpressionReturn());
     DoPostfixExprBeginning();
     break;
   }
@@ -5719,8 +6510,9 @@ void CodeCompletionCallbacksImpl::doneParsing() {
 
     if (ShouldCompleteCallPatternAfterParen) {
       ExprContextInfo ParentContextInfo(CurDeclContext, ParsedExpr);
-      Lookup.setExpectedTypes(ParentContextInfo.getPossibleTypes(),
-                              ParentContextInfo.isSingleExpressionBody());
+      Lookup.setExpectedTypes(
+          ParentContextInfo.getPossibleTypes(),
+          ParentContextInfo.isImplicitSingleExpressionReturn());
       if (!ContextInfo.getPossibleCallees().empty()) {
         for (auto &typeAndDecl : ContextInfo.getPossibleCallees())
           Lookup.tryFunctionCallCompletions(typeAndDecl.Type, typeAndDecl.Decl,
@@ -5738,7 +6530,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
         (Lookup.FoundFunctionCalls &&
          Lookup.FoundFunctionsWithoutFirstKeyword)) {
       Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                              ContextInfo.isSingleExpressionBody());
+                              ContextInfo.isImplicitSingleExpressionReturn());
       Lookup.setHaveLParen(false);
       DoPostfixExprBeginning();
     }
@@ -5766,8 +6558,10 @@ void CodeCompletionCallbacksImpl::doneParsing() {
 
   case CompletionKind::TypeDeclResultBeginning:
   case CompletionKind::TypeSimpleBeginning: {
-    Lookup.getTypeCompletionsInDeclContext(
-        P.Context.SourceMgr.getCodeCompletionLoc());
+    auto Loc = Context.SourceMgr.getCodeCompletionLoc();
+    Lookup.getTypeCompletionsInDeclContext(Loc);
+    Lookup.getSelfTypeCompletionInDeclContext(
+        Loc, Kind == CompletionKind::TypeDeclResultBeginning);
     break;
   }
 
@@ -5785,7 +6579,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
   case CompletionKind::CaseStmtBeginning: {
     ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
     Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                            ContextInfo.isSingleExpressionBody());
+                            ContextInfo.isImplicitSingleExpressionReturn());
     Lookup.setIdealExpectedType(CodeCompleteTokenExpr->getType());
     Lookup.getUnresolvedMemberCompletions(ContextInfo.getPossibleTypes());
     DoPostfixExprBeginning();
@@ -5804,7 +6598,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
     if (isa<AccessorDecl>(ParsedDecl)) {
       ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
       Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                              ContextInfo.isSingleExpressionBody());
+                              ContextInfo.isImplicitSingleExpressionReturn());
       DoPostfixExprBeginning();
     }
     break;
@@ -5815,7 +6609,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
 
     // TypeName at attribute position after '@'.
     // - VarDecl: Property Wrappers.
-    // - ParamDecl/VarDecl/FuncDecl: Function Buildres.
+    // - ParamDecl/VarDecl/FuncDecl: Function Builders.
     if (!AttTargetDK || *AttTargetDK == DeclKind::Var ||
         *AttTargetDK == DeclKind::Param || *AttTargetDK == DeclKind::Func)
       Lookup.getTypeCompletionsInDeclContext(
@@ -5837,16 +6631,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
       Lookup.addImportModuleNames();
     break;
   }
-  case CompletionKind::UnresolvedMember: {
-    Lookup.setHaveDot(DotLoc);
-    ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
-    Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                            ContextInfo.isSingleExpressionBody());
-    Lookup.setIdealExpectedType(CodeCompleteTokenExpr->getType());
-    Lookup.getUnresolvedMemberCompletions(ContextInfo.getPossibleTypes());
-    break;
-  }
-  case CompletionKind::CallArg : {
+  case CompletionKind::CallArg: {
     ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
 
     bool shouldPerformGlobalCompletion = true;
@@ -5855,9 +6640,12 @@ void CodeCompletionCallbacksImpl::doneParsing() {
         !ContextInfo.getPossibleCallees().empty()) {
       Lookup.setHaveLParen(true);
       for (auto &typeAndDecl : ContextInfo.getPossibleCallees()) {
-        if (auto SD = dyn_cast_or_null<SubscriptDecl>(typeAndDecl.Decl)) {
-          Lookup.addSubscriptCallPattern(typeAndDecl.Type, SD,
-                                         typeAndDecl.SemanticContext);
+        auto apply = ContextInfo.getAnalyzedExpr();
+        if (apply && isa<SubscriptExpr>(apply)) {
+          Lookup.addSubscriptCallPattern(
+              typeAndDecl.Type,
+              dyn_cast_or_null<SubscriptDecl>(typeAndDecl.Decl),
+              typeAndDecl.SemanticContext);
         } else {
           Lookup.addFunctionCallPattern(
               typeAndDecl.Type,
@@ -5872,23 +6660,138 @@ void CodeCompletionCallbacksImpl::doneParsing() {
           (Lookup.FoundFunctionCalls &&
            Lookup.FoundFunctionsWithoutFirstKeyword);
     } else if (!ContextInfo.getPossibleParams().empty()) {
-      Lookup.addCallArgumentCompletionResults(ContextInfo.getPossibleParams());
+      auto params = ContextInfo.getPossibleParams();
+      Lookup.addCallArgumentCompletionResults(params);
 
       shouldPerformGlobalCompletion = !ContextInfo.getPossibleTypes().empty();
+      // Fallback to global completion if the position is out of number. It's
+      // better than suggest nothing.
+      shouldPerformGlobalCompletion |= llvm::all_of(
+          params, [](const PossibleParamInfo &P) { return !P.Param; });
     }
 
     if (shouldPerformGlobalCompletion) {
       Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                              ContextInfo.isSingleExpressionBody());
+                              ContextInfo.isImplicitSingleExpressionReturn());
       DoPostfixExprBeginning();
+    }
+    break;
+  }
+
+  case CompletionKind::LabeledTrailingClosure: {
+    ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
+
+    SmallVector<PossibleParamInfo, 2> params;
+    // Only complete function type parameters
+    llvm::copy_if(ContextInfo.getPossibleParams(), std::back_inserter(params),
+                  [](const PossibleParamInfo &P) {
+                    // nullptr indicates out of bounds.
+                    if (!P.Param)
+                      return true;
+                    return P.Param->getPlainType()
+                        ->lookThroughAllOptionalTypes()
+                        ->is<AnyFunctionType>();
+                  });
+
+    bool allRequired = false;
+    if (!params.empty()) {
+      Lookup.addCallArgumentCompletionResults(
+          params, /*isLabeledTrailingClosure=*/true);
+      allRequired = llvm::all_of(
+          params, [](const PossibleParamInfo &P) { return P.IsRequired; });
+    }
+
+    // If there're optional parameters, do global completion or member
+    // completion depending on the completion is happening at the start of line.
+    if (!allRequired) {
+      if (IsAtStartOfLine) {
+        //   foo() {}
+        //   <HERE>
+
+        auto &Sink = CompletionContext.getResultSink();
+        if (isa<Initializer>(CurDeclContext))
+          CurDeclContext = CurDeclContext->getParent();
+
+        if (CurDeclContext->isTypeContext()) {
+          // Override completion (CompletionKind::NominalMemberBeginning).
+          addDeclKeywords(Sink, Context.LangOpts.EnableExperimentalConcurrency);
+          addLetVarKeywords(Sink);
+          SmallVector<StringRef, 0> ParsedKeywords;
+          CompletionOverrideLookup OverrideLookup(Sink, Context, CurDeclContext,
+                                                  ParsedKeywords, SourceLoc());
+          OverrideLookup.getOverrideCompletions(SourceLoc());
+        } else {
+          // Global completion (CompletionKind::PostfixExprBeginning).
+          addDeclKeywords(Sink, Context.LangOpts.EnableExperimentalConcurrency);
+          addStmtKeywords(Sink, MaybeFuncBody);
+          addSuperKeyword(Sink);
+          addLetVarKeywords(Sink);
+          addExprKeywords(Sink);
+          addAnyTypeKeyword(Sink, Context.TheAnyType);
+          DoPostfixExprBeginning();
+        }
+      } else {
+        //   foo() {} <HERE>
+        // Member completion.
+        Expr *analyzedExpr = ContextInfo.getAnalyzedExpr();
+        if (!analyzedExpr)
+          break;
+
+        // Only if the completion token is the last token in the call.
+        if (analyzedExpr->getEndLoc() != CodeCompleteTokenExpr->getLoc())
+          break;
+
+        Type resultTy = analyzedExpr->getType();
+        // If the call expression doesn't have a type, fallback to:
+        if (!resultTy || resultTy->is<ErrorType>()) {
+          // 1) Try to type check removing CodeCompletionExpr from the call.
+          Expr *removedExpr = analyzedExpr;
+          removeCodeCompletionExpr(CurDeclContext->getASTContext(),
+                                   removedExpr);
+          ConcreteDeclRef referencedDecl;
+          auto optT = getTypeOfCompletionContextExpr(
+              CurDeclContext->getASTContext(), CurDeclContext,
+              CompletionTypeCheckKind::Normal, removedExpr, referencedDecl);
+          if (optT) {
+            resultTy = *optT;
+            analyzedExpr->setType(resultTy);
+          }
+        }
+        if (!resultTy || resultTy->is<ErrorType>()) {
+          // 2) Infer it from the possible callee info.
+          if (!ContextInfo.getPossibleCallees().empty()) {
+            auto calleeInfo = ContextInfo.getPossibleCallees()[0];
+            resultTy = calleeInfo.Type->getResult();
+            analyzedExpr->setType(resultTy);
+          }
+        }
+        if (!resultTy || resultTy->is<ErrorType>()) {
+          // 3) Give up providing postfix completions.
+          break;
+        }
+
+        auto &SM = CurDeclContext->getASTContext().SourceMgr;
+        auto leadingChar =
+            SM.extractText({SM.getCodeCompletionLoc().getAdvancedLoc(-1), 1});
+        Lookup.setHaveLeadingSpace(leadingChar.find_first_of(" \t\f\v") !=
+                                   StringRef::npos);
+
+        if (isDynamicLookup(resultTy))
+          Lookup.setIsDynamicLookup();
+        Lookup.getValueExprCompletions(resultTy, /*VD=*/nullptr);
+        Lookup.getOperatorCompletions(analyzedExpr, leadingSequenceExprs);
+        Lookup.getPostfixKeywordCompletions(resultTy, analyzedExpr);
+      }
     }
     break;
   }
 
   case CompletionKind::ReturnStmtExpr : {
     SourceLoc Loc = P.Context.SourceMgr.getCodeCompletionLoc();
-    Lookup.setExpectedTypes(getReturnTypeFromContext(CurDeclContext),
-                            /*isSingleExpressionBody*/ false);
+    SmallVector<Type, 2> possibleReturnTypes;
+    collectPossibleReturnTypesFromContext(CurDeclContext, possibleReturnTypes);
+    Lookup.setExpectedTypes(possibleReturnTypes,
+                            /*isImplicitSingleExpressionReturn*/ false);
     Lookup.getValueCompletionsInDeclContext(Loc);
     break;
   }
@@ -5899,7 +6802,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
       if (FD->isCoroutine()) {
         // TODO: handle multi-value yields.
         Lookup.setExpectedTypes(FD->getStorage()->getValueInterfaceType(),
-                                /*isSingleExpressionBody*/ false);
+                                /*isImplicitSingleExpressionReturn*/ false);
       }
     }
     Lookup.getValueCompletionsInDeclContext(Loc);
@@ -5909,7 +6812,7 @@ void CodeCompletionCallbacksImpl::doneParsing() {
   case CompletionKind::AfterPoundExpr: {
     ExprContextInfo ContextInfo(CurDeclContext, CodeCompleteTokenExpr);
     Lookup.setExpectedTypes(ContextInfo.getPossibleTypes(),
-                            ContextInfo.isSingleExpressionBody());
+                            ContextInfo.isImplicitSingleExpressionReturn());
 
     Lookup.addPoundAvailable(ParentStmtKind);
     Lookup.addPoundLiteralCompletions(/*needPound=*/false);
@@ -5944,111 +6847,12 @@ void CodeCompletionCallbacksImpl::doneParsing() {
   }
   case CompletionKind::AfterIfStmtElse:
   case CompletionKind::CaseStmtKeyword:
+  case CompletionKind::EffectsSpecifier:
     // Handled earlier by keyword completions.
     break;
   }
 
-  for (auto &Request: Lookup.RequestedCachedResults) {
-    // Use the current SourceFile as the DeclContext so that we can use it to
-    // perform qualified lookup, and to get the correct visibility for
-    // @testable imports.
-    const SourceFile &SF = P.SF;
-
-    llvm::DenseSet<CodeCompletionCache::Key> ImportsSeen;
-    auto handleImport = [&](ModuleDecl::ImportedModule Import) {
-      ModuleDecl *TheModule = Import.importedModule;
-      ModuleDecl::AccessPathTy Path = Import.accessPath;
-      if (TheModule->getFiles().empty())
-        return;
-
-      // Clang submodules are ignored and there's no lookup cost involved,
-      // so just ignore them and don't put the empty results in the cache
-      // because putting a lot of objects in the cache will push out
-      // other lookups.
-      if (isClangSubModule(TheModule))
-        return;
-
-      std::vector<std::string> AccessPath;
-      for (auto Piece : Path) {
-        AccessPath.push_back(std::string(Piece.Item));
-      }
-
-      StringRef ModuleFilename = TheModule->getModuleFilename();
-      // ModuleFilename can be empty if something strange happened during
-      // module loading, for example, the module file is corrupted.
-      if (!ModuleFilename.empty()) {
-        auto &Ctx = TheModule->getASTContext();
-        CodeCompletionCache::Key K{
-            ModuleFilename.str(),
-            std::string(TheModule->getName()),
-            AccessPath,
-            Request.NeedLeadingDot,
-            SF.hasTestableOrPrivateImport(
-                AccessLevel::Internal, TheModule,
-                SourceFile::ImportQueryKind::TestableOnly),
-            SF.hasTestableOrPrivateImport(
-                AccessLevel::Internal, TheModule,
-                SourceFile::ImportQueryKind::PrivateOnly),
-            Ctx.LangOpts.CodeCompleteInitsInPostfixExpr,
-            CompletionContext.getAnnnoateResult(),
-        };
-
-        using PairType = llvm::DenseSet<swift::ide::CodeCompletionCache::Key,
-            llvm::DenseMapInfo<CodeCompletionCache::Key>>::iterator;
-        std::pair<PairType, bool> Result = ImportsSeen.insert(K);
-        if (!Result.second)
-          return; // already handled.
-        RequestedModules.push_back({std::move(K), TheModule,
-          Request.OnlyTypes, Request.OnlyPrecedenceGroups});
-        if (Request.IncludeModuleQualifier)
-          Lookup.addModuleName(TheModule);
-      }
-    };
-
-    if (Request.TheModule) {
-      // FIXME: actually check imports.
-      for (auto Import : namelookup::getAllImports(Request.TheModule)) {
-        handleImport(Import);
-      }
-    } else {
-      // Add results from current module.
-      Lookup.getToplevelCompletions(Request.OnlyTypes);
-
-      // Add the qualifying module name
-      if (Request.IncludeModuleQualifier)
-        Lookup.addModuleName(CurDeclContext->getParentModule());
-
-      // Add results for all imported modules.
-      ModuleDecl::ImportFilter ImportFilter;
-      ImportFilter |= ModuleDecl::ImportFilterKind::Public;
-      ImportFilter |= ModuleDecl::ImportFilterKind::Private;
-      ImportFilter |= ModuleDecl::ImportFilterKind::ImplementationOnly;
-      SmallVector<ModuleDecl::ImportedModule, 4> Imports;
-      auto *SF = CurDeclContext->getParentSourceFile();
-      SF->getImportedModules(Imports, ImportFilter);
-
-      for (auto Imported : Imports) {
-        for (auto Import : namelookup::getAllImports(Imported.importedModule))
-          handleImport(Import);
-      }
-    }
-  }
-  Lookup.RequestedCachedResults.clear();
-
-  CompletionContext.typeContextKind = Lookup.typeContextKind();
-
-  deliverCompletionResults();
-}
-
-void CodeCompletionCallbacksImpl::deliverCompletionResults() {
-  // Use the current SourceFile as the DeclContext so that we can use it to
-  // perform qualified lookup, and to get the correct visibility for
-  // @testable imports.
-  DeclContext *DCForModules = &P.SF;
-
-  Consumer.handleResultsAndModules(CompletionContext, RequestedModules,
-                                   DCForModules);
-  RequestedModules.clear();
+  deliverCompletionResults(CompletionContext, Lookup, P.SF, Consumer);
 }
 
 void PrintingCodeCompletionConsumer::handleResults(
@@ -6057,7 +6861,7 @@ void PrintingCodeCompletionConsumer::handleResults(
   for (auto Result : Results) {
     if (!IncludeKeywords && Result->getKind() == CodeCompletionResult::Keyword)
       continue;
-    NumResults++;
+    ++NumResults;
   }
   if (NumResults == 0)
     return;
@@ -6067,10 +6871,13 @@ void PrintingCodeCompletionConsumer::handleResults(
     if (!IncludeKeywords && Result->getKind() == CodeCompletionResult::Keyword)
       continue;
     Result->printPrefix(OS);
-    if (PrintAnnotatedDescription)
+    if (PrintAnnotatedDescription) {
       printCodeCompletionResultDescriptionAnnotated(*Result, OS, /*leadingPunctuation=*/false);
-    else
+      OS << "; typename=";
+      printCodeCompletionResultTypeNameAnnotated(*Result, OS);
+    } else {
       Result->getCompletionString()->print(OS);
+    }
 
     llvm::SmallString<64> Name;
     llvm::raw_svector_ostream NameOs(Name);
@@ -6116,7 +6923,7 @@ void swift::ide::lookupCodeCompletionResultsFromModule(
     ArrayRef<std::string> accessPath, bool needLeadingDot,
     const DeclContext *currDeclContext) {
   CompletionLookup Lookup(targetSink, module->getASTContext(), currDeclContext);
-  Lookup.getVisibleDeclsOfModule(module, accessPath, needLeadingDot);
+  Lookup.lookupExternalModuleDecls(module, accessPath, needLeadingDot);
 }
 
 void swift::ide::copyCodeCompletionResults(CodeCompletionResultSink &targetSink,
@@ -6191,7 +6998,7 @@ void SimpleCachingCodeCompletionConsumer::handleResultsAndModules(
     if (!V.hasValue()) {
       // No cached results found. Fill the cache.
       V = context.Cache.createValue();
-      (*V)->Sink.annotateResult = context.getAnnnoateResult();
+      (*V)->Sink.annotateResult = context.getAnnotateResult();
       lookupCodeCompletionResultsFromModule(
           (*V)->Sink, R.TheModule, R.Key.AccessPath,
           R.Key.ResultsHaveLeadingDot, DCForModules);
@@ -6203,4 +7010,72 @@ void SimpleCachingCodeCompletionConsumer::handleResultsAndModules(
   }
 
   handleResults(context.takeResults());
+}
+
+//===----------------------------------------------------------------------===//
+// ImportDepth
+//===----------------------------------------------------------------------===//
+
+ImportDepth::ImportDepth(ASTContext &context,
+                         const FrontendOptions &frontendOptions) {
+  llvm::DenseSet<ModuleDecl *> seen;
+  std::deque<std::pair<ModuleDecl *, uint8_t>> worklist;
+
+  StringRef mainModule = frontendOptions.ModuleName;
+  auto *main = context.getLoadedModule(context.getIdentifier(mainModule));
+  assert(main && "missing main module");
+  worklist.emplace_back(main, uint8_t(0));
+
+  // Imports from -import-name such as Playground auxiliary sources are treated
+  // specially by applying import depth 0.
+  llvm::StringSet<> auxImports;
+  for (const auto &pair : frontendOptions.getImplicitImportModuleNames())
+    auxImports.insert(pair.first);
+
+  // Private imports from this module.
+  // FIXME: only the private imports from the current source file.
+  // FIXME: ImportFilterKind::ShadowedByCrossImportOverlay?
+  SmallVector<ImportedModule, 16> mainImports;
+  main->getImportedModules(mainImports,
+                           {ModuleDecl::ImportFilterKind::Default,
+                            ModuleDecl::ImportFilterKind::ImplementationOnly});
+  for (auto &import : mainImports) {
+    uint8_t depth = 1;
+    if (auxImports.count(import.importedModule->getName().str()))
+      depth = 0;
+    worklist.emplace_back(import.importedModule, depth);
+  }
+
+  // Fill depths with BFS over module imports.
+  while (!worklist.empty()) {
+    ModuleDecl *module;
+    uint8_t depth;
+    std::tie(module, depth) = worklist.front();
+    worklist.pop_front();
+
+    if (!seen.insert(module).second)
+      continue;
+
+    // Insert new module:depth mapping.
+    const clang::Module *CM = module->findUnderlyingClangModule();
+    if (CM) {
+      depths[CM->getFullModuleName()] = depth;
+    } else {
+      depths[module->getName().str()] = depth;
+    }
+
+    // Add imports to the worklist.
+    SmallVector<ImportedModule, 16> imports;
+    module->getImportedModules(imports);
+    for (auto &import : imports) {
+      uint8_t next = std::max(depth, uint8_t(depth + 1)); // unsigned wrap
+
+      // Implicitly imported sub-modules get the same depth as their parent.
+      if (const clang::Module *CMI =
+              import.importedModule->findUnderlyingClangModule())
+        if (CM && CMI->isSubModuleOf(CM))
+          next = depth;
+      worklist.emplace_back(import.importedModule, next);
+    }
+  }
 }

@@ -15,15 +15,16 @@
 
 #include "swift/Parse/SyntaxParseActions.h"
 #include "swift/Syntax/References.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace swift {
-  class RawSyntaxTokenCache;
   class SourceManager;
   class SyntaxParsingCache;
   class SourceFile;
 
 namespace syntax {
-  class SyntaxArena;
+class SyntaxArena;
+class SourceFileSyntax;
 }
 
 /// Receives the parsed syntax info from the parser and constructs a persistent
@@ -32,18 +33,22 @@ namespace syntax {
 ///
 /// It also handles caching re-usable RawSyntax objects and skipping parsed
 /// nodes via consulting a \c SyntaxParsingCache.
-class SyntaxTreeCreator: public SyntaxParseActions {
+class SyntaxTreeCreator final : public SyntaxParseActions {
   SourceManager &SM;
   unsigned BufferID;
   RC<syntax::SyntaxArena> Arena;
+
+  /// A string allocated in \c Arena that contains an exact copy of the source
+  /// file for which this \c SyntaxTreeCreator creates a syntax tree. \c
+  /// RawSyntax nodes can safely reference text inside this buffer since they
+  /// retain the \c SyntaxArena which holds the buffer.
+  StringRef ArenaSourceBuffer;
 
   /// A cache of nodes that can be reused when creating the current syntax
   /// tree.
   SyntaxParsingCache *SyntaxCache;
 
-  /// Tokens nodes that have already been created and may be reused in other
-  /// parts of the syntax tree.
-  std::unique_ptr<RawSyntaxTokenCache> TokenCache;
+  llvm::BumpPtrAllocator ScratchAlloc;
 
 public:
   SyntaxTreeCreator(SourceManager &SM, unsigned bufferID,
@@ -51,24 +56,39 @@ public:
                     RC<syntax::SyntaxArena> arena);
   ~SyntaxTreeCreator();
 
-  void acceptSyntaxRoot(OpaqueSyntaxNode root, SourceFile &SF);
+  Optional<syntax::SourceFileSyntax>
+  realizeSyntaxRoot(OpaqueSyntaxNode root, const SourceFile &SF) override;
 
 private:
-  OpaqueSyntaxNode recordToken(tok tokenKind,
-                               ArrayRef<ParsedTriviaPiece> leadingTrivia,
-                               ArrayRef<ParsedTriviaPiece> trailingTrivia,
+  OpaqueSyntaxNode recordToken(tok tokenKind, StringRef leadingTrivia,
+                               StringRef trailingTrivia,
                                CharSourceRange range) override;
 
   OpaqueSyntaxNode recordMissingToken(tok tokenKind, SourceLoc loc) override;
 
-  OpaqueSyntaxNode recordRawSyntax(syntax::SyntaxKind kind,
-                                   ArrayRef<OpaqueSyntaxNode> elements,
-                                   CharSourceRange range) override;
-
-  void discardRecordedNode(OpaqueSyntaxNode node) override;
+  OpaqueSyntaxNode
+  recordRawSyntax(syntax::SyntaxKind kind,
+                  ArrayRef<OpaqueSyntaxNode> elements) override;
 
   std::pair<size_t, OpaqueSyntaxNode>
   lookupNode(size_t lexerOffset, syntax::SyntaxKind kind) override;
+
+  OpaqueSyntaxNode makeDeferredToken(tok tokenKind, StringRef leadingTrivia,
+                                     StringRef trailingTrivia,
+                                     CharSourceRange range,
+                                     bool isMissing) override;
+
+  OpaqueSyntaxNode
+  makeDeferredLayout(syntax::SyntaxKind k, bool IsMissing,
+                     const ArrayRef<RecordedOrDeferredNode> &children) override;
+
+  OpaqueSyntaxNode recordDeferredToken(OpaqueSyntaxNode deferred) override;
+  OpaqueSyntaxNode recordDeferredLayout(OpaqueSyntaxNode deferred) override;
+
+  DeferredNodeInfo getDeferredChild(OpaqueSyntaxNode node, size_t ChildIndex,
+                                    SourceLoc StartLoc) override;
+
+  size_t getDeferredNumChildren(OpaqueSyntaxNode node) override;
 };
 
 } // end namespace swift
