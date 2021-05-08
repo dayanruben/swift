@@ -1,9 +1,12 @@
 // RUN: %empty-directory(%t)
 
 // The module should be generated regardless of errors and diagnostic should still be output
-// RUN: %target-swift-frontend -verify -emit-module -o %t/errors.swiftmodule -experimental-allow-module-with-compiler-errors -D ERROR_MODULE %s
+// RUN: %target-swift-frontend -verify -emit-module -o %t/errors.swiftmodule -emit-reference-dependencies-path %t/errors.swiftdeps -emit-dependencies-path %t/errors.d -experimental-allow-module-with-compiler-errors -D ERROR_MODULE -primary-file %s
 // RUN: llvm-bcanalyzer %t/errors.swiftmodule | %FileCheck -check-prefix=CHECK-BC %s
 // CHECK-BC-NOT: UnknownCode
+// RUN: ls %t/errors.swiftdeps
+// RUN: ls %t/errors.d
+
 #if ERROR_MODULE
 public struct ValidStructInvalidMember {
   public var member: String
@@ -52,6 +55,11 @@ public func invalidFuncBody() -> ValidStructInvalidMember {
 }
 
 public func invalidFunc() -> undefined {} // expected-error {{cannot find type 'undefined'}}
+
+extension undefined: undefined {} // expected-error {{cannot find type 'undefined'}}
+
+class GenericClass<T> {}
+class InvalidSuperclass: GenericClass<undefined> {} // expected-error {{cannot find type 'undefined'}}
 #endif
 
 // RUN: %target-swift-frontend -emit-module -o %t/validUses.swiftmodule -experimental-allow-module-with-compiler-errors -I%t -D VALID_USES %s 2>&1 | %FileCheck -check-prefix=CHECK-VALID %s
@@ -67,9 +75,9 @@ func test(s: ValidStructInvalidMember) {
 // Check SIL diagnostics are still output (no reason not to output SIL since
 // there were no errors)
 func other() -> Int {}
-// CHECK-VALID: allow-errors.swift:[[@LINE-1]]:22: error: missing return in a function expected to return 'Int'
+// CHECK-VALID: allow-errors.swift:[[@LINE-1]]:22: error: missing return in global function expected to return 'Int'
 func other2() -> Bool {}
-// CHECK-VALID: allow-errors.swift:[[@LINE-1]]:24: error: missing return in a function expected to return 'Bool'
+// CHECK-VALID: allow-errors.swift:[[@LINE-1]]:24: error: missing return in global function expected to return 'Bool'
 #endif
 
 // All invalid uses should have no errors in the file itself, all referenced

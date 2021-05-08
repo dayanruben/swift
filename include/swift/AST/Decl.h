@@ -62,6 +62,7 @@ namespace swift {
   class DynamicSelfType;
   class Type;
   class Expr;
+  struct ExternalSourceLocs;
   class CaptureListExpr;
   class DeclRefExpr;
   class ForeignAsyncConvention;
@@ -82,7 +83,8 @@ namespace swift {
   class ParameterTypeFlags;
   class Pattern;
   struct PrintOptions;
-  struct PropertyWrapperBackingPropertyInfo;
+  struct PropertyWrapperAuxiliaryVariables;
+  class PropertyWrapperInitializerInfo;
   struct PropertyWrapperTypeInfo;
   struct PropertyWrapperMutability;
   class ProtocolDecl;
@@ -586,7 +588,10 @@ protected:
     HasAnyUnavailableValues : 1
   );
 
-  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1,
+    /// If the module is compiled as static library.
+    StaticLibrary : 1,
+
     /// If the module was or is being compiled with `-enable-testing`.
     TestingEnabled : 1,
 
@@ -687,14 +692,12 @@ private:
   void operator=(const Decl&) = delete;
   SourceLoc getLocFromSource() const;
 
-  struct CachedExternalSourceLocs {
-    SourceLoc Loc;
-    SourceLoc StartLoc;
-    SourceLoc EndLoc;
-    SmallVector<CharSourceRange, 4> DocRanges;
-  };
-  mutable CachedExternalSourceLocs const *CachedSerializedLocs = nullptr;
-  const CachedExternalSourceLocs *getSerializedLocs() const;
+  /// Returns the serialized locations of this declaration from the
+  /// corresponding .swiftsourceinfo file. "Empty" (ie. \c BufferID of 0, an
+  /// invalid \c Loc, and empty \c DocRanges) if either there is no
+  /// .swiftsourceinfo or the buffer could not be created, eg. if the file
+  /// no longer exists.
+  const ExternalSourceLocs *getSerializedLocs() const;
 
   /// Directly set the invalid bit
   void setInvalidBit();
@@ -787,6 +790,9 @@ public:
   DeclAttributes &getAttrs() {
     return Attrs;
   }
+
+  /// Returns the innermost enclosing decl with an availability annotation.
+  const Decl *getInnermostDeclWithAvailability() const;
 
   /// Returns the introduced OS version in the given platform kind specified
   /// by @available attribute.
@@ -1679,6 +1685,62 @@ public:
   
   ArrayRef<PatternBindingEntry> getPatternList() const {
     return const_cast<PatternBindingDecl*>(this)->getMutablePatternList();
+  }
+
+  /// Clean up walking the initializers for the pattern
+  class InitIterator {
+
+    const PatternBindingDecl &decl;
+    unsigned currentPatternEntryIndex;
+
+    void next() { ++currentPatternEntryIndex; }
+
+  public:
+    using value_type = Expr *;
+    using pointer = value_type;
+    using reference = value_type;
+    using difference_type = unsigned;
+
+    InitIterator(const PatternBindingDecl &decl, unsigned start = 0)
+        : decl(decl), currentPatternEntryIndex(start) {}
+
+    InitIterator &operator++() {
+      next();
+      return *this;
+    }
+
+    InitIterator operator++(int) {
+      InitIterator newIterator(decl, currentPatternEntryIndex);
+      newIterator.next();
+      return newIterator;
+    }
+
+    pointer operator->() { return decl.getInit(currentPatternEntryIndex); }
+
+    pointer operator*() { return decl.getInit(currentPatternEntryIndex); }
+
+    difference_type operator-(const InitIterator &other) {
+      return currentPatternEntryIndex - other.currentPatternEntryIndex;
+    }
+
+    bool operator==(const InitIterator &other) const {
+      return &decl == &other.decl &&
+             currentPatternEntryIndex == other.currentPatternEntryIndex;
+    }
+
+    bool operator!=(const InitIterator &other) const {
+      return !(*this == other);
+    }
+  };
+
+  InitIterator beginInits() const { return InitIterator(*this); }
+
+  InitIterator endInits() const {
+    return InitIterator(*this, getNumPatternEntries());
+  }
+
+  llvm::iterator_range<InitIterator> initializers() const {
+    return llvm::make_range(beginInits(), endInits());
   }
 
   void setInitStringRepresentation(unsigned i, StringRef str) {
@@ -3429,7 +3491,7 @@ class StructDecl final : public NominalTypeDecl {
   SourceLoc StructLoc;
 
   // We import C++ class templates as generic structs. Then when in Swift code
-  // we want to substitude generic parameters with actual arguments, we
+  // we want to substitute generic parameters with actual arguments, we
   // convert the arguments to C++ equivalents and ask Clang to instantiate the
   // C++ template. Then we import the C++ class template instantiation
   // as a non-generic structs with a name prefixed with `__CxxTemplateInst`.
@@ -3706,17 +3768,21 @@ public:
 
   /// Whether the class is (known to be) a default actor.
   bool isDefaultActor() const;
+  bool isDefaultActor(ModuleDecl *M, ResilienceExpansion expansion) const;
 
   /// Whether the class is known to be a *root* default actor,
   /// i.e. the first class in its hierarchy that is a default actor.
   bool isRootDefaultActor() const;
+  bool isRootDefaultActor(ModuleDecl *M, ResilienceExpansion expansion) const;
 
   /// Whether the class was explicitly declared with the `actor` keyword.
   bool isExplicitActor() const { return Bits.ClassDecl.IsActor; }
 
-  /// Does this class explicitly declare any of the methods that
-  /// would prevent it from being a default actor?
-  bool hasExplicitCustomActorMethods() const;
+  /// Get the closest-to-root superclass that's an actor class.
+  const ClassDecl *getRootActorClass() const;
+
+  /// Fetch this class's unownedExecutor property, if it has one.
+  const VarDecl *getUnownedExecutorProperty() const;
 
   /// Is this the NSObject class type?
   bool isNSObject() const;
@@ -3942,6 +4008,7 @@ enum class KnownDerivableProtocolKind : uint8_t {
   Decodable,
   AdditiveArithmetic,
   Differentiable,
+  Actor,
 };
 
 /// ProtocolDecl - A declaration of a protocol, for example:
@@ -4464,6 +4531,34 @@ public:
     return {};
   }
 
+  /// This is the primary mechanism by which we can easily determine whether
+  /// this storage decl has any effects.
+  ///
+  /// \returns the getter decl iff this decl has only one accessor that is
+  ///          a 'get' with an effect (i.e., 'async', 'throws', or both).
+  ///          Otherwise returns nullptr.
+  AccessorDecl *getEffectfulGetAccessor() const;
+
+  /// Performs a "limit check" on an effect possibly exhibited by this storage
+  /// decl with respect to some other storage decl that serves as the "limit."
+  /// This check says that \c this is less effectful than \c other if
+  /// \c this either does not exhibit the effect, or if it does, then \c other
+  /// also exhibits the effect. Thus, it is conceptually equivalent to
+  /// a less-than-or-equal (≤) check like so:
+  ///
+  /// \verbatim
+  ///
+  ///           this->hasEffect(E) ≤ other->hasEffect(E)
+  ///
+  /// \endverbatim
+  ///
+  /// \param kind the single effect we are performing a check for.
+  ///
+  /// \returns true iff \c this decl either does not exhibit the effect,
+  ///          or \c other also exhibits the effect.
+  bool isLessEffectfulThan(AbstractStorageDecl const* other,
+                           EffectKind kind) const;
+
   /// Return an accessor that this storage is expected to have, synthesizing
   /// one if necessary. Note that will always synthesize one, even if the
   /// accessor is not part of the expected opaque set for the storage, so use
@@ -4928,6 +5023,10 @@ public:
   /// Whether this var has an implicit property wrapper attribute.
   bool hasImplicitPropertyWrapper() const;
 
+  /// Whether this var is a parameter with an attached property wrapper
+  /// that has an external effect on the function.
+  bool hasExternalPropertyWrapper() const;
+
   /// Whether all of the attached property wrappers have an init(wrappedValue:)
   /// initializer.
   bool allAttachedPropertyWrappersHaveWrappedValueInit() const;
@@ -4957,10 +5056,15 @@ public:
   /// unbound generic types. It will be the type of the backing property.
   Type getPropertyWrapperBackingPropertyType() const;
 
-  /// Retrieve information about the backing properties of the attached
-  /// property wrapper.
-  PropertyWrapperBackingPropertyInfo
-      getPropertyWrapperBackingPropertyInfo() const;
+  /// If there is an attached property wrapper, retrieve the synthesized
+  /// auxiliary variables.
+  PropertyWrapperAuxiliaryVariables
+      getPropertyWrapperAuxiliaryVariables() const;
+
+  /// If there is an attached property wrapper, retrieve information about
+  /// how to initialize the backing property.
+  PropertyWrapperInitializerInfo
+      getPropertyWrapperInitializerInfo() const;
 
   /// Retrieve information about the mutability of the composed
   /// property wrappers.
@@ -5616,7 +5720,7 @@ public:
   ArrayRef<AutoDiffConfig> getDerivativeFunctionConfigurations();
 
   /// Add the given derivative function configuration.
-  void addDerivativeFunctionConfiguration(AutoDiffConfig config);
+  void addDerivativeFunctionConfiguration(const AutoDiffConfig &config);
 
 protected:
   // If a function has a body at all, we have either a parsed body AST node or
@@ -5738,8 +5842,8 @@ public:
 
   /// Determine whether the given function is concurrent.
   ///
-  /// A function is concurrent if it has the @concurrent attribute.
-  bool isConcurrent() const;
+  /// A function is concurrent if it has the @Sendable attribute.
+  bool isSendable() const;
 
   /// Returns true if the function is a suitable 'async' context.
   ///
@@ -6007,6 +6111,17 @@ public:
   /// constructor.
   bool hasDynamicSelfResult() const;
 
+
+  AbstractFunctionDecl *getAsyncAlternative() const;
+
+  /// Determine whether this function is implicitly known to have its
+  /// parameters of function type be @_unsafeSendable.
+  ///
+  /// This hard-codes knowledge of a number of functions that will
+  /// eventually have @_unsafeSendable and, eventually, @Sendable,
+  /// on their parameters of function type.
+  bool hasKnownUnsafeSendableFunctionParams() const;
+
   using DeclContext::operator new;
   using Decl::getASTContext;
 };
@@ -6265,16 +6380,18 @@ class AccessorDecl final : public FuncDecl {
   AccessorDecl(SourceLoc declLoc, SourceLoc accessorKeywordLoc,
                AccessorKind accessorKind, AbstractStorageDecl *storage,
                SourceLoc staticLoc, StaticSpellingKind staticSpelling,
-               bool throws, SourceLoc throwsLoc,
+               bool async, SourceLoc asyncLoc, bool throws, SourceLoc throwsLoc,
                bool hasImplicitSelfDecl, GenericParamList *genericParams,
                DeclContext *parent)
     : FuncDecl(DeclKind::Accessor,
                staticLoc, staticSpelling, /*func loc*/ declLoc,
                /*name*/ Identifier(), /*name loc*/ declLoc,
-               /*Async=*/false, SourceLoc(), throws, throwsLoc,
+               async, asyncLoc, throws, throwsLoc,
                hasImplicitSelfDecl, genericParams, parent),
       AccessorKeywordLoc(accessorKeywordLoc),
       Storage(storage) {
+    assert(!async || accessorKind == AccessorKind::Get
+           && "only get accessors can be async");
     Bits.AccessorDecl.AccessorKind = unsigned(accessorKind);
   }
 
@@ -6285,6 +6402,7 @@ class AccessorDecl final : public FuncDecl {
                                   AbstractStorageDecl *storage,
                                   SourceLoc staticLoc,
                                   StaticSpellingKind staticSpelling,
+                                  bool async, SourceLoc asyncLoc,
                                   bool throws, SourceLoc throwsLoc,
                                   GenericParamList *genericParams,
                                   DeclContext *parent,
@@ -6303,7 +6421,7 @@ public:
                                           AccessorKind accessorKind,
                                           AbstractStorageDecl *storage,
                                           StaticSpellingKind staticSpelling,
-                                          bool throws,
+                                          bool async, bool throws,
                                           GenericParamList *genericParams,
                                           Type fnRetType, DeclContext *parent);
 
@@ -6313,6 +6431,7 @@ public:
                               AbstractStorageDecl *storage,
                               SourceLoc staticLoc,
                               StaticSpellingKind staticSpelling,
+                              bool async, SourceLoc asyncLoc,
                               bool throws, SourceLoc throwsLoc,
                               GenericParamList *genericParams,
                               ParameterList *parameterList,
@@ -6652,6 +6771,7 @@ class ConstructorDecl : public AbstractFunctionDecl {
 public:
   ConstructorDecl(DeclName Name, SourceLoc ConstructorLoc, 
                   bool Failable, SourceLoc FailabilityLoc,
+                  bool Async, SourceLoc AsyncLoc,
                   bool Throws, SourceLoc ThrowsLoc,
                   ParameterList *BodyParams,
                   GenericParamList *GenericParams, 
@@ -6659,8 +6779,10 @@ public:
 
   static ConstructorDecl *
   createImported(ASTContext &ctx, ClangNode clangNode, DeclName name,
-                 SourceLoc constructorLoc, bool failable,
-                 SourceLoc failabilityLoc, bool throws, SourceLoc throwsLoc,
+                 SourceLoc constructorLoc, 
+                 bool failable, SourceLoc failabilityLoc, 
+                 bool async, SourceLoc asyncLoc,
+                 bool throws, SourceLoc throwsLoc,
                  ParameterList *bodyParams, GenericParamList *genericParams,
                  DeclContext *parent);
 
@@ -6977,6 +7099,11 @@ public:
     return HigherThanLoc;
   }
 
+  /// Retrieve the array of \c Relation objects containing those precedence
+  /// groups with higher precedence than this precedence group.
+  ///
+  /// The elements of this array may be invalid, in which case they will have
+  /// null \c PrecedenceGroupDecl elements.
   ArrayRef<Relation> getHigherThan() const {
     return { getHigherThanBuffer(), NumHigherThan };
   }
@@ -6994,6 +7121,11 @@ public:
     return LowerThanLoc;
   }
 
+  /// Retrieve the array of \c Relation objects containing those precedence
+  /// groups with lower precedence than this precedence group.
+  ///
+  /// The elements of this array may be invalid, in which case they will have
+  /// null \c PrecedenceGroupDecl elements.
   ArrayRef<Relation> getLowerThan() const {
     return { getLowerThanBuffer(), NumLowerThan };
   }

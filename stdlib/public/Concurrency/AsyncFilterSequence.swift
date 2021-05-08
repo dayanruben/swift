@@ -12,6 +12,7 @@
 
 import Swift
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncSequence {
   @inlinable
   public __consuming func filter(
@@ -21,6 +22,7 @@ extension AsyncSequence {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 public struct AsyncFilterSequence<Base: AsyncSequence> {
   @usableFromInline
   let base: Base
@@ -38,6 +40,7 @@ public struct AsyncFilterSequence<Base: AsyncSequence> {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncFilterSequence: AsyncSequence {
   public typealias Element = Base.Element
   public typealias AsyncIterator = Iterator

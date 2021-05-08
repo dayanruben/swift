@@ -212,6 +212,7 @@ bool CanType::isReferenceTypeImpl(CanType type, const GenericSignatureImpl *sig,
   case TypeKind::BuiltinRawPointer:
   case TypeKind::BuiltinRawUnsafeContinuation:
   case TypeKind::BuiltinJob:
+  case TypeKind::BuiltinExecutor:
   case TypeKind::BuiltinDefaultActorStorage:
   case TypeKind::BuiltinUnsafeValueBuffer:
   case TypeKind::BuiltinVector:
@@ -482,9 +483,13 @@ Type TypeBase::addCurriedSelfType(const DeclContext *dc) {
 
   auto selfTy = dc->getSelfInterfaceType();
   auto selfParam = AnyFunctionType::Param(selfTy);
-  if (sig)
-    return GenericFunctionType::get(sig, {selfParam}, type);
-  return FunctionType::get({selfParam}, type);
+  // FIXME: Verify ExtInfo state is correct, not working by accident.
+  if (sig) {
+    GenericFunctionType::ExtInfo info;
+    return GenericFunctionType::get(sig, {selfParam}, type, info);
+  }
+  FunctionType::ExtInfo info;
+  return FunctionType::get({selfParam}, type, info);
 }
 
 void TypeBase::getTypeVariables(
@@ -615,13 +620,17 @@ bool TypeBase::isVoid() {
   return false;
 }
 
-/// Check if this type is equal to Swift.Bool.
-bool TypeBase::isBool() {
-  if (auto NTD = getAnyNominal())
-    if (isa<StructDecl>(NTD))
-      return getASTContext().getBoolDecl() == NTD;
-  return false;
+#define KNOWN_STDLIB_TYPE_DECL(NAME, DECL_CLASS, NUM_GENERIC_PARAMS) \
+/** Check if this type is equal to Swift.NAME. */ \
+bool TypeBase::is##NAME() { \
+  if (auto generic = getAnyGeneric()) { \
+    if (isa<DECL_CLASS>(generic)) { \
+      return getASTContext().get##NAME##Decl() == generic; \
+    } \
+  } \
+  return false; \
 }
+#include "swift/AST/KnownStdlibTypes.def"
 
 Type TypeBase::getRValueType() {
   // If the type is not an lvalue, this is a no-op.
@@ -651,24 +660,20 @@ CanType CanType::getOptionalObjectTypeImpl(CanType type) {
 
 Type TypeBase::getAnyPointerElementType(PointerTypeKind &PTK) {
   auto &C = getASTContext();
-  if (auto nominalTy = getAs<NominalType>()) {
-    if (nominalTy->getDecl() == C.getUnsafeMutableRawPointerDecl()) {
-      PTK = PTK_UnsafeMutableRawPointer;
-      return C.TheEmptyTupleType;
-    }
-    if (nominalTy->getDecl() == C.getUnsafeRawPointerDecl()) {
-      PTK = PTK_UnsafeRawPointer;
-      return C.TheEmptyTupleType;
-    }
+  if (isUnsafeMutableRawPointer()) {
+    PTK = PTK_UnsafeMutableRawPointer;
+    return C.TheEmptyTupleType;
+  }
+  if (isUnsafeRawPointer()) {
+    PTK = PTK_UnsafeRawPointer;
+    return C.TheEmptyTupleType;
   }
   if (auto boundTy = getAs<BoundGenericType>()) {
-    if (boundTy->getDecl() == C.getUnsafeMutablePointerDecl()) {
+    if (boundTy->isUnsafeMutablePointer()) {
       PTK = PTK_UnsafeMutablePointer;
-    } else if (boundTy->getDecl() == C.getUnsafePointerDecl()) {
+    } else if (boundTy->isUnsafePointer()) {
       PTK = PTK_UnsafePointer;
-    } else if (
-      boundTy->getDecl() == C.getAutoreleasingUnsafeMutablePointerDecl()
-    ) {
+    } else if (boundTy->isAutoreleasingUnsafeMutablePointer()) {
       PTK = PTK_AutoreleasingUnsafeMutablePointer;
     } else {
       return Type();
@@ -684,7 +689,8 @@ Type TypeBase::wrapInPointer(PointerTypeKind kind) {
     switch (kind) {
     case PTK_UnsafeMutableRawPointer:
     case PTK_UnsafeRawPointer:
-      llvm_unreachable("these pointer types don't take arguments");
+      // these pointer types don't take arguments.
+      return (NominalTypeDecl*)nullptr;
     case PTK_UnsafePointer:
       return ctx.getUnsafePointerDecl();
     case PTK_UnsafeMutablePointer:
@@ -696,25 +702,27 @@ Type TypeBase::wrapInPointer(PointerTypeKind kind) {
   }());
 
   assert(pointerDecl);
+  // Don't fail hard on null pointerDecl.
+  if (!pointerDecl) {
+    return Type();
+  }
   return BoundGenericType::get(pointerDecl, /*parent*/nullptr, Type(this));
 }
 
 Type TypeBase::getAnyBufferPointerElementType(BufferPointerTypeKind &BPTK) {
   auto &C = getASTContext();
-  if (auto nominalTy = getAs<NominalType>()) {
-    if (nominalTy->getDecl() == C.getUnsafeMutableRawBufferPointerDecl()) {
-      BPTK = BPTK_UnsafeMutableRawBufferPointer;
-    } else if (nominalTy->getDecl() == C.getUnsafeRawBufferPointerDecl()) {
-      BPTK = BPTK_UnsafeRawBufferPointer;
-    } else {
-      return Type();
-    }
+  if (isUnsafeMutableRawBufferPointer()) {
+    BPTK = BPTK_UnsafeMutableRawBufferPointer;
+    return C.TheEmptyTupleType;
+  }
+  if (isUnsafeRawBufferPointer()) {
+    BPTK = BPTK_UnsafeRawBufferPointer;
     return C.TheEmptyTupleType;
   }
   if (auto boundTy = getAs<BoundGenericType>()) {
-    if (boundTy->getDecl() == C.getUnsafeMutableBufferPointerDecl()) {
+    if (boundTy->isUnsafeMutableBufferPointer()) {
       BPTK = BPTK_UnsafeMutableBufferPointer;
-    } else if (boundTy->getDecl() == C.getUnsafeBufferPointerDecl()) {
+    } else if (boundTy->isUnsafeBufferPointer()) {
       BPTK = BPTK_UnsafeBufferPointer;
     } else {
       return Type();
@@ -808,13 +816,28 @@ bool TypeBase::isStdlibType() {
   return false;
 }
 
+bool TypeBase::isCGFloatType() {
+  auto *NTD = getAnyNominal();
+  if (!NTD)
+    return false;
+
+  auto *DC = NTD->getDeclContext();
+  if (!DC->isModuleScopeContext())
+    return false;
+
+  auto *module = DC->getParentModule();
+  // On macOS `CGFloat` is part of a `CoreGraphics` module,
+  // but on Linux it could be found in `Foundation`.
+  return (module->getName().is("CoreGraphics") ||
+          module->getName().is("Foundation")) &&
+         NTD->getName().is("CGFloat");
+}
+
 bool TypeBase::isKnownStdlibCollectionType() {
-  if (auto *structType = getAs<BoundGenericStructType>()) {
-    auto &ctx = getASTContext();
-    auto *decl = structType->getDecl();
-    return decl == ctx.getArrayDecl() || decl == ctx.getDictionaryDecl() ||
-           decl == ctx.getSetDecl();
+  if (isArray() || isDictionary() || isSet()) {
+    return true;
   }
+
   return false;
 }
 
@@ -829,7 +852,7 @@ Type TypeBase::removeArgumentLabels(unsigned numArgumentLabels) {
   llvm::SmallVector<AnyFunctionType::Param, 8> unlabeledParams;
   unlabeledParams.reserve(fnType->getNumParams());
   for (const auto &param : fnType->getParams())
-    unlabeledParams.push_back(param.getWithoutLabel());
+    unlabeledParams.push_back(param.getWithoutLabels());
 
   auto result = fnType->getResult()
                       ->removeArgumentLabels(numArgumentLabels - 1);
@@ -908,12 +931,38 @@ static bool allowsUnlabeledTrailingClosureParameter(const ParamDecl *param) {
   return paramType->is<AnyFunctionType>();
 }
 
+/// Determine whether the parameter is contextually Sendable.
+static bool isParamUnsafeSendable(const ParamDecl *param) {
+  // Check for @_unsafeSendable.
+  if (param->getAttrs().hasAttribute<UnsafeSendableAttr>())
+    return true;
+
+  // Check that the parameter is of function type.
+  Type paramType = param->isVariadic() ? param->getVarargBaseTy()
+                                       : param->getInterfaceType();
+  paramType = paramType->getRValueType()->lookThroughAllOptionalTypes();
+  if (!paramType->is<FunctionType>())
+    return false;
+
+  // Check whether this function is known to have @_unsafeSendable function
+  // parameters.
+  auto func = dyn_cast<AbstractFunctionDecl>(param->getDeclContext());
+  if (!func)
+    return false;
+
+  return func->hasKnownUnsafeSendableFunctionParams();
+}
+
 ParameterListInfo::ParameterListInfo(
     ArrayRef<AnyFunctionType::Param> params,
     const ValueDecl *paramOwner,
     bool skipCurriedSelf) {
   defaultArguments.resize(params.size());
   propertyWrappers.resize(params.size());
+  unsafeSendable.resize(params.size());
+  unsafeMainActor.resize(params.size());
+  implicitSelfCapture.resize(params.size());
+  inheritActorContext.resize(params.size());
 
   // No parameter owner means no parameter list means no default arguments
   // - hand back the zeroed bitvector.
@@ -962,8 +1011,24 @@ ParameterListInfo::ParameterListInfo(
       acceptsUnlabeledTrailingClosures.set(i);
     }
 
-    if (param->hasAttachedPropertyWrapper()) {
-      propertyWrappers[i] = param;
+    if (param->hasExternalPropertyWrapper()) {
+      propertyWrappers.set(i);
+    }
+
+    if (isParamUnsafeSendable(param)) {
+      unsafeSendable.set(i);
+    }
+
+    if (param->getAttrs().hasAttribute<UnsafeMainActorAttr>()) {
+      unsafeMainActor.set(i);
+    }
+
+    if (param->getAttrs().hasAttribute<ImplicitSelfCaptureAttr>()) {
+      implicitSelfCapture.set(i);
+    }
+
+    if (param->getAttrs().hasAttribute<InheritActorContextAttr>()) {
+      inheritActorContext.set(i);
     }
   }
 }
@@ -979,9 +1044,37 @@ bool ParameterListInfo::acceptsUnlabeledTrailingClosureArgument(
       acceptsUnlabeledTrailingClosures[paramIdx];
 }
 
-const ParamDecl *
-ParameterListInfo::getPropertyWrapperParam(unsigned paramIdx) const {
-  return paramIdx < propertyWrappers.size() ? propertyWrappers[paramIdx] : nullptr;
+bool ParameterListInfo::hasExternalPropertyWrapper(unsigned paramIdx) const {
+  return paramIdx < propertyWrappers.size() ? propertyWrappers[paramIdx] : false;
+}
+
+bool ParameterListInfo::isUnsafeSendable(unsigned paramIdx) const {
+  return paramIdx < unsafeSendable.size()
+      ? unsafeSendable[paramIdx]
+      : false;
+}
+
+bool ParameterListInfo::isUnsafeMainActor(unsigned paramIdx) const {
+  return paramIdx < unsafeMainActor.size()
+      ? unsafeMainActor[paramIdx]
+      : false;
+}
+
+bool ParameterListInfo::isImplicitSelfCapture(unsigned paramIdx) const {
+  return paramIdx < implicitSelfCapture.size()
+      ? implicitSelfCapture[paramIdx]
+      : false;
+}
+
+bool ParameterListInfo::inheritsActorContext(unsigned paramIdx) const {
+  return paramIdx < inheritActorContext.size()
+      ? inheritActorContext[paramIdx]
+      : false;
+}
+
+bool ParameterListInfo::anyContextualInfo() const {
+  return unsafeSendable.any() || unsafeMainActor.any() ||
+      implicitSelfCapture.any() || inheritActorContext.any();
 }
 
 /// Turn a param list into a symbolic and printable representation that does not
@@ -1011,9 +1104,7 @@ rebuildSelfTypeWithObjectType(AnyFunctionType::Param selfParam,
   if (selfParam.getPlainType()->getAs<MetatypeType>())
     objectTy = MetatypeType::get(objectTy);
 
-  return AnyFunctionType::Param(objectTy,
-                                selfParam.getLabel(),
-                                selfParam.getParameterFlags());
+  return selfParam.withType(objectTy);
 }
 
 /// Returns a new function type exactly like this one but with the self
@@ -1188,9 +1279,11 @@ getCanonicalParams(AnyFunctionType *funcType,
                    SmallVectorImpl<AnyFunctionType::Param> &canParams) {
   auto origParams = funcType->getParams();
   for (auto param : origParams) {
+    // Canonicalize the type and drop the internal label to canonicalize the
+    // Param.
     canParams.emplace_back(param.getPlainType()->getCanonicalType(genericSig),
-                           param.getLabel(),
-                           param.getParameterFlags());
+                           param.getLabel(), param.getParameterFlags(),
+                           /*InternalLabel=*/Identifier());
   }
 }
 
@@ -1304,7 +1397,9 @@ CanType TypeBase::computeCanonicalType() {
     getCanonicalParams(funcTy, genericSig, canParams);
     auto resultTy = funcTy->getResult()->getCanonicalType(genericSig);
 
-    auto extInfo = funcTy->getCanonicalExtInfo(useClangTypes(resultTy));
+    Optional<ASTExtInfo> extInfo = None;
+    if (funcTy->hasExtInfo())
+      extInfo = funcTy->getCanonicalExtInfo(useClangTypes(resultTy));
     if (genericSig) {
       Result = GenericFunctionType::get(genericSig, canParams, resultTy,
                                         extInfo);
@@ -1403,12 +1498,11 @@ TypeBase *TypeBase::reconstituteSugar(bool Recursive) {
         return arg;
       };
 
-      auto &ctx = boundGeneric->getASTContext();
-      if (boundGeneric->getDecl() == ctx.getArrayDecl())
+      if (boundGeneric->isArray())
         return ArraySliceType::get(getGenericArg(0));
-      if (boundGeneric->getDecl() == ctx.getDictionaryDecl())
+      if (boundGeneric->isDictionary())
         return DictionaryType::get(getGenericArg(0), getGenericArg(1));
-      if (boundGeneric->getDecl() == ctx.getOptionalDecl())
+      if (boundGeneric->isOptional())
         return OptionalType::get(getGenericArg(0));
     }
     return Ty;
@@ -1438,6 +1532,11 @@ ParenType::ParenType(Type baseType, RecursiveTypeProperties properties,
   : SugarType(TypeKind::Paren,
               flags.isInOut() ? InOutType::get(baseType) : baseType,
               properties) {
+  // In some situations (rdar://75740683) we appear to end up with ParenTypes
+  // that contain a nullptr baseType. Once this is eliminated, we can remove
+  // the checks for `type.isNull()` in the `DiagnosticArgumentKind::Type` case
+  // of `formatDiagnosticArgument`.
+  assert(baseType && "A ParenType should always wrap a non-null type");
   Bits.ParenType.Flags = flags.toRaw();
   if (flags.isInOut())
     assert(!baseType->is<InOutType>() && "caller did not pass a base type");
@@ -1757,9 +1856,6 @@ public:
       if (nom->getDecl() != substNom->getDecl())
         return CanType();
       
-      if (nom->getDecl()->isInvalid())
-        return CanType();
-      
       // Same decl should always either have or not have a parent.
       assert((bool)nom->getParent() == (bool)substNom->getParent());
       
@@ -2001,8 +2097,6 @@ public:
       return CanType();
 
     auto *decl = bgt->getDecl();
-    if (decl->isInvalid())
-      return CanType();
 
     auto *moduleDecl = decl->getParentModule();
     auto origSubMap = bgt->getContextSubstitutionMap(
@@ -2062,6 +2156,12 @@ public:
       if (req.getKind() != RequirementKind::Conformance) continue;
 
       auto canTy = req.getFirstType()->getCanonicalType();
+
+      // If the substituted type is an interface type, we can't verify the
+      // generic requirements.
+      if (canTy.subst(substSubMap)->isTypeParameter())
+        continue;
+
       auto *proto = req.getProtocolDecl();
       auto origConf = origSubMap.lookupConformance(canTy, proto);
       auto substConf = substSubMap.lookupConformance(canTy, proto);
@@ -2416,8 +2516,7 @@ getForeignRepresentable(Type type, ForeignLanguage language,
 
   // Unmanaged<T> can be trivially represented in Objective-C if T
   // is trivially represented in Objective-C.
-  if (language == ForeignLanguage::ObjectiveC &&
-      nominal == ctx.getUnmanagedDecl()) {
+  if (language == ForeignLanguage::ObjectiveC && type->isUnmanaged()) {
     auto boundGenericType = type->getAs<BoundGenericType>();
 
     // Note: works around a broken Unmanaged<> definition.
@@ -3072,7 +3171,7 @@ static bool canSubstituteTypeInto(Type ty, const DeclContext *dc,
   case OpaqueSubstitutionKind::SubstituteNonResilientModule:
     // Can't access types that are not public from a different module.
     if (dc->getParentModule() == typeDecl->getDeclContext()->getParentModule())
-      return true;
+      return typeDecl->getEffectiveAccess() > AccessLevel::FilePrivate;
 
     return typeDecl->getEffectiveAccess() > AccessLevel::Internal;
   }
@@ -3103,15 +3202,12 @@ operator()(SubstitutableType *maybeOpaqueType) const {
   // archetype in question. This will map the inner generic signature of the
   // opaque type to its outer signature.
   auto partialSubstTy = archetype->getInterfaceType().subst(*subs);
-  // Then apply the substitutions from the root opaque archetype, to specialize
-  // for its type arguments.
-  auto substTy = partialSubstTy.subst(opaqueRoot->getSubstitutions());
 
   // Check that we are allowed to substitute the underlying type into the
   // context.
   auto inContext = this->inContext;
   auto isContextWholeModule = this->isContextWholeModule;
-  if (substTy.findIf(
+  if (partialSubstTy.findIf(
           [inContext, substitutionKind, isContextWholeModule](Type t) -> bool {
             if (!canSubstituteTypeInto(t, inContext, substitutionKind,
                                        isContextWholeModule))
@@ -3119,6 +3215,12 @@ operator()(SubstitutableType *maybeOpaqueType) const {
             return false;
           }))
     return maybeOpaqueType;
+
+  // Then apply the substitutions from the root opaque archetype, to specialize
+  // for its type arguments. We perform this substitution after checking for
+  // visibility, since we do not want the result of the visibility check to
+  // depend on the substitutions previously applied.
+  auto substTy = partialSubstTy.subst(opaqueRoot->getSubstitutions());
 
   // If the type changed, but still contains opaque types, recur.
   if (!substTy->isEqual(maybeOpaqueType) && substTy->hasOpaqueArchetype()) {
@@ -3186,18 +3288,12 @@ operator()(CanType maybeOpaqueType, Type replacementType,
   // archetype in question. This will map the inner generic signature of the
   // opaque type to its outer signature.
   auto partialSubstTy = archetype->getInterfaceType().subst(*subs);
-  auto partialSubstRef =
-      abstractRef.subst(archetype->getInterfaceType(), *subs);
-
-  // Then apply the substitutions from the root opaque archetype, to specialize
-  // for its type arguments.
-  auto substTy = partialSubstTy.subst(opaqueRoot->getSubstitutions());
 
   // Check that we are allowed to substitute the underlying type into the
   // context.
   auto inContext = this->inContext;
   auto isContextWholeModule = this->isContextWholeModule;
-  if (substTy.findIf(
+  if (partialSubstTy.findIf(
           [inContext, substitutionKind, isContextWholeModule](Type t) -> bool {
             if (!canSubstituteTypeInto(t, inContext, substitutionKind,
                                        isContextWholeModule))
@@ -3206,6 +3302,14 @@ operator()(CanType maybeOpaqueType, Type replacementType,
           }))
     return abstractRef;
 
+  // Then apply the substitutions from the root opaque archetype, to specialize
+  // for its type arguments. We perform this substitution after checking for
+  // visibility, since we do not want the result of the visibility check to
+  // depend on the substitutions previously applied.
+  auto substTy = partialSubstTy.subst(opaqueRoot->getSubstitutions());
+
+  auto partialSubstRef =
+      abstractRef.subst(archetype->getInterfaceType(), *subs);
   auto substRef =
       partialSubstRef.subst(partialSubstTy, opaqueRoot->getSubstitutions());
 
@@ -3470,6 +3574,17 @@ ClangTypeInfo AnyFunctionType::getClangTypeInfo() const {
   case TypeKind::GenericFunction:
     // Generic functions do not have C types.
     return ClangTypeInfo();
+  default:
+    llvm_unreachable("Illegal type kind for AnyFunctionType.");
+  }
+}
+
+Type AnyFunctionType::getGlobalActor() const {
+  switch (getKind()) {
+  case TypeKind::Function:
+    return cast<FunctionType>(this)->getGlobalActor();
+  case TypeKind::GenericFunction:
+    return cast<GenericFunctionType>(this)->getGlobalActor();
   default:
     llvm_unreachable("Illegal type kind for AnyFunctionType.");
   }
@@ -4105,6 +4220,13 @@ TypeBase::getContextSubstitutions(const DeclContext *dc,
     // Continue looking into the parent.
     if (auto nominalTy = baseTy->getAs<NominalType>()) {
       baseTy = nominalTy->getParent();
+      continue;
+    }
+
+    // There are no subtitutions to apply if the type is still unbound,
+    // continue looking into the parent.
+    if (auto unboundGeneric = baseTy->getAs<UnboundGenericType>()) {
+      baseTy = unboundGeneric->getParent();
       continue;
     }
 
@@ -4753,6 +4875,7 @@ case TypeKind::Id:
       auto type = param.getPlainType();
       auto label = param.getLabel();
       auto flags = param.getParameterFlags();
+      auto internalLabel = param.getInternalLabel();
 
       auto substType = type.transformRec(fn);
       if (!substType)
@@ -4771,7 +4894,7 @@ case TypeKind::Id:
         flags = flags.withInOut(true);
       }
 
-      substParams.emplace_back(substType, label, flags);
+      substParams.emplace_back(substType, label, flags, internalLabel);
     }
 
     // Transform result type.
@@ -4781,6 +4904,17 @@ case TypeKind::Id:
 
     if (resultTy.getPointer() != function->getResult().getPointer())
       isUnchanged = false;
+
+    // Transform the global actor.
+    Type globalActorType;
+    if (Type origGlobalActorType = function->getGlobalActor()) {
+      globalActorType = origGlobalActorType.transformRec(fn);
+      if (!globalActorType)
+        return Type();
+
+      if (globalActorType.getPointer() != origGlobalActorType.getPointer())
+        isUnchanged = false;
+    }
 
     if (auto genericFnType = dyn_cast<GenericFunctionType>(base)) {
 #ifndef NDEBUG
@@ -4795,14 +4929,20 @@ case TypeKind::Id:
       if (isUnchanged) return *this;
 
       auto genericSig = genericFnType->getGenericSignature();
+      if (!function->hasExtInfo())
+        return GenericFunctionType::get(genericSig, substParams, resultTy);
       return GenericFunctionType::get(genericSig, substParams, resultTy,
-                                      function->getExtInfo());
+                                      function->getExtInfo()
+                                          .withGlobalActor(globalActorType));
     }
 
     if (isUnchanged) return *this;
 
+    if (!function->hasExtInfo())
+      return FunctionType::get(substParams, resultTy);
     return FunctionType::get(substParams, resultTy,
-                             function->getExtInfo());
+                             function->getExtInfo()
+                                 .withGlobalActor(globalActorType));
   }
 
   case TypeKind::ArraySlice: {
@@ -5070,6 +5210,7 @@ ReferenceCounting TypeBase::getReferenceCounting() {
   case TypeKind::BuiltinRawPointer:
   case TypeKind::BuiltinRawUnsafeContinuation:
   case TypeKind::BuiltinJob:
+  case TypeKind::BuiltinExecutor:
   case TypeKind::BuiltinDefaultActorStorage:
   case TypeKind::BuiltinUnsafeValueBuffer:
   case TypeKind::BuiltinVector:
@@ -5390,7 +5531,10 @@ AnyFunctionType::getAutoDiffDerivativeFunctionLinearMapType(
     }
     auto differentialResult =
         hasInoutDiffParameter ? Type(ctx.TheEmptyTupleType) : resultTanType;
-    linearMapType = FunctionType::get(differentialParams, differentialResult);
+    // FIXME: Verify ExtInfo state is correct, not working by accident.
+    FunctionType::ExtInfo info;
+    linearMapType =
+        FunctionType::get(differentialParams, differentialResult, info);
     break;
   }
   case AutoDiffLinearMapKind::Pullback: {
@@ -5439,7 +5583,9 @@ AnyFunctionType::getAutoDiffDerivativeFunctionLinearMapType(
     auto flags = ParameterTypeFlags().withInOut(hasInoutDiffParameter);
     auto pullbackParam =
         AnyFunctionType::Param(resultTanType, Identifier(), flags);
-    linearMapType = FunctionType::get({pullbackParam}, pullbackResult);
+    // FIXME: Verify ExtInfo state is correct, not working by accident.
+    FunctionType::ExtInfo info;
+    linearMapType = FunctionType::get({pullbackParam}, pullbackResult, info);
     break;
   }
   }

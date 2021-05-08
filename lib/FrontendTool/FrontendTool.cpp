@@ -417,11 +417,11 @@ static bool buildModuleFromInterface(CompilerInstance &Instance) {
       Instance.getSourceMgr(), Instance.getDiags(),
       Invocation.getSearchPathOptions(), Invocation.getLangOptions(),
       Invocation.getClangImporterOptions(),
-      Invocation.getClangModuleCachePath(),
-      PrebuiltCachePath, Invocation.getModuleName(), InputPath,
-      Invocation.getOutputFilename(),
+      Invocation.getClangModuleCachePath(), PrebuiltCachePath,
+      Invocation.getModuleName(), InputPath, Invocation.getOutputFilename(),
       FEOpts.SerializeModuleInterfaceDependencyHashes,
-      FEOpts.shouldTrackSystemDependencies(), LoaderOpts);
+      FEOpts.shouldTrackSystemDependencies(), LoaderOpts,
+      RequireOSSAModules_t(Invocation.getSILOptions()));
 }
 
 static bool compileLLVMIR(CompilerInstance &Instance) {
@@ -640,7 +640,10 @@ static void emitSwiftdepsForAllPrimaryInputsIfNeeded(
   //
   // FIXME: It seems more appropriate for the driver to notice the early-exit
   // and react by always enqueuing the jobs it dropped in the other waves.
-  if (Instance.getDiags().hadAnyError())
+  //
+  // We will output a module if allowing errors, so ignore that case.
+  if (Instance.getDiags().hadAnyError() &&
+      !Invocation.getFrontendOptions().AllowModuleWithCompilerErrors)
     return;
 
   for (auto *SF : Instance.getPrimarySourceFiles()) {
@@ -859,7 +862,7 @@ static bool emitAnyWholeModulePostTypeCheckSupplementaryOutputs(
   }
 
   if (opts.InputsAndOutputs.hasPrivateModuleInterfaceOutputPath()) {
-    // Copy the settings from the module interface
+    // Copy the settings from the module interface to add SPI printing.
     ModuleInterfaceOptions privOpts = Invocation.getModuleInterfaceOptions();
     privOpts.PrintSPIs = true;
 
@@ -989,10 +992,11 @@ static void performEndOfPipelineActions(CompilerInstance &Instance) {
   if (!ctx.hadError()) {
     emitLoadedModuleTraceForAllPrimariesIfNeeded(
         Instance.getMainModule(), Instance.getDependencyTracker(), opts);
-    
-    emitAnyWholeModulePostTypeCheckSupplementaryOutputs(Instance);
 
     dumpAPIIfNeeded(Instance);
+  }
+  if (!ctx.hadError() || opts.AllowModuleWithCompilerErrors) {
+    emitAnyWholeModulePostTypeCheckSupplementaryOutputs(Instance);
   }
 
   // Verify reference dependencies of the current compilation job. Note this
@@ -1228,6 +1232,7 @@ static bool performAction(CompilerInstance &Instance,
   case FrontendOptions::ActionType::MergeModules:
   case FrontendOptions::ActionType::Immediate:
   case FrontendOptions::ActionType::EmitAssembly:
+  case FrontendOptions::ActionType::EmitIRGen:
   case FrontendOptions::ActionType::EmitIR:
   case FrontendOptions::ActionType::EmitBC:
   case FrontendOptions::ActionType::EmitObject:
@@ -1968,9 +1973,10 @@ int swift::performFrontend(ArrayRef<const char *> Args,
     DiagnosticInfo errorInfo(
         DiagID(0), SourceLoc(), DiagnosticKind::Error,
         "fatal error encountered during compilation; " SWIFT_BUG_REPORT_MESSAGE,
-        {}, SourceLoc(), {}, {}, {}, false);
+        {}, StringRef(), SourceLoc(), {}, {}, {}, false);
     DiagnosticInfo noteInfo(DiagID(0), SourceLoc(), DiagnosticKind::Note,
-                            reason, {}, SourceLoc(), {}, {}, {}, false);
+                            reason, {}, StringRef(), SourceLoc(), {}, {}, {},
+                            false);
     PDC.handleDiagnostic(dummyMgr, errorInfo);
     PDC.handleDiagnostic(dummyMgr, noteInfo);
     if (shouldCrash)

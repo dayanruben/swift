@@ -533,6 +533,9 @@ static void collectPossibleCalleesByQualifiedLookup(
     SmallVectorImpl<FunctionTypeAndDecl> &candidates) {
   ConcreteDeclRef ref = nullptr;
 
+  if (auto ice = dyn_cast<ImplicitConversionExpr>(baseExpr))
+    baseExpr = ice->getSyntacticSubExpr();
+
   // Re-typecheck TypeExpr so it's typechecked without the arguments which may
   // affects the inference of the generic arguments.
   if (TypeExpr *tyExpr = dyn_cast<TypeExpr>(baseExpr)) {
@@ -551,10 +554,20 @@ static void collectPossibleCalleesByQualifiedLookup(
   }
   baseTy = baseTy->getWithoutSpecifierType();
 
-  // Use metatype for lookup 'super.init' if it's inside constructors.
-  if (isa<SuperRefExpr>(baseExpr) && isa<ConstructorDecl>(DC) &&
-      name == DeclNameRef::createConstructor())
-    baseTy = MetatypeType::get(baseTy);
+  // Use metatype for lookup 'super.init' and 'self.init' if it's inside
+  // constructors.
+  if (name == DeclNameRef::createConstructor() && isa<ConstructorDecl>(DC)) {
+    bool isSuperCall = isa<SuperRefExpr>(baseExpr);
+    bool isSelfCall = false;
+    if (auto declRef = dyn_cast<DeclRefExpr>(baseExpr)) {
+      if (declRef->getDecl()->getName() == DC.getASTContext().Id_self) {
+        isSelfCall = true;
+      }
+    }
+    if (isSuperCall || isSelfCall) {
+      baseTy = MetatypeType::get(baseTy);
+    }
+  }
 
   collectPossibleCalleesByQualifiedLookup(DC, baseTy, name, candidates);
 
@@ -569,8 +582,10 @@ static void collectPossibleCalleesByQualifiedLookup(
     Type kpValueTy = kpTy->castTo<BoundGenericType>()->getGenericArgs()[1];
     kpTy = BoundGenericType::get(kpDecl, Type(), {baseTy, kpValueTy});
 
+    // FIXME: Verify ExtInfo state is correct, not working by accident.
+    FunctionType::ExtInfo info;
     Type fnTy = FunctionType::get(
-        {AnyFunctionType::Param(kpTy, Ctx.Id_keyPath)}, kpValueTy);
+        {AnyFunctionType::Param(kpTy, Ctx.Id_keyPath)}, kpValueTy, info);
     candidates.emplace_back(fnTy->castTo<AnyFunctionType>(), nullptr);
   }
 }
@@ -641,6 +656,9 @@ static bool collectPossibleCalleesForApply(
   } else if (auto CRCE = dyn_cast<ConstructorRefCallExpr>(fnExpr)) {
     collectPossibleCalleesByQualifiedLookup(
         DC, CRCE->getArg(), DeclNameRef::createConstructor(), candidates);
+  } else if (auto TE = dyn_cast<TypeExpr>(fnExpr)) {
+    collectPossibleCalleesByQualifiedLookup(
+        DC, TE, DeclNameRef::createConstructor(), candidates);
   } else if (auto *UME = dyn_cast<UnresolvedMemberExpr>(fnExpr)) {
     collectPossibleCalleesForUnresolvedMember(DC, UME, candidates);
   }
@@ -733,6 +751,115 @@ static bool getPositionInArgs(DeclContext &DC, Expr *Args, Expr *CCExpr,
   return false;
 }
 
+/// For function call arguments \p Args, return the argument at \p Position
+/// computed by \c getPositionInArgs
+static Expr *getArgAtPosition(Expr *Args, unsigned Position) {
+  if (isa<ParenExpr>(Args)) {
+    assert(Position == 0);
+    return Args;
+  }
+
+  if (auto *tuple = dyn_cast<TupleExpr>(Args)) {
+    return tuple->getElement(Position);
+  } else {
+    llvm_unreachable("Unable to retrieve arg at position returned by "
+                     "getPositionInArgs?");
+  }
+}
+
+/// Get index of \p CCExpr in \p Params. Note that the position in \p Params may
+/// be different than the position in \p Args if there are defaulted arguments
+/// in \p Params which don't occur in \p Args.
+///
+/// \returns \c true if success, \c false if \p CCExpr is not a part of \p Args.
+static bool getPositionInParams(DeclContext &DC, Expr *Args, Expr *CCExpr,
+                                ArrayRef<AnyFunctionType::Param> Params,
+                                unsigned &PosInParams) {
+  if (isa<ParenExpr>(Args)) {
+    PosInParams = 0;
+    return true;
+  }
+
+  auto *tuple = dyn_cast<TupleExpr>(Args);
+  if (!tuple) {
+    return false;
+  }
+
+  auto &SM = DC.getASTContext().SourceMgr;
+  PosInParams = 0;
+  unsigned PosInArgs = 0;
+  bool LastParamWasVariadic = false;
+  // We advance PosInArgs until we find argument that is after the code
+  // completion token, which is when we stop.
+  // For each argument, we try to find a matching parameter either by matching
+  // argument labels, in which case PosInParams may be advanced by more than 1,
+  // or by advancing PosInParams and PosInArgs both by 1.
+  for (; PosInArgs < tuple->getNumElements(); ++PosInArgs) {
+    if (!SM.isBeforeInBuffer(tuple->getElement(PosInArgs)->getEndLoc(),
+                             CCExpr->getStartLoc())) {
+      // The arg is after the code completion position. Stop.
+      if (LastParamWasVariadic && tuple->getElementName(PosInArgs).empty()) {
+        // If the last parameter was variadic and this argument stands by itself
+        // without a label, assume that it belongs to the previous vararg
+        // list.
+        PosInParams--;
+      }
+      break;
+    }
+
+    auto ArgName = tuple->getElementName(PosInArgs);
+    // If the last parameter we matched was variadic, we claim all following
+    // unlabeled arguments for that variadic parameter -> advance PosInArgs but
+    // not PosInParams.
+    if (LastParamWasVariadic && ArgName.empty()) {
+      continue;
+    } else {
+      LastParamWasVariadic = false;
+    }
+
+    // Look for a matching parameter label.
+    bool AdvancedPosInParams = false;
+    for (unsigned i = PosInParams; i < Params.size(); ++i) {
+      if (Params[i].getLabel() == ArgName) {
+        // We have found a label match. Advance the position in the params
+        // to point to the param after the one with this label.
+        PosInParams = i + 1;
+        AdvancedPosInParams = true;
+        if (Params[i].isVariadic()) {
+          LastParamWasVariadic = true;
+        }
+        break;
+      }
+    }
+
+    bool IsTrailingClosure =
+        PosInArgs >= tuple->getNumElements() - tuple->getNumTrailingElements();
+    if (!AdvancedPosInParams && IsTrailingClosure) {
+      // If the argument is a trailing closure, it can't match non-function
+      // parameters. Advance to the next function parameter.
+      for (unsigned i = PosInParams; i < Params.size(); ++i) {
+        if (Params[i].getParameterType()->is<FunctionType>()) {
+          PosInParams = i + 1;
+          AdvancedPosInParams = true;
+          break;
+        }
+      }
+    }
+
+    if (!AdvancedPosInParams) {
+      // We haven't performed any special advance logic. Assume the argument
+      // and parameter match, so advance PosInParams by 1.
+      ++PosInParams;
+    }
+  }
+  if (PosInArgs < tuple->getNumElements() && PosInParams < Params.size()) {
+    // We didn't search until the end, so we found a position in Params. Success
+    return true;
+  } else {
+    return false;
+  }
+}
+
 /// Given an expression and its context, the analyzer tries to figure out the
 /// expected type of the expression by analyzing its context.
 class ExprContextAnalyzer {
@@ -763,15 +890,15 @@ class ExprContextAnalyzer {
   bool analyzeApplyExpr(Expr *E) {
     // Collect parameter lists for possible func decls.
     SmallVector<FunctionTypeAndDecl, 2> Candidates;
-    Expr *Arg = nullptr;
+    Expr *Args = nullptr;
     if (auto *applyExpr = dyn_cast<ApplyExpr>(E)) {
       if (!collectPossibleCalleesForApply(*DC, applyExpr, Candidates))
         return false;
-      Arg = applyExpr->getArg();
+      Args = applyExpr->getArg();
     } else if (auto *subscriptExpr = dyn_cast<SubscriptExpr>(E)) {
       if (!collectPossibleCalleesForSubscript(*DC, subscriptExpr, Candidates))
         return false;
-      Arg = subscriptExpr->getIndex();
+      Args = subscriptExpr->getIndex();
     } else {
       llvm_unreachable("unexpected expression kind");
     }
@@ -779,18 +906,45 @@ class ExprContextAnalyzer {
     PossibleCallees.assign(Candidates.begin(), Candidates.end());
 
     // Determine the position of code completion token in call argument.
-    unsigned Position;
+    unsigned PositionInArgs;
     bool HasName;
-    if (!getPositionInArgs(*DC, Arg, ParsedExpr, Position, HasName))
+    if (!getPositionInArgs(*DC, Args, ParsedExpr, PositionInArgs, HasName))
       return false;
 
     // Collect possible types (or labels) at the position.
-    // FIXME: Take variadic and optional parameters into account. We need to do
-    //        something equivalent to 'constraints::matchCallArguments'
     {
-      bool MayNeedName = !HasName && !E->isImplicit() &&
-                         (isa<CallExpr>(E) | isa<SubscriptExpr>(E) ||
-                          isa<UnresolvedMemberExpr>(E));
+      bool MayBeArgForLabeledParam =
+          HasName || E->isImplicit() ||
+          (!isa<CallExpr>(E) && !isa<SubscriptExpr>(E) &&
+           !isa<UnresolvedMemberExpr>(E));
+
+      // If the completion position cannot be the actual argument, it must be
+      // able to be an argument label.
+      bool MayBeLabel = !MayBeArgForLabeledParam;
+
+      // Alternatively, the code completion position may complete to an argument
+      // label if we are currently completing variadic args.
+      // E.g.
+      // func foo(x: Int..., y: Int...) {}
+      // foo(x: 1, #^COMPLETE^#)
+      // #^COMPLETE^# may complete to either an additional variadic arg or to
+      // the argument label `y`.
+      //
+      // Varargs are represented by a VarargExpansionExpr that contains an
+      // ArrayExpr on the call side.
+      if (auto Vararg = dyn_cast<VarargExpansionExpr>(
+              getArgAtPosition(Args, PositionInArgs))) {
+        if (auto Array = dyn_cast_or_null<ArrayExpr>(Vararg->getSubExpr())) {
+          if (Array->getNumElements() > 0 &&
+              !isa<CodeCompletionExpr>(Array->getElement(0))) {
+            // We can only complete as argument label if we have at least one
+            // proper vararg before the code completion token. We shouldn't be
+            // suggesting labels for:
+            // foo(x: #^COMPLETE^#)
+            MayBeLabel = true;
+          }
+        }
+      }
       SmallPtrSet<CanType, 4> seenTypes;
       llvm::SmallSet<std::pair<Identifier, CanType>, 4> seenArgs;
       for (auto &typeAndDecl : Candidates) {
@@ -799,13 +953,22 @@ class ExprContextAnalyzer {
           memberDC = typeAndDecl.Decl->getInnermostDeclContext();
 
         auto Params = typeAndDecl.Type->getParams();
+        unsigned PositionInParams;
+        if (!getPositionInParams(*DC, Args, ParsedExpr, Params,
+                                 PositionInParams)) {
+          // If the argument doesn't have a matching position in the parameters,
+          // indicate that with optional nullptr param.
+          if (seenArgs.insert({Identifier(), CanType()}).second)
+            recordPossibleParam(nullptr, /*isRequired=*/false);
+          continue;
+        }
         ParameterList *paramList = nullptr;
         if (auto VD = typeAndDecl.Decl) {
           paramList = getParameterList(VD);
           if (paramList && paramList->size() != Params.size())
             paramList = nullptr;
         }
-        for (auto Pos = Position; Pos < Params.size(); ++Pos) {
+        for (auto Pos = PositionInParams; Pos < Params.size(); ++Pos) {
           const auto &paramType = Params[Pos];
           Type ty = paramType.getPlainType();
           if (memberDC && ty->hasTypeParameter())
@@ -815,11 +978,13 @@ class ExprContextAnalyzer {
               paramList && (paramList->get(Pos)->isDefaultArgument() ||
                             paramList->get(Pos)->isVariadic());
 
-          if (paramType.hasLabel() && MayNeedName) {
+          if (MayBeLabel && paramType.hasLabel()) {
             if (seenArgs.insert({paramType.getLabel(), ty->getCanonicalType()})
                     .second)
               recordPossibleParam(&paramType, !canSkip);
-          } else {
+          }
+
+          if (MayBeArgForLabeledParam || !paramType.hasLabel()) {
             auto argTy = ty;
             if (paramType.isInOut())
               argTy = InOutType::get(argTy);
@@ -830,12 +995,6 @@ class ExprContextAnalyzer {
           }
           if (!canSkip)
             break;
-        }
-        // If the argument position is out of expeceted number, indicate that
-        // with optional nullptr param.
-        if (Position >= Params.size()) {
-          if (seenArgs.insert({Identifier(), CanType()}).second)
-            recordPossibleParam(nullptr, /*isRequired=*/false);
         }
       }
     }
@@ -866,12 +1025,12 @@ class ExprContextAnalyzer {
         if (auto boundGenericT = arrayT->getAs<BoundGenericType>()) {
           // let _: [Element] = [#HERE#]
           // In this case, 'Element' is the expected type.
-          if (boundGenericT->getDecl() == Context.getArrayDecl())
+          if (boundGenericT->isArray())
             recordPossibleType(boundGenericT->getGenericArgs()[0]);
 
           // let _: [Key : Value] = [#HERE#]
           // In this case, 'Key' is the expected type.
-          if (boundGenericT->getDecl() == Context.getDictionaryDecl())
+          if (boundGenericT->isDictionary())
             recordPossibleType(boundGenericT->getGenericArgs()[0]);
         }
       }
@@ -883,7 +1042,7 @@ class ExprContextAnalyzer {
 
       for (auto dictT : dictCtxtInfo.getPossibleTypes()) {
         if (auto boundGenericT = dictT->getAs<BoundGenericType>()) {
-          if (boundGenericT->getDecl() == Context.getDictionaryDecl()) {
+          if (boundGenericT->isDictionary()) {
             if (ParsedExpr->isImplicit() && isa<TupleExpr>(ParsedExpr)) {
               // let _: [Key : Value] = [#HERE#:]
               // let _: [Key : Value] = [#HERE#:val]
@@ -898,7 +1057,7 @@ class ExprContextAnalyzer {
             } else {
               // let _: [Key : Value] = [key: val, #HERE#]
               // In this case, assume 'Key' is the expected type.
-              if (boundGenericT->getDecl() == Context.getDictionaryDecl())
+              if (boundGenericT->isDictionary())
                 recordPossibleType(boundGenericT->getGenericArgs()[0]);
             }
           }
@@ -911,7 +1070,7 @@ class ExprContextAnalyzer {
       if (IE->isFolded() &&
           SM.rangeContains(IE->getCondExpr()->getSourceRange(),
                            ParsedExpr->getSourceRange())) {
-        recordPossibleType(Context.getBoolDecl()->getDeclaredInterfaceType());
+        recordPossibleType(Context.getBoolType());
         break;
       }
       ExprContextInfo ternaryCtxtInfo(DC, Parent);
@@ -991,8 +1150,7 @@ class ExprContextAnalyzer {
     case StmtKind::ForEach:
       if (auto SEQ = cast<ForEachStmt>(Parent)->getSequence()) {
         if (containsTarget(SEQ)) {
-          recordPossibleType(
-              Context.getSequenceDecl()->getDeclaredInterfaceType());
+          recordPossibleType(Context.getSequenceType());
         }
       }
       break;
@@ -1001,7 +1159,7 @@ class ExprContextAnalyzer {
     case StmtKind::While:
     case StmtKind::Guard:
       if (isBoolConditionOf(Parent)) {
-        recordPossibleType(Context.getBoolDecl()->getDeclaredInterfaceType());
+        recordPossibleType(Context.getBoolType());
       }
       break;
     default:

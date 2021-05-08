@@ -1862,7 +1862,7 @@ derived from the ARC object. As an example, consider the following Swift/SIL::
   bb0(%0 : @guaranteed Klass):
     // Definition of '%1'
     %1 = copy_value %0 : $Klass
-    
+
     // Consume '%1'. This means '%1' can no longer be used after this point. We
     // rebind '%1' in the destination blocks (bbYes, bbNo).
     checked_cast_br %1 : $Klass to $OtherKlass, bbYes, bbNo
@@ -3302,7 +3302,7 @@ hop_to_executor
 
   hop_to_executor %0 : $T
 
-  // $T must conform to the Actor protocol
+  // $T must be Builtin.Executor or conform to the Actor protocol
 
 Ensures that all instructions, which need to run on the actor's executor
 actually run on that executor.
@@ -3311,6 +3311,29 @@ This instruction can only be used inside an ``@async`` function.
 Checks if the current executor is the one which is bound to the operand actor.
 If not, begins a suspension point and enqueues the continuation to the executor
 which is bound to the operand actor.
+
+SIL generation emits this instruction with operands of actor type as
+well as of type ``Builtin.Executor``.  The former are expected to be
+lowered by the SIL pipeline, so that IR generation only operands of type
+``Builtin.Executor`` remain.
+
+The operand is a guaranteed operand, i.e. not consumed.
+
+extract_executor
+````````````````
+
+::
+
+  sil-instruction ::= 'extract_executor' sil-operand
+
+  %1 = extract_executor %0 : $T
+  // $T must be Builtin.Executor or conform to the Actor protocol
+  // %1 will be of type Builtin.Executor
+
+Extracts the executor from the executor or actor operand. SIL generation
+emits this instruction to produce executor values when needed (e.g.,
+to provide to a runtime function). It will be lowered away by the SIL
+pipeline.
 
 The operand is a guaranteed operand, i.e. not consumed.
 
@@ -3466,7 +3489,7 @@ debug_value
 
 ::
 
-  sil-instruction ::= debug_value sil-operand (',' debug-var-attr)*
+  sil-instruction ::= debug_value '[poison]'? sil-operand (',' debug-var-attr)*
 
   debug_value %1 : $Int
 
@@ -3487,6 +3510,15 @@ There are a number of attributes that provide details about the source
 variable that is being described, including the name of the
 variable. For function and closure arguments ``argno`` is the number
 of the function argument starting with 1.
+
+If the '[poison]' flag is set, then all references within this debug
+value will be overwritten with a sentinel at this point in the
+program. This is used in debug builds when shortening non-trivial
+value lifetimes to ensure the debugger cannot inspect invalid
+memory. `debug_value` instructions with the poison flag are not
+generated until OSSA islowered. They are not expected to be serialized
+within the module, and the pipeline is not expected to do any
+significant code motion after lowering.
 
 debug_value_addr
 ````````````````
@@ -4508,7 +4540,7 @@ prev_dynamic_function_ref
   // $@convention(thin) T -> U must be a thin function type
   // %1 has type $T -> U
 
-Creates a reference to a previous implemenation of a `dynamic_replacement` SIL
+Creates a reference to a previous implementation of a `dynamic_replacement` SIL
 function.
 
 For the following Swift code::

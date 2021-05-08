@@ -95,7 +95,10 @@ Type swift::getMemberTypeForComparison(const ValueDecl *member,
     // For subscripts, we don't have a 'Self' type, but turn it
     // into a monomorphic function type.
     auto funcTy = memberType->castTo<AnyFunctionType>();
-    memberType = FunctionType::get(funcTy->getParams(), funcTy->getResult());
+    // FIXME: Verify ExtInfo state is correct, not working by accident.
+    FunctionType::ExtInfo info;
+    memberType =
+        FunctionType::get(funcTy->getParams(), funcTy->getResult(), info);
   } else {
     // For properties, strip off ownership.
     memberType = memberType->getReferenceStorageReferent();
@@ -1446,7 +1449,7 @@ namespace  {
     UNINTERESTING_ATTR(Exported)
     UNINTERESTING_ATTR(ForbidSerializingReference)
     UNINTERESTING_ATTR(GKInspectable)
-    UNINTERESTING_ATTR(HasAsyncAlternative)
+    UNINTERESTING_ATTR(CompletionHandlerAsync)
     UNINTERESTING_ATTR(HasMissingDesignatedInitializers)
     UNINTERESTING_ATTR(IBAction)
     UNINTERESTING_ATTR(IBDesignable)
@@ -1534,14 +1537,18 @@ namespace  {
     UNINTERESTING_ATTR(ActorIndependent)
     UNINTERESTING_ATTR(GlobalActor)
     UNINTERESTING_ATTR(Async)
-    UNINTERESTING_ATTR(Concurrent)
+    UNINTERESTING_ATTR(Spawn)
+    UNINTERESTING_ATTR(Sendable)
 
     UNINTERESTING_ATTR(AtRethrows)
     UNINTERESTING_ATTR(Marker)
 
     UNINTERESTING_ATTR(AtReasync)
     UNINTERESTING_ATTR(Nonisolated)
-
+    UNINTERESTING_ATTR(UnsafeSendable)
+    UNINTERESTING_ATTR(UnsafeMainActor)
+    UNINTERESTING_ATTR(ImplicitSelfCapture)
+    UNINTERESTING_ATTR(InheritActorContext)
 #undef UNINTERESTING_ATTR
 
     void visitAvailableAttr(AvailableAttr *attr) {
@@ -1815,6 +1822,18 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
         return true;
       }
     }
+
+    // Make sure an effectful storage decl is only overridden by a storage
+    // decl with the same or fewer effect kinds.
+    if (!overrideASD->isLessEffectfulThan(baseASD, EffectKind::Async)) {
+      diags.diagnose(overrideASD, diag::override_with_more_effects,
+                     overrideASD->getDescriptiveKind(), "async");
+      return true;
+    } else if (!overrideASD->isLessEffectfulThan(baseASD, EffectKind::Throws)) {
+      diags.diagnose(overrideASD, diag::override_with_more_effects,
+                     overrideASD->getDescriptiveKind(), "throwing");
+      return true;
+    }
   }
 
   // Various properties are only checked for the storage declarations
@@ -1896,12 +1915,19 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     }
   }
   // If the overriding declaration is 'throws' but the base is not,
-  // complain.
+  // complain. Do the same for 'async'
   if (auto overrideFn = dyn_cast<AbstractFunctionDecl>(override)) {
     if (overrideFn->hasThrows() &&
         !cast<AbstractFunctionDecl>(base)->hasThrows()) {
-      diags.diagnose(override, diag::override_throws,
-                  isa<ConstructorDecl>(override));
+      diags.diagnose(override, diag::override_with_more_effects,
+                     override->getDescriptiveKind(), "throwing");
+      diags.diagnose(base, diag::overridden_here);
+    }
+
+    if (overrideFn->hasAsync() &&
+        !cast<AbstractFunctionDecl>(base)->hasAsync()) {
+      diags.diagnose(override, diag::override_with_more_effects,
+                     override->getDescriptiveKind(), "async");
       diags.diagnose(base, diag::overridden_here);
     }
 
@@ -1915,18 +1941,37 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
 
   // The overridden declaration cannot be 'final'.
   if (base->isFinal() && !isAccessor) {
-    // FIXME: Customize message to the kind of thing.
-    auto baseKind = base->getDescriptiveKind();
-    switch (baseKind) {
-    case DescriptiveDeclKind::StaticProperty:
-    case DescriptiveDeclKind::StaticMethod:
-    case DescriptiveDeclKind::StaticSubscript:
-      override->diagnose(diag::override_static, baseKind);
-      break;
-    default:
-      override->diagnose(diag::override_final,
-                         override->getDescriptiveKind(), baseKind);
-      break;
+    // Use a special diagnostic for overriding an actor's unownedExecutor
+    // method.  TODO: only if it's implicit?  But then we need to
+    // propagate implicitness in module interfaces.
+    auto isActorUnownedExecutor = [&] {
+      auto prop = dyn_cast<VarDecl>(base);
+      return (prop &&
+              prop->isFinal() &&
+              isa<ClassDecl>(prop->getDeclContext()) &&
+              cast<ClassDecl>(prop->getDeclContext())->isActor() &&
+              !prop->isStatic() &&
+              prop->getName() == ctx.Id_unownedExecutor &&
+              prop->getInterfaceType()->getAnyNominal() ==
+                ctx.getUnownedSerialExecutorDecl());
+    };
+
+    if (isActorUnownedExecutor()) {
+      override->diagnose(diag::override_implicit_unowned_executor);
+    } else {
+      // FIXME: Customize message to the kind of thing.
+      auto baseKind = base->getDescriptiveKind();
+      switch (baseKind) {
+      case DescriptiveDeclKind::StaticProperty:
+      case DescriptiveDeclKind::StaticMethod:
+      case DescriptiveDeclKind::StaticSubscript:
+        override->diagnose(diag::override_static, baseKind);
+        break;
+      default:
+        override->diagnose(diag::override_final,
+                           override->getDescriptiveKind(), baseKind);
+        break;
+      }
     }
 
     base->diagnose(diag::overridden_here);

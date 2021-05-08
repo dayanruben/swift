@@ -36,6 +36,7 @@
 #include "swift/AST/TypeWalker.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/Defer.h"
+#include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Statistic.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/DenseMap.h"
@@ -124,6 +125,8 @@ STATISTIC(NumRewriteRhsSimplifiedToLhs,
           "# of rewrite rule right-hand sides simplified to lhs (and removed)");
 STATISTIC(NumRewriteRulesRedundant,
           "# of rewrite rules that are redundant (and removed)");
+STATISTIC(NumSignaturesRebuiltWithoutRedundantRequirements,
+          "# of generic signatures which had a concretized conformance requirement");
 
 namespace  {
 
@@ -436,19 +439,11 @@ class GenericSignatureBuilder::ExplicitRequirement {
 public:
   ExplicitRequirement(RequirementKind kind,
                       const RequirementSource *source,
-                      Type type)
-    : sourceAndKind(source, kind),
-      rhs(type ? type->getCanonicalType() : Type()) {}
-
-  ExplicitRequirement(RequirementKind kind,
-                      const RequirementSource *source,
-                      ProtocolDecl *proto)
-    : sourceAndKind(source, kind), rhs(proto) {}
-
-  ExplicitRequirement(RequirementKind kind,
-                      const RequirementSource *source,
-                      LayoutConstraint layout)
-    : sourceAndKind(source, kind), rhs(layout) {}
+                      RequirementRHS rhs)
+    : sourceAndKind(source, kind), rhs(rhs) {
+    if (auto type = rhs.dyn_cast<Type>())
+      this->rhs = type->getCanonicalType();
+  }
 
   /// For a Constraint<T> with an explicit requirement source, we recover the
   /// subject type from the requirement source and the right hand side from the
@@ -465,36 +460,10 @@ public:
     return ExplicitRequirement(kind, constraint.source, constraint.value);
   }
 
-  /// To recover the root explicit requirement from a Constraint<T>, we walk the
-  /// requirement source up the root, and look at both the root and the next
-  /// innermost child.
-  /// Together, these give us the subject type (via the root) and the right hand
-  /// side of the requirement (from the next innermost child).
-  ///
-  /// The requirement kind must be passed in since Constraint<T>'s kind is
-  /// implicit by virtue of which list it appears under inside its equivalence
-  /// class, and is not stored inside the constraint.
-  ///
-  /// The constraint's actual value is ignored; that's the right hand
-  /// side of the derived constraint, not the right hand side of the original
-  /// explicit requirement.
-  template<typename T>
-  static ExplicitRequirement fromDerivedConstraint(RequirementKind kind,
-                                                   Constraint<T> constraint) {
-    assert(constraint.source->isDerivedNonRootRequirement());
-
-    const RequirementSource *root = constraint.source;
-    const RequirementSource *child = nullptr;
-
-    while (root->parent && root->isDerivedRequirement()) {
-      child = root;
-      root = root->parent;
-    }
-
-    assert(root != nullptr);
-    assert(child != nullptr);
-
-    switch (child->kind) {
+  static std::pair<RequirementKind, RequirementRHS>
+  getKindAndRHS(const RequirementSource *source,
+                ASTContext &ctx) {
+    switch (source->kind) {
     // If we have a protocol requirement source whose parent is the root, then
     // we have an implied constraint coming from a protocol's requirement
     // signature:
@@ -508,8 +477,8 @@ public:
     // Therefore the original constraint was 'T : Sequence'.
     case RequirementSource::ProtocolRequirement:
     case RequirementSource::InferredProtocolRequirement: {
-      auto *proto = child->getProtocolDecl();
-      return ExplicitRequirement(RequirementKind::Conformance, root, proto);
+      auto *proto = source->getProtocolDecl();
+      return std::make_pair(RequirementKind::Conformance, proto);
     }
 
     // If we have a superclass or concrete source whose parent is the root, then
@@ -525,29 +494,28 @@ public:
     // respectively.
     case RequirementSource::Superclass:
     case RequirementSource::Concrete: {
-      Type conformingType = child->getStoredType();
+      Type conformingType = source->getStoredType();
       if (conformingType) {
         // A concrete requirement source for a self-conforming exitential type
         // stores the original type, and not the conformance, because there is
         // no way to recover the original type from the conformance.
         assert(conformingType->isExistentialType());
       } else {
-        auto conformance = child->getProtocolConformance();
+        auto conformance = source->getProtocolConformance();
         if (conformance.isConcrete())
           conformingType = conformance.getConcrete()->getType();
         else {
           // If the conformance was abstract or invalid, we're dealing with
           // invalid code. We have no way to recover the superclass type, so
           // just stick an ErrorType in there.
-          auto &ctx = constraint.getSubjectDependentType({ })->getASTContext();
           conformingType = ErrorType::get(ctx);
         }
       }
 
-      auto kind = (child->kind == RequirementSource::Superclass
+      auto kind = (source->kind == RequirementSource::Superclass
                    ? RequirementKind::Superclass
                    : RequirementKind::SameType);
-      return ExplicitRequirement(kind, root, conformingType);
+      return std::make_pair(kind, conformingType);
     }
 
     // If we have a layout source whose parent is the root, then
@@ -560,21 +528,67 @@ public:
     // by a superclass constraint, ensuring that it supercedes an explicit
     // 'T : AnyObject' constraint).
     case RequirementSource::Layout: {
-      auto type = child->getStoredType();
-      return ExplicitRequirement(RequirementKind::Superclass, root, type);
+      auto type = source->getStoredType();
+      return std::make_pair(RequirementKind::Superclass, type);
     }
 
     default: {
-      auto &SM = constraint.getSubjectDependentType({ })->getASTContext().SourceMgr;
-      constraint.source->dump(llvm::errs(), &SM, 0);
+      source->dump(llvm::errs(), &ctx.SourceMgr, 0);
       llvm::errs() << "\n";
-      llvm_unreachable("Unknown root kind");
+      llvm_unreachable("Unhandled source kind");
     }
     }
   }
 
+  static ExplicitRequirement fromRequirementSource(const RequirementSource *source,
+                                                   ASTContext &ctx) {
+    auto *parent = source->parent;
+
+    RequirementKind kind;
+    RequirementRHS rhs;
+    std::tie(kind, rhs) = getKindAndRHS(source, ctx);
+
+    return ExplicitRequirement(kind, parent, rhs);
+  }
+
+  /// To recover the root explicit requirement from a Constraint<T>, we walk the
+  /// requirement source up the root, and look at both the root and the next
+  /// innermost child.
+  /// Together, these give us the subject type (via the root) and the right hand
+  /// side of the requirement (from the next innermost child).
+  ///
+  /// The requirement kind must be passed in since Constraint<T>'s kind is
+  /// implicit by virtue of which list it appears under inside its equivalence
+  /// class, and is not stored inside the constraint.
+  ///
+  /// The constraint's actual value is ignored; that's the right hand
+  /// side of the derived constraint, not the right hand side of the original
+  /// explicit requirement.
+  template<typename T>
+  static ExplicitRequirement fromDerivedConstraint(Constraint<T> constraint,
+                                                   ASTContext &ctx) {
+    assert(constraint.source->isDerivedNonRootRequirement());
+
+    const RequirementSource *root = constraint.source;
+    const RequirementSource *child = nullptr;
+
+    while (root->parent && root->isDerivedRequirement()) {
+      child = root;
+      root = root->parent;
+    }
+
+    assert(child != nullptr);
+    assert(root != nullptr);
+
+    return fromRequirementSource(child, ctx);
+  }
+
   RequirementKind getKind() const {
     return sourceAndKind.getInt();
+  }
+
+  Type getSubjectType() const {
+    return getSource()->getStoredType();
   }
 
   const RequirementSource *getSource() const {
@@ -616,6 +630,11 @@ public:
 
     return true;
   }
+
+  friend bool operator!=(const ExplicitRequirement &lhs,
+                         const ExplicitRequirement &rhs) {
+    return !(lhs == rhs);
+  }
 };
 
 namespace llvm {
@@ -638,6 +657,15 @@ template<> struct DenseMapInfo<swift::GenericSignatureBuilder::ExplicitRequireme
 
 };
 
+}
+
+namespace {
+  struct ConflictingConcreteTypeRequirement {
+    ExplicitRequirement concreteTypeRequirement;
+    ExplicitRequirement otherRequirement;
+    Type resolvedConcreteType;
+    RequirementRHS otherRHS;
+  };
 }
 
 struct GenericSignatureBuilder::Implementation {
@@ -690,8 +718,37 @@ struct GenericSignatureBuilder::Implementation {
   /// Whether there were any errors.
   bool HadAnyError = false;
 
-  /// The set of computed redundant explicit requirements.
-  llvm::DenseSet<ExplicitRequirement> RedundantRequirements;
+  /// All explicit non-same type requirements that were added to the builder.
+  SmallSetVector<ExplicitRequirement, 2> ExplicitRequirements;
+
+  /// All explicit same-type requirements that were added to the builder.
+  SmallVector<Requirement, 2> ExplicitSameTypeRequirements;
+
+  /// A mapping of redundant explicit requirements to the best root requirement
+  /// that implies them. Built by computeRedundantRequirements().
+  using RedundantRequirementMap =
+      llvm::DenseMap<ExplicitRequirement,
+                     llvm::SmallDenseSet<ExplicitRequirement, 2>>;
+
+  RedundantRequirementMap RedundantRequirements;
+
+  /// Requirements which conflict with other requirements, for example if a
+  /// there are two unrelated superclass requirements on the same type,
+  /// the second one is recorded here. Built by computeRedundantRequirements().
+  llvm::DenseMap<ExplicitRequirement, RequirementRHS> ConflictingRequirements;
+
+  /// Pairs of conflicting concrete type vs. superclass/layout/conformance
+  /// requirements.
+  std::vector<ConflictingConcreteTypeRequirement>
+      ConflictingConcreteTypeRequirements;
+
+  llvm::DenseSet<ExplicitRequirement> ExplicitConformancesImpliedByConcrete;
+
+  llvm::DenseMap<std::pair<CanType, ProtocolDecl *>,
+                 ConformanceAccessPath> ConformanceAccessPaths;
+
+  std::vector<std::pair<CanType, ConformanceAccessPath>>
+      CurrentConformanceAccessPaths;
 
 #ifndef NDEBUG
   /// Whether we've already computed redundant requiremnts.
@@ -961,7 +1018,7 @@ static Type replaceSelfWithType(Type selfType, Type depTy) {
 /// occurs within the requirement signature of its own protocol.
 static bool isSelfDerivedProtocolRequirementInProtocol(
                                              const RequirementSource *source,
-                                             ProtocolDecl *selfProto,
+                                             const ProtocolDecl *selfProto,
                                              GenericSignatureBuilder &builder) {
   assert(source->isProtocolRequirement());
 
@@ -1025,7 +1082,7 @@ const RequirementSource *RequirementSource::getMinimalConformanceSource(
   };
 
   bool sawProtocolRequirement = false;
-  ProtocolDecl *requirementSignatureSelfProto = nullptr;
+  const ProtocolDecl *requirementSignatureSelfProto = nullptr;
 
   Type rootType = nullptr;
   Optional<std::pair<const RequirementSource *, const RequirementSource *>>
@@ -1057,13 +1114,14 @@ const RequirementSource *RequirementSource::getMinimalConformanceSource(
                                           ArchetypeResolutionKind::WellFormed);
       assert(parentEquivClass && "Not a well-formed type?");
 
-      if (parentEquivClass->concreteType)
-        derivedViaConcrete = true;
-      else if (parentEquivClass->superclass &&
-               builder.lookupConformance(parentType->getCanonicalType(),
-                                         parentEquivClass->superclass,
-                                         source->getProtocolDecl()))
-        derivedViaConcrete = true;
+      if (requirementSignatureSelfProto) {
+        if (parentEquivClass->concreteType)
+          derivedViaConcrete = true;
+        else if (parentEquivClass->superclass &&
+                 builder.lookupConformance(parentEquivClass->superclass,
+                                           source->getProtocolDecl()))
+          derivedViaConcrete = true;
+      }
 
       // The parent potential archetype must conform to the protocol in which
       // this requirement resides. Add this constraint.
@@ -1758,6 +1816,37 @@ SourceLoc FloatingRequirementSource::getLoc() const {
   return SourceLoc();
 }
 
+bool FloatingRequirementSource::isDerived() const {
+  switch (kind) {
+  case Explicit:
+  case Inferred:
+  case NestedTypeNameMatch:
+    return false;
+
+  case AbstractProtocol:
+    switch (storage.get<const RequirementSource *>()->kind) {
+    case RequirementSource::RequirementSignatureSelf:
+      return false;
+
+    case RequirementSource::Concrete:
+    case RequirementSource::Explicit:
+    case RequirementSource::Inferred:
+    case RequirementSource::NestedTypeNameMatch:
+    case RequirementSource::Parent:
+    case RequirementSource::ProtocolRequirement:
+    case RequirementSource::InferredProtocolRequirement:
+    case RequirementSource::Superclass:
+    case RequirementSource::Layout:
+    case RequirementSource::EquivalentType:
+      return true;
+    }
+
+  case Resolved:
+    return storage.get<const RequirementSource *>()->isDerivedRequirement();
+  }
+  llvm_unreachable("unhandled kind");
+}
+
 bool FloatingRequirementSource::isExplicit() const {
   switch (kind) {
   case Explicit:
@@ -1834,7 +1923,6 @@ FloatingRequirementSource FloatingRequirementSource::asInferred(
 }
 
 bool FloatingRequirementSource::isRecursive(
-                                    Type rootType,
                                     GenericSignatureBuilder &builder) const {
   llvm::SmallSet<std::pair<CanType, ProtocolDecl *>, 32> visitedAssocReqs;
   for (auto storedSource = storage.dyn_cast<const RequirementSource *>();
@@ -2082,7 +2170,9 @@ TypeDecl *EquivalenceClass::lookupNestedType(
   if (cached != nestedTypeNameCache.end() &&
       cached->second.numConformancesPresent == conformsTo.size() &&
       (!superclass ||
-       cached->second.superclassPresent == superclass->getCanonicalType())) {
+       cached->second.superclassPresent == superclass->getCanonicalType()) &&
+      (!concreteType ||
+        cached->second.concreteTypePresent == concreteType->getCanonicalType())) {
     ++NumNestedTypeCacheHits;
     return populateResult(cached->second);
   }
@@ -2092,7 +2182,6 @@ TypeDecl *EquivalenceClass::lookupNestedType(
 
   // Look for types with the given name in protocols that we know about.
   AssociatedTypeDecl *bestAssocType = nullptr;
-  llvm::SmallSetVector<AssociatedTypeDecl *, 4> assocTypeAnchors;
   SmallVector<TypeDecl *, 4> concreteDecls;
   for (const auto &conforms : conformsTo) {
     ProtocolDecl *proto = conforms.first;
@@ -2104,7 +2193,6 @@ TypeDecl *EquivalenceClass::lookupNestedType(
       if (auto assocType = dyn_cast<AssociatedTypeDecl>(member)) {
         // Retrieve the associated type anchor.
         assocType = assocType->getAssociatedTypeAnchor();
-        assocTypeAnchors.insert(assocType);
 
         if (!bestAssocType ||
              compareAssociatedTypes(assocType, bestAssocType) < 0)
@@ -2131,28 +2219,13 @@ TypeDecl *EquivalenceClass::lookupNestedType(
         lookupConcreteNestedType(decl, name, concreteDecls);
   }
 
-  // Infer same-type constraints among same-named associated type anchors.
-  if (assocTypeAnchors.size() > 1) {
-    auto anchorType = getAnchor(builder, builder.getGenericParams());
-    auto inferredSource =
-      FloatingRequirementSource::forNestedTypeNameMatch(
-        assocTypeAnchors.front()->getName());
-    for (auto assocType : assocTypeAnchors) {
-      if (assocType == bestAssocType) continue;
-
-      builder.addRequirement(
-        Requirement(RequirementKind::SameType,
-                    DependentMemberType::get(anchorType, bestAssocType),
-                    DependentMemberType::get(anchorType, assocType)),
-        nullptr, inferredSource, nullptr, nullptr);
-    }
-  }
-
   // Form the new cache entry.
   CachedNestedType entry;
   entry.numConformancesPresent = conformsTo.size();
   entry.superclassPresent =
     superclass ? superclass->getCanonicalType() : CanType();
+  entry.concreteTypePresent =
+    concreteType ? concreteType->getCanonicalType() : CanType();
   if (bestAssocType) {
     entry.types.push_back(bestAssocType);
     entry.types.insert(entry.types.end(),
@@ -2362,6 +2435,13 @@ Type EquivalenceClass::getTypeInContext(GenericSignatureBuilder &builder,
 
 void EquivalenceClass::dump(llvm::raw_ostream &out,
                             GenericSignatureBuilder *builder) const {
+  auto dumpSource = [&](const RequirementSource *source) {
+    source->dump(out, &builder->getASTContext().SourceMgr, 4);
+    if (source->isDerivedRequirement())
+      out << " [derived]";
+    out << "\n";
+  };
+
   out << "Equivalence class represented by "
     << members.front()->getRepresentative()->getDebugName() << ":\n";
   out << "Members: ";
@@ -2375,10 +2455,7 @@ void EquivalenceClass::dump(llvm::raw_ostream &out,
   for (auto entry : conformsTo) {
     out << "  " << entry.first->getNameStr() << "\n";
     for (auto constraint : entry.second) {
-      constraint.source->dump(out, &builder->getASTContext().SourceMgr, 4);
-      if (constraint.source->isDerivedRequirement())
-        out << " [derived]";
-      out << "\n";
+      dumpSource(constraint.source);
     }
   }
 
@@ -2386,18 +2463,33 @@ void EquivalenceClass::dump(llvm::raw_ostream &out,
   for (auto constraint : sameTypeConstraints) {
     out << "  " << constraint.getSubjectDependentType({})
         << " == " << constraint.value << "\n";
-    constraint.source->dump(out, &builder->getASTContext().SourceMgr, 4);
-    if (constraint.source->isDerivedRequirement())
-      out << " [derived]";
-    out << "\n";
+      dumpSource(constraint.source);
   }
 
-  if (concreteType)
+  if (concreteType) {
     out << "Concrete type: " << concreteType.getString() << "\n";
-  if (superclass)
+    for (auto constraint : concreteTypeConstraints) {
+      out << "  " << constraint.getSubjectDependentType({})
+          << " == " << constraint.value << "\n";
+      dumpSource(constraint.source);
+    }
+  }
+  if (superclass) {
     out << "Superclass: " << superclass.getString() << "\n";
-  if (layout)
+    for (auto constraint : superclassConstraints) {
+      out << "  " << constraint.getSubjectDependentType({})
+          << " : " << constraint.value << "\n";
+      dumpSource(constraint.source);
+    }
+  }
+  if (layout) {
     out << "Layout: " << layout.getString() << "\n";
+    for (auto constraint : layoutConstraints) {
+      out << "  " << constraint.getSubjectDependentType({})
+          << " : " << constraint.value << "\n";
+      dumpSource(constraint.source);
+    }
+  }
 
   if (!delayedRequirements.empty()) {
     out << "Delayed requirements:\n";
@@ -2539,8 +2631,7 @@ GenericSignatureBuilder::resolveConcreteConformance(ResolvedType type,
     concreteSource = equivClass->concreteTypeConstraints.front().source;
 
   // Lookup the conformance of the concrete type to this protocol.
-  auto conformance =
-      lookupConformance(type.getDependentType(), concrete, proto);
+  auto conformance = lookupConformance(concrete, proto);
   if (conformance.isInvalid()) {
     if (!concrete->hasError() && concreteSource->getLoc().isValid()) {
       Impl->HadAnyError = true;
@@ -2574,7 +2665,19 @@ GenericSignatureBuilder::resolveConcreteConformance(ResolvedType type,
     concreteSource = concreteSource->viaConcrete(*this, concrete);
   } else {
     concreteSource = concreteSource->viaConcrete(*this, conformance);
-    equivClass->recordConformanceConstraint(*this, type, proto, concreteSource);
+  }
+
+  equivClass->recordConformanceConstraint(*this, type, proto, concreteSource);
+
+  // Only infer conditional requirements from explicit sources.
+  bool hasExplicitSource = llvm::any_of(
+      equivClass->concreteTypeConstraints,
+      [](const ConcreteConstraint &constraint) {
+        return (!constraint.source->isDerivedRequirement() &&
+                constraint.source->getLoc().isValid());
+      });
+
+  if (hasExplicitSource) {
     if (addConditionalRequirements(conformance, /*inferForModule=*/nullptr,
                                    concreteSource->getLoc()))
       return nullptr;
@@ -2591,8 +2694,7 @@ const RequirementSource *GenericSignatureBuilder::resolveSuperConformance(
   if (!superclass) return nullptr;
 
   // Lookup the conformance of the superclass to this protocol.
-  auto conformance =
-    lookupConformance(type.getDependentType(), superclass, proto);
+  auto conformance = lookupConformance(superclass, proto);
   if (conformance.isInvalid())
     return nullptr;
 
@@ -2609,9 +2711,20 @@ const RequirementSource *GenericSignatureBuilder::resolveSuperConformance(
 
   superclassSource = superclassSource->viaSuperclass(*this, conformance);
   equivClass->recordConformanceConstraint(*this, type, proto, superclassSource);
-  if (addConditionalRequirements(conformance, /*inferForModule=*/nullptr,
-                                 superclassSource->getLoc()))
-    return nullptr;
+
+  // Only infer conditional requirements from explicit sources.
+  bool hasExplicitSource = llvm::any_of(
+    equivClass->superclassConstraints,
+    [](const ConcreteConstraint &constraint) {
+      return (!constraint.source->isDerivedRequirement() &&
+              constraint.source->getLoc().isValid());
+    });
+
+  if (hasExplicitSource) {
+    if (addConditionalRequirements(conformance, /*inferForModule=*/nullptr,
+                                   superclassSource->getLoc()))
+      return nullptr;
+  }
 
   return superclassSource;
 }
@@ -3687,13 +3800,12 @@ GenericSignatureBuilder::LookUpConformanceInBuilder::operator()(
     return conformedProtocol->getModuleContext()->lookupConformance(
         conformingReplacementType, conformedProtocol);
   }
-  return builder->lookupConformance(dependentType, conformingReplacementType,
+  return builder->lookupConformance(conformingReplacementType,
                                     conformedProtocol);
 }
 
 ProtocolConformanceRef
-GenericSignatureBuilder::lookupConformance(CanType dependentType,
-                                           Type conformingReplacementType,
+GenericSignatureBuilder::lookupConformance(Type conformingReplacementType,
                                            ProtocolDecl *conformedProtocol) {
   if (conformingReplacementType->isTypeParameter())
     return ProtocolConformanceRef(conformedProtocol);
@@ -3710,8 +3822,7 @@ GenericSignatureBuilder::lookupConformance(CanType dependentType,
 static Type resolveDependentMemberTypes(
                                 GenericSignatureBuilder &builder,
                                 Type type,
-                                ArchetypeResolutionKind resolutionKind
-                                  = ArchetypeResolutionKind::WellFormed) {
+                                ArchetypeResolutionKind resolutionKind) {
   if (!type->hasTypeParameter()) return type;
 
   return type.transformRec([&resolutionKind,
@@ -3729,12 +3840,10 @@ static Type resolveDependentMemberTypes(
       return concreteType;
 
     // Map the type parameter to an equivalence class.
-    auto equivClass = resolved.getEquivalenceClass(builder);
-    if (!equivClass)
-      return ErrorType::get(Type(type));
+    auto equivClass = resolved.getEquivalenceClassIfPresent();
 
     // If there is a concrete type in this equivalence class, use that.
-    if (equivClass->concreteType) {
+    if (equivClass && equivClass->concreteType) {
       // .. unless it's recursive.
       if (equivClass->recursiveConcreteType)
         return ErrorType::get(Type(type));
@@ -3749,7 +3858,7 @@ static Type resolveDependentMemberTypes(
                                          resolutionKind);
     }
 
-    return equivClass->getAnchor(builder, builder.getGenericParams());
+    return resolved.getDependentType(builder);
   });
 }
 
@@ -3783,6 +3892,22 @@ static Type substituteConcreteType(Type parentType,
 
   auto subMap = parentType->getContextSubstitutionMap(
       dc->getParentModule(), dc);
+
+  // If the type has unresolved DependentMemberTypes, we can't use
+  // Type::subst() if a generic parameter is replaced with a concrete
+  // type. Instead, perform a "shallow" substitution where we replace
+  // generic parameter types but leave DependentMemberTypes as-is.
+  // This means we will end up back in maybeResolveEquivalenceClass(),
+  // where we will perform the name lookup required to resolve any
+  // DependentMemberTypes with a concrete base.
+  if (type->findUnresolvedDependentMemberType()) {
+    return type.transform([&](Type t) {
+      if (t->is<GenericTypeParamType>()) {
+        return t.subst(subMap);
+      }
+      return t;
+    });
+  }
 
   return type.subst(subMap);
 }
@@ -3857,13 +3982,11 @@ ResolvedType GenericSignatureBuilder::maybeResolveEquivalenceClass(
       if (baseEquivClass->conformsTo.find(proto)
           == baseEquivClass->conformsTo.end()) {
         if (baseEquivClass->concreteType &&
-            lookupConformance(type->getCanonicalType(),
-                              baseEquivClass->concreteType,
+            lookupConformance(baseEquivClass->concreteType,
                               proto)) {
           // Fall through
         } else if (baseEquivClass->superclass &&
-                   lookupConformance(type->getCanonicalType(),
-                                     baseEquivClass->superclass,
+                   lookupConformance(baseEquivClass->superclass,
                                      proto)) {
           // Fall through
         } else {
@@ -3897,13 +4020,11 @@ ResolvedType GenericSignatureBuilder::maybeResolveEquivalenceClass(
                       : baseEquivClass->superclass);
       } else {
         if (baseEquivClass->concreteType &&
-            lookupConformance(type->getCanonicalType(),
-                              baseEquivClass->concreteType,
+            lookupConformance(baseEquivClass->concreteType,
                               proto)) {
           parentType = baseEquivClass->concreteType;
         } else if (baseEquivClass->superclass &&
-                   lookupConformance(type->getCanonicalType(),
-                                     baseEquivClass->superclass,
+                   lookupConformance(baseEquivClass->superclass,
                                      proto)) {
           parentType = baseEquivClass->superclass;
         } else {
@@ -3949,12 +4070,12 @@ auto GenericSignatureBuilder::resolve(UnresolvedType paOrT,
     return ResolvedType(pa);
 
   // Determine what kind of resolution we want.
-  Type type = paOrT.get<Type>();
   ArchetypeResolutionKind resolutionKind =
     ArchetypeResolutionKind::WellFormed;
-  if (!source.isExplicit() && source.isRecursive(type, *this))
+  if (!source.isExplicit() && source.isRecursive(*this))
     resolutionKind = ArchetypeResolutionKind::AlreadyKnown;
 
+  Type type = paOrT.get<Type>();
   return maybeResolveEquivalenceClass(type, resolutionKind,
                                       /*wantExactPotentialArchetype=*/true);
 }
@@ -3963,6 +4084,168 @@ bool GenericSignatureBuilder::areInSameEquivalenceClass(Type type1,
                                                         Type type2) {
   return resolveEquivalenceClass(type1, ArchetypeResolutionKind::WellFormed)
     == resolveEquivalenceClass(type2, ArchetypeResolutionKind::WellFormed);
+}
+
+Type GenericSignatureBuilder::getCanonicalTypeInContext(Type type,
+                           TypeArrayView<GenericTypeParamType> genericParams) {
+  // All the contextual canonicality rules apply to type parameters, so if the
+  // type doesn't involve any type parameters, it's already canonical.
+  if (!type->hasTypeParameter())
+    return type;
+
+  // Replace non-canonical type parameters.
+  return type.transformRec([&](TypeBase *component) -> Optional<Type> {
+    if (!isa<GenericTypeParamType>(component) &&
+        !isa<DependentMemberType>(component))
+      return None;
+
+    // Find the equivalence class for this dependent type.
+    auto resolved = maybeResolveEquivalenceClass(
+                      Type(component),
+                      ArchetypeResolutionKind::CompleteWellFormed,
+                      /*wantExactPotentialArchetype=*/false);
+    if (!resolved) return None;
+
+    if (auto concrete = resolved.getAsConcreteType())
+      return getCanonicalTypeInContext(concrete, genericParams);
+
+    auto equivClass = resolved.getEquivalenceClass(*this);
+    if (!equivClass) return None;
+
+    // If there is a concrete type in this equivalence class, use that.
+    if (auto concrete = equivClass->concreteType) {
+      // .. unless it's recursive.
+      if (equivClass->recursiveConcreteType)
+        return ErrorType::get(Type(type));
+
+      // Prevent recursive substitution.
+      equivClass->recursiveConcreteType = true;
+      SWIFT_DEFER {
+        equivClass->recursiveConcreteType = false;
+      };
+
+      return getCanonicalTypeInContext(concrete, genericParams);
+    }
+
+    return equivClass->getAnchor(*this, genericParams);
+  });
+}
+
+ConformanceAccessPath
+GenericSignatureBuilder::getConformanceAccessPath(Type type,
+                                                  ProtocolDecl *protocol,
+                                                  GenericSignature sig) {
+  auto canType = getCanonicalTypeInContext(type, { })->getCanonicalType();
+  assert(canType->isTypeParameter());
+
+  // Check if we've already cached the result before doing anything else.
+  auto found = Impl->ConformanceAccessPaths.find(
+      std::make_pair(canType, protocol));
+  if (found != Impl->ConformanceAccessPaths.end()) {
+    return found->second;
+  }
+
+  FrontendStatsTracer(Context.Stats, "get-conformance-access-path");
+
+  // If this is the first time we're asked to look up a conformance access path,
+  // visit all of the root conformance requirements in our generic signature and
+  // add them to the buffer.
+  if (Impl->ConformanceAccessPaths.empty()) {
+    for (const auto &req : sig->getRequirements()) {
+      // We only care about conformance requirements.
+      if (req.getKind() != RequirementKind::Conformance)
+        continue;
+
+      auto rootType = req.getFirstType()->getCanonicalType();
+      auto *rootProto = req.getProtocolDecl();
+
+      ConformanceAccessPath::Entry root(rootType, rootProto);
+      ArrayRef<ConformanceAccessPath::Entry> path(root);
+      ConformanceAccessPath result(Context.AllocateCopy(path));
+
+      // Add the path to the buffer.
+      Impl->CurrentConformanceAccessPaths.emplace_back(rootType, result);
+
+      // Add the path to the map.
+      auto key = std::make_pair(rootType, rootProto);
+      auto inserted = Impl->ConformanceAccessPaths.insert(
+          std::make_pair(key, result));
+      assert(inserted.second);
+      (void) inserted;
+    }
+  }
+
+  // We keep going until we find the path we are looking for.
+  while (true) {
+    auto found = Impl->ConformanceAccessPaths.find(
+        std::make_pair(canType, protocol));
+    if (found != Impl->ConformanceAccessPaths.end()) {
+      return found->second;
+    }
+
+    assert(Impl->CurrentConformanceAccessPaths.size() > 0);
+
+    // Refill the buffer.
+    std::vector<std::pair<CanType, ConformanceAccessPath>> morePaths;
+
+    // From each path in the buffer, compute all paths of length plus one.
+    for (const auto &pair : Impl->CurrentConformanceAccessPaths) {
+      const auto &lastElt = pair.second.back();
+      auto *lastProto = lastElt.second;
+
+      // A copy of the current path, populated as needed.
+      SmallVector<ConformanceAccessPath::Entry, 4> entries;
+
+      for (const auto &req : lastProto->getRequirementSignature()) {
+        // We only care about conformance requirements.
+        if (req.getKind() != RequirementKind::Conformance)
+          continue;
+
+        auto nextSubjectType = req.getFirstType()->getCanonicalType();
+        auto *nextProto = req.getProtocolDecl();
+
+        // Compute the canonical anchor for this conformance requirement.
+        auto nextType = replaceSelfWithType(pair.first, nextSubjectType);
+        auto nextCanType = getCanonicalTypeInContext(nextType, { })
+            ->getCanonicalType();
+
+        // Skip "derived via concrete" sources.
+        if (!nextCanType->isTypeParameter())
+          continue;
+
+        // Check if we already have a conformance access path for this anchor.
+        auto key = std::make_pair(nextCanType, nextProto);
+
+        // If we've already seen a path for this conformance, skip it and
+        // don't add it to the buffer.
+        if (Impl->ConformanceAccessPaths.count(key))
+          continue;
+
+        if (entries.empty()) {
+          // Fill our temporary vector.
+          entries.insert(entries.begin(),
+                         pair.second.begin(),
+                         pair.second.end());
+        }
+
+        // Add the next entry.
+        entries.emplace_back(nextSubjectType, nextProto);
+        ConformanceAccessPath result = Context.AllocateCopy(entries);
+        entries.pop_back();
+
+        // Add the path to the buffer.
+        morePaths.emplace_back(nextCanType, result);
+
+        // Add the path to the map.
+        auto inserted = Impl->ConformanceAccessPaths.insert(
+            std::make_pair(key, result));
+        assert(inserted.second);
+        (void) inserted;
+      }
+    }
+
+    std::swap(morePaths, Impl->CurrentConformanceAccessPaths);
+  }
 }
 
 TypeArrayView<GenericTypeParamType>
@@ -4393,6 +4676,12 @@ ConstraintResult GenericSignatureBuilder::addConformanceRequirement(
                                FloatingRequirementSource source) {
   auto resolvedSource = source.getSource(*this, type);
 
+  if (!resolvedSource->isDerivedRequirement()) {
+    Impl->ExplicitRequirements.insert(
+        ExplicitRequirement(RequirementKind::Conformance,
+                            resolvedSource, proto));
+  }
+
   // Add the conformance requirement, bailing out earlier if we've already
   // seen it.
   auto equivClass = type.getEquivalenceClass(*this);
@@ -4408,25 +4697,21 @@ ConstraintResult GenericSignatureBuilder::addLayoutRequirementDirect(
                                              ResolvedType type,
                                              LayoutConstraint layout,
                                              FloatingRequirementSource source) {
-  auto equivClass = type.getEquivalenceClass(*this);
+  auto resolvedSource = source.getSource(*this, type);
 
-  // Update the layout in the equivalence class, if we didn't have one already.
-  bool anyChanges = false;
-  if (!equivClass->layout) {
-    equivClass->layout = layout;
-    anyChanges = true;
-  } else {
-    // Try to merge layout constraints.
-    auto mergedLayout = equivClass->layout.merge(layout);
-    if (mergedLayout->isKnownLayout() && mergedLayout != equivClass->layout) {
-      equivClass->layout = mergedLayout;
-      anyChanges = true;
-    }
+  if (!resolvedSource->isDerivedRequirement()) {
+    Impl->ExplicitRequirements.insert(
+        ExplicitRequirement(RequirementKind::Layout,
+                            resolvedSource, layout));
   }
 
+  // Update the layout in the equivalence class, if we didn't have one already.
+  bool anyChanges = updateLayout(type, layout);
+
   // Record this layout constraint.
+  auto equivClass = type.getEquivalenceClass(*this);
   equivClass->layoutConstraints.push_back({type.getUnresolvedType(),
-    layout, source.getSource(*this, type)});
+                                           layout, resolvedSource});
   equivClass->modified(*this);
   ++NumLayoutConstraints;
   if (!anyChanges) ++NumLayoutConstraintsExtra;
@@ -4538,11 +4823,36 @@ bool GenericSignatureBuilder::updateSuperclass(
   return false;
 }
 
+bool GenericSignatureBuilder::updateLayout(ResolvedType type,
+                                           LayoutConstraint layout) {
+  auto equivClass = type.getEquivalenceClass(*this);
+
+  if (!equivClass->layout) {
+    equivClass->layout = layout;
+    return true;
+  }
+
+  // Try to merge layout constraints.
+  auto mergedLayout = equivClass->layout.merge(layout);
+  if (mergedLayout->isKnownLayout() && mergedLayout != equivClass->layout) {
+    equivClass->layout = mergedLayout;
+    return true;
+  }
+
+  return false;
+}
+
 ConstraintResult GenericSignatureBuilder::addSuperclassRequirementDirect(
                                             ResolvedType type,
                                             Type superclass,
                                             FloatingRequirementSource source) {
   auto resolvedSource = source.getSource(*this, type);
+
+  if (!resolvedSource->isDerivedRequirement()) {
+    Impl->ExplicitRequirements.insert(
+        ExplicitRequirement(RequirementKind::Superclass,
+                            resolvedSource, superclass));
+  }
 
   // Record the constraint.
   auto equivClass = type.getEquivalenceClass(*this);
@@ -4602,7 +4912,7 @@ ConstraintResult GenericSignatureBuilder::addTypeRequirement(
                                unresolvedHandling);
   }
 
-  // If the resolved subject is a type, there may be things we can infer (if it
+  // If the resolved subject is concrete, there may be things we can infer (if it
   // conditionally conforms to the protocol), and we can probably perform
   // diagnostics here.
   if (auto subjectType = resolvedSubject.getAsConcreteType()) {
@@ -4618,9 +4928,12 @@ ConstraintResult GenericSignatureBuilder::addTypeRequirement(
 
         // FIXME: diagnose if there's no conformance.
         if (conformance) {
-          if (addConditionalRequirements(conformance, inferForModule,
-                                         source.getLoc()))
-            return ConstraintResult::Conflicting;
+          // Only infer conditional requirements from explicit sources.
+          if (!source.isDerived()) {
+            if (addConditionalRequirements(conformance, inferForModule,
+                                           source.getLoc()))
+              return ConstraintResult::Conflicting;
+          }
         }
       }
     }
@@ -4733,6 +5046,11 @@ GenericSignatureBuilder::addSameTypeRequirementBetweenTypeParameters(
 
   Type depType1 = type1.getDependentType(*this);
   Type depType2 = type2.getDependentType(*this);
+
+  if (!source->isDerivedRequirement()) {
+    Impl->ExplicitSameTypeRequirements.emplace_back(RequirementKind::SameType,
+                                                    depType1, depType2);
+  }
 
   // Record the same-type constraint, and bail out if it was already known.
   auto equivClass = type1.getEquivalenceClassIfPresent();
@@ -4859,9 +5177,7 @@ GenericSignatureBuilder::addSameTypeRequirementBetweenTypeParameters(
       equivClass->layout = equivClass2->layout;
       equivClass->layoutConstraints = std::move(equivClass2->layoutConstraints);
     } else {
-      const RequirementSource *source2
-        = equivClass2->layoutConstraints.front().source;
-      addLayoutRequirementDirect(T1, equivClass2->layout, source2);
+      updateLayout(T1, equivClass2->layout);
       equivClass->layoutConstraints.insert(
                                    equivClass->layoutConstraints.end(),
                                    equivClass2->layoutConstraints.begin() + 1,
@@ -4958,6 +5274,12 @@ ConstraintResult GenericSignatureBuilder::addSameTypeRequirementToConcrete(
                                            ResolvedType type,
                                            Type concrete,
                                            const RequirementSource *source) {
+  if (!source->isDerivedRequirement()) {
+    Impl->ExplicitSameTypeRequirements.emplace_back(RequirementKind::SameType,
+                                                    type.getDependentType(*this),
+                                                    concrete);
+  }
+
   auto equivClass = type.getEquivalenceClass(*this);
 
   // Record the concrete type and its source.
@@ -5055,7 +5377,9 @@ ConstraintResult GenericSignatureBuilder::addSameTypeRequirement(
   return addSameTypeRequirement(paOrT1, paOrT2, source, unresolvedHandling,
                                 [&](Type type1, Type type2) {
       Impl->HadAnyError = true;
-      if (source.getLoc().isValid()) {
+      if (source.getLoc().isValid() &&
+          !type1->hasError() &&
+          !type2->hasError()) {
         Diags.diagnose(source.getLoc(), diag::requires_same_concrete_type,
                        type1, type2);
       }
@@ -5236,7 +5560,9 @@ GenericSignatureBuilder::addRequirement(const Requirement &req,
         UnresolvedHandlingKind::GenerateConstraints,
         [&](Type type1, Type type2) {
           Impl->HadAnyError = true;
-          if (source.getLoc().isValid()) {
+          if (source.getLoc().isValid() &&
+              !type1->hasError() &&
+              !type2->hasError()) {
             Diags.diagnose(source.getLoc(), diag::requires_same_concrete_type,
                            type1, type2);
           }
@@ -5304,7 +5630,7 @@ public:
         auto addSameTypeConstraint = [&](Type firstType,
                                          AssociatedTypeDecl *assocType) {
           auto *protocol = assocType->getProtocol();
-          auto conf = Builder.lookupConformance(CanType(), firstType, protocol);
+          auto conf = Builder.lookupConformance(firstType, protocol);
           auto secondType = conf.getAssociatedType(
               firstType, assocType->getDeclaredInterfaceType());
           Requirement req(RequirementKind::SameType, firstType, secondType);
@@ -5546,6 +5872,29 @@ static void expandSameTypeConstraints(GenericSignatureBuilder &builder,
   }
 }
 
+static bool compareSourceLocs(SourceManager &SM, SourceLoc lhsLoc, SourceLoc rhsLoc) {
+  if (lhsLoc.isValid() != rhsLoc.isValid())
+    return lhsLoc.isValid();
+
+  if (lhsLoc.isValid() && rhsLoc.isValid()) {
+    unsigned lhsBuffer = SM.findBufferContainingLoc(lhsLoc);
+    unsigned rhsBuffer = SM.findBufferContainingLoc(rhsLoc);
+
+    // If the buffers are the same, use source location ordering.
+    if (lhsBuffer == rhsBuffer) {
+      if (SM.isBeforeInBuffer(lhsLoc, rhsLoc))
+        return true;
+    } else {
+      // Otherwise, order by buffer identifier.
+      if (SM.getIdentifierForBuffer(lhsBuffer)
+               .compare(SM.getIdentifierForBuffer(lhsBuffer)))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 /// A directed graph where the vertices are explicit requirement sources and
 /// an edge (v, w) records that the explicit source v implies the explicit
 /// source w.
@@ -5588,18 +5937,38 @@ class RedundantRequirementGraph {
 
   SmallVector<Vertex, 2> vertices;
 
-  ComponentID nextComponent = 0;
-  VertexID nextIndex = 0;
+  ComponentID componentCount = 0;
+  VertexID vertexCount = 0;
 
   SmallVector<VertexID, 2> stack;
 
 public:
-  template<typename T, typename Fn>
-  void addConstraintsFromEquivClass(
-      GenericSignatureBuilder &builder,
-      const std::vector<Constraint<T>> &constraints,
+  template<typename T>
+  void handleConstraintsImpliedByConcrete(
       RequirementKind kind,
-      Fn filter) {
+      const SmallVectorImpl<Constraint<T>> &impliedByConcrete,
+      const Optional<ExplicitRequirement> &concreteTypeRequirement) {
+    // This can occur if the combination of a superclass requirement and
+    // protocol conformance requirement force a type to become concrete.
+    if (!concreteTypeRequirement)
+      return;
+
+    for (auto constraint : impliedByConcrete) {
+      if (constraint.source->isDerivedNonRootRequirement())
+        continue;
+
+      auto req = ExplicitRequirement::fromExplicitConstraint(kind, constraint);
+      addEdge(*concreteTypeRequirement, req);
+    }
+  }
+
+  template<typename T>
+  Optional<ExplicitRequirement>
+  addConstraintsFromEquivClass(
+      RequirementKind kind,
+      const SmallVectorImpl<Constraint<T>> &exact,
+      const SmallVectorImpl<Constraint<T>> &lessSpecific,
+      ASTContext &ctx) {
     // The set of 'redundant explicit requirements', which are known to be less
     // specific than some other explicit requirements. An example is a type
     // parameter with multiple superclass constraints:
@@ -5627,20 +5996,15 @@ public:
     // These 'root requirements' imply the 'explicit requirements'.
     SmallVector<ExplicitRequirement, 1> rootReqs;
 
-    for (auto constraint : constraints) {
-      auto *source = constraint.source;
-
-      if (source->isDerivedNonRootRequirement()) {
-        // If the derived requirement was filtered by our predicate, it doesn't
-        // make our explicit requirements redundant.
-        if (filter(constraint))
-          continue;
-
-        auto req = ExplicitRequirement::fromDerivedConstraint(kind, constraint);
+    for (auto constraint : exact) {
+      if (constraint.source->isDerivedNonRootRequirement()) {
+        auto req = ExplicitRequirement::fromDerivedConstraint(
+            constraint, ctx);
 
         rootReqs.push_back(req);
       } else {
-        auto req = ExplicitRequirement::fromExplicitConstraint(kind, constraint);
+        auto req = ExplicitRequirement::fromExplicitConstraint(
+            kind, constraint);
 
         VertexID v = addVertex(req);
 #ifndef NDEBUG
@@ -5650,15 +6014,33 @@ public:
 #endif
         (void) v;
 
-        // If the explicit requirement was filtered by our predicate, it doesn't
-        // make the other explicit requirements redundant.
-        if (filter(constraint)) {
-          redundantExplicitReqs.push_back(req);
-        } else {
-          explicitReqs.push_back(req);
-        }
+        explicitReqs.push_back(req);
       }
     }
+
+    for (auto constraint : lessSpecific) {
+      if (constraint.source->isDerivedNonRootRequirement())
+        continue;
+
+      auto req = ExplicitRequirement::fromExplicitConstraint(kind, constraint);
+
+      VertexID v = addVertex(req);
+#ifndef NDEBUG
+      // Record that we saw an actual explicit requirement rooted at this vertex,
+      // for verification purposes.
+      vertices[v].sawVertex = true;
+#endif
+      (void) v;
+
+      redundantExplicitReqs.push_back(req);
+    }
+
+    // Get the "best" explicit requirement that implies the rest.
+    Optional<ExplicitRequirement> result;
+    if (!rootReqs.empty())
+      result = rootReqs[0];
+    else if (!explicitReqs.empty())
+      result = explicitReqs[0];
 
     // If all requirements are derived, there is nothing to do.
     if (explicitReqs.empty()) {
@@ -5670,7 +6052,7 @@ public:
           }
         }
       }
-      return;
+      return result;
     }
 
     // If there are multiple most specific explicit requirements, they will form a cycle.
@@ -5693,6 +6075,8 @@ public:
     for (auto rootReq : rootReqs) {
       addEdge(rootReq, explicitReqs[0]);
     }
+
+    return result;
   }
 
 private:
@@ -5748,11 +6132,11 @@ private:
   void strongConnect(VertexID v) {
     // Set the depth index for v to the smallest unused index.
     assert(vertices[v].index == Vertex::UndefinedIndex);
-    vertices[v].index = nextIndex;
+    vertices[v].index = vertexCount;
     assert(vertices[v].lowLink == Vertex::UndefinedIndex);
-    vertices[v].lowLink = nextIndex;
+    vertices[v].lowLink = vertexCount;
 
-    nextIndex++;
+    vertexCount++;
 
     stack.push_back(v);
     assert(!vertices[v].onStack);
@@ -5790,40 +6174,60 @@ private:
         vertices[w].onStack = false;
         assert(vertices[w].component == Vertex::UndefinedComponent);
 
-        vertices[w].component = nextComponent;
+        vertices[w].component = componentCount;
       } while (v != w);
 
-      nextComponent++;
+      componentCount++;
     }
   }
 
 public:
+  using RedundantRequirementMap =
+      llvm::DenseMap<ExplicitRequirement,
+                     llvm::SmallDenseSet<ExplicitRequirement, 2>>;
+
   void computeRedundantRequirements(SourceManager &SM,
-                         llvm::DenseSet<ExplicitRequirement> &redundant) {
+                                    RedundantRequirementMap &redundant) {
     // First, compute SCCs.
     computeSCCs();
 
-    // The number of edges from other connected components to this one.
-    SmallVector<unsigned, 2> inboundComponentEdges;
-    inboundComponentEdges.resize(nextComponent);
+    // The set of edges pointing to each connected component.
+    SmallVector<SmallVector<ComponentID, 2>, 2> inboundComponentEdges;
+    inboundComponentEdges.resize(componentCount);
 
-    // Visit all vertices and count inter-component edges.
+    // The set of edges originating from this connected component.
+    SmallVector<SmallVector<ComponentID, 2>, 2> outboundComponentEdges;
+    outboundComponentEdges.resize(componentCount);
+
+    // Visit all vertices and build the adjacency sets for the connected
+    // component graph.
     for (const auto &vertex : vertices) {
       assert(vertex.component != Vertex::UndefinedComponent);
       for (auto successor : vertex.successors) {
         ComponentID otherComponent = vertices[successor].component;
-        if (vertex.component != otherComponent)
-          ++inboundComponentEdges[otherComponent];
+        if (vertex.component != otherComponent) {
+          inboundComponentEdges[otherComponent].push_back(vertex.component);
+          outboundComponentEdges[vertex.component].push_back(otherComponent);
+        }
       }
     }
 
-    // The best explicit requirement for each root SCC.
-    SmallVector<Optional<ExplicitRequirement>, 2> bestExplicitReq;
-    bestExplicitReq.resize(nextComponent);
+    auto isRootComponent = [&](ComponentID component) -> bool {
+      return inboundComponentEdges[component].empty();
+    };
 
-    // Visit all vertices and find the best requirement for each root SCC.
+    // The set of root components.
+    llvm::SmallDenseSet<ComponentID, 2> rootComponents;
+
+    // The best explicit requirement for each root component.
+    SmallVector<Optional<ExplicitRequirement>, 2> bestExplicitReq;
+    bestExplicitReq.resize(componentCount);
+
+    // Visit all vertices and find the best requirement for each root component.
     for (const auto &vertex : vertices) {
-      if (inboundComponentEdges[vertex.component] == 0) {
+      if (isRootComponent(vertex.component)) {
+        rootComponents.insert(vertex.component);
+
         // If this vertex is part of a root SCC, see if the requirement is
         // better than the one we have so far.
         auto &best = bestExplicitReq[vertex.component];
@@ -5832,26 +6236,61 @@ public:
       }
     }
 
-    // Compute the set of redundant requirements.
-    for (const auto &vertex : vertices) {
-      if (inboundComponentEdges[vertex.component] == 0) {
-        // We have a root SCC. This requirement is redundant unless
-        // it is the best requirement for this SCC.
-        auto best = bestExplicitReq[vertex.component];
-        assert(best.hasValue() &&
-               "Did not record best requirement for root SCC?");
+    // The set of root components that each component is reachable from.
+    SmallVector<llvm::SmallDenseSet<ComponentID, 2>, 2> reachableFromRoot;
+    reachableFromRoot.resize(componentCount);
 
-        if (vertex.req == *best)
-          continue;
+    // Traverse the graph of connected components starting from the roots.
+    for (auto rootComponent : rootComponents) {
+      SmallVector<ComponentID, 2> worklist;
+
+      auto addToWorklist = [&](ComponentID nextComponent) {
+        if (!reachableFromRoot[nextComponent].count(rootComponent))
+          worklist.push_back(nextComponent);
+      };
+
+      addToWorklist(rootComponent);
+
+      while (!worklist.empty()) {
+        auto component = worklist.back();
+        worklist.pop_back();
+
+        reachableFromRoot[component].insert(rootComponent);
+
+        for (auto nextComponent : outboundComponentEdges[component])
+          addToWorklist(nextComponent);
+      }
+    }
+
+    // Compute the mapping of redundant requirements to the best root
+    // requirement that implies them.
+    for (const auto &vertex : vertices) {
+      if (isRootComponent(vertex.component)) {
+        // A root component is reachable from itself, and itself only.
+        assert(reachableFromRoot[vertex.component].size() == 1);
+        assert(reachableFromRoot[vertex.component].count(vertex.component) == 1);
       } else {
-        // We have a non-root SCC. This requirement is always
-        // redundant.
         assert(!bestExplicitReq[vertex.component].hasValue() &&
                "Recorded best requirement for non-root SCC?");
       }
 
-      auto inserted = redundant.insert(vertex.req);
-      assert(inserted.second && "Saw the same vertex twice?");
+      // We have a non-root component. This requirement is always
+      // redundant.
+      auto reachableFromRootSet = reachableFromRoot[vertex.component];
+      assert(reachableFromRootSet.size() > 0);
+
+      for (auto rootComponent : reachableFromRootSet) {
+        assert(isRootComponent(rootComponent));
+
+        auto best = bestExplicitReq[rootComponent];
+        assert(best.hasValue() &&
+               "Did not record best requirement for root SCC?");
+
+        assert(vertex.req != *best || vertex.component == rootComponent);
+        if (vertex.req != *best) {
+          redundant[vertex.req].insert(*best);
+        }
+      }
     }
   }
 
@@ -5889,29 +6328,10 @@ private:
     if (cmpTypes != 0)
       return cmpTypes < 0;
 
-    // Prefer source-location-based over abstract.
     auto existingLoc = existingSource->getLoc();
     auto currentLoc = currentSource->getLoc();
-    if (existingLoc.isValid() != currentLoc.isValid())
-      return currentLoc.isValid();
 
-    if (existingLoc.isValid() && currentLoc.isValid()) {
-      unsigned existingBuffer = SM.findBufferContainingLoc(existingLoc);
-      unsigned currentBuffer = SM.findBufferContainingLoc(currentLoc);
-
-      // If the buffers are the same, use source location ordering.
-      if (existingBuffer == currentBuffer) {
-        if (SM.isBeforeInBuffer(currentLoc, existingLoc))
-          return true;
-      } else {
-        // Otherwise, order by buffer identifier.
-        if (SM.getIdentifierForBuffer(currentBuffer)
-                 .compare(SM.getIdentifierForBuffer(existingBuffer)))
-          return true;
-      }
-    }
-
-    return true;
+    return compareSourceLocs(SM, currentLoc, existingLoc);
   }
 
 public:
@@ -5973,17 +6393,49 @@ void GenericSignatureBuilder::ExplicitRequirement::dump(
     break;
   }
 
-  getSource()->dump(out, SM, 0);
-  out << " : ";
+  out << getSubjectType() << " : ";
   if (auto type = rhs.dyn_cast<Type>())
     out << type;
   else if (auto *proto = rhs.dyn_cast<ProtocolDecl *>())
     out << proto->getName();
   else
     out << rhs.get<LayoutConstraint>();
+
+  out << "(source: ";
+  getSource()->dump(out, SM, 0);
+  out << ")";
 }
 
-void GenericSignatureBuilder::computeRedundantRequirements() {
+static bool typeImpliesLayoutConstraint(Type t, LayoutConstraint layout) {
+  if (layout->isRefCounted() && t->satisfiesClassConstraint())
+    return true;
+
+  return false;
+}
+
+static bool typeConflictsWithLayoutConstraint(Type t, LayoutConstraint layout) {
+  if (layout->isClass() && !t->satisfiesClassConstraint())
+    return true;
+
+  return false;
+}
+
+static bool isConcreteConformance(const EquivalenceClass &equivClass,
+                                  ProtocolDecl *proto,
+                                  GenericSignatureBuilder &builder) {
+  if (equivClass.concreteType &&
+      builder.lookupConformance(equivClass.concreteType, proto)) {
+    return true;
+  } else if (equivClass.superclass &&
+           builder.lookupConformance(equivClass.superclass, proto)) {
+    return true;
+  }
+
+  return false;
+}
+
+void GenericSignatureBuilder::computeRedundantRequirements(
+    const ProtocolDecl *requirementSignatureSelfProto) {
   assert(!Impl->computedRedundantRequirements &&
          "Already computed redundant requirements");
 #ifndef NDEBUG
@@ -5997,111 +6449,231 @@ void GenericSignatureBuilder::computeRedundantRequirements() {
   // source.
   for (auto &equivClass : Impl->EquivalenceClasses) {
     for (auto &entry : equivClass.conformsTo) {
-      graph.addConstraintsFromEquivClass(
-          *this, entry.second,
-          RequirementKind::Conformance,
-          [&](Constraint<ProtocolDecl *> constraint) -> bool {
-            auto *source = constraint.source;
+      SmallVector<Constraint<ProtocolDecl *>, 2> exact;
+      SmallVector<Constraint<ProtocolDecl *>, 2> lessSpecific;
 
-            bool derivedViaConcrete = false;
-            if (source->getMinimalConformanceSource(
-                *this, constraint.getSubjectDependentType({ }), entry.first,
-                derivedViaConcrete)
-                != source)
-              return true;
+      for (const auto &constraint : entry.second) {
+        auto *source = constraint.source;
 
-            if (derivedViaConcrete)
-              return true;
+        // FIXME: Remove this check.
+        bool derivedViaConcrete = false;
+        if (source->getMinimalConformanceSource(
+            *this, constraint.getSubjectDependentType({ }), entry.first,
+            derivedViaConcrete)
+            != source)
+          continue;
 
-            return false;
-          });
+        if (derivedViaConcrete)
+          continue;
+
+        // FIXME: Check for a conflict via the concrete type.
+        exact.push_back(constraint);
+
+        if (!source->isDerivedRequirement()) {
+          if (isConcreteConformance(equivClass, entry.first, *this)) {
+            Impl->ExplicitConformancesImpliedByConcrete.insert(
+                ExplicitRequirement::fromExplicitConstraint(
+                    RequirementKind::Conformance, constraint));
+          }
+        }
+      }
+
+      graph.addConstraintsFromEquivClass(RequirementKind::Conformance,
+                                         exact, lessSpecific, Context);
     }
+
+    Type resolvedConcreteType;
+    Optional<ExplicitRequirement> concreteTypeRequirement;
 
     if (equivClass.concreteType) {
-      Type resolvedConcreteType =
-        resolveDependentMemberTypes(*this, equivClass.concreteType);
-      graph.addConstraintsFromEquivClass(
-          *this, equivClass.concreteTypeConstraints,
-          RequirementKind::SameType,
-          [&](Constraint<Type> constraint) -> bool {
-            auto *source = constraint.source;
-            Type t = constraint.value;
+      resolvedConcreteType =
+        getCanonicalTypeInContext(equivClass.concreteType, { });
 
-            bool derivedViaConcrete = false;
-            if (source->getMinimalConformanceSource(
-                *this, constraint.getSubjectDependentType({ }), nullptr,
-                derivedViaConcrete)
-                != source)
-              return true;
+      SmallVector<Constraint<Type>, 2> exact;
+      SmallVector<Constraint<Type>, 2> lessSpecific;
 
-            if (derivedViaConcrete)
-              return true;
+      for (const auto &constraint : equivClass.concreteTypeConstraints) {
+        auto *source = constraint.source;
+        Type t = constraint.value;
 
-            if (t->isEqual(resolvedConcreteType))
-              return false;
+        // FIXME: Remove this check.
+        bool derivedViaConcrete = false;
+        if (source->getMinimalConformanceSource(
+            *this, constraint.getSubjectDependentType({ }), nullptr,
+            derivedViaConcrete)
+            != source)
+          continue;
 
-            auto resolvedType = resolveDependentMemberTypes(*this, t);
-            if (resolvedType->isEqual(resolvedConcreteType))
-              return false;
+        if (derivedViaConcrete)
+          continue;
 
-            // We have a less-specific constraint.
-            return true;
-          });
+        if (t->isEqual(resolvedConcreteType)) {
+          exact.push_back(constraint);
+          continue;
+        }
+
+        auto resolvedType = getCanonicalTypeInContext(t, { });
+        if (resolvedType->isEqual(resolvedConcreteType)) {
+          exact.push_back(constraint);
+        }
+
+        // Record the conflict.
+        if (!source->isDerivedRequirement()) {
+          auto req =
+              ExplicitRequirement::fromExplicitConstraint(
+                  RequirementKind::SameType, constraint);
+          Impl->ConflictingRequirements.insert(
+              std::make_pair(req, resolvedConcreteType));
+        }
+
+        lessSpecific.push_back(constraint);
+      }
+
+      concreteTypeRequirement =
+          graph.addConstraintsFromEquivClass(RequirementKind::SameType,
+                                             exact, lessSpecific, Context);
     }
+
+    Type resolvedSuperclass;
+    Optional<ExplicitRequirement> superclassRequirement;
 
     if (equivClass.superclass) {
       // Resolve any thus-far-unresolved dependent types.
-      Type resolvedSuperclass =
-        resolveDependentMemberTypes(*this, equivClass.superclass);
-      graph.addConstraintsFromEquivClass(
-          *this, equivClass.superclassConstraints,
-          RequirementKind::Superclass,
-          [&](Constraint<Type> constraint) -> bool {
-            auto *source = constraint.source;
-            Type t = constraint.value;
+      resolvedSuperclass =
+        getCanonicalTypeInContext(equivClass.superclass, getGenericParams());
 
-            bool derivedViaConcrete = false;
-            if (source->getMinimalConformanceSource(
-                *this, constraint.getSubjectDependentType({ }), nullptr,
-                derivedViaConcrete)
-                != source)
-              return true;
+      SmallVector<Constraint<Type>, 2> exact;
+      SmallVector<Constraint<Type>, 2> lessSpecific;
+      SmallVector<Constraint<Type>, 2> impliedByConcrete;
 
-            if (derivedViaConcrete)
-              return true;
+      for (const auto &constraint : equivClass.superclassConstraints) {
+        auto *source = constraint.source;
+        Type t = constraint.value;
 
-            if (t->isEqual(resolvedSuperclass))
-              return false;
+        // FIXME: Remove this check.
+        bool derivedViaConcrete = false;
+        if (source->getMinimalConformanceSource(
+            *this, constraint.getSubjectDependentType({ }), nullptr,
+            derivedViaConcrete)
+            != source)
+          continue;
 
-            Type resolvedType = resolveDependentMemberTypes(*this, t);
-            if (resolvedType->isEqual(resolvedSuperclass))
-              return false;
+        if (derivedViaConcrete)
+          continue;
 
-            // We have a less-specific constraint.
-            return true;
-          });
+        if (resolvedConcreteType) {
+          Type resolvedType = getCanonicalTypeInContext(t, { });
+          if (resolvedType->isExactSuperclassOf(resolvedConcreteType))
+            impliedByConcrete.push_back(constraint);
+        }
+
+        if (t->isEqual(resolvedSuperclass)) {
+          exact.push_back(constraint);
+          continue;
+        }
+
+        Type resolvedType = getCanonicalTypeInContext(t, { });
+        if (resolvedType->isEqual(resolvedSuperclass)) {
+          exact.push_back(constraint);
+          continue;
+        }
+
+        // Check for a conflict.
+        if (!source->isDerivedRequirement() &&
+            !resolvedType->isExactSuperclassOf(resolvedSuperclass)) {
+          auto req =
+              ExplicitRequirement::fromExplicitConstraint(
+                  RequirementKind::Superclass, constraint);
+          Impl->ConflictingRequirements.insert(
+              std::make_pair(req, resolvedSuperclass));
+        }
+
+        lessSpecific.push_back(constraint);
+      }
+
+      superclassRequirement =
+          graph.addConstraintsFromEquivClass(RequirementKind::Superclass,
+                                             exact, lessSpecific, Context);
+
+      graph.handleConstraintsImpliedByConcrete(RequirementKind::Superclass,
+                                               impliedByConcrete,
+                                               concreteTypeRequirement);
     }
 
+    Optional<ExplicitRequirement> layoutRequirement;
+
     if (equivClass.layout) {
-      graph.addConstraintsFromEquivClass(
-          *this, equivClass.layoutConstraints,
-          RequirementKind::Layout,
-          [&](Constraint<LayoutConstraint> constraint) -> bool {
-            auto *source = constraint.source;
-            auto layout = constraint.value;
+      SmallVector<Constraint<LayoutConstraint>, 2> exact;
+      SmallVector<Constraint<LayoutConstraint>, 2> lessSpecific;
+      SmallVector<Constraint<LayoutConstraint>, 2> impliedByConcrete;
 
-            bool derivedViaConcrete = false;
-            if (source->getMinimalConformanceSource(
-                *this, constraint.getSubjectDependentType({ }), nullptr,
-                derivedViaConcrete)
-                != source)
-              return true;
+      for (const auto &constraint : equivClass.layoutConstraints) {
+        auto *source = constraint.source;
+        auto layout = constraint.value;
 
-            if (derivedViaConcrete)
-              return true;
+        // FIXME: Remove this check.
+        bool derivedViaConcrete = false;
+        if (source->getMinimalConformanceSource(
+            *this, constraint.getSubjectDependentType({ }), nullptr,
+            derivedViaConcrete)
+            != source)
+          continue;
 
-            return layout != equivClass.layout;
-          });
+        if (derivedViaConcrete)
+          continue;
+
+        if (resolvedConcreteType) {
+          if (typeImpliesLayoutConstraint(resolvedConcreteType, layout)) {
+            impliedByConcrete.push_back(constraint);
+
+            if (!source->isDerivedRequirement()) {
+              Impl->ExplicitConformancesImpliedByConcrete.insert(
+                  ExplicitRequirement::fromExplicitConstraint(
+                      RequirementKind::Layout, constraint));
+            }
+          }
+        }
+
+        if (layout == equivClass.layout) {
+          exact.push_back(constraint);
+          continue;
+        }
+
+        // Check for a conflict.
+        if (!source->isDerivedRequirement() &&
+            !layout.merge(equivClass.layout)->isKnownLayout()) {
+          auto req =
+              ExplicitRequirement::fromExplicitConstraint(
+                  RequirementKind::Layout, constraint);
+          Impl->ConflictingRequirements.insert(
+              std::make_pair(req, equivClass.layout));
+        }
+
+        lessSpecific.push_back(constraint);
+      }
+
+      layoutRequirement =
+          graph.addConstraintsFromEquivClass(RequirementKind::Layout,
+                                             exact, lessSpecific, Context);
+
+      graph.handleConstraintsImpliedByConcrete(RequirementKind::Layout,
+                                               impliedByConcrete,
+                                               concreteTypeRequirement);
+    }
+
+    if (resolvedConcreteType && resolvedSuperclass) {
+      if (!resolvedSuperclass->isExactSuperclassOf(resolvedConcreteType)) {
+        Impl->ConflictingConcreteTypeRequirements.push_back(
+            {*concreteTypeRequirement, *superclassRequirement,
+             resolvedConcreteType, resolvedSuperclass});
+      }
+    } else if (resolvedConcreteType && equivClass.layout) {
+      if (typeConflictsWithLayoutConstraint(resolvedConcreteType,
+                                            equivClass.layout)) {
+        Impl->ConflictingConcreteTypeRequirements.push_back(
+            {*concreteTypeRequirement, *layoutRequirement,
+             resolvedConcreteType, equivClass.layout});
+      }
     }
   }
 
@@ -6118,11 +6690,14 @@ void GenericSignatureBuilder::computeRedundantRequirements() {
 
 void
 GenericSignatureBuilder::finalize(TypeArrayView<GenericTypeParamType> genericParams,
-                                  bool allowConcreteGenericParams) {
+                                  bool allowConcreteGenericParams,
+                                  const ProtocolDecl *requirementSignatureSelfProto) {
   // Process any delayed requirements that we can handle now.
   processDelayedRequirements();
 
-  computeRedundantRequirements();
+  computeRedundantRequirements(requirementSignatureSelfProto);
+  diagnoseRedundantRequirements();
+  diagnoseConflictingConcreteTypeRequirements();
 
   assert(!Impl->finalized && "Already finalized builder");
 #ifndef NDEBUG
@@ -6258,14 +6833,16 @@ GenericSignatureBuilder::finalize(TypeArrayView<GenericTypeParamType> genericPar
     checkLayoutConstraints(genericParams, &equivClass);
   };
 
-  // FIXME: Expand all conformance requirements. This is expensive :(
-  for (auto &equivClass : Impl->EquivalenceClasses) {
+  if (!Impl->ExplicitSameTypeRequirements.empty()) {
+    // FIXME: Expand all conformance requirements. This is expensive :(
+    for (auto &equivClass : Impl->EquivalenceClasses) {
       expandSameTypeConstraints(*this, &equivClass);
-  }
+    }
 
-  // Check same-type constraints.
-  for (auto &equivClass : Impl->EquivalenceClasses) {
-    checkSameTypeConstraints(genericParams, &equivClass);
+    // Check same-type constraints.
+    for (auto &equivClass : Impl->EquivalenceClasses) {
+      checkSameTypeConstraints(genericParams, &equivClass);
+    }
   }
 
   // Check for generic parameters which have been made concrete or equated
@@ -6474,28 +7051,6 @@ void GenericSignatureBuilder::processDelayedRequirements() {
   } while (anySolved);
 }
 
-template<typename T>
-Constraint<T> GenericSignatureBuilder::checkConstraintList(
-                           TypeArrayView<GenericTypeParamType> genericParams,
-                           std::vector<Constraint<T>> &constraints,
-                           RequirementKind kind,
-                           llvm::function_ref<bool(const Constraint<T> &)>
-                             isSuitableRepresentative,
-                           llvm::function_ref<
-                             ConstraintRelation(const Constraint<T>&)>
-                               checkConstraint,
-                           Optional<Diag<unsigned, Type, T, T>>
-                             conflictingDiag,
-                           Diag<Type, T> redundancyDiag,
-                           Diag<unsigned, Type, T> otherNoteDiag) {
-  return checkConstraintList<T, T>(genericParams, constraints, kind,
-                                   isSuitableRepresentative, checkConstraint,
-                                   conflictingDiag, redundancyDiag,
-                                   otherNoteDiag,
-                                   [](const T& value) { return value; },
-                                   /*removeSelfDerived=*/true);
-}
-
 namespace {
   /// Remove self-derived sources from the given vector of constraints.
   ///
@@ -6579,7 +7134,7 @@ namespace {
   }
 } // end anonymous namespace
 
-template<typename T, typename DiagT>
+template<typename T>
 Constraint<T> GenericSignatureBuilder::checkConstraintList(
                            TypeArrayView<GenericTypeParamType> genericParams,
                            std::vector<Constraint<T>> &constraints,
@@ -6589,16 +7144,11 @@ Constraint<T> GenericSignatureBuilder::checkConstraintList(
                            llvm::function_ref<
                              ConstraintRelation(const Constraint<T>&)>
                                checkConstraint,
-                           Optional<Diag<unsigned, Type, DiagT, DiagT>>
+                           Optional<Diag<unsigned, Type, T, T>>
                              conflictingDiag,
-                           Diag<Type, DiagT> redundancyDiag,
-                           Diag<unsigned, Type, DiagT> otherNoteDiag,
-                           llvm::function_ref<DiagT(const T&)> diagValue,
-                           bool removeSelfDerived) {
+                           Diag<Type, T> redundancyDiag,
+                           Diag<unsigned, Type, T> otherNoteDiag) {
   assert(!constraints.empty() && "No constraints?");
-  if (removeSelfDerived) {
-    ::removeSelfDerived(*this, constraints, /*proto=*/nullptr);
-  }
 
   // Sort the constraints, so we get a deterministic ordering of diagnostics.
   std::sort(constraints.begin(), constraints.end());
@@ -6617,7 +7167,7 @@ Constraint<T> GenericSignatureBuilder::checkConstraintList(
                    representativeConstraint->source->classifyDiagKind(),
                    representativeConstraint->getSubjectDependentType(
                                                                genericParams),
-                   diagValue(representativeConstraint->value));
+                   representativeConstraint->value);
   };
 
   // Go through the concrete constraints looking for redundancies.
@@ -6663,8 +7213,8 @@ Constraint<T> GenericSignatureBuilder::checkConstraintList(
           getSubjectType(constraint.getSubjectDependentType(genericParams));
         Diags.diagnose(constraint.source->getLoc(), *conflictingDiag,
                        subject.first, subject.second,
-                       diagValue(constraint.value),
-                       diagValue(representativeConstraint->value));
+                       constraint.value,
+                       representativeConstraint->value);
 
         noteRepresentativeConstraint();
         break;
@@ -6682,8 +7232,8 @@ Constraint<T> GenericSignatureBuilder::checkConstraintList(
         Diags.diagnose(representativeConstraint->source->getLoc(),
                        *conflictingDiag,
                        subject.first, subject.second,
-                       diagValue(representativeConstraint->value),
-                       diagValue(constraint.value));
+                       representativeConstraint->value,
+                       constraint.value);
 
         diagnosedConflictingRepresentative = true;
         break;
@@ -6700,7 +7250,7 @@ Constraint<T> GenericSignatureBuilder::checkConstraintList(
         Diags.diagnose(constraint.source->getLoc(),
                        redundancyDiag,
                        constraint.getSubjectDependentType(genericParams),
-                       diagValue(constraint.value));
+                       constraint.value);
 
         noteRepresentativeConstraint();
       }
@@ -6761,41 +7311,217 @@ void GenericSignatureBuilder::checkConformanceConstraints(
 
     // Remove any self-derived constraints.
     removeSelfDerived(*this, entry.second, entry.first);
+  }
+}
 
-    checkConstraintList<ProtocolDecl *, ProtocolDecl *>(
-      genericParams, entry.second, RequirementKind::Conformance,
-      [](const Constraint<ProtocolDecl *> &constraint) {
-        return true;
-      },
-      [&](const Constraint<ProtocolDecl *> &constraint) {
-        auto proto = constraint.value;
-        assert(proto == entry.first && "Mixed up protocol constraints");
+void GenericSignatureBuilder::diagnoseRedundantRequirements() const {
+  for (const auto &req : Impl->ExplicitRequirements) {
+    auto *source = req.getSource();
+    auto loc = source->getLoc();
 
-        // If this conformance requirement recursively makes a protocol
-        // conform to itself, don't complain here.
-        auto source = constraint.source;
+    // Don't diagnose anything without a source location.
+    if (loc.isInvalid())
+      continue;
+
+    // Don't diagnose inferred requirements.
+    if (source->isInferredRequirement())
+      continue;
+
+    // Check if its actually redundant.
+    auto found = Impl->RedundantRequirements.find(req);
+    if (found == Impl->RedundantRequirements.end())
+      continue;
+
+    // Don't diagnose explicit requirements that are implied by
+    // inferred requirements.
+    if (llvm::all_of(found->second,
+                     [&](const ExplicitRequirement &otherReq) {
+                       return otherReq.getSource()->isInferredRequirement();
+                     }))
+      continue;
+
+    auto subjectType = getSugaredDependentType(req.getSubjectType(),
+                                               getGenericParams());
+
+    switch (req.getKind()) {
+    case RequirementKind::Conformance: {
+      auto *proto = req.getRHS().get<ProtocolDecl *>();
+
+      // If this conformance requirement recursively makes a protocol
+      // conform to itself, don't complain here, because we diagnose
+      // the circular inheritance elsewhere.
+      {
         auto rootSource = source->getRoot();
-        if (rootSource->kind == RequirementSource::RequirementSignatureSelf &&
-            source != rootSource &&
-            proto == rootSource->getProtocolDecl() &&
-            areInSameEquivalenceClass(rootSource->getRootType(),
-                                      source->getAffectedType())) {
-          return ConstraintRelation::Unrelated;
+        if (proto == rootSource->getProtocolDecl() &&
+            rootSource->kind == RequirementSource::RequirementSignatureSelf &&
+            rootSource->getRootType()->isEqual(source->getAffectedType())) {
+          break;
         }
+      }
 
-        // If this is a redundantly inherited Objective-C protocol, treat it
-        // as "unrelated" to silence the warning about the redundant
-        // conformance.
-        if (isRedundantlyInheritableObjCProtocol(proto, constraint.source))
-          return ConstraintRelation::Unrelated;
+      // If this is a redundantly inherited Objective-C protocol, treat it
+      // as "unrelated" to silence the warning about the redundant
+      // conformance.
+      if (isRedundantlyInheritableObjCProtocol(proto, source))
+        break;
 
-        return ConstraintRelation::Redundant;
-      },
-      None,
-      diag::redundant_conformance_constraint,
-      diag::redundant_conformance_here,
-      [](ProtocolDecl *proto) { return proto; },
-      /*removeSelfDerived=*/false);
+      Context.Diags.diagnose(loc, diag::redundant_conformance_constraint,
+                             subjectType, proto);
+
+      for (auto otherReq : found->second) {
+        auto *otherSource = otherReq.getSource();
+        if (otherSource->isInferredRequirement())
+          continue;
+
+        auto otherLoc = otherSource->getLoc();
+        if (otherLoc.isInvalid())
+          continue;
+
+        Context.Diags.diagnose(otherLoc, diag::redundant_conformance_here,
+                               subjectType, proto);
+      }
+
+      break;
+    }
+
+    case RequirementKind::Layout: {
+      auto layout = req.getRHS().get<LayoutConstraint>();
+
+      auto conflict = Impl->ConflictingRequirements.find(req);
+      if (conflict != Impl->ConflictingRequirements.end()) {
+        Impl->HadAnyError = true;
+
+        auto otherLayout = conflict->second.get<LayoutConstraint>();
+        Context.Diags.diagnose(loc, diag::conflicting_layout_constraints,
+                               subjectType, layout, otherLayout);
+
+        for (auto otherReq : found->second) {
+          auto *otherSource = otherReq.getSource();
+          auto otherLoc = otherSource->getLoc();
+          if (otherLoc.isInvalid())
+            continue;
+
+          Context.Diags.diagnose(otherLoc, diag::conflicting_layout_constraint,
+                                 subjectType, otherLayout);
+        }
+      } else {
+        Context.Diags.diagnose(loc, diag::redundant_layout_constraint,
+                               subjectType, layout);
+
+        for (auto otherReq : found->second) {
+          auto *otherSource = otherReq.getSource();
+          if (otherSource->isInferredRequirement())
+            continue;
+
+          auto otherLoc = otherSource->getLoc();
+          if (otherLoc.isInvalid())
+            continue;
+
+          Context.Diags.diagnose(otherLoc, diag::previous_layout_constraint,
+                                 subjectType, layout);
+        }
+      }
+
+      break;
+    }
+
+    case RequirementKind::Superclass: {
+      auto superclass = req.getRHS().get<Type>();
+
+      auto conflict = Impl->ConflictingRequirements.find(req);
+      if (conflict != Impl->ConflictingRequirements.end()) {
+        Impl->HadAnyError = true;
+
+        auto otherSuperclass = conflict->second.get<Type>();
+
+        Context.Diags.diagnose(loc, diag::conflicting_superclass_constraints,
+                               subjectType, superclass, otherSuperclass);
+
+        for (auto otherReq : found->second) {
+          auto *otherSource = otherReq.getSource();
+          auto otherLoc = otherSource->getLoc();
+          if (otherLoc.isInvalid())
+            continue;
+
+          Context.Diags.diagnose(otherLoc, diag::conflicting_superclass_constraint,
+                                 subjectType, otherSuperclass);
+        }
+      } else {
+        Context.Diags.diagnose(loc, diag::redundant_superclass_constraint,
+                               subjectType, superclass);
+
+        for (auto otherReq : found->second) {
+          auto *otherSource = otherReq.getSource();
+          if (otherSource->isInferredRequirement())
+            continue;
+
+          auto otherLoc = otherSource->getLoc();
+          if (otherLoc.isInvalid())
+            continue;
+
+          Context.Diags.diagnose(otherLoc, diag::superclass_redundancy_here,
+                                 subjectType, superclass);
+        }
+      }
+
+      break;
+    }
+
+    case RequirementKind::SameType:
+      // TODO
+      break;
+    }
+  }
+}
+
+void GenericSignatureBuilder::diagnoseConflictingConcreteTypeRequirements() const {
+  for (auto pair : Impl->ConflictingConcreteTypeRequirements) {
+    SourceLoc loc = pair.concreteTypeRequirement.getSource()->getLoc();
+    SourceLoc otherLoc = pair.otherRequirement.getSource()->getLoc();
+
+    if (loc.isInvalid() && otherLoc.isInvalid())
+      continue;
+
+    auto subjectType = pair.concreteTypeRequirement.getSubjectType();
+    SourceLoc subjectLoc = (loc.isInvalid() ? otherLoc : loc);
+
+    Impl->HadAnyError = true;
+
+    switch (pair.otherRequirement.getKind()) {
+    case RequirementKind::Superclass: {
+      Context.Diags.diagnose(subjectLoc, diag::type_does_not_inherit,
+                             subjectType, pair.resolvedConcreteType,
+                             pair.otherRHS.get<Type>());
+
+      if (otherLoc.isValid()) {
+        Context.Diags.diagnose(otherLoc, diag::superclass_redundancy_here,
+                               subjectType, pair.otherRHS.get<Type>());
+      }
+
+      break;
+    }
+
+    case RequirementKind::Layout: {
+      Context.Diags.diagnose(subjectLoc, diag::type_is_not_a_class,
+                             subjectType, pair.resolvedConcreteType, Type());
+
+      if (otherLoc.isValid()) {
+        Context.Diags.diagnose(otherLoc, diag::previous_layout_constraint,
+                               subjectType, pair.otherRHS.get<LayoutConstraint>());
+      }
+
+      break;
+    }
+
+    case RequirementKind::Conformance:
+    case RequirementKind::SameType:
+      llvm_unreachable("TODO");
+    }
+
+    if (loc.isValid()) {
+      Context.Diags.diagnose(loc, diag::same_type_redundancy_here,
+                             1, subjectType, pair.resolvedConcreteType);
+    }
   }
 }
 
@@ -7390,7 +8116,7 @@ void GenericSignatureBuilder::checkSameTypeConstraints(
   for (auto &constraints : intracomponentEdges) {
     if (constraints.empty()) continue;
 
-    checkConstraintList<Type, Type>(
+    checkConstraintList<Type>(
       genericParams, constraints, RequirementKind::SameType,
       [](const Constraint<Type> &) { return true; },
       [](const Constraint<Type> &constraint) {
@@ -7403,11 +8129,7 @@ void GenericSignatureBuilder::checkSameTypeConstraints(
       },
       None,
       diag::redundant_same_type_constraint,
-      diag::previous_same_type_constraint,
-      [&](Type type) {
-        return type;
-      },
-      /*removeSelfDerived=*/false);
+      diag::previous_same_type_constraint);
   }
 
   // Diagnose redundant same-type constraints across components. First,
@@ -7581,7 +8303,17 @@ void GenericSignatureBuilder::checkConcreteTypeConstraints(
                               EquivalenceClass *equivClass) {
   // Resolve any thus-far-unresolved dependent types.
   Type resolvedConcreteType =
-    resolveDependentMemberTypes(*this, equivClass->concreteType);
+    getCanonicalTypeInContext(equivClass->concreteType, genericParams);
+
+  removeSelfDerived(*this, equivClass->concreteTypeConstraints,
+                    /*proto=*/nullptr,
+                    /*dropDerivedViaConcrete=*/true,
+                    /*allCanBeSelfDerived=*/true);
+
+  // This can occur if the combination of a superclass requirement and
+  // protocol conformance requirement force a type to become concrete.
+  if (equivClass->concreteTypeConstraints.empty())
+    return;
 
   checkConstraintList<Type>(
     genericParams, equivClass->concreteTypeConstraints, RequirementKind::SameType,
@@ -7589,8 +8321,7 @@ void GenericSignatureBuilder::checkConcreteTypeConstraints(
       if (constraint.value->isEqual(resolvedConcreteType))
         return true;
 
-      auto resolvedType =
-        resolveDependentMemberTypes(*this, constraint.value);
+      auto resolvedType = getCanonicalTypeInContext(constraint.value, { });
       return resolvedType->isEqual(resolvedConcreteType);
     },
     [&](const Constraint<Type> &constraint) {
@@ -7612,8 +8343,6 @@ void GenericSignatureBuilder::checkConcreteTypeConstraints(
     diag::same_type_conflict,
     diag::redundant_same_type_to_concrete,
     diag::same_type_redundancy_here);
-
-  equivClass->concreteType = resolvedConcreteType;
 }
 
 void GenericSignatureBuilder::checkSuperclassConstraints(
@@ -7621,84 +8350,7 @@ void GenericSignatureBuilder::checkSuperclassConstraints(
                               EquivalenceClass *equivClass) {
   assert(equivClass->superclass && "No superclass constraint?");
 
-  // Resolve any thus-far-unresolved dependent types.
-  Type resolvedSuperclass =
-    resolveDependentMemberTypes(*this, equivClass->superclass);
-
-  auto representativeConstraint =
-    checkConstraintList<Type>(
-      genericParams, equivClass->superclassConstraints, RequirementKind::Superclass,
-      [&](const ConcreteConstraint &constraint) {
-        if (constraint.value->isEqual(resolvedSuperclass))
-          return true;
-
-        Type resolvedType =
-          resolveDependentMemberTypes(*this, constraint.value);
-        return resolvedType->isEqual(resolvedSuperclass);
-      },
-      [&](const Constraint<Type> &constraint) {
-        Type superclass = constraint.value;
-
-        // If this class is a superclass of the "best"
-        if (superclass->isExactSuperclassOf(resolvedSuperclass))
-          return ConstraintRelation::Redundant;
-
-        // Otherwise, it conflicts.
-        return ConstraintRelation::Conflicting;
-      },
-      diag::requires_superclass_conflict,
-      diag::redundant_superclass_constraint,
-      diag::superclass_redundancy_here);
-
-  // Record the resolved superclass type.
-  equivClass->superclass = resolvedSuperclass;
-
-  // If we have a concrete type, check it.
-  // FIXME: Substitute into the concrete type.
-  if (equivClass->concreteType) {
-    Type resolvedConcreteType =
-      resolveDependentMemberTypes(*this, equivClass->concreteType);
-    auto existing = equivClass->findAnyConcreteConstraintAsWritten();
-    // Make sure the concrete type fulfills the superclass requirement.
-    if (!equivClass->superclass->isExactSuperclassOf(resolvedConcreteType)){
-      Impl->HadAnyError = true;
-      if (existing) {
-        Diags.diagnose(existing->source->getLoc(), diag::type_does_not_inherit,
-                       existing->getSubjectDependentType(getGenericParams()),
-                       existing->value, equivClass->superclass);
-
-        if (representativeConstraint.source->getLoc().isValid()) {
-          Diags.diagnose(representativeConstraint.source->getLoc(),
-                         diag::superclass_redundancy_here,
-                         representativeConstraint.source->classifyDiagKind(),
-                         representativeConstraint.getSubjectDependentType(
-                                                              genericParams),
-                         equivClass->superclass);
-        }
-      } else if (representativeConstraint.source->getLoc().isValid()) {
-        Diags.diagnose(representativeConstraint.source->getLoc(),
-                       diag::type_does_not_inherit,
-                       representativeConstraint.getSubjectDependentType(
-                                                              genericParams),
-                       resolvedConcreteType, equivClass->superclass);
-      }
-    } else if (representativeConstraint.source->shouldDiagnoseRedundancy(true)
-               && existing &&
-               existing->source->shouldDiagnoseRedundancy(false)) {
-      // It does fulfill the requirement; diagnose the redundancy.
-      Diags.diagnose(representativeConstraint.source->getLoc(),
-                     diag::redundant_superclass_constraint,
-                     representativeConstraint.getSubjectDependentType(
-                                                              genericParams),
-                     representativeConstraint.value);
-
-      Diags.diagnose(existing->source->getLoc(),
-                     diag::same_type_redundancy_here,
-                     existing->source->classifyDiagKind(),
-                     existing->getSubjectDependentType(genericParams),
-                     existing->value);
-    }
-  }
+  removeSelfDerived(*this, equivClass->superclassConstraints, /*proto=*/nullptr);
 }
 
 void GenericSignatureBuilder::checkLayoutConstraints(
@@ -7706,56 +8358,84 @@ void GenericSignatureBuilder::checkLayoutConstraints(
                               EquivalenceClass *equivClass) {
   if (!equivClass->layout) return;
 
-  checkConstraintList<LayoutConstraint>(
-    genericParams, equivClass->layoutConstraints, RequirementKind::Layout,
-    [&](const Constraint<LayoutConstraint> &constraint) {
-      return constraint.value == equivClass->layout;
-    },
-    [&](const Constraint<LayoutConstraint> &constraint) {
-      auto layout = constraint.value;
-
-      // If the layout constraints are mergable, i.e. compatible,
-      // it is a redundancy.
-      if (layout.merge(equivClass->layout)->isKnownLayout())
-        return ConstraintRelation::Redundant;
-
-      return ConstraintRelation::Conflicting;
-    },
-    diag::conflicting_layout_constraints,
-    diag::redundant_layout_constraint,
-    diag::previous_layout_constraint);
+  removeSelfDerived(*this, equivClass->layoutConstraints, /*proto=*/nullptr);
 }
 
 bool GenericSignatureBuilder::isRedundantExplicitRequirement(
-    ExplicitRequirement req) const {
+    const ExplicitRequirement &req) const {
   assert(Impl->computedRedundantRequirements &&
          "Must ensure computeRedundantRequirements() is called first");
   auto &redundantReqs = Impl->RedundantRequirements;
   return (redundantReqs.find(req) != redundantReqs.end());
 }
 
-namespace {
-  template<typename T>
-  bool hasNonRedundantRequirementSource(ArrayRef<Constraint<T>> constraints,
-                                        RequirementKind kind,
-                                        GenericSignatureBuilder &builder) {
-    for (auto constraint : constraints) {
-      if (constraint.source->isDerivedRequirement())
-        continue;
+static Optional<Requirement> createRequirement(RequirementKind kind,
+                                               Type depTy,
+                                               RequirementRHS rhs,
+                           TypeArrayView<GenericTypeParamType> genericParams) {
 
-      auto req = ExplicitRequirement::fromExplicitConstraint(kind, constraint);
-      if (builder.isRedundantExplicitRequirement(req))
-        continue;
+  depTy = getSugaredDependentType(depTy, genericParams);
 
-      return true;
-    }
+  if (auto type = rhs.dyn_cast<Type>()) {
+    if (type->hasError())
+      return None;
 
-    return false;
+    // Drop requirements involving concrete types containing
+    // unresolved associated types.
+    if (type->findUnresolvedDependentMemberType())
+      return None;
+
+    if (type->isTypeParameter())
+      type = getSugaredDependentType(type, genericParams);
+
+    return Requirement(kind, depTy, type);
+  } else if (auto *proto = rhs.dyn_cast<ProtocolDecl *>()) {
+    auto type = proto->getDeclaredInterfaceType();
+    return Requirement(kind, depTy, type);
+  } else {
+    auto layoutConstraint = rhs.get<LayoutConstraint>();
+    return Requirement(kind, depTy, layoutConstraint);
   }
+}
 
-  using SameTypeComponentRef = std::pair<EquivalenceClass *, unsigned>;
+/// Determine the canonical ordering of requirements.
+static unsigned getRequirementKindOrder(RequirementKind kind) {
+  switch (kind) {
+  case RequirementKind::Conformance: return 2;
+  case RequirementKind::Superclass: return 0;
+  case RequirementKind::SameType: return 3;
+  case RequirementKind::Layout: return 1;
+  }
+  llvm_unreachable("unhandled kind");
+}
 
-} // end anonymous namespace
+static int compareRequirements(const Requirement *lhsPtr,
+                               const Requirement *rhsPtr) {
+  auto &lhs = *lhsPtr;
+  auto &rhs = *rhsPtr;
+
+  int compareLHS =
+    compareDependentTypes(lhs.getFirstType(), rhs.getFirstType());
+
+  if (compareLHS != 0)
+    return compareLHS;
+
+  int compareKind = (getRequirementKindOrder(lhs.getKind()) -
+                     getRequirementKindOrder(rhs.getKind()));
+
+  if (compareKind != 0)
+    return compareKind;
+
+  // We should only have multiple conformance requirements.
+  assert(lhs.getKind() == RequirementKind::Conformance);
+
+  int compareProtos =
+    TypeDecl::compare(lhs.getProtocolDecl(), rhs.getProtocolDecl());
+
+  assert(compareProtos != 0 && "Duplicate conformance requirement");
+
+  return compareProtos;
+}
 
 void GenericSignatureBuilder::enumerateRequirements(
                    TypeArrayView<GenericTypeParamType> genericParams,
@@ -7763,161 +8443,99 @@ void GenericSignatureBuilder::enumerateRequirements(
   auto recordRequirement = [&](RequirementKind kind,
                                Type depTy,
                                RequirementRHS rhs) {
-    depTy = getSugaredDependentType(depTy, genericParams);
-
-    if (auto type = rhs.dyn_cast<Type>()) {
-      if (type->hasError())
-        return;
-
-      // Drop requirements involving concrete types containing
-      // unresolved associated types.
-      if (type->findUnresolvedDependentMemberType()) {
-        assert(Impl->HadAnyError);
-        return;
-      }
-
-      if (type->isTypeParameter())
-        type = getSugaredDependentType(type, genericParams);
-
-      requirements.push_back(Requirement(kind, depTy, type));
-    } else if (auto *proto = rhs.dyn_cast<ProtocolDecl *>()) {
-      auto type = proto->getDeclaredInterfaceType();
-      requirements.push_back(Requirement(kind, depTy, type));
-    } else {
-      auto layoutConstraint = rhs.get<LayoutConstraint>();
-      requirements.push_back(Requirement(kind, depTy, layoutConstraint));
-      return;
-    }
+    if (auto req = createRequirement(kind, depTy, rhs, genericParams))
+      requirements.push_back(*req);
   };
 
-  // Collect all of the subject types that will be involved in constraints.
-  SmallVector<SameTypeComponentRef, 8> subjects;
-  for (auto &equivClass : Impl->EquivalenceClasses) {
-    if (equivClass.derivedSameTypeComponents.empty()) {
-      checkSameTypeConstraints(getGenericParams(), &equivClass);
+  // Collect all non-same type requirements.
+  for (auto &req : Impl->ExplicitRequirements) {
+    if (isRedundantExplicitRequirement(req))
+      continue;
+
+    auto depTy = getCanonicalTypeInContext(
+        req.getSubjectType(), { });
+
+    // FIXME: This should be an assert once we ensure that concrete
+    // same-type requirements always mark other requirements on the
+    // same subject type as redundant or conflicting.
+    if (!depTy->isTypeParameter())
+      continue;
+
+    auto rhs = req.getRHS();
+    if (auto constraintType = rhs.dyn_cast<Type>()) {
+      rhs = getCanonicalTypeInContext(constraintType, genericParams);
     }
 
-    for (unsigned i : indices(equivClass.derivedSameTypeComponents))
-      subjects.push_back({&equivClass, i});
+    recordRequirement(req.getKind(), depTy, rhs);
   }
 
-  for (const auto &subject : subjects) {
-    // Dig out the subject type and its corresponding component.
-    auto equivClass = subject.first;
-    auto &component = equivClass->derivedSameTypeComponents[subject.second];
-    Type subjectType = component.type;
-
-    assert(!subjectType->hasError());
-    assert(!subjectType->findUnresolvedDependentMemberType());
-
-    // If this equivalence class is bound to a concrete type, equate the
-    // anchor with a concrete type.
-    if (Type concreteType = equivClass->concreteType) {
-      // If the parent of this anchor is also a concrete type, don't
-      // create a requirement.
-      if (!subjectType->is<GenericTypeParamType>() &&
-          maybeResolveEquivalenceClass(
-            subjectType->castTo<DependentMemberType>()->getBase(),
-            ArchetypeResolutionKind::WellFormed,
-            /*wantExactPotentialArchetype=*/false)
-            .getEquivalenceClass(*this)->concreteType)
-        continue;
-
-      // Drop recursive and invalid concrete-type constraints.
-      if (equivClass->recursiveConcreteType ||
-          equivClass->invalidConcreteType)
-        continue;
-
-      // Filter out derived requirements... except for concrete-type
-      // requirements on generic parameters. The exception is due to
-      // the canonicalization of generic signatures, which never
-      // eliminates generic parameters even when they have been
-      // mapped to a concrete type.
-      if (subjectType->is<GenericTypeParamType>() ||
-          component.concreteTypeSource == nullptr ||
-          !component.concreteTypeSource->isDerivedRequirement()) {
-        recordRequirement(RequirementKind::SameType,
-                          subjectType, concreteType);
+  // Collect all same type requirements.
+  if (!Impl->ExplicitSameTypeRequirements.empty()) {
+    for (auto &equivClass : Impl->EquivalenceClasses) {
+      if (equivClass.derivedSameTypeComponents.empty()) {
+        checkSameTypeConstraints(genericParams, &equivClass);
       }
-      continue;
-    }
 
-    std::function<void()> deferredSameTypeRequirement;
+      for (unsigned i : indices(equivClass.derivedSameTypeComponents)) {
+        // Dig out the subject type and its corresponding component.
+        auto &component = equivClass.derivedSameTypeComponents[i];
+        Type subjectType = component.type;
 
-    // If we're at the last anchor in the component, do nothing;
-    if (subject.second + 1 != equivClass->derivedSameTypeComponents.size()) {
-      // Form a same-type constraint from this anchor within the component
-      // to the next.
-      // FIXME: Distinguish between explicit and inferred here?
-      auto &nextComponent =
-        equivClass->derivedSameTypeComponents[subject.second + 1];
-      Type otherSubjectType = nextComponent.type;
-      deferredSameTypeRequirement =
-        [&recordRequirement, subjectType, otherSubjectType] {
+        assert(!subjectType->hasError());
+        assert(!subjectType->findUnresolvedDependentMemberType());
+
+        // If this equivalence class is bound to a concrete type, equate the
+        // anchor with a concrete type.
+        if (Type concreteType = equivClass.concreteType) {
+          concreteType = getCanonicalTypeInContext(concreteType, genericParams);
+
+          // If the parent of this anchor is also a concrete type, don't
+          // create a requirement.
+          if (!subjectType->is<GenericTypeParamType>() &&
+              maybeResolveEquivalenceClass(
+                subjectType->castTo<DependentMemberType>()->getBase(),
+                ArchetypeResolutionKind::WellFormed,
+                /*wantExactPotentialArchetype=*/false)
+                .getEquivalenceClass(*this)->concreteType)
+            continue;
+
+          // Drop recursive and invalid concrete-type constraints.
+          if (equivClass.recursiveConcreteType ||
+              equivClass.invalidConcreteType)
+            continue;
+
+          // Filter out derived requirements... except for concrete-type
+          // requirements on generic parameters. The exception is due to
+          // the canonicalization of generic signatures, which never
+          // eliminates generic parameters even when they have been
+          // mapped to a concrete type.
+          if (subjectType->is<GenericTypeParamType>() ||
+              component.concreteTypeSource == nullptr ||
+              !component.concreteTypeSource->isDerivedRequirement()) {
+            recordRequirement(RequirementKind::SameType,
+                              subjectType, concreteType);
+          }
+          continue;
+        }
+
+        // If we're at the last anchor in the component, do nothing;
+        if (i + 1 != equivClass.derivedSameTypeComponents.size()) {
+          // Form a same-type constraint from this anchor within the component
+          // to the next.
+          // FIXME: Distinguish between explicit and inferred here?
+          auto &nextComponent = equivClass.derivedSameTypeComponents[i + 1];
+          Type otherSubjectType = nextComponent.type;
+
           recordRequirement(RequirementKind::SameType,
                             subjectType, otherSubjectType);
-        };
-    }
-
-    SWIFT_DEFER {
-      if (deferredSameTypeRequirement) deferredSameTypeRequirement();
-    };
-
-    // If this is not the first component anchor in its equivalence class,
-    // we're done.
-    if (subject.second > 0)
-      continue;
-
-    // If we have a superclass, produce a superclass requirement
-    if (equivClass->superclass &&
-        !equivClass->recursiveSuperclassType &&
-        !equivClass->superclass->hasError()) {
-      if (hasNonRedundantRequirementSource<Type>(
-            equivClass->superclassConstraints,
-            RequirementKind::Superclass, *this)) {
-        recordRequirement(RequirementKind::Superclass,
-                          subjectType, equivClass->superclass);
+        }
       }
-    }
-
-    // If we have a layout constraint, produce a layout requirement.
-    if (equivClass->layout) {
-      if (hasNonRedundantRequirementSource<LayoutConstraint>(
-            equivClass->layoutConstraints,
-            RequirementKind::Layout, *this)) {
-        recordRequirement(RequirementKind::Layout,
-                          subjectType, equivClass->layout);
-      }
-    }
-
-    // Enumerate conformance requirements.
-    SmallVector<ProtocolDecl *, 4> protocols;
-
-    for (const auto &conforms : equivClass->conformsTo) {
-      if (hasNonRedundantRequirementSource<ProtocolDecl *>(
-            conforms.second, RequirementKind::Conformance, *this)) {
-        protocols.push_back(conforms.first);
-      }
-    }
-
-    // Sort the protocols in canonical order.
-    llvm::array_pod_sort(protocols.begin(), protocols.end(), 
-                         TypeDecl::compare);
-
-    // Enumerate the conformance requirements.
-    for (auto proto : protocols) {
-      recordRequirement(RequirementKind::Conformance, subjectType, proto);
     }
   }
 
-  // Sort the subject types in canonical order. This needs to be a stable sort
-  // so that the relative order of requirements that have the same subject type
-  // is preserved.
-  std::stable_sort(requirements.begin(), requirements.end(),
-                   [](const Requirement &lhs, const Requirement &rhs) {
-    return compareDependentTypes(lhs.getFirstType(),
-                                 rhs.getFirstType()) < 0;
-  });
+  // Sort the requirements in canonical order.
+  llvm::array_pod_sort(requirements.begin(), requirements.end(),
+                       compareRequirements);
 }
 
 void GenericSignatureBuilder::dump() {
@@ -7948,11 +8566,272 @@ void GenericSignatureBuilder::addGenericSignature(GenericSignature sig) {
     addRequirement(reqt, FloatingRequirementSource::forAbstract(), nullptr);
 }
 
+#ifndef NDEBUG
+
+static void checkGenericSignature(CanGenericSignature canSig,
+                                  GenericSignatureBuilder &builder) {
+  PrettyStackTraceGenericSignature debugStack("checking", canSig);
+
+  auto canonicalRequirements = canSig->getRequirements();
+
+  // Check that the signature is canonical.
+  for (unsigned idx : indices(canonicalRequirements)) {
+    debugStack.setRequirement(idx);
+
+    const auto &reqt = canonicalRequirements[idx];
+
+    // Left-hand side must be canonical in its context.
+    // Check canonicalization of requirement itself.
+    switch (reqt.getKind()) {
+    case RequirementKind::Superclass:
+      assert(canSig->isCanonicalTypeInContext(reqt.getFirstType(), builder) &&
+             "Left-hand side is not canonical");
+      assert(canSig->isCanonicalTypeInContext(reqt.getSecondType(), builder) &&
+             "Superclass type isn't canonical in its own context");
+      break;
+
+    case RequirementKind::Layout:
+      assert(canSig->isCanonicalTypeInContext(reqt.getFirstType(), builder) &&
+             "Left-hand side is not canonical");
+      break;
+
+    case RequirementKind::SameType: {
+      auto isCanonicalAnchor = [&](Type type) {
+        if (auto *dmt = type->getAs<DependentMemberType>())
+          return canSig->isCanonicalTypeInContext(dmt->getBase(), builder);
+        return type->is<GenericTypeParamType>();
+      };
+
+      auto firstType = reqt.getFirstType();
+      auto secondType = reqt.getSecondType();
+      assert(isCanonicalAnchor(firstType));
+
+      if (reqt.getSecondType()->isTypeParameter()) {
+        assert(isCanonicalAnchor(secondType));
+        assert(compareDependentTypes(firstType, secondType) < 0 &&
+               "Out-of-order type parameters in same-type constraint");
+      } else {
+        assert(canSig->isCanonicalTypeInContext(secondType) &&
+               "Concrete same-type isn't canonical in its own context");
+      }
+      break;
+    }
+
+    case RequirementKind::Conformance:
+      assert(canSig->isCanonicalTypeInContext(reqt.getFirstType(), builder) &&
+             "Left-hand side is not canonical");
+      assert(reqt.getFirstType()->isTypeParameter() &&
+             "Left-hand side must be a type parameter");
+      assert(isa<ProtocolType>(reqt.getSecondType().getPointer()) &&
+             "Right-hand side of conformance isn't a protocol type");
+      break;
+    }
+
+    // From here on, we're only interested in requirements beyond the first.
+    if (idx == 0) continue;
+
+    // Make sure that the left-hand sides are in nondecreasing order.
+    const auto &prevReqt = canonicalRequirements[idx-1];
+    int compareLHS =
+      compareDependentTypes(prevReqt.getFirstType(), reqt.getFirstType());
+    assert(compareLHS <= 0 && "Out-of-order left-hand sides");
+
+    // If we have two same-type requirements where the left-hand sides differ
+    // but fall into the same equivalence class, we can check the form.
+    if (compareLHS < 0 && reqt.getKind() == RequirementKind::SameType &&
+        prevReqt.getKind() == RequirementKind::SameType &&
+        canSig->areSameTypeParameterInContext(prevReqt.getFirstType(),
+                                              reqt.getFirstType(),
+                                              builder)) {
+      // If it's a it's a type parameter, make sure the equivalence class is
+      // wired together sanely.
+      if (prevReqt.getSecondType()->isTypeParameter()) {
+        assert(prevReqt.getSecondType()->isEqual(reqt.getFirstType()) &&
+               "same-type constraints within an equiv. class are out-of-order");
+      } else {
+        // Otherwise, the concrete types must match up.
+        assert(prevReqt.getSecondType()->isEqual(reqt.getSecondType()) &&
+               "inconsistent concrete same-type constraints in equiv. class");
+      }
+    }
+
+    // If we have a concrete same-type requirement, we shouldn't have any
+    // other requirements on the same type.
+    if (reqt.getKind() == RequirementKind::SameType &&
+        !reqt.getSecondType()->isTypeParameter()) {
+      assert(compareLHS < 0 &&
+             "Concrete subject type should not have any other requirements");
+    }
+
+    assert(compareRequirements(&prevReqt, &reqt) < 0 &&
+           "Out-of-order requirements");
+  }
+}
+#endif
+
+static Type stripBoundDependentMemberTypes(Type t) {
+  if (auto *depMemTy = t->getAs<DependentMemberType>()) {
+    return DependentMemberType::get(
+      stripBoundDependentMemberTypes(depMemTy->getBase()),
+      depMemTy->getName());
+  }
+
+  return t;
+}
+
+static Requirement stripBoundDependentMemberTypes(Requirement req) {
+  auto subjectType = stripBoundDependentMemberTypes(req.getFirstType());
+
+  switch (req.getKind()) {
+  case RequirementKind::Conformance:
+    return Requirement(RequirementKind::Conformance, subjectType,
+                       req.getSecondType());
+
+  case RequirementKind::Superclass:
+  case RequirementKind::SameType:
+    return Requirement(req.getKind(), subjectType,
+                       req.getSecondType().transform([](Type t) {
+                         return stripBoundDependentMemberTypes(t);
+                       }));
+
+  case RequirementKind::Layout:
+    return Requirement(RequirementKind::Layout, subjectType,
+                       req.getLayoutConstraint());
+  }
+
+  llvm_unreachable("Bad requirement kind");
+}
+
+GenericSignature GenericSignatureBuilder::rebuildSignatureWithoutRedundantRequirements(
+                                          bool allowConcreteGenericParams,
+                                          const ProtocolDecl *requirementSignatureSelfProto) && {
+  NumSignaturesRebuiltWithoutRedundantRequirements++;
+
+  GenericSignatureBuilder newBuilder(Context);
+
+  for (auto param : getGenericParams())
+    newBuilder.addGenericParameter(param);
+
+  auto newSource = FloatingRequirementSource::forAbstract();
+
+  for (const auto &req : Impl->ExplicitRequirements) {
+    assert(req.getKind() != RequirementKind::SameType &&
+           "Should not see same-type requirement here");
+
+    if (isRedundantExplicitRequirement(req) &&
+        Impl->ExplicitConformancesImpliedByConcrete.count(req))
+      continue;
+
+    auto subjectType = req.getSubjectType();
+    subjectType = stripBoundDependentMemberTypes(subjectType);
+    auto resolvedSubjectType =
+        resolveDependentMemberTypes(*this, subjectType,
+                                    ArchetypeResolutionKind::WellFormed);
+
+    // This can occur if the combination of a superclass requirement and
+    // protocol conformance requirement force a type to become concrete.
+    //
+    // FIXME: Is there a more principled formulation of this?
+    if (req.getKind() == RequirementKind::Superclass &&
+        !resolvedSubjectType->isTypeParameter()) {
+      newBuilder.addRequirement(Requirement(RequirementKind::SameType,
+                                            subjectType, resolvedSubjectType),
+                                newSource, nullptr);
+      continue;
+    }
+
+    assert(resolvedSubjectType->isTypeParameter());
+
+    if (auto optReq = createRequirement(req.getKind(), resolvedSubjectType,
+                                        req.getRHS(), getGenericParams())) {
+      auto newReq = stripBoundDependentMemberTypes(*optReq);
+      newBuilder.addRequirement(newReq, newSource, nullptr);
+    }
+  }
+
+  for (const auto &req : Impl->ExplicitSameTypeRequirements) {
+    auto resolveType = [this](Type t) -> Type {
+      t = stripBoundDependentMemberTypes(t);
+      if (t->is<GenericTypeParamType>()) {
+        return t;
+      } else if (auto *depMemTy = t->getAs<DependentMemberType>()) {
+        auto resolvedBaseTy =
+            resolveDependentMemberTypes(*this, depMemTy->getBase(),
+                                        ArchetypeResolutionKind::WellFormed);
+
+
+        if (resolvedBaseTy->isTypeParameter()) {
+          return DependentMemberType::get(resolvedBaseTy, depMemTy->getName());
+        } else {
+          return resolveDependentMemberTypes(*this, t,
+                                             ArchetypeResolutionKind::WellFormed);
+        }
+      } else {
+        return t;
+      }
+    };
+
+    auto subjectType = resolveType(req.getFirstType());
+    auto constraintType = resolveType(req.getSecondType());
+
+    auto newReq = stripBoundDependentMemberTypes(
+        Requirement(RequirementKind::SameType,
+                    subjectType, constraintType));
+
+    newBuilder.addRequirement(newReq, newSource, nullptr);
+  }
+
+  // Wipe out the internal state of the old builder, since we don't need it anymore.
+  Impl.reset();
+
+  // Build a new signature using the new builder.
+  return std::move(newBuilder).computeGenericSignature(
+      allowConcreteGenericParams,
+      requirementSignatureSelfProto,
+      /*rebuildingWithoutRedundantConformances=*/true);
+}
+
 GenericSignature GenericSignatureBuilder::computeGenericSignature(
                                           bool allowConcreteGenericParams,
-                                          bool allowBuilderToMove) && {
+                                          const ProtocolDecl *requirementSignatureSelfProto,
+                                          bool rebuildingWithoutRedundantConformances) && {
   // Finalize the builder, producing any necessary diagnostics.
-  finalize(getGenericParams(), allowConcreteGenericParams);
+  finalize(getGenericParams(),
+           allowConcreteGenericParams,
+           requirementSignatureSelfProto);
+
+  if (rebuildingWithoutRedundantConformances) {
+    assert(requirementSignatureSelfProto == nullptr &&
+           "Rebuilding a requirement signature?");
+
+    assert(!Impl->HadAnyError &&
+           "Rebuilt signature had errors");
+
+#ifndef NDEBUG
+    for (const auto &req : Impl->ExplicitConformancesImpliedByConcrete) {
+      assert(!isRedundantExplicitRequirement(req) &&
+             "Rebuilt signature still had redundant conformance requirements");
+    }
+#endif
+  }
+
+  // If any of our explicit conformance requirements were implied by
+  // superclass or concrete same-type requirements, we have to build the
+  // signature again, since dropping the redundant conformance requirements
+  // changes the canonical type computation.
+  //
+  // However, if we already diagnosed an error, don't do this, because
+  // we might end up emitting duplicate diagnostics.
+  //
+  // Also, don't do this when building a requirement signature.
+  if (!rebuildingWithoutRedundantConformances &&
+      requirementSignatureSelfProto == nullptr &&
+      !Impl->HadAnyError &&
+      !Impl->ExplicitConformancesImpliedByConcrete.empty()) {
+    return std::move(*this).rebuildSignatureWithoutRedundantRequirements(
+        allowConcreteGenericParams,
+        requirementSignatureSelfProto);
+  }
 
   // Collect the requirements placed on the generic parameter types.
   SmallVector<Requirement, 4> requirements;
@@ -7961,12 +8840,21 @@ GenericSignature GenericSignatureBuilder::computeGenericSignature(
   // Form the generic signature.
   auto sig = GenericSignature::get(getGenericParams(), requirements);
 
+#ifndef NDEBUG
+  if (!Impl->HadAnyError) {
+    checkGenericSignature(sig.getCanonicalSignature(), *this);
+  }
+#endif
+
   // When we can, move this generic signature builder to make it the canonical
   // builder, rather than constructing a new generic signature builder that
   // will produce the same thing.
   //
   // We cannot do this when there were errors.
-  if (allowBuilderToMove && !Impl->HadAnyError) {
+  //
+  // Also, we cannot do this when building a requirement signature.
+  if (requirementSignatureSelfProto == nullptr &&
+      !Impl->HadAnyError) {
     // Register this generic signature builder as the canonical builder for the
     // given signature.
     Context.registerGenericSignatureBuilder(sig, std::move(*this));
@@ -8062,9 +8950,6 @@ void GenericSignatureBuilder::verifyGenericSignature(ASTContext &context,
       context.Diags.diagnose(SourceLoc(), diag::generic_signature_not_minimal,
                              reqString, sig->getAsString());
     }
-
-    // Canonicalize the signature to check that it is canonical.
-    (void)newSig.getCanonicalSignature();
   }
 }
 

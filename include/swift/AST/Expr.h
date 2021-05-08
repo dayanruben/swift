@@ -292,10 +292,18 @@ protected:
     Kind : 2
   );
 
-  SWIFT_INLINE_BITFIELD(ClosureExpr, AbstractClosureExpr, 1,
+  SWIFT_INLINE_BITFIELD(ClosureExpr, AbstractClosureExpr, 1+1+1,
     /// True if closure parameters were synthesized from anonymous closure
     /// variables.
-    HasAnonymousClosureVars : 1
+    HasAnonymousClosureVars : 1,
+
+    /// True if "self" can be captured implicitly without requiring "self."
+    /// on each member reference.
+    ImplicitSelfCapture : 1,
+
+    /// True if this @Sendable async closure parameter should implicitly
+    /// inherit the actor context from where it was formed.
+    InheritActorContext : 1
   );
 
   SWIFT_INLINE_BITFIELD_FULL(BindOptionalExpr, Expr, 16,
@@ -3148,9 +3156,24 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == ExprKind::Load; }
 };
 
+/// This is a conversion from an expression of UnresolvedType to an arbitrary
+/// other type, and from an arbitrary type to UnresolvedType.  This node does
+/// not appear in valid code, only in code involving diagnostics.
+class UnresolvedTypeConversionExpr : public ImplicitConversionExpr {
+public:
+  UnresolvedTypeConversionExpr(Expr *subExpr, Type type)
+  : ImplicitConversionExpr(ExprKind::UnresolvedTypeConversion, subExpr, type) {}
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::UnresolvedTypeConversion;
+  }
+};
+
 /// FunctionConversionExpr - Convert a function to another function type,
 /// which might involve renaming the parameters or handling substitutions
 /// of subtypes (in the return) or supertypes (in the input).
+///
+/// FIXME: This should be a CapturingExpr.
 class FunctionConversionExpr : public ImplicitConversionExpr {
 public:
   FunctionConversionExpr(Expr *subExpr, Type type)
@@ -3796,6 +3819,12 @@ public:
     SeparatelyTypeChecked,
   };
 
+  /// Bits used to indicate contextual information that is concurrency-specific.
+  enum UnsafeConcurrencyBits {
+    Sendable = 1 << 0,
+    MainActor = 1 << 1
+  };
+
 private:
   /// The attributes attached to the closure.
   DeclAttributes Attributes;
@@ -3810,7 +3839,10 @@ private:
   /// the CaptureListExpr which would normally maintain this sort of
   /// information about captured variables), we need to have some way to access
   /// this information directly on the ClosureExpr.
-  VarDecl * CapturedSelfDecl;
+  ///
+  /// The integer indicates how the closure is contextually concurrent.
+  llvm::PointerIntPair<VarDecl *, 2, uint8_t>
+      CapturedSelfDeclAndUnsafeConcurrent;
 
   /// The location of the "async", if present.
   SourceLoc AsyncLoc;
@@ -3840,13 +3872,15 @@ public:
     : AbstractClosureExpr(ExprKind::Closure, Type(), /*Implicit=*/false,
                           discriminator, parent),
       Attributes(attributes), BracketRange(bracketRange),
-      CapturedSelfDecl(capturedSelfDecl),
+      CapturedSelfDeclAndUnsafeConcurrent(capturedSelfDecl, 0),
       AsyncLoc(asyncLoc), ThrowsLoc(throwsLoc), ArrowLoc(arrowLoc),
       InLoc(inLoc),
       ExplicitResultTypeAndBodyState(explicitResultType, BodyState::Parsed),
       Body(nullptr) {
     setParameterList(params);
     Bits.ClosureExpr.HasAnonymousClosureVars = false;
+    Bits.ClosureExpr.ImplicitSelfCapture = false;
+    Bits.ClosureExpr.InheritActorContext = false;
   }
 
   SourceRange getSourceRange() const;
@@ -3874,7 +3908,27 @@ public:
   void setHasAnonymousClosureVars() {
     Bits.ClosureExpr.HasAnonymousClosureVars = true;
   }
-  
+
+  /// Whether this closure allows "self" to be implicitly captured without
+  /// required "self." on each reference.
+  bool allowsImplicitSelfCapture() const {
+    return Bits.ClosureExpr.ImplicitSelfCapture;
+  }
+
+  void setAllowsImplicitSelfCapture(bool value = true) {
+    Bits.ClosureExpr.ImplicitSelfCapture = value;
+  }
+
+  /// Whether this closure should implicitly inherit the actor context from
+  /// where it was formed. This only affects @Sendable async closures.
+  bool inheritsActorContext() const {
+    return Bits.ClosureExpr.InheritActorContext;
+  }
+
+  void setInheritsActorContext(bool value = true) {
+    Bits.ClosureExpr.InheritActorContext = value;
+  }
+
   /// Determine whether this closure expression has an
   /// explicitly-specified result type.
   bool hasExplicitResultType() const { return ArrowLoc.isValid(); }
@@ -3946,7 +4000,27 @@ public:
 
   /// VarDecl captured by this closure under the literal name \c self , if any.
   VarDecl *getCapturedSelfDecl() const {
-    return CapturedSelfDecl;
+    return CapturedSelfDeclAndUnsafeConcurrent.getPointer();
+  }
+
+  bool isUnsafeSendable() const {
+    return CapturedSelfDeclAndUnsafeConcurrent.getInt() &
+        UnsafeConcurrencyBits::Sendable;
+  }
+
+  bool isUnsafeMainActor() const {
+    return CapturedSelfDeclAndUnsafeConcurrent.getInt() &
+        UnsafeConcurrencyBits::MainActor;
+  }
+
+  void setUnsafeConcurrent(bool sendable, bool forMainActor) {
+    uint8_t bits = 0;
+    if (sendable)
+      bits |= UnsafeConcurrencyBits::Sendable;
+    if (forMainActor)
+      bits |= UnsafeConcurrencyBits::MainActor;
+
+    CapturedSelfDeclAndUnsafeConcurrent.setInt(bits);
   }
 
   /// Get the type checking state of this closure's body.
@@ -4370,8 +4444,8 @@ class ApplyExpr : public Expr {
   /// The function being called.
   Expr *Fn;
 
-  /// The argument being passed to it, and whether it's a 'super' argument.
-  llvm::PointerIntPair<Expr *, 1, bool> ArgAndIsSuper;
+  /// The argument being passed to it.
+  Expr *Arg;
   
   /// Returns true if \c e could be used as the call's argument. For most \c ApplyExpr
   /// subclasses, this means it is a \c ParenExpr or \c TupleExpr.
@@ -4379,7 +4453,7 @@ class ApplyExpr : public Expr {
 
 protected:
   ApplyExpr(ExprKind Kind, Expr *Fn, Expr *Arg, bool Implicit, Type Ty = Type())
-    : Expr(Kind, Implicit, Ty), Fn(Fn), ArgAndIsSuper(Arg, false) {
+    : Expr(Kind, Implicit, Ty), Fn(Fn), Arg(Arg) {
     assert(classof((Expr*)this) && "ApplyExpr::classof out of date");
     assert(validateArg(Arg) && "Arg is not a permitted expr kind");
     Bits.ApplyExpr.ThrowsIsSet = false;
@@ -4392,15 +4466,10 @@ public:
   void setFn(Expr *e) { Fn = e; }
   Expr *getSemanticFn() const { return Fn->getSemanticsProvidingExpr(); }
   
-  Expr *getArg() const { return ArgAndIsSuper.getPointer(); }
+  Expr *getArg() const { return Arg; }
   void setArg(Expr *e) {
     assert(validateArg(e) && "Arg is not a permitted expr kind");
-    ArgAndIsSuper = {e, ArgAndIsSuper.getInt()};
-  }
-  
-  bool isSuper() const { return ArgAndIsSuper.getInt(); }
-  void setIsSuper(bool super) {
-    ArgAndIsSuper = {ArgAndIsSuper.getPointer(), super};
+    Arg = e;
   }
 
   /// Has the type-checker set the 'throws' bit yet?
@@ -5650,6 +5719,26 @@ public:
       case Kind::Identity:
       case Kind::TupleElement:
         llvm_unreachable("no unresolved name for this kind");
+      }
+      llvm_unreachable("unhandled kind");
+    }
+
+    bool hasDeclRef() const {
+      switch (getKind()) {
+      case Kind::Property:
+      case Kind::Subscript:
+        return true;
+
+      case Kind::Invalid:
+      case Kind::UnresolvedProperty:
+      case Kind::UnresolvedSubscript:
+      case Kind::OptionalChain:
+      case Kind::OptionalWrap:
+      case Kind::OptionalForce:
+      case Kind::Identity:
+      case Kind::TupleElement:
+      case Kind::DictionaryKey:
+        return false;
       }
       llvm_unreachable("unhandled kind");
     }

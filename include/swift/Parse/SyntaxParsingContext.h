@@ -27,12 +27,12 @@ class ParsedSyntax;
 class ParsedTokenSyntax;
 struct ParsedTrivia;
 class SourceFile;
-enum class tok;
+enum class tok : uint8_t;
 class Token;
 class DiagnosticEngine;
 
 namespace syntax {
-  enum class SyntaxKind;
+enum class SyntaxKind : uint16_t;
 }
 
 enum class SyntaxContextKind {
@@ -43,6 +43,14 @@ enum class SyntaxContextKind {
   Pattern,
   Syntax,
 };
+
+} // end namespace swift
+
+namespace llvm {
+raw_ostream &operator<<(raw_ostream &OS, swift::SyntaxContextKind Kind);
+} // end namespace llvm
+
+namespace swift {
 
 enum class SyntaxNodeCreationKind {
   /// This is for \c SyntaxParsingContext to collect the syntax data and create
@@ -355,6 +363,9 @@ public:
 
   /// Dump the nodes that are in the storage stack of the SyntaxParsingContext
   SWIFT_DEBUG_DUMPER(dumpStorage());
+
+  void dumpStack(llvm::raw_ostream &OS) const;
+  SWIFT_DEBUG_DUMPER(dumpStack()) { dumpStack(llvm::errs()); }
 };
 
 } // namespace swift

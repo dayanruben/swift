@@ -594,14 +594,19 @@ public:
                     ConstraintLocator *locator)
       : ContextualFailure(
             solution,
-            solution.getConstraintSystem().getContextualTypePurpose(
-                locator->getAnchor()),
+            locator->isForContextualType()
+                ? locator->castLastElementTo<LocatorPathElt::ContextualType>()
+                      .getPurpose()
+                : solution.getConstraintSystem().getContextualTypePurpose(
+                      locator->getAnchor()),
             lhs, rhs, locator) {}
 
   ContextualFailure(const Solution &solution, ContextualTypePurpose purpose,
                     Type lhs, Type rhs, ConstraintLocator *locator)
       : FailureDiagnostic(solution, locator), CTP(purpose), RawFromType(lhs),
         RawToType(rhs) {}
+
+  SourceLoc getLoc() const override;
 
   Type getFromType() const { return resolve(RawFromType); }
 
@@ -704,7 +709,7 @@ public:
 };
 
 /// Diagnose errors related to converting function type which
-/// isn't explicitly '@escaping' or '@concurrent' to some other type.
+/// isn't explicitly '@escaping' or '@Sendable' to some other type.
 class AttributedFuncToTypeConversionFailure final : public ContextualFailure {
 public:
   enum AttributeKind {
@@ -724,10 +729,21 @@ public:
 
 private:
   /// Emit tailored diagnostics for no-escape/non-concurrent parameter
-  /// conversions e.g. passing such parameter as an @escaping or @concurrent
+  /// conversions e.g. passing such parameter as an @escaping or @Sendable
   /// argument, or trying to assign it to a variable which expects @escaping
-  /// or @concurrent function.
+  /// or @Sendable function.
   bool diagnoseParameterUse() const;
+};
+
+/// Diagnose failure where a global actor attribute is dropped when
+/// trying to convert one function type to another.
+class DroppedGlobalActorFunctionAttr final : public ContextualFailure {
+public:
+  DroppedGlobalActorFunctionAttr(const Solution &solution, Type fromType,
+                                 Type toType, ConstraintLocator *locator)
+      : ContextualFailure(solution, fromType, toType, locator) {}
+
+  bool diagnoseAsError() override;
 };
 
 /// Diagnose failures related to use of the unwrapped optional types,
@@ -754,6 +770,16 @@ private:
   void offerDefaultValueUnwrapFixIt(DeclContext *DC, const Expr *expr) const;
   /// Suggest a force optional unwrap via `!`
   void offerForceUnwrapFixIt(const Expr *expr) const;
+};
+
+class WrappedValueMismatch final : public ContextualFailure {
+public:
+  WrappedValueMismatch(const Solution &solution, Type fromType,
+                       Type toType, ConstraintLocator *locator)
+      : ContextualFailure(solution, fromType, toType, locator) {
+  }
+
+  bool diagnoseAsError() override;
 };
 
 /// Diagnostics for mismatched generic arguments e.g
@@ -1068,24 +1094,26 @@ public:
   bool diagnoseAsError() override;
 };
 
-class MissingProjectedValueFailure final : public FailureDiagnostic {
+class InvalidPropertyWrapperType final : public FailureDiagnostic {
   Type wrapperType;
 
 public:
-  MissingProjectedValueFailure(const Solution &solution, Type wrapper,
-                               ConstraintLocator *locator)
+  InvalidPropertyWrapperType(const Solution &solution, Type wrapper,
+                             ConstraintLocator *locator)
       : FailureDiagnostic(solution, locator), wrapperType(resolveType(wrapper)) {}
 
   bool diagnoseAsError() override;
 };
 
-class MissingPropertyWrapperAttributeFailure final : public FailureDiagnostic {
+class InvalidProjectedValueArgument final : public FailureDiagnostic {
   Type wrapperType;
+  ParamDecl *param;
 
 public:
-  MissingPropertyWrapperAttributeFailure(const Solution &solution, Type wrapper,
-                                         ConstraintLocator *locator)
-      : FailureDiagnostic(solution, locator), wrapperType(resolveType(wrapper)) {}
+  InvalidProjectedValueArgument(const Solution &solution, Type wrapper,
+                                ParamDecl *param, ConstraintLocator *locator)
+      : FailureDiagnostic(solution, locator), wrapperType(resolveType(wrapper)),
+        param(param) {}
 
   bool diagnoseAsError() override;
 };
@@ -1576,7 +1604,7 @@ public:
                             ConstraintLocator *locator)
       : FailureDiagnostic(solution, locator), Member(member) {
     assert(member->hasName());
-    assert(locator->isForKeyPathComponent() ||
+    assert(locator->isInKeyPathComponent() ||
            locator->isForKeyPathDynamicMemberLookup());
   }
 
@@ -1897,6 +1925,12 @@ public:
   /// Tailored diagnostics for argument mismatches associated with trailing
   /// closures being passed to non-closure parameters.
   bool diagnoseTrailingClosureMismatch() const;
+
+  /// Tailored key path as function diagnostics for argument mismatches where
+  /// argument is a keypath expression that has a root type that matches a
+  /// function parameter, but keypath value don't match the function parameter
+  /// result value.
+  bool diagnoseKeyPathAsFunctionResultMismatch() const;
 
 protected:
   /// \returns The position of the argument being diagnosed, starting at 1.
@@ -2272,6 +2306,8 @@ public:
 
   Type getFromType() const override { return RawReprType; }
   Type getToType() const override { return ExpectedType; }
+
+  bool diagnoseAsError() override;
 
 private:
   void fixIt(InFlightDiagnostic &diagnostic) const override;

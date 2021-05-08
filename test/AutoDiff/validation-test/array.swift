@@ -3,6 +3,7 @@
 
 // Would fail due to unavailability of swift_autoDiffCreateLinearMapContext.
 // UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
 
 import StdlibUnittest
 import _Differentiation
@@ -344,6 +345,10 @@ ArrayAutoDiffTests.test("Array.+") {
   }
   let v = FloatArrayTan([4, -5, 6])
   expectEqual(v, pullback(at: [1, 2, 3], of: identity)(v))
+  
+  let v1: [Float] = [1, 1]
+  let v2: [Float] = [1, 1, 1]
+  expectEqual((.zero, .zero), pullback(at: v1, v2, of: +)(.zero))
 }
 
 ArrayAutoDiffTests.test("Array.+=") {
@@ -436,6 +441,16 @@ ArrayAutoDiffTests.test("Array.DifferentiableView.base") {
   expectEqual(
     FloatArrayTan([1, 2, 3, 4]),
     backprop(FloatArrayTan([1, 2, 3, 4])))
+}
+
+ArrayAutoDiffTests.test("Array.DifferentiableView.move") {
+  var v: [Float] = [1, 2, 3]
+  v.move(by: .zero)
+  expectEqual(v, [1, 2, 3])
+
+  var z: [Float] = []
+  z.move(by: .zero)
+  expectEqual(z, [])
 }
 
 runAllTests()

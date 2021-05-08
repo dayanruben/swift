@@ -128,6 +128,30 @@ public:
     }
   }
 
+  /// All operands of \p instruction to the worklist when performing 2 stage
+  /// instruction deletion. Meant to be used right before deleting an
+  /// instruction in callbacks like InstModCallback::onNotifyWillBeDeleted().
+  void addOperandsToWorklist(SILInstruction &instruction) {
+    assert(!instruction.hasUsesOfAnyResult() &&
+           "Cannot erase instruction that is used!");
+
+    // Make sure that we reprocess all operands now that we reduced their
+    // use counts.
+    if (instruction.getNumOperands() < 8) {
+      for (auto &operand : instruction.getAllOperands()) {
+        if (auto *operandInstruction =
+                operand.get()->getDefiningInstruction()) {
+          withDebugStream([&](llvm::raw_ostream &stream,
+                              StringRef loggingName) {
+            stream << loggingName << ": add op " << *operandInstruction << '\n'
+                   << " from erased inst to worklist\n";
+          });
+          add(operandInstruction);
+        }
+      }
+    }
+  }
+
   /// When an instruction has been simplified, add all of its users to the
   /// worklist, since additional simplifications of its users may have been
   /// exposed.
@@ -215,7 +239,7 @@ public:
     return newInstruction;
   }
 
-  // This method is to be used when an instruction is found to be dead,
+  // This method is to be used when an instruction is found to be dead or
   // replaceable with another preexisting expression. Here we add all uses of
   // instruction to the worklist, and replace all uses of instruction with the
   // new value.
@@ -296,29 +320,15 @@ public:
   }
 
   void eraseSingleInstFromFunction(SILInstruction &instruction,
-                                   bool addOperandsToWorklist) {
+                                   bool shouldAddOperandsToWorklist) {
     withDebugStream([&](llvm::raw_ostream &stream, StringRef loggingName) {
       stream << loggingName << ": ERASE " << instruction << '\n';
     });
 
-    assert(!instruction.hasUsesOfAnyResult() &&
-           "Cannot erase instruction that is used!");
+    // If we are asked to add operands to the worklist, do so now.
+    if (shouldAddOperandsToWorklist)
+      addOperandsToWorklist(instruction);
 
-    // Make sure that we reprocess all operands now that we reduced their
-    // use counts.
-    if (instruction.getNumOperands() < 8 && addOperandsToWorklist) {
-      for (auto &operand : instruction.getAllOperands()) {
-        if (auto *operandInstruction =
-                operand.get()->getDefiningInstruction()) {
-          withDebugStream([&](llvm::raw_ostream &stream,
-                              StringRef loggingName) {
-            stream << loggingName << ": add op " << *operandInstruction << '\n'
-                   << " from erased inst to worklist\n";
-          });
-          add(operandInstruction);
-        }
-      }
-    }
     erase(&instruction);
     instruction.eraseFromParent();
   }

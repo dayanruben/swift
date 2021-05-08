@@ -14,14 +14,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Basic/Range.h"
 #include "swift/Localization/LocalizationFormat.h"
+#include "swift/Basic/Range.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Bitstream/BitstreamReader.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/YAMLTraits.h"
 #include <cstdint>
@@ -35,6 +37,12 @@ enum LocalDiagID : uint32_t {
 #define DIAG(KIND, ID, Options, Text, Signature) ID,
 #include "swift/AST/DiagnosticsAll.def"
   NumDiags
+};
+
+static constexpr const char *const diagnosticNameStrings[] = {
+#define DIAG(KIND, ID, Options, Text, Signature) " [" #ID "]",
+#include "swift/AST/DiagnosticsAll.def"
+    "<not a diagnostic>",
 };
 
 } // namespace
@@ -85,9 +93,24 @@ bool SerializedLocalizationWriter::emit(llvm::StringRef filePath) {
   return OS.has_error();
 }
 
+llvm::StringRef
+LocalizationProducer::getMessageOr(swift::DiagID id,
+                                   llvm::StringRef defaultMessage) {
+  auto localizedMessage = getMessage(id);
+  if (localizedMessage.empty())
+    return defaultMessage;
+  if (printDiagnosticNames) {
+    llvm::StringRef diagnosticName(diagnosticNameStrings[(unsigned)id]);
+    auto localizedDebugDiagnosticMessage =
+        localizationSaver.save(localizedMessage.str() + diagnosticName.str());
+    return localizedDebugDiagnosticMessage;
+  }
+  return localizedMessage;
+}
+
 SerializedLocalizationProducer::SerializedLocalizationProducer(
-    std::unique_ptr<llvm::MemoryBuffer> buffer)
-    : Buffer(std::move(buffer)) {
+    std::unique_ptr<llvm::MemoryBuffer> buffer, bool printDiagnosticNames)
+    : LocalizationProducer(printDiagnosticNames), Buffer(std::move(buffer)) {
   auto base =
       reinterpret_cast<const unsigned char *>(Buffer.get()->getBufferStart());
   auto tableOffset = endian::read<offset_type>(base, little);
@@ -103,7 +126,9 @@ SerializedLocalizationProducer::getMessage(swift::DiagID id) const {
   return {(const char *)value.getDataPtr(), value.getDataLen()};
 }
 
-YAMLLocalizationProducer::YAMLLocalizationProducer(llvm::StringRef filePath) {
+YAMLLocalizationProducer::YAMLLocalizationProducer(llvm::StringRef filePath,
+                                                   bool printDiagnosticNames)
+    : LocalizationProducer(printDiagnosticNames) {
   auto FileBufOrErr = llvm::MemoryBuffer::getFileOrSTDIN(filePath);
   llvm::MemoryBuffer *document = FileBufOrErr->get();
   diag::LocalizationInput yin(document->getBuffer());

@@ -28,7 +28,7 @@ func asyncGlobal8() async throws async -> async Int async {}
 // expected-error@-3{{'async' has already been specified}} {{53-59=}}
 
 class X {
-  init() async { } // expected-error{{initializer cannot be marked 'async'}}
+  init() async { }
 
   deinit async { } // expected-error{{deinitializers cannot have a name}}
 
@@ -42,7 +42,7 @@ class X {
       return 0
     }
 
-    set async { // expected-error{{expected '{' to start setter definition}}
+    set async { // expected-error{{'set' accessor cannot have specifier 'async'}}
     }
   }
 }

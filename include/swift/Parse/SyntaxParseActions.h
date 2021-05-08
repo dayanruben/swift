@@ -20,6 +20,8 @@
 
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
+#include "swift/Subsystems.h"
+#include "llvm/ADT/PointerIntPair.h"
 #include "llvm/Support/Allocator.h"
 
 namespace swift {
@@ -27,14 +29,13 @@ namespace swift {
 class ParsedTriviaPiece;
 class SourceFile;
 class SourceLoc;
-enum class tok;
+enum class tok : uint8_t;
+class ParsedRawSyntaxNode;
 
 namespace syntax {
 class SourceFileSyntax;
-enum class SyntaxKind;
+enum class SyntaxKind : uint16_t;
 }
-
-typedef const void *OpaqueSyntaxNode;
 
 // MARK: - Helper types
 
@@ -51,15 +52,14 @@ public:
   };
 
 private:
-  OpaqueSyntaxNode Opaque;
-  Kind NodeKind;
+  llvm::PointerIntPair<OpaqueSyntaxNode, 2, Kind> Data;
 
 public:
   RecordedOrDeferredNode(OpaqueSyntaxNode Node, Kind NodeKind)
-      : Opaque(Node), NodeKind(NodeKind) {}
+      : Data(Node, NodeKind) {}
 
-  OpaqueSyntaxNode getOpaque() const { return Opaque; }
-  Kind getKind() const { return NodeKind; }
+  OpaqueSyntaxNode getOpaque() const { return Data.getPointer(); }
+  Kind getKind() const { return Data.getInt(); }
 };
 
 /// Data returned from \c getDeferredChild. This is enough data to construct
@@ -71,12 +71,11 @@ struct DeferredNodeInfo {
   syntax::SyntaxKind SyntaxKind;
   tok TokenKind;
   bool IsMissing;
-  CharSourceRange Range;
 
   DeferredNodeInfo(RecordedOrDeferredNode Data, syntax::SyntaxKind SyntaxKind,
-                   tok TokenKind, bool IsMissing, CharSourceRange Range)
+                   tok TokenKind, bool IsMissing)
       : Data(Data), SyntaxKind(SyntaxKind), TokenKind(TokenKind),
-        IsMissing(IsMissing), Range(Range) {}
+        IsMissing(IsMissing) {}
 };
 
 // MARK: - SyntaxParseActions
@@ -114,9 +113,11 @@ public:
   /// Create a deferred layout node that may or may not be recorded later using
   /// \c recordDeferredLayout. The \c SyntaxParseAction is responsible for
   /// keeping the deferred token alive until it is destructed.
+  /// From all nodes in \p children, the underlying opaque data will be *taken*
+  /// which resets the nodes.
   virtual OpaqueSyntaxNode
   makeDeferredLayout(syntax::SyntaxKind k, bool isMissing,
-                     const ArrayRef<RecordedOrDeferredNode> &children) = 0;
+                     const MutableArrayRef<ParsedRawSyntaxNode> &children) = 0;
 
   /// Record a deferred token node that was previously created using \c
   /// makeDeferredToken. The deferred data will never be used again, so it can
@@ -133,12 +134,24 @@ public:
   /// which created it, to retrieve children.
   /// This method assumes that \p node represents a *deferred* layout node.
   /// This methods returns all information needed to construct a \c
-  /// ParsedRawSyntaxNode of a child node. \p node is the parent node for which
-  /// the child at position \p ChildIndex should be retrieved. Furthmore, \p
-  /// node starts at \p StartLoc.
+  /// ParsedRawSyntaxNode of a child node, except for the range which can be
+  /// retrieved using \c getDeferredChildRange if element ranges should be
+  /// verified
+  /// \p node is the parent node for which the child at position \p ChildIndex
+  /// should be retrieved. Furthmore, \p node starts at \p StartLoc.
   virtual DeferredNodeInfo getDeferredChild(OpaqueSyntaxNode node,
-                                            size_t childIndex,
-                                            SourceLoc startLoc) = 0;
+                                            size_t childIndex) const = 0;
+
+  /// To verify \c ParsedRawSyntaxNode element ranges, the range of child nodes
+  /// returend by \c getDeferredChild needs to be determined. That's what this
+  /// method does.
+  /// It assumes that \p node is a deferred layout node starting at \p startLoc
+  /// and returns the range of the child node at \p childIndex.
+  /// This method is not designed with performance in mind. Do not use in
+  /// performance-critical code.
+  virtual CharSourceRange getDeferredChildRange(OpaqueSyntaxNode node,
+                                                size_t childIndex,
+                                                SourceLoc startLoc) const = 0;
 
   /// Return the number of children, \p node has. These can be retrieved using
   /// \c getDeferredChild.

@@ -278,6 +278,12 @@ ERROR(expected_lbrace_accessor,PointsToFirstBadToken,
 ERROR(expected_accessor_kw,none,
       "expected 'get', 'set', 'willSet', or 'didSet' keyword to "
       "start an accessor definition",())
+ERROR(invalid_accessor_specifier,none,
+      "'%0' accessor cannot have specifier '%1'",
+      (StringRef, StringRef))
+ERROR(invalid_accessor_with_effectful_get,none,
+      "'%0' accessor is not allowed on property with 'get' accessor that is 'async' or 'throws'",
+      (StringRef))
 ERROR(missing_getter,none,
       "%select{variable|subscript}0 with %1 must also have a getter",
       (unsigned, StringRef))
@@ -756,7 +762,6 @@ ERROR(expected_dynamic_func_attr,none,
 ERROR(async_after_throws,none,
       "%select{'async'|'reasync'}0 must precede %select{'throws'|'rethrows'}1",
       (bool, bool))
-ERROR(async_init,none, "initializer cannot be marked 'async'", ())
 ERROR(duplicate_effects_specifier,none,
       "'%0' has already been specified", (StringRef))
 
@@ -961,6 +966,8 @@ ERROR(statement_begins_with_closure,none,
       "top-level statement cannot begin with a closure expression", ())
 ERROR(statement_same_line_without_semi,none,
       "consecutive statements on a line must be separated by ';'", ())
+ERROR(statement_same_line_without_newline,none,
+      "consecutive statements on a line must be separated by a newline", ())
 ERROR(invalid_label_on_stmt,none,
       "labels are only valid on loops, if, and switch statements", ())
 ERROR(labeled_block_needs_do,none,
@@ -1325,6 +1332,7 @@ ERROR(expr_selector_expected_rparen,PointsToFirstBadToken,
 ERROR(expr_dynamictype_deprecated,PointsToFirstBadToken,
       "'.dynamicType' is deprecated. Use 'type(of: ...)' instead", ())
 
+// '#assert'
 ERROR(pound_assert_disabled,PointsToFirstBadToken,
       "#assert is an experimental feature that is currently disabled", ())
 ERROR(pound_assert_expected_lparen,PointsToFirstBadToken,
@@ -1335,6 +1343,10 @@ ERROR(pound_assert_expected_expression,PointsToFirstBadToken,
       "expected a condition expression", ())
 ERROR(pound_assert_expected_string_literal,PointsToFirstBadToken,
       "expected a string literal", ())
+
+// Postfix '#if' expressions.
+ERROR(expr_postfix_ifconfig_unexpectedtoken,none,
+      "unexpected tokens in '#if' expression body", ())
 
 //------------------------------------------------------------------------------
 // MARK: Attribute-parsing diagnostics
@@ -1375,6 +1387,9 @@ ERROR(attr_expected_comma,none,
 
 ERROR(attr_expected_string_literal,none,
 "expected string literal in '%0' attribute", (StringRef))
+
+ERROR(attr_expected_integer_literal,none,
+"expected integer literal in '%0' attribute", (StringRef))
 
 ERROR(attr_expected_option_such_as,none,
       "expected '%0' option such as '%1'", (StringRef, StringRef))
@@ -1675,8 +1690,8 @@ ERROR(sil_inst_autodiff_invalid_witness_generic_signature,PointsToFirstBadToken,
       "parameters as original function generic signature '%1'",
       (StringRef, StringRef))
 
-// hasAsyncAlternative
-ERROR(has_async_alternative_invalid_name, none,
+// completionHandlerAsync
+ERROR(attr_completion_handler_async_invalid_name, none,
       "argument of '%0' attribute must be an identifier or full function name",
       (StringRef))
 
@@ -1756,6 +1771,12 @@ WARNING(likely_simulator_platform_condition,none,
       "platform condition appears to be testing for simulator environment; "
       "use 'targetEnvironment(simulator)' instead",
       ())
+
+ERROR(canimport_two_parameters, none, "canImport can take only two parameters", ())
+
+ERROR(canimport_label, none, "2nd parameter of canImport should be labeled as _version or _underlyingVersion", ())
+
+ERROR(canimport_version, none, "cannot parse module version: %0", (StringRef))
 
 //------------------------------------------------------------------------------
 // MARK: Availability query parsing diagnostics

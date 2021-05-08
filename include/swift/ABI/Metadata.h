@@ -1035,7 +1035,9 @@ struct TargetAnyClassMetadata : public TargetHeapMetadata<Runtime> {
   // Note that ObjC classes do not have a metadata header.
 
   /// The metadata for the superclass.  This is null for the root class.
-  ConstTargetMetadataPointer<Runtime, swift::TargetClassMetadata> Superclass;
+  TargetSignedPointer<Runtime, const TargetClassMetadata<Runtime> *
+                                   __ptrauth_swift_objc_superclass>
+      Superclass;
 
 #if SWIFT_OBJC_INTEROP
   /// The cache data is used for certain dynamic lookups; it is owned
@@ -1332,6 +1334,28 @@ public:
   }
 };
 using ClassMetadata = TargetClassMetadata<InProcess>;
+
+/// The structure of class metadata that's compatible with dispatch objects.
+/// This includes Swift heap metadata, followed by the vtable entries that
+/// dispatch expects to see, with padding to place them at the expected offsets.
+template <typename Runtime>
+struct TargetDispatchClassMetadata : public TargetHeapMetadata<Runtime> {
+  using InvokeCall = void (*)(void *, void *, uint32_t);
+
+  TargetDispatchClassMetadata(MetadataKind Kind, unsigned long VTableType,
+                              InvokeCall Invoke)
+      : TargetHeapMetadata<Runtime>(Kind), VTableType(VTableType),
+        VTableInvoke(Invoke) {}
+
+  TargetPointer<Runtime, void> Opaque;
+#if SWIFT_OBJC_INTEROP
+  TargetPointer<Runtime, void> OpaqueObjC[3];
+#endif
+
+  unsigned long VTableType;
+  TargetSignedPointer<Runtime, InvokeCall __ptrauth_swift_dispatch_invoke_function> VTableInvoke;
+};
+using DispatchClassMetadata = TargetDispatchClassMetadata<InProcess>;
 
 /// The structure of metadata for heap-allocated local variables.
 /// This is non-type metadata.
@@ -1637,7 +1661,8 @@ struct TargetFunctionTypeMetadata : public TargetMetadata<Runtime> {
   }
   bool isAsync() const { return Flags.isAsync(); }
   bool isThrowing() const { return Flags.isThrowing(); }
-  bool isConcurrent() const { return Flags.isConcurrent(); }
+  bool isSendable() const { return Flags.isSendable(); }
+  bool isDifferentiable() const { return Flags.isDifferentiable(); }
   bool hasParameterFlags() const { return Flags.hasParameterFlags(); }
   bool isEscaping() const { return Flags.isEscaping(); }
 
@@ -1654,6 +1679,28 @@ struct TargetFunctionTypeMetadata : public TargetMetadata<Runtime> {
   const uint32_t *getParameterFlags() const {
     return reinterpret_cast<const uint32_t *>(getParameters() +
                                               getNumParameters());
+  }
+
+  TargetFunctionMetadataDifferentiabilityKind<StoredSize> *
+  getDifferentiabilityKindAddress() {
+    assert(isDifferentiable());
+    void *previousEndAddr = hasParameterFlags()
+        ? reinterpret_cast<void *>(getParameterFlags() + getNumParameters())
+        : reinterpret_cast<void *>(getParameters() + getNumParameters());
+    return reinterpret_cast<
+        TargetFunctionMetadataDifferentiabilityKind<StoredSize> *>(
+        llvm::alignAddr(previousEndAddr,
+                        llvm::Align(alignof(typename Runtime::StoredPointer))));
+  }
+
+  TargetFunctionMetadataDifferentiabilityKind<StoredSize>
+  getDifferentiabilityKind() const {
+    if (isDifferentiable()) {
+      return *const_cast<TargetFunctionTypeMetadata<Runtime> *>(this)
+          ->getDifferentiabilityKindAddress();
+    }
+    return TargetFunctionMetadataDifferentiabilityKind<StoredSize>
+        ::NonDifferentiable;
   }
 };
 using FunctionTypeMetadata = TargetFunctionTypeMetadata<InProcess>;
@@ -2859,8 +2906,13 @@ class TargetGenericEnvironment
        uint16_t, GenericParamDescriptor, GenericRequirementDescriptor>;
   friend TrailingObjects;
 
+#if !defined(_MSC_VER) || _MSC_VER >= 1920
   template<typename T>
   using OverloadToken = typename TrailingObjects::template OverloadToken<T>;
+#else
+// MSVC 2017 trips parsing an using of an using, of a variadic template
+#define OverloadToken typename TrailingObjects::template OverloadToken
+#endif
 
   size_t numTrailingObjects(OverloadToken<uint16_t>) const {
     return Flags.getNumGenericParameterLevels();
@@ -2873,6 +2925,10 @@ class TargetGenericEnvironment
   size_t numTrailingObjects(OverloadToken<GenericRequirementDescriptor>) const {
     return Flags.getNumGenericRequirements();
   }
+
+#if defined(_MSC_VER) && _MSC_VER < 1920
+#undef OverloadToken
+#endif
 
   GenericEnvironmentFlags Flags;
 
@@ -2935,8 +2991,13 @@ protected:
     FollowingTrailingObjects...>;
   friend TrailingObjects;
 
+#if !defined(_MSC_VER) || _MSC_VER >= 1920
   template<typename T>
   using OverloadToken = typename TrailingObjects::template OverloadToken<T>;
+#else
+// MSVC 2017 trips parsing an using of an using, of a variadic template
+#define OverloadToken typename TrailingObjects::template OverloadToken
+#endif
   
   const Self *asSelf() const {
     return static_cast<const Self *>(this);
@@ -3000,6 +3061,11 @@ protected:
   size_t numTrailingObjects(OverloadToken<GenericRequirementDescriptor>) const {
     return asSelf()->isGeneric() ? getGenericContextHeader().NumRequirements : 0;
   }
+
+#if defined(_MSC_VER) && _MSC_VER < 1920
+#undef OverloadToken
+#endif
+
 };
 
 /// Reference to a generic context.
@@ -4243,6 +4309,14 @@ public:
     return FieldOffsetVectorOffset;
   }
 
+  bool isActor() const {
+    return this->getTypeContextDescriptorFlags().class_isActor();
+  }
+
+  bool isDefaultActor() const {
+    return this->getTypeContextDescriptorFlags().class_isDefaultActor();
+  }
+
   bool hasVTable() const {
     return this->getTypeContextDescriptorFlags().class_hasVTable();
   }
@@ -4845,6 +4919,9 @@ struct DynamicReplacementKey {
 
   uint16_t getExtraDiscriminator() const {
     return flags & 0x0000FFFF;
+  }
+  bool isAsync() const {
+    return ((flags >> 16 ) & 0x1);
   }
 };
 

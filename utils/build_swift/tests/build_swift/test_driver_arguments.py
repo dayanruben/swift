@@ -107,7 +107,7 @@ class TestDriverArgumentParserMeta(type):
             with utils.redirect_stdout() as output:
                 with self.assertRaises(ParserError):
                     self.parse_args([option.option_string])
-                    self.assertNotEmpty(output)
+                self.assertTrue(output)
 
         return test
 
@@ -454,7 +454,9 @@ class TestDriverArgumentParser(unittest.TestCase):
 
         with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '1'])
+        with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '1.2'])
+        with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '0.0.0.0.1'])
 
     def test_option_clang_user_visible_version(self):
@@ -466,7 +468,9 @@ class TestDriverArgumentParser(unittest.TestCase):
 
         with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '1'])
+        with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '1.2'])
+        with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '0.0.0.0.1'])
 
     def test_option_swift_compiler_version(self):
@@ -478,6 +482,7 @@ class TestDriverArgumentParser(unittest.TestCase):
 
         with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '1'])
+        with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '0.0.0.1'])
 
     def test_option_swift_user_visible_version(self):
@@ -489,6 +494,7 @@ class TestDriverArgumentParser(unittest.TestCase):
 
         with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '1'])
+        with self.assertRaises(ParserError):
             self.parse_default_args([option_string, '0.0.0.1'])
 
     def test_option_I(self):
@@ -579,6 +585,14 @@ class TestDriverArgumentParser(unittest.TestCase):
     def test_implied_defaults_test_optimize_for_size(self):
         namespace = self.parse_default_args(['--test-optimize-for-size'])
         self.assertTrue(namespace.test)
+
+    def test_implied_defaults_test_early_swift_driver(self):
+        namespace = self.parse_default_args(['--test'])
+        self.assertTrue(namespace.test_early_swift_driver)
+
+    def test_implied_defaults_test_no_early_swift_driver(self):
+        namespace = self.parse_default_args(['--test --skip-early-swift-driver'])
+        self.assertTrue(namespace.test_early_swift_driver is None)
 
     def test_implied_defaults_test_optimize_none_with_implicit_dynamic(self):
         namespace = self.parse_default_args(

@@ -39,6 +39,12 @@ static DefaultArgumentKind getDefaultArgKind(Expr *init) {
   if (!init)
     return DefaultArgumentKind::None;
 
+  // Parse an as-written 'nil' expression as the special NilLiteral kind,
+  // which is emitted by the caller and can participate in rethrows
+  // checking.
+  if (isa<NilLiteralExpr>(init))
+    return DefaultArgumentKind::NilLiteral;
+
   auto magic = dyn_cast<MagicIdentifierLiteralExpr>(init);
   if (!magic)
     return DefaultArgumentKind::Normal;
@@ -351,9 +357,13 @@ Parser::parseParameterClause(SourceLoc &leftParenLoc,
         param.FirstNameLoc = SourceLoc();
         param.SecondName = Identifier();
         param.SecondNameLoc = SourceLoc();
-      } else if (isBareType) {
+      } else if (isBareType && !Tok.is(tok::code_complete)) {
         // Otherwise, if this is a bare type, then the user forgot to name the
         // parameter, e.g. "func foo(Int) {}"
+        // Don't enter this case if the element could only be parsed as a bare
+        // type because a code completion token is positioned here. In this case
+        // the user is about to type the parameter label and we shouldn't
+        // suggest types.
         SourceLoc typeStartLoc = Tok.getLoc();
         auto type = parseType(diag::expected_parameter_type, false);
         status |= type;
@@ -968,8 +978,8 @@ ParserResult<Pattern> Parser::parseTypedPattern() {
       // Disable this tentative parse when in code-completion mode, otherwise
       // code-completion may enter the delayed-decl state twice.
       if (Tok.isFollowingLParen() && !L->isCodeCompletion()) {
-        BacktrackingScope backtrack(*this);
-        
+        CancellableBacktrackingScope backtrack(*this);
+
         // Create a local context if needed so we can parse trailing closures.
         LocalContext dummyContext;
         Optional<ContextChange> contextChange;

@@ -13,14 +13,20 @@
 import Swift
 @_implementationOnly import _SwiftConcurrencyShims
 
-/// A partial task is a unit of scheduleable work.
+/// TODO: remove this before shipping
+@available(SwiftStdlib 5.5, *)
+public typealias PartialAsyncTask = UnownedJob
+
+/// A job is a unit of scheduleable work.
+@available(SwiftStdlib 5.5, *)
 @frozen
-public struct PartialAsyncTask {
+public struct UnownedJob {
   private var context: Builtin.Job
 
   public func run() { }
 }
 
+@available(SwiftStdlib 5.5, *)
 @frozen
 public struct UnsafeContinuation<T, E: Error> {
   @usableFromInline internal var context: Builtin.RawUnsafeContinuation
@@ -29,10 +35,6 @@ public struct UnsafeContinuation<T, E: Error> {
   internal init(_ context: Builtin.RawUnsafeContinuation) {
     self.context = context
   }
-
-  @usableFromInline
-  @_silgen_name("swift_continuation_resume")
-  internal func _resume(returning value: __owned T)
 
   /// Resume the task awaiting the continuation by having it return normally
   /// from its suspension point.
@@ -48,12 +50,12 @@ public struct UnsafeContinuation<T, E: Error> {
   /// able to reschedule it.
   @_alwaysEmitIntoClient
   public func resume(returning value: __owned T) where E == Never {
-    self._resume(returning: value)
+    #if compiler(>=5.5) && $BuiltinContinuation
+    Builtin.resumeNonThrowingContinuationReturning(context, value)
+    #else
+    fatalError("Swift compiler is incompatible with this SDK version")
+    #endif
   }
-
-  @usableFromInline
-  @_silgen_name("swift_continuation_throwingResume")
-  internal func _resume(returningToThrowingFunction: __owned T)
 
   /// Resume the task awaiting the continuation by having it return normally
   /// from its suspension point.
@@ -69,12 +71,12 @@ public struct UnsafeContinuation<T, E: Error> {
   /// able to reschedule it.
   @_alwaysEmitIntoClient
   public func resume(returning value: __owned T) {
-    self._resume(returningToThrowingFunction: value)
+    #if compiler(>=5.5) && $BuiltinContinuation
+    Builtin.resumeThrowingContinuationReturning(context, value)
+    #else
+    fatalError("Swift compiler is incompatible with this SDK version")
+    #endif
   }
-
-  @usableFromInline
-  @_silgen_name("swift_continuation_throwingResumeWithError")
-  internal func _resume(throwing: __owned Error)
 
   /// Resume the task awaiting the continuation by having it throw an error
   /// from its suspension point.
@@ -90,10 +92,15 @@ public struct UnsafeContinuation<T, E: Error> {
   /// able to reschedule it.
   @_alwaysEmitIntoClient
   public func resume(throwing error: __owned E) {
-    self._resume(throwing: error)
+#if compiler(>=5.5) && $BuiltinContinuation
+    Builtin.resumeThrowingContinuationThrowing(context, error)
+#else
+    fatalError("Swift compiler is incompatible with this SDK version")
+#endif
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 extension UnsafeContinuation {
   /// Resume the task awaiting the continuation by having it either
   /// return normally or throw an error based on the state of the given
@@ -162,6 +169,7 @@ extension UnsafeContinuation {
 #if _runtime(_ObjC)
 
 // Intrinsics used by SILGen to resume or fail continuations.
+@available(SwiftStdlib 5.5, *)
 @_alwaysEmitIntoClient
 internal func _resumeUnsafeContinuation<T>(
   _ continuation: UnsafeContinuation<T, Never>,
@@ -170,6 +178,7 @@ internal func _resumeUnsafeContinuation<T>(
   continuation.resume(returning: value)
 }
 
+@available(SwiftStdlib 5.5, *)
 @_alwaysEmitIntoClient
 internal func _resumeUnsafeThrowingContinuation<T>(
   _ continuation: UnsafeContinuation<T, Error>,
@@ -178,6 +187,7 @@ internal func _resumeUnsafeThrowingContinuation<T>(
   continuation.resume(returning: value)
 }
 
+@available(SwiftStdlib 5.5, *)
 @_alwaysEmitIntoClient
 internal func _resumeUnsafeThrowingContinuationWithError<T>(
   _ continuation: UnsafeContinuation<T, Error>,
@@ -191,6 +201,7 @@ internal func _resumeUnsafeThrowingContinuationWithError<T>(
 /// The operation functions must resume the continuation *exactly once*.
 ///
 /// The continuation will not begin executing until the operation function returns.
+@available(SwiftStdlib 5.5, *)
 @_alwaysEmitIntoClient
 public func withUnsafeContinuation<T>(
   _ fn: (UnsafeContinuation<T, Never>) -> Void
@@ -203,6 +214,7 @@ public func withUnsafeContinuation<T>(
 /// The operation functions must resume the continuation *exactly once*.
 ///
 /// The continuation will not begin executing until the operation function returns.
+@available(SwiftStdlib 5.5, *)
 @_alwaysEmitIntoClient
 public func withUnsafeThrowingContinuation<T>(
   _ fn: (UnsafeContinuation<T, Error>) -> Void
@@ -212,5 +224,6 @@ public func withUnsafeThrowingContinuation<T>(
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 @available(*, deprecated, message: "please use UnsafeContination<..., Error>")
 public typealias UnsafeThrowingContinuation<T> = UnsafeContinuation<T, Error>

@@ -16,6 +16,7 @@
 #include "TypeCheckConcurrency.h"
 #include "TypeChecker.h"
 #include "TypeCheckType.h"
+#include "swift/Strings.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Initializer.h"
 #include "swift/AST/ParameterList.h"
@@ -36,7 +37,7 @@ static bool shouldInferAttributeInContext(const DeclContext *dc) {
       if (auto sourceFile = dc->getParentSourceFile()) {
         switch (sourceFile->Kind) {
         case SourceFileKind::Interface:
-          // Interfaces have explicitly called-out ConcurrentValue conformances.
+          // Interfaces have explicitly called-out Sendable conformances.
           return false;
 
         case SourceFileKind::Library:
@@ -133,7 +134,7 @@ static bool checkAsyncHandler(FuncDecl *func, bool diagnose) {
 
 void swift::addAsyncNotes(AbstractFunctionDecl const* func) {
   assert(func);
-  if (!isa<DestructorDecl>(func)) {
+  if (!isa<DestructorDecl>(func) && !isa<AccessorDecl>(func)) {
     auto note =
         func->diagnose(diag::note_add_async_to_function, func->getName());
 
@@ -143,8 +144,7 @@ void swift::addAsyncNotes(AbstractFunctionDecl const* func) {
                         : "async throws";
 
       note.fixItReplace(SourceRange(func->getThrowsLoc()), replacement);
-
-    } else {
+    } else if (func->getParameters()->getRParenLoc().isValid()) {
       note.fixItInsert(func->getParameters()->getRParenLoc().getAdvancedLoc(1),
                        " async");
     }
@@ -159,6 +159,11 @@ void swift::addAsyncNotes(AbstractFunctionDecl const* func) {
 
 bool IsAsyncHandlerRequest::evaluate(
     Evaluator &evaluator, FuncDecl *func) const {
+  // Turn off @asyncHandler when not specifically enabled.
+  if (!func->getASTContext().LangOpts.EnableExperimentalAsyncHandler) {
+    return false;
+  }
+
   // Check whether the attribute was explicitly specified.
   if (auto attr = func->getAttrs().getAttribute<AsyncHandlerAttr>()) {
     // Check for well-formedness.
@@ -232,6 +237,11 @@ bool IsAsyncHandlerRequest::evaluate(
 
 bool CanBeAsyncHandlerRequest::evaluate(
     Evaluator &evaluator, FuncDecl *func) const {
+  // Turn off @asyncHandler when not specifically enabled.
+  if (!func->getASTContext().LangOpts.EnableExperimentalAsyncHandler) {
+    return false;
+  }
+
   return !checkAsyncHandler(func, /*diagnose=*/false);
 }
 
@@ -261,59 +271,30 @@ bool IsActorRequest::evaluate(
   if (!classDecl)
     return false;
 
-  bool isExplicitActor = classDecl->isExplicitActor() ||
-    classDecl->getAttrs().getAttribute<ActorAttr>();
-
-  // If there is a superclass, we can infer actor-ness from it.
-  if (auto superclassDecl = classDecl->getSuperclassDecl()) {
-    // The superclass is an actor, so we are, too.
-    if (superclassDecl->isActor())
-      return true;
-
-    // The superclass is 'NSObject', which is known to have no state and no
-    // superclass.
-    if (superclassDecl->isNSObject() && isExplicitActor)
-      return true;
-
-    // This class cannot be an actor; complain if the 'actor' modifier was
-    // provided.
-    if (isExplicitActor) {
-      classDecl->diagnose(diag::actor_with_nonactor_superclass,
-                          superclassDecl->getName())
-        .highlight(classDecl->getStartLoc());
-    }
-
-    return false;
-  }
-
-  return isExplicitActor;
+  return classDecl->isExplicitActor() ||
+      classDecl->getAttrs().getAttribute<ActorAttr>();
 }
 
 bool IsDefaultActorRequest::evaluate(
-    Evaluator &evaluator, ClassDecl *classDecl) const {
-  // If the class isn't an actor class, it's not a default actor.
+    Evaluator &evaluator, ClassDecl *classDecl, ModuleDecl *M,
+    ResilienceExpansion expansion) const {
+  // If the class isn't an actor, it's not a default actor.
   if (!classDecl->isActor())
     return false;
 
-  // If there is a superclass, and it's an actor class, we defer
-  // the decision to it.
-  if (auto superclassDecl = classDecl->getSuperclassDecl()) {
-    // If the superclass is an actor, we inherit its default-actor-ness.
-    if (superclassDecl->isActor())
-      return superclassDecl->isDefaultActor();
-
-    // If the superclass is not an actor class, it can only be
-    // a default actor if it's NSObject.  (For now, other classes simply
-    // can't be actors at all.)  We don't need to diagnose this; we
-    // should've done that already in isActor().
-    if (!superclassDecl->isNSObject())
-      return false;
-  }
-
-  // If the class has explicit custom-actor methods, it's not
-  // a default actor.
-  if (classDecl->hasExplicitCustomActorMethods())
+  // If the class is resilient from the perspective of the module
+  // module, it's not a default actor.
+  if (classDecl->isForeign() || classDecl->isResilient(M, expansion))
     return false;
+
+  // Check whether the class has explicit custom-actor methods.
+
+  // If we synthesized the unownedExecutor property, we should've
+  // added a semantics attribute to it (if it was actually a default
+  // actor).
+  if (auto executorProperty = classDecl->getUnownedExecutorProperty())
+    return executorProperty->getAttrs()
+             .hasSemanticsAttr(SEMANTICS_DEFAULT_ACTOR);
 
   return true;
 }
@@ -442,31 +423,16 @@ VarDecl *GlobalActorInstanceRequest::evaluate(
 }
 
 Optional<std::pair<CustomAttr *, NominalTypeDecl *>>
-GlobalActorAttributeRequest::evaluate(
-    Evaluator &evaluator,
-    llvm::PointerUnion<Decl *, ClosureExpr *> subject) const {
-  DeclContext *dc;
-  DeclAttributes *declAttrs;
-  SourceLoc loc;
-  if (auto decl = subject.dyn_cast<Decl *>()) {
-    dc = decl->getDeclContext();
-    declAttrs = &decl->getAttrs();
-    loc = decl->getLoc();
-  } else {
-    auto closure = subject.get<ClosureExpr *>();
-    dc = closure;
-    declAttrs = &closure->getAttrs();
-    loc = closure->getLoc();
-  }
+swift::checkGlobalActorAttributes(
+    SourceLoc loc, DeclContext *dc, ArrayRef<CustomAttr *> attrs) {
   ASTContext &ctx = dc->getASTContext();
+
   CustomAttr *globalActorAttr = nullptr;
   NominalTypeDecl *globalActorNominal = nullptr;
-
-  for (auto attr : declAttrs->getAttributes<CustomAttr>()) {
-    auto mutableAttr = const_cast<CustomAttr *>(attr);
+  for (auto attr : attrs) {
     // Figure out which nominal declaration this custom attribute refers to.
     auto nominal = evaluateOrDefault(ctx.evaluator,
-                                     CustomAttrNominalRequest{mutableAttr, dc},
+                                     CustomAttrNominalRequest{attr, dc},
                                      nullptr);
 
     // Ignore unresolvable custom attributes.
@@ -492,19 +458,53 @@ GlobalActorAttributeRequest::evaluate(
   if (!globalActorAttr)
     return None;
 
+  return std::make_pair(globalActorAttr, globalActorNominal);
+}
+
+Optional<std::pair<CustomAttr *, NominalTypeDecl *>>
+GlobalActorAttributeRequest::evaluate(
+    Evaluator &evaluator,
+    llvm::PointerUnion<Decl *, ClosureExpr *> subject) const {
+  DeclContext *dc;
+  DeclAttributes *declAttrs;
+  SourceLoc loc;
+  if (auto decl = subject.dyn_cast<Decl *>()) {
+    dc = decl->getDeclContext();
+    declAttrs = &decl->getAttrs();
+    loc = decl->getLoc();
+  } else {
+    auto closure = subject.get<ClosureExpr *>();
+    dc = closure;
+    declAttrs = &closure->getAttrs();
+    loc = closure->getLoc();
+  }
+
+  // Collect the attributes.
+  SmallVector<CustomAttr *, 2> attrs;
+  for (auto attr : declAttrs->getAttributes<CustomAttr>()) {
+    auto mutableAttr = const_cast<CustomAttr *>(attr);
+    attrs.push_back(mutableAttr);
+  }
+
+  // Look for a global actor attribute.
+  auto result = checkGlobalActorAttributes(loc, dc, attrs);
+  if (!result)
+    return None;
+
   // Closures can always have a global actor attached.
   if (auto closure = subject.dyn_cast<ClosureExpr *>()) {
-    return std::make_pair(globalActorAttr, globalActorNominal);
+    return result;
   }
 
   // Check that a global actor attribute makes sense on this kind of
   // declaration.
   auto decl = subject.get<Decl *>();
+  auto globalActorAttr = result->first;
   if (auto nominal = dyn_cast<NominalTypeDecl>(decl)) {
     // Nominal types are okay...
     if (auto classDecl = dyn_cast<ClassDecl>(nominal)){
       if (classDecl->isActor()) {
-        // ... except for actor classes.
+        // ... except for actors.
         nominal->diagnose(diag::global_actor_on_actor_class, nominal->getName())
             .highlight(globalActorAttr->getRangeWithAt());
         return None;
@@ -529,12 +529,31 @@ GlobalActorAttributeRequest::evaluate(
     return None;
   }
 
-  return std::make_pair(globalActorAttr, globalActorNominal);
+  return result;
+}
+
+Type swift::getExplicitGlobalActor(ClosureExpr *closure) {
+  // Look at the explicit attribute.
+  auto globalActorAttr = evaluateOrDefault(
+      closure->getASTContext().evaluator,
+      GlobalActorAttributeRequest{closure}, None);
+  if (!globalActorAttr)
+    return Type();
+
+  Type globalActor = evaluateOrDefault(
+      closure->getASTContext().evaluator,
+      CustomAttrTypeRequest{
+        globalActorAttr->first, closure, CustomAttrTypeKind::GlobalActor},
+        Type());
+  if (!globalActor || globalActor->hasError())
+    return Type();
+
+  return globalActor;
 }
 
 /// Determine the isolation rules for a given declaration.
 ActorIsolationRestriction ActorIsolationRestriction::forDeclaration(
-    ConcreteDeclRef declRef) {
+    ConcreteDeclRef declRef, bool fromExpression) {
   auto decl = declRef.getDecl();
 
   switch (decl->getKind()) {
@@ -603,6 +622,14 @@ ActorIsolationRestriction ActorIsolationRestriction::forDeclaration(
         isAccessibleAcrossActors = true;
     }
 
+    // Similarly, a computed property or subscript that has an 'async' getter
+    // provides an asynchronous context, and has no restrictions.
+    if (auto storageDecl = dyn_cast<AbstractStorageDecl>(decl)) {
+      if (auto effectfulGetter = storageDecl->getEffectfulGetAccessor())
+        if (effectfulGetter->hasAsync())
+          isAccessibleAcrossActors = true;
+    }
+
     // Determine the actor isolation of the given declaration.
     switch (auto isolation = getActorIsolation(cast<ValueDecl>(decl))) {
     case ActorIsolation::ActorInstance:
@@ -612,6 +639,13 @@ ActorIsolationRestriction ActorIsolationRestriction::forDeclaration(
 
     case ActorIsolation::GlobalActorUnsafe:
     case ActorIsolation::GlobalActor: {
+      // A global-actor-isolated function referenced within an expression
+      // carries the global actor into its function type. The actual
+      // reference to the function is therefore not restricted, because the
+      // call to the function is.
+      if (fromExpression && isa<AbstractFunctionDecl>(decl))
+        return forUnrestricted();
+
       Type actorType = isolation.getGlobalActor();
       if (auto subs = declRef.getSubstitutions())
         actorType = actorType.subst(subs);
@@ -621,7 +655,6 @@ ActorIsolationRestriction ActorIsolationRestriction::forDeclaration(
     }
 
     case ActorIsolation::Independent:
-    case ActorIsolation::IndependentUnsafe:
       // Actor-independent have no restrictions on their access.
       return forUnrestricted();
 
@@ -706,37 +739,40 @@ static bool isAsyncCall(const ApplyExpr *call) {
 /// features.
 static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc);
 
-/// Determine whether this closure is escaping.
-static bool isEscapingClosure(const AbstractClosureExpr *closure) {
-  if (auto type = closure->getType()) {
-    if (auto fnType = type->getAs<AnyFunctionType>())
-      return !fnType->isNoEscape();
+/// Determine whether this closure should be treated as Sendable.
+///
+/// \param forActorIsolation Whether this check is for the purposes of
+/// determining whether the closure must be non-isolated.
+static bool isSendableClosure(
+    const AbstractClosureExpr *closure, bool forActorIsolation) {
+  if (auto explicitClosure = dyn_cast<ClosureExpr>(closure)) {
+    if (forActorIsolation && explicitClosure->inheritsActorContext())
+      return false;
+
+    if (explicitClosure->isUnsafeSendable())
+      return true;
   }
 
-  return true;
-}
-
-/// Determine whether this closure is escaping.
-static bool isConcurrentClosure(const AbstractClosureExpr *closure) {
   if (auto type = closure->getType()) {
     if (auto fnType = type->getAs<AnyFunctionType>())
-      return fnType->isConcurrent();
+      if (fnType->isSendable())
+        return true;
   }
 
   return false;
 }
 
 /// Determine whether the given type is suitable as a concurrent value type.
-static bool isConcurrentValueType(const DeclContext *dc, Type type) {
-  class IsConcurrentValue : public TypeVisitor<IsConcurrentValue, bool> {
+bool swift::isSendableType(const DeclContext *dc, Type type) {
+  class IsSendable : public TypeVisitor<IsSendable, bool> {
     DeclContext *dc;
-    ProtocolDecl *concurrentValueProto;
+    ProtocolDecl *SendableProto;
 
   public:
-    IsConcurrentValue(const DeclContext *dc)
+    IsSendable(const DeclContext *dc)
         : dc(const_cast<DeclContext *>(dc)) {
-      concurrentValueProto = dc->getASTContext().getProtocol(
-          KnownProtocolKind::ConcurrentValue);
+      SendableProto = dc->getASTContext().getProtocol(
+          KnownProtocolKind::Sendable);
     }
 
 #define ALWAYS_CONCURRENT_VALUE(Id) \
@@ -772,11 +808,11 @@ static bool isConcurrentValueType(const DeclContext *dc, Type type) {
 #undef ALWAYS_CONCURRENT_VALUE
 
     bool visitForConformanceCheck(TypeBase *type) {
-      if (!concurrentValueProto)
+      if (!SendableProto)
         return true;
 
       return !TypeChecker::conformsToProtocol(
-          Type(type), concurrentValueProto, dc).isInvalid();
+          Type(type), SendableProto, dc).isInvalid();
     }
 
     bool visitTupleType(TupleType *type) {
@@ -805,11 +841,11 @@ static bool isConcurrentValueType(const DeclContext *dc, Type type) {
     }
 
     bool visitProtocolType(ProtocolType *type) {
-      if (!concurrentValueProto)
+      if (!SendableProto)
         return true;
 
       return !TypeChecker::containsProtocol(
-        Type(type), concurrentValueProto, dc).isInvalid();
+        Type(type), SendableProto, dc).isInvalid();
     }
 
     bool visitBoundGenericType(BoundGenericType *type) {
@@ -826,7 +862,7 @@ static bool isConcurrentValueType(const DeclContext *dc, Type type) {
 
     bool visitFunctionType(FunctionType *type) {
       // Concurrent function types meet the requirements.
-      if (type->isConcurrent())
+      if (type->isSendable())
         return true;
 
       // C and thin function types meeting the requirements because they
@@ -843,10 +879,10 @@ static bool isConcurrentValueType(const DeclContext *dc, Type type) {
     }
 
     bool visitProtocolCompositionType(ProtocolCompositionType *type) {
-      if (!concurrentValueProto)
+      if (!SendableProto)
         return true;
 
-      return !TypeChecker::containsProtocol(type, concurrentValueProto, dc)
+      return !TypeChecker::containsProtocol(type, SendableProto, dc)
         .isInvalid();
     }
 
@@ -864,43 +900,45 @@ static bool isConcurrentValueType(const DeclContext *dc, Type type) {
 
 static bool diagnoseNonConcurrentParameter(
     SourceLoc loc, ConcurrentReferenceKind refKind, ConcreteDeclRef declRef,
-    ParamDecl *param, Type paramType) {
+    ParamDecl *param, Type paramType, DiagnosticBehavior behavior) {
   ASTContext &ctx = declRef.getDecl()->getASTContext();
-  ctx.Diags.diagnose(loc, diag::non_concurrent_param_type, paramType);
+  ctx.Diags.diagnose(loc, diag::non_concurrent_param_type, paramType)
+      .limitBehavior(behavior);
   return false;
 }
 
 static bool diagnoseNonConcurrentResult(
     SourceLoc loc, ConcurrentReferenceKind refKind, ConcreteDeclRef declRef,
-    Type resultType) {
+    Type resultType, DiagnosticBehavior behavior) {
   ASTContext &ctx = declRef.getDecl()->getASTContext();
-  ctx.Diags.diagnose(loc, diag::non_concurrent_result_type, resultType);
+  ctx.Diags.diagnose(loc, diag::non_concurrent_result_type, resultType)
+      .limitBehavior(behavior);
   return false;
 }
 
 static bool diagnoseNonConcurrentProperty(
     SourceLoc loc, ConcurrentReferenceKind refKind, VarDecl *var,
-    Type propertyType) {
+    Type propertyType, DiagnosticBehavior behavior) {
   ASTContext &ctx = var->getASTContext();
   ctx.Diags.diagnose(loc, diag::non_concurrent_property_type,
                      var->getDescriptiveKind(), var->getName(),
-                     propertyType, var->isLocalCapture());
+                     propertyType, var->isLocalCapture())
+      .limitBehavior(behavior);
   return false;
 }
 
-/// Whether we should diagnose cases where ConcurrentValue conformances are
+/// Whether we should diagnose cases where Sendable conformances are
 /// missing.
-static bool shouldDiagnoseNonConcurrentValueViolations(
+static bool shouldDiagnoseNonSendableViolations(
     const LangOptions &langOpts) {
-  return langOpts.EnableExperimentalConcurrency ||
-      langOpts.WarnConcurrency;
+  return langOpts.WarnConcurrency;
 }
 
 bool swift::diagnoseNonConcurrentTypesInReference(
     ConcreteDeclRef declRef, const DeclContext *dc, SourceLoc loc,
-    ConcurrentReferenceKind refKind) {
+    ConcurrentReferenceKind refKind, DiagnosticBehavior behavior) {
   // Bail out immediately if we aren't supposed to do this checking.
-  if (!shouldDiagnoseNonConcurrentValueViolations(dc->getASTContext().LangOpts))
+  if (!shouldDiagnoseNonSendableViolations(dc->getASTContext().LangOpts))
     return false;
 
   // For functions, check the parameter and result types.
@@ -908,17 +946,18 @@ bool swift::diagnoseNonConcurrentTypesInReference(
   if (auto function = dyn_cast<AbstractFunctionDecl>(declRef.getDecl())) {
     for (auto param : *function->getParameters()) {
       Type paramType = param->getInterfaceType().subst(subs);
-      if (!isConcurrentValueType(dc, paramType)) {
+      if (!isSendableType(dc, paramType)) {
         return diagnoseNonConcurrentParameter(
-            loc, refKind, declRef, param, paramType);
+            loc, refKind, declRef, param, paramType, behavior);
       }
     }
 
     // Check the result type of a function.
     if (auto func = dyn_cast<FuncDecl>(function)) {
       Type resultType = func->getResultInterfaceType().subst(subs);
-      if (!isConcurrentValueType(dc, resultType)) {
-        return diagnoseNonConcurrentResult(loc, refKind, declRef, resultType);
+      if (!isSendableType(dc, resultType)) {
+        return diagnoseNonConcurrentResult(loc, refKind, declRef, resultType,
+                                           behavior);
       }
     }
 
@@ -929,24 +968,26 @@ bool swift::diagnoseNonConcurrentTypesInReference(
     Type propertyType = var->isLocalCapture()
         ? var->getType()
         : var->getValueInterfaceType().subst(subs);
-    if (!isConcurrentValueType(dc, propertyType)) {
-      return diagnoseNonConcurrentProperty(loc, refKind, var, propertyType);
+    if (!isSendableType(dc, propertyType)) {
+      return diagnoseNonConcurrentProperty(loc, refKind, var, propertyType,
+                                           behavior);
     }
   }
 
   if (auto subscript = dyn_cast<SubscriptDecl>(declRef.getDecl())) {
     for (auto param : *subscript->getIndices()) {
       Type paramType = param->getInterfaceType().subst(subs);
-      if (!isConcurrentValueType(dc, paramType)) {
+      if (!isSendableType(dc, paramType)) {
         return diagnoseNonConcurrentParameter(
-            loc, refKind, declRef, param, paramType);
+            loc, refKind, declRef, param, paramType, behavior);
       }
     }
 
     // Check the element type of a subscript.
     Type resultType = subscript->getElementInterfaceType().subst(subs);
-    if (!isConcurrentValueType(dc, resultType)) {
-      return diagnoseNonConcurrentResult(loc, refKind, declRef, resultType);
+    if (!isSendableType(dc, resultType)) {
+      return diagnoseNonConcurrentResult(loc, refKind, declRef, resultType,
+                                         behavior);
     }
 
     return false;
@@ -1215,6 +1256,9 @@ namespace {
       if (auto apply = dyn_cast<ApplyExpr>(expr)) {
         applyStack.push_back(apply);  // record this encounter
 
+        // Check the call itself.
+        (void)checkApply(apply);
+
         // If this is a call to a partial apply thunk, decompose it to check it
         // like based on the original written syntax, e.g., "self.method".
         if (auto partialApply = decomposePartialApplyThunk(
@@ -1266,21 +1310,9 @@ namespace {
         }
       }
 
-      // Key paths require any captured values to be ConcurrentValue-conforming.
-      if (auto keyPath = dyn_cast<KeyPathExpr>(expr)) {
-        for (const auto &component : keyPath->getComponents()) {
-          auto indexExpr = component.getIndexExpr();
-          if (!indexExpr || !indexExpr->getType())
-            continue;
 
-          if (shouldDiagnoseNonConcurrentValueViolations(ctx.LangOpts) &&
-              !isConcurrentValueType(getDeclContext(), indexExpr->getType())) {
-            ctx.Diags.diagnose(
-                component.getLoc(), diag::non_concurrent_keypath_capture,
-                indexExpr->getType());
-          }
-        }
-      }
+      if (auto keyPath = dyn_cast<KeyPathExpr>(expr))
+        checkKeyPathExpr(keyPath);
 
       // The children of #selector expressions are not evaluated, so we do not
       // need to do isolation checking there. This is convenient because such
@@ -1362,6 +1394,33 @@ namespace {
       return nullptr;
     }
 
+    /// Note when the enclosing context could be put on a global actor.
+    void noteGlobalActorOnContext(DeclContext *dc, Type globalActor) {
+      // If we are in a synchronous function on the global actor,
+      // suggest annotating with the global actor itself.
+      if (auto fn = dyn_cast<FuncDecl>(dc)) {
+        if (!isa<AccessorDecl>(fn) && !fn->isAsyncContext()) {
+          switch (getActorIsolation(fn)) {
+          case ActorIsolation::ActorInstance:
+          case ActorIsolation::GlobalActor:
+          case ActorIsolation::GlobalActorUnsafe:
+          case ActorIsolation::Independent:
+            return;
+
+          case ActorIsolation::Unspecified:
+            fn->diagnose(diag::note_add_globalactor_to_function,
+                globalActor->getWithoutParens().getString(),
+                fn->getDescriptiveKind(),
+                fn->getName(),
+                globalActor)
+              .fixItInsert(fn->getAttributeInsertionLoc(false),
+                diag::insert_globalactor_attr, globalActor);
+              return;
+          }
+        }
+      }
+    }
+
     /// Note that the given actor member is isolated.
     /// @param context is allowed to be null if no context is appropriate.
     void noteIsolatedActorMember(ValueDecl *decl, Expr *context) {
@@ -1407,7 +1466,7 @@ namespace {
     ///
     /// \returns true if we diagnosed the entity, \c false otherwise.
     bool diagnoseReferenceToUnsafeGlobal(ValueDecl *value, SourceLoc loc) {
-      if (!shouldDiagnoseExistingDataRaces(getDeclContext()))
+      if (!ctx.LangOpts.WarnConcurrency)
         return false;
 
       // Only diagnose direct references to mutable global state.
@@ -1504,69 +1563,20 @@ namespace {
     }
 
     /// Get the actor isolation of the innermost relevant context.
-    ActorIsolation getInnermostIsolatedContext(const DeclContext *constDC) {
-      // Retrieve the actor isolation for a declaration somewhere in our
-      // declaration context chain and map it into our own context so that
-      // the types can be compared.
-      auto getActorIsolation = [constDC](ValueDecl *value) {
-        switch (auto isolation = swift::getActorIsolation(value)) {
-        case ActorIsolation::ActorInstance:
-        case ActorIsolation::Independent:
-        case ActorIsolation::IndependentUnsafe:
-        case ActorIsolation::Unspecified:
-          return isolation;
+    ActorIsolation getInnermostIsolatedContext(DeclContext *dc) {
+      // Retrieve the actor isolation of the context.
+      switch (auto isolation = getActorIsolationOfContext(dc)) {
+      case ActorIsolation::ActorInstance:
+      case ActorIsolation::Independent:
+      case ActorIsolation::Unspecified:
+        return isolation;
 
-        case ActorIsolation::GlobalActor:
-        case ActorIsolation::GlobalActorUnsafe:
-          return ActorIsolation::forGlobalActor(
-              constDC->mapTypeIntoContext(isolation.getGlobalActor()),
-              isolation == ActorIsolation::GlobalActorUnsafe);
-        }
-      };
-
-      auto dc = const_cast<DeclContext *>(constDC);
-      while (!dc->isModuleScopeContext()) {
-        if (auto closure = dyn_cast<AbstractClosureExpr>(dc)) {
-          // If this closure has specific isolation, use it.
-          auto closureIsolation = getActorIsolationOfContext(dc);
-          if (closureIsolation != ActorIsolation::Independent)
-            return closureIsolation;
-
-          // Look through non-escaping closures.
-          if (auto type = closure->getType()) {
-            if (auto fnType = type->getAs<AnyFunctionType>()) {
-              if (fnType->isNoEscape()) {
-                dc = closure->getParent();
-                continue;
-              }
-            }
-          }
-        }
-
-        // Functions have actor isolation defined on them.
-        if (auto func = dyn_cast<AbstractFunctionDecl>(dc))
-          return getActorIsolation(func);
-
-        // Subscripts have actor isolation defined on them.
-        if (auto subscript = dyn_cast<SubscriptDecl>(dc))
-          return getActorIsolation(subscript);
-
-        // Pattern binding declarations have actor isolation defined on their
-        // properties, if any.
-        if (auto init = dyn_cast<PatternBindingInitializer>(dc)) {
-          auto var = init->getBinding()->getAnchoringVarDecl(
-              init->getBindingIndex());
-          if (var)
-            return getActorIsolation(var);
-
-          return ActorIsolation::forUnspecified();
-        }
-
-        return ActorIsolation::forUnspecified();
+      case ActorIsolation::GlobalActor:
+      case ActorIsolation::GlobalActorUnsafe:
+        return ActorIsolation::forGlobalActor(
+            dc->mapTypeIntoContext(isolation.getGlobalActor()),
+            isolation == ActorIsolation::GlobalActorUnsafe);
       }
-
-      // At module scope, actor independence with safety is assumed.
-      return ActorIsolation::forIndependent(ActorIndependentKind::Safe);
     }
 
     bool isInAsynchronousContext() const {
@@ -1588,7 +1598,7 @@ namespace {
       FoundAsync, // successfully marked an implicitly-async operation
       NotFound,  // fail: no valid implicitly-async operation was found
       SyncContext, // fail: a valid implicitly-async op, but in sync context
-      NotConcurrentValue  // fail: valid op and context, but not ConcurrentValue
+      NotSendable  // fail: valid op and context, but not Sendable
     };
 
     /// Attempts to identify and mark a valid cross-actor use of a synchronous
@@ -1666,10 +1676,91 @@ namespace {
               concDeclRef, getDeclContext(), declLoc,
               ConcurrentReferenceKind::SynchronousAsAsyncCall);
         if (problemFound)
-          result = AsyncMarkingResult::NotConcurrentValue;
+          result = AsyncMarkingResult::NotSendable;
       }
 
       return result;
+    }
+
+    /// Check actor isolation for a particular application.
+    bool checkApply(ApplyExpr *apply) {
+      auto fnExprType = apply->getFn()->getType();
+      if (!fnExprType)
+        return false;
+
+      auto fnType = fnExprType->getAs<FunctionType>();
+      if (!fnType)
+        return false;
+
+      // Handle calls to global-actor-qualified functions.
+      Type globalActor = fnType->getGlobalActor();
+      if (!globalActor)
+        return false;
+
+      auto declContext = const_cast<DeclContext *>(getDeclContext());
+
+      // Check whether we are within the same isolation context, in which
+      // case there is nothing further to check,
+      auto contextIsolation = getInnermostIsolatedContext(declContext);
+      if (contextIsolation.isGlobalActor() &&
+          contextIsolation.getGlobalActor()->isEqual(globalActor)) {
+        return false;
+      }
+
+      // From this point on, the only possibility is that we have an implicitly
+      // aynchronous call.
+
+      // If we are not in an asynchronous context, complain.
+      if (!isInAsynchronousContext()) {
+        auto isolation = ActorIsolation::forGlobalActor(
+            globalActor, /*unsafe=*/false);
+        if (auto calleeDecl = apply->getCalledValue()) {
+          ctx.Diags.diagnose(
+              apply->getLoc(), diag::actor_isolated_call_decl, isolation,
+              calleeDecl->getDescriptiveKind(), calleeDecl->getName(),
+              contextIsolation);
+          calleeDecl->diagnose(
+              diag::actor_isolated_sync_func, calleeDecl->getDescriptiveKind(),
+              calleeDecl->getName());
+        } else {
+          ctx.Diags.diagnose(
+              apply->getLoc(), diag::actor_isolated_call, isolation,
+              contextIsolation);
+        }
+        noteGlobalActorOnContext(
+            const_cast<DeclContext *>(getDeclContext()), globalActor);
+
+        return true;
+      }
+
+      // Mark as implicitly async.
+      if (!fnType->getExtInfo().isAsync())
+        apply->setImplicitlyAsync(true);
+
+      // If we don't need to check for sendability, we're done.
+      if (!shouldDiagnoseNonSendableViolations(ctx.LangOpts))
+        return false;
+
+      // Check for sendability of the parameter types.
+      for (const auto &param : fnType->getParams()) {
+        // FIXME: Dig out the locations of the corresponding arguments.
+        if (!isSendableType(getDeclContext(), param.getParameterType())) {
+          ctx.Diags.diagnose(
+              apply->getLoc(), diag::non_concurrent_param_type,
+              param.getParameterType());
+          return true;
+        }
+      }
+
+      // Check for sendability of the result type.
+      if (!isSendableType(getDeclContext(), fnType->getResult())) {
+        ctx.Diags.diagnose(
+            apply->getLoc(), diag::non_concurrent_result_type,
+            fnType->getResult());
+        return true;
+      }
+
+      return false;
     }
 
     /// Check a reference to an entity within a global actor.
@@ -1678,7 +1769,7 @@ namespace {
         bool isCrossActor,
         Expr *context) {
       ValueDecl *value = valueRef.getDecl();
-      auto declContext = getDeclContext();
+      auto declContext = const_cast<DeclContext *>(getDeclContext());
 
       // Check whether we are within the same isolation context, in which
       // case there is nothing further to check,
@@ -1733,10 +1824,6 @@ namespace {
         return true;
       }
 
-      case ActorIsolation::IndependentUnsafe:
-        // Allow unrestricted use of something in a global actor.
-        return false;
-
       case ActorIsolation::Independent: {
         auto result = tryMarkImplicitlyAsync(loc, valueRef, context);
         if (result == AsyncMarkingResult::FoundAsync)
@@ -1767,21 +1854,7 @@ namespace {
           value->getDescriptiveKind(), value->getName(), globalActor,
           /*actorIndependent=*/false, useKind,
           result == AsyncMarkingResult::SyncContext);
-
-        // If we are in a synchronous function on the global actor,
-        // suggest annotating with the global actor itself.
-        if (auto fn = dyn_cast<FuncDecl>(declContext)) {
-          if (!isa<AccessorDecl>(fn) && !fn->isAsyncContext()) {
-            fn->diagnose(diag::note_add_globalactor_to_function,
-                globalActor->getWithoutParens().getString(),
-                fn->getDescriptiveKind(),
-                fn->getName(),
-                globalActor)
-              .fixItInsert(fn->getAttributeInsertionLoc(false),
-                diag::insert_globalactor_attr, globalActor);
-          }
-        }
-
+        noteGlobalActorOnContext(declContext, globalActor);
         noteIsolatedActorMember(value, context);
 
         return true;
@@ -1819,10 +1892,14 @@ namespace {
       // Check whether this is a local variable, in which case we can
       // determine whether it was safe to access concurrently.
       if (auto var = dyn_cast<VarDecl>(value)) {
+        // Ignore interpolation variables.
+        if (var->getBaseName() == ctx.Id_dollarInterpolation)
+          return false;
+
         auto parent = mutableLocalVarParent[declRefExpr];
 
         // If the variable is immutable, it's fine so long as it involves
-        // ConcurrentValue types.
+        // Sendable types.
         //
         // When flow-sensitive concurrent captures are enabled, we also
         // allow reads, depending on a SIL diagnostic pass to identify the
@@ -1844,18 +1921,18 @@ namespace {
       }
 
       if (auto func = dyn_cast<FuncDecl>(value)) {
-        if (func->isConcurrent())
+        if (func->isSendable())
           return false;
 
         func->diagnose(
             diag::local_function_executed_concurrently,
             func->getDescriptiveKind(), func->getName())
-          .fixItInsert(func->getAttributeInsertionLoc(false), "@concurrent ");
+          .fixItInsert(func->getAttributeInsertionLoc(false), "@Sendable ");
 
-        // Add the @concurrent attribute implicitly, so we don't diagnose
+        // Add the @Sendable attribute implicitly, so we don't diagnose
         // again.
         const_cast<FuncDecl *>(func)->getAttrs().add(
-            new (ctx) ConcurrentAttr(true));
+            new (ctx) SendableAttr(true));
         return true;
       }
 
@@ -1866,6 +1943,95 @@ namespace {
       value->diagnose(
           diag::kind_declared_here, value->getDescriptiveKind());
       return true;
+    }
+
+    ///
+    /// \return true iff a diagnostic was emitted
+    bool checkKeyPathExpr(KeyPathExpr *keyPath) {
+      bool diagnosed = false;
+
+      // returns None if it is not a 'let'-bound var decl. Otherwise,
+      // the bool indicates whether a diagnostic was emitted.
+      auto checkLetBoundVarDecl = [&](KeyPathExpr::Component const& component)
+                                                            -> Optional<bool> {
+        auto decl = component.getDeclRef().getDecl();
+        if (auto varDecl = dyn_cast<VarDecl>(decl)) {
+          if (varDecl->isLet()) {
+            auto type = component.getComponentType();
+            if (shouldDiagnoseNonSendableViolations(ctx.LangOpts)
+                && !isSendableType(getDeclContext(), type)) {
+              ctx.Diags.diagnose(
+                  component.getLoc(), diag::non_concurrent_keypath_access,
+                  type);
+              return true;
+            }
+            return false;
+          }
+        }
+        return None;
+      };
+
+      // check the components of the keypath.
+      for (const auto &component : keyPath->getComponents()) {
+        // The decl referred to by the path component cannot be within an actor.
+        if (component.hasDeclRef()) {
+          auto concDecl = component.getDeclRef();
+          auto isolation = ActorIsolationRestriction::forDeclaration(concDecl);
+
+          switch (isolation.getKind()) {
+          case ActorIsolationRestriction::Unsafe:
+          case ActorIsolationRestriction::Unrestricted:
+            break; // OK. Does not refer to an actor-isolated member.
+
+          case ActorIsolationRestriction::GlobalActorUnsafe:
+            // Only check if we're in code that's adopted concurrency features.
+            if (!shouldDiagnoseExistingDataRaces(getDeclContext()))
+              break; // do not check
+
+            LLVM_FALLTHROUGH; // otherwise, perform checking
+
+          case ActorIsolationRestriction::GlobalActor:
+            // Disable global actor checking for now.
+            if (!ctx.LangOpts.isSwiftVersionAtLeast(6))
+              break;
+
+            LLVM_FALLTHROUGH; // otherwise, it's invalid so diagnose it.
+
+          case ActorIsolationRestriction::CrossActorSelf:
+            // 'let'-bound decls with this isolation are OK, just check them.
+            if (auto wasLetBound = checkLetBoundVarDecl(component)) {
+              diagnosed = wasLetBound.getValue();
+              break;
+            }
+            LLVM_FALLTHROUGH; // otherwise, it's invalid so diagnose it.
+
+          case ActorIsolationRestriction::ActorSelf: {
+            auto decl = concDecl.getDecl();
+            ctx.Diags.diagnose(component.getLoc(),
+                               diag::actor_isolated_keypath_component,
+                               decl->getDescriptiveKind(), decl->getName());
+            diagnosed = true;
+            break;
+          }
+          }; // end switch
+        }
+
+        // Captured values in a path component must conform to Sendable.
+        // These captured values appear in Subscript, aka "index" components,
+        // such as \Type.dict[k] where k is a captured dictionary key.
+        if (auto indexExpr = component.getIndexExpr()) {
+          auto type = indexExpr->getType();
+          if (type && shouldDiagnoseNonSendableViolations(ctx.LangOpts)
+              && !isSendableType(getDeclContext(), type)) {
+            ctx.Diags.diagnose(
+                component.getLoc(), diag::non_concurrent_keypath_capture,
+                indexExpr->getType());
+            diagnosed = true;
+          }
+        }
+      }
+
+      return diagnosed;
     }
 
     /// Check a reference to a local or global.
@@ -1925,19 +2091,15 @@ namespace {
       }
 
       if (auto closure = dyn_cast<AbstractClosureExpr>(dc)) {
-        if (isConcurrentClosure(closure)) {
+        if (isSendableClosure(closure, /*forActorIsolation=*/true)) {
           return diag::actor_isolated_from_concurrent_closure;
-        }
-
-        if (isEscapingClosure(closure)) {
-          return diag::actor_isolated_from_escaping_closure;
         }
 
         return findActorIndependentReason(dc->getParent());
       }
 
       if (auto func = dyn_cast<AbstractFunctionDecl>(dc)) {
-        if (func->isConcurrent())
+        if (func->isSendable())
           return diag::actor_isolated_from_concurrent_function;
       }
 
@@ -1983,7 +2145,7 @@ namespace {
           auto result = tryMarkImplicitlyAsync(memberLoc, memberRef, context);
           if (result == AsyncMarkingResult::FoundAsync)
             return false; // no problems
-          else if (result == AsyncMarkingResult::NotConcurrentValue)
+          else if (result == AsyncMarkingResult::NotSendable)
             return true;
 
           auto useKind = static_cast<unsigned>(
@@ -2018,7 +2180,6 @@ namespace {
 
             return false;
 
-          case ActorIsolation::IndependentUnsafe:
           case ActorIsolation::Unspecified:
             return false;
 
@@ -2026,7 +2187,7 @@ namespace {
             auto result = tryMarkImplicitlyAsync(memberLoc, memberRef, context);
             if (result == AsyncMarkingResult::FoundAsync)
               return false; // no problems
-            else if (result == AsyncMarkingResult::NotConcurrentValue)
+            else if (result == AsyncMarkingResult::NotSendable)
               return true;
 
             // The 'self' is for an actor-independent member, which means
@@ -2045,7 +2206,7 @@ namespace {
             auto result = tryMarkImplicitlyAsync(memberLoc, memberRef, context);
             if (result == AsyncMarkingResult::FoundAsync)
               return false; // no problems
-            else if (result == AsyncMarkingResult::NotConcurrentValue)
+            else if (result == AsyncMarkingResult::NotSendable)
               return true;
 
             // The 'self' is for a member that's part of a global actor, which
@@ -2072,11 +2233,18 @@ namespace {
 
         LLVM_FALLTHROUGH;
 
-      case ActorIsolationRestriction::GlobalActor:
+      case ActorIsolationRestriction::GlobalActor: {
+        const bool isInitDeInit = isa<ConstructorDecl>(getDeclContext()) ||
+                                  isa<DestructorDecl>(getDeclContext());
+        // If we are within an initializer or deinitilizer and are referencing a
+        // stored property on "self", we are not crossing actors.
+        if (isInitDeInit && isa<VarDecl>(member) &&
+            cast<VarDecl>(member)->hasStorage() && getReferencedSelf(base))
+          return false;
         return checkGlobalActorReference(
             memberRef, memberLoc, isolation.getGlobalActor(),
             isolation.isCrossActor, context);
-
+      }
       case ActorIsolationRestriction::Unsafe:
         // This case is hit when passing actor state inout to functions in some
         // cases. The error is emitted by diagnoseInOutArg.
@@ -2087,34 +2255,16 @@ namespace {
 
     // Attempt to resolve the global actor type of a closure.
     Type resolveGlobalActorType(ClosureExpr *closure) {
-      auto globalActorAttr = evaluateOrDefault(
-          ctx.evaluator, GlobalActorAttributeRequest{closure}, None);
-      if (!globalActorAttr)
-        return Type();
-
-      Type globalActor = evaluateOrDefault(
-          ctx.evaluator,
-          CustomAttrTypeRequest{
-            globalActorAttr->first, closure, CustomAttrTypeKind::GlobalActor},
-            Type());
-      if (!globalActor || globalActor->hasError())
-        return Type();
-
-      // Actor-isolated closures must be async.
-      bool isAsync = false;
+      // Check whether the closure's type has a global actor already.
       if (Type closureType = closure->getType()) {
-        if (auto closureFnType = closureType->getAs<FunctionType>())
-          isAsync = closureFnType->isAsync();
+        if (auto closureFnType = closureType->getAs<FunctionType>()) {
+          if (Type globalActor = closureFnType->getGlobalActor())
+            return globalActor;
+        }
       }
 
-      if (!isAsync) {
-        ctx.Diags.diagnose(
-            closure->getLoc(), diag::global_actor_isolated_synchronous_closure,
-            globalActor);
-        return Type();
-      }
-
-      return globalActor;
+      // Look for an explicit attribute.
+      return getExplicitGlobalActor(closure);
     }
 
     /// Determine the isolation of a particular closure.
@@ -2125,12 +2275,22 @@ namespace {
         AbstractClosureExpr *closure) {
       // If the closure specifies a global actor, use it.
       if (auto explicitClosure = dyn_cast<ClosureExpr>(closure)) {
+        if (explicitClosure->getAttrs().hasAttribute<ActorIndependentAttr>())
+          return ClosureActorIsolation::forIndependent();
+
         if (Type globalActorType = resolveGlobalActorType(explicitClosure))
           return ClosureActorIsolation::forGlobalActor(globalActorType);
+
+        if (explicitClosure->isUnsafeMainActor()) {
+          ASTContext &ctx = closure->getASTContext();
+          if (Type mainActor = ctx.getMainActorType())
+            return ClosureActorIsolation::forGlobalActor(mainActor);
+        }
       }
 
-      // Escaping and concurrent closures are always actor-independent.
-      if (isEscapingClosure(closure) || isConcurrentClosure(closure))
+      // Sendable closures are actor-independent unless the closure has
+      // specifically opted into inheriting actor isolation.
+      if (isSendableClosure(closure, /*forActorIsolation=*/true))
         return ClosureActorIsolation::forIndependent();
 
       // A non-escaping closure gets its isolation from its context.
@@ -2139,7 +2299,6 @@ namespace {
       // We must have parent isolation determined to get here.
       switch (parentIsolation) {
       case ActorIsolation::Independent:
-      case ActorIsolation::IndependentUnsafe:
       case ActorIsolation::Unspecified:
         return ClosureActorIsolation::forIndependent();
 
@@ -2182,14 +2341,14 @@ bool ActorIsolationChecker::mayExecuteConcurrentlyWith(
   while (useContext != defContext) {
     // If we find a concurrent closure... it can be run concurrently.
     if (auto closure = dyn_cast<AbstractClosureExpr>(useContext)) {
-      if (isConcurrentClosure(closure))
+      if (isSendableClosure(closure, /*forActorIsolation=*/false))
         return true;
     }
 
     if (auto func = dyn_cast<FuncDecl>(useContext)) {
       if (func->isLocalCapture()) {
-        // If the function is @concurrent... it can be run concurrently.
-        if (func->isConcurrent())
+        // If the function is @Sendable... it can be run concurrently.
+        if (func->isSendable())
           return true;
       }
     }
@@ -2211,6 +2370,10 @@ void swift::checkTopLevelActorIsolation(TopLevelCodeDecl *decl) {
 }
 
 void swift::checkFunctionActorIsolation(AbstractFunctionDecl *decl) {
+  // Disable this check for @LLDBDebuggerFunction functions.
+  if (decl->getAttrs().hasAttribute<LLDBDebuggerFunctionAttr>())
+    return;
+
   ActorIsolationChecker checker(decl);
   if (auto body = decl->getBody()) {
     body->walk(checker);
@@ -2243,12 +2406,23 @@ void swift::checkPropertyWrapperActorIsolation(
 /// inference rules). Returns \c None if there were no attributes on this
 /// declaration.
 static Optional<ActorIsolation> getIsolationFromAttributes(
-    const Decl *decl, bool shouldDiagnose = true) {
+    const Decl *decl, bool shouldDiagnose = true, bool onlyExplicit = false) {
   // Look up attributes on the declaration that can affect its actor isolation.
   // If any of them are present, use that attribute.
   auto independentAttr = decl->getAttrs().getAttribute<ActorIndependentAttr>();
   auto nonisolatedAttr = decl->getAttrs().getAttribute<NonisolatedAttr>();
   auto globalActorAttr = decl->getGlobalActorAttr();
+
+  // Remove implicit attributes if we only care about explicit ones.
+  if (onlyExplicit) {
+    if (independentAttr && independentAttr->isImplicit())
+      independentAttr = nullptr;
+    if (nonisolatedAttr && nonisolatedAttr->isImplicit())
+      nonisolatedAttr = nullptr;
+    if (globalActorAttr && globalActorAttr->first->isImplicit())
+      globalActorAttr = None;
+  }
+
   unsigned numIsolationAttrs =
     (nonisolatedAttr ? 1 : 0) + (independentAttr ? 1 : 0) +
     (globalActorAttr ? 1 : 0);
@@ -2288,16 +2462,16 @@ static Optional<ActorIsolation> getIsolationFromAttributes(
     }
   }
 
-    // If the declaration is explicitly marked 'nonisolated', report it as
-    // independent.
-    if (nonisolatedAttr) {
-      return ActorIsolation::forIndependent(ActorIndependentKind::Safe);
-    }
+  // If the declaration is explicitly marked 'nonisolated', report it as
+  // independent.
+  if (nonisolatedAttr) {
+    return ActorIsolation::forIndependent();
+  }
 
   // If the declaration is explicitly marked @actorIndependent, report it as
   // independent.
   if (independentAttr) {
-    return ActorIsolation::forIndependent(independentAttr->getKind());
+    return ActorIsolation::forIndependent();
   }
 
   // If the declaration is marked with a global actor, report it as being
@@ -2365,7 +2539,6 @@ static Optional<ActorIsolation> getIsolationFromWitnessedRequirements(
       case ActorIsolation::GlobalActor:
       case ActorIsolation::GlobalActorUnsafe:
       case ActorIsolation::Independent:
-      case ActorIsolation::IndependentUnsafe:
         break;
       }
 
@@ -2390,7 +2563,6 @@ static Optional<ActorIsolation> getIsolationFromWitnessedRequirements(
         llvm_unreachable("protocol requirements cannot be actor instances");
 
       case ActorIsolation::Independent:
-      case ActorIsolation::IndependentUnsafe:
         // We only need one @actorIndependent.
         if (sawActorIndependent)
           return true;
@@ -2427,6 +2599,89 @@ static Optional<ActorIsolation> getIsolationFromWitnessedRequirements(
   return std::get<1>(isolatedRequirements.front());
 }
 
+/// Compute the isolation of a nominal type from the conformances that
+/// are directly specified on the type.
+static Optional<ActorIsolation> getIsolationFromConformances(
+    NominalTypeDecl *nominal) {
+  if (isa<ProtocolDecl>(nominal))
+    return None;
+
+  Optional<ActorIsolation> foundIsolation;
+  for (auto proto :
+       nominal->getLocalProtocols(ConformanceLookupKind::NonStructural)) {
+    switch (auto protoIsolation = getActorIsolation(proto)) {
+    case ActorIsolation::ActorInstance:
+    case ActorIsolation::Unspecified:
+    case ActorIsolation::Independent:
+      break;
+
+    case ActorIsolation::GlobalActor:
+    case ActorIsolation::GlobalActorUnsafe:
+      if (!foundIsolation) {
+        foundIsolation = protoIsolation;
+        continue;
+      }
+
+      if (*foundIsolation != protoIsolation)
+        return None;
+
+      break;
+    }
+  }
+
+  return foundIsolation;
+}
+
+/// Compute the isolation of a nominal type from the property wrappers on
+/// any stored properties.
+static Optional<ActorIsolation> getIsolationFromWrappers(
+    NominalTypeDecl *nominal) {
+  if (!isa<StructDecl>(nominal) && !isa<ClassDecl>(nominal))
+    return None;
+
+  if (!nominal->getParentSourceFile())
+    return None;
+  
+  Optional<ActorIsolation> foundIsolation;
+  for (auto member : nominal->getMembers()) {
+    auto var = dyn_cast<VarDecl>(member);
+    if (!var || !var->isInstanceMember())
+      continue;
+
+    auto info = var->getAttachedPropertyWrapperTypeInfo(0);
+    if (!info)
+      continue;
+
+    auto isolation = getActorIsolation(info.valueVar);
+
+    // Inconsistent wrappedValue/projectedValue isolation disables inference.
+    if (info.projectedValueVar &&
+        getActorIsolation(info.projectedValueVar) != isolation)
+      continue;
+
+    switch (isolation) {
+    case ActorIsolation::ActorInstance:
+    case ActorIsolation::Unspecified:
+    case ActorIsolation::Independent:
+      break;
+
+    case ActorIsolation::GlobalActor:
+    case ActorIsolation::GlobalActorUnsafe:
+      if (!foundIsolation) {
+        foundIsolation = isolation;
+        continue;
+      }
+
+      if (*foundIsolation != isolation)
+        return None;
+
+      break;
+    }
+  }
+
+  return foundIsolation;
+}
+
 // Check whether a declaration is an asynchronous handler.
 static bool isAsyncHandler(ValueDecl *value) {
   if (auto func = dyn_cast<AbstractFunctionDecl>(value)) {
@@ -2435,6 +2690,61 @@ static bool isAsyncHandler(ValueDecl *value) {
   }
 
   return false;
+}
+
+namespace {
+
+/// Describes how actor isolation is propagated to a member, if at all.
+enum class MemberIsolationPropagation {
+  GlobalActor,
+  AnyIsolation
+};
+
+}
+/// Determine how the given member can receive its isolation from its type
+/// context.
+static Optional<MemberIsolationPropagation> getMemberIsolationPropagation(
+    const ValueDecl *value) {
+  if (!value->getDeclContext()->isTypeContext())
+    return None;
+
+  switch (value->getKind()) {
+  case DeclKind::Import:
+  case DeclKind::Extension:
+  case DeclKind::TopLevelCode:
+  case DeclKind::InfixOperator:
+  case DeclKind::PrefixOperator:
+  case DeclKind::PostfixOperator:
+  case DeclKind::IfConfig:
+  case DeclKind::PoundDiagnostic:
+  case DeclKind::PrecedenceGroup:
+  case DeclKind::MissingMember:
+  case DeclKind::Class:
+  case DeclKind::Enum:
+  case DeclKind::Protocol:
+  case DeclKind::Struct:
+  case DeclKind::TypeAlias:
+  case DeclKind::GenericTypeParam:
+  case DeclKind::AssociatedType:
+  case DeclKind::OpaqueType:
+  case DeclKind::Param:
+  case DeclKind::Module:
+  case DeclKind::Destructor:
+    return None;
+
+  case DeclKind::PatternBinding:
+  case DeclKind::EnumCase:
+  case DeclKind::EnumElement:
+  case DeclKind::Constructor:
+    return MemberIsolationPropagation::GlobalActor;
+
+  case DeclKind::Func:
+  case DeclKind::Accessor:
+  case DeclKind::Subscript:
+  case DeclKind::Var:
+    return value->isInstanceMember() ? MemberIsolationPropagation::AnyIsolation
+                                     : MemberIsolationPropagation::GlobalActor;
+  }
 }
 
 ActorIsolation ActorIsolationRequest::evaluate(
@@ -2449,11 +2759,10 @@ ActorIsolation ActorIsolationRequest::evaluate(
   // overridden by other inference rules.
   ActorIsolation defaultIsolation = ActorIsolation::forUnspecified();
 
-  // A @concurrent function is assumed to be actor-independent.
+  // A @Sendable function is assumed to be actor-independent.
   if (auto func = dyn_cast<AbstractFunctionDecl>(value)) {
-    if (func->isConcurrent()) {
-      defaultIsolation = ActorIsolation::forIndependent(
-          ActorIndependentKind::Safe);
+    if (func->isSendable()) {
+      defaultIsolation = ActorIsolation::forIndependent();
     }
   }
 
@@ -2468,26 +2777,20 @@ ActorIsolation ActorIsolationRequest::evaluate(
 
   // Function used when returning an inferred isolation.
   auto inferredIsolation = [&](
-      ActorIsolation inferred, bool propagateUnsafe = false) {
+      ActorIsolation inferred, bool onlyGlobal = false) {
     // Add an implicit attribute to capture the actor isolation that was
     // inferred, so that (e.g.) it will be printed and serialized.
     ASTContext &ctx = value->getASTContext();
     switch (inferred) {
-    // FIXME: if the context is 'unsafe', is it fine to infer the 'safe' one?
-    case ActorIsolation::IndependentUnsafe:
     case ActorIsolation::Independent:
+      if (onlyGlobal)
+        return ActorIsolation::forUnspecified();
+
       value->getAttrs().add(new (ctx) ActorIndependentAttr(
                               ActorIndependentKind::Safe, /*IsImplicit=*/true));
       break;
 
     case ActorIsolation::GlobalActorUnsafe:
-      if (!propagateUnsafe && !value->hasClangNode()) {
-        // Don't infer unsafe global actor isolation.
-        return ActorIsolation::forUnspecified();
-      }
-
-      LLVM_FALLTHROUGH;
-
     case ActorIsolation::GlobalActor: {
       auto typeExpr = TypeExpr::createImplicit(inferred.getGlobalActor(), ctx);
       auto attr = CustomAttr::create(
@@ -2500,6 +2803,9 @@ ActorIsolation ActorIsolationRequest::evaluate(
 
     case ActorIsolation::ActorInstance:
     case ActorIsolation::Unspecified:
+      if (onlyGlobal)
+        return ActorIsolation::forUnspecified();
+
       // Nothing to do.
       break;
     }
@@ -2514,10 +2820,10 @@ ActorIsolation ActorIsolationRequest::evaluate(
     if (!isAsyncHandler(value)) {
       auto isolation = getActorIsolation(overriddenValue);
       SubstitutionMap subs;
-      if (auto env = value->getInnermostDeclContext()
-              ->getGenericEnvironmentOfContext()) {
-        subs = SubstitutionMap::getOverrideSubstitutions(
-          overriddenValue, value, subs);
+
+      if (Type selfType = value->getDeclContext()->getSelfInterfaceType()) {
+        subs = selfType->getMemberSubstitutionMap(
+            value->getModuleContext(), overriddenValue);
       }
 
       return inferredIsolation(isolation.subst(subs));
@@ -2536,7 +2842,7 @@ ActorIsolation ActorIsolationRequest::evaluate(
     if (auto wrapperInfo = var->getAttachedPropertyWrapperTypeInfo(0)) {
       if (auto wrappedValue = wrapperInfo.valueVar) {
         if (auto isolation = getActorIsolation(wrappedValue))
-          return inferredIsolation(isolation, /*propagateUnsafe=*/true);
+          return inferredIsolation(isolation);
       }
     }
 
@@ -2550,7 +2856,7 @@ ActorIsolation ActorIsolationRequest::evaluate(
           if (!isa<ClassDecl>(backingNominal) ||
               !cast<ClassDecl>(backingNominal)->isActor()) {
             if (auto isolation = getActorIsolation(backingNominal))
-              return inferredIsolation(isolation, /*propagateUnsafe=*/true);
+              return inferredIsolation(isolation);
           }
         }
       }
@@ -2564,7 +2870,7 @@ ActorIsolation ActorIsolationRequest::evaluate(
               originalVar->getAttachedPropertyWrapperTypeInfo(0)) {
         if (auto projectedValue = wrapperInfo.projectedValueVar) {
           if (auto isolation = getActorIsolation(projectedValue))
-            return inferredIsolation(isolation, /*propagateUnsafe=*/true);
+            return inferredIsolation(isolation);
         }
       }
     }
@@ -2574,7 +2880,8 @@ ActorIsolation ActorIsolationRequest::evaluate(
     // If the declaration witnesses a protocol requirement that is isolated,
     // use that.
     if (auto witnessedIsolation = getIsolationFromWitnessedRequirements(value)) {
-      return inferredIsolation(*witnessedIsolation);
+      if (auto inferred = inferredIsolation(*witnessedIsolation))
+        return inferred;
     }
 
     // If the declaration is a class with a superclass that has specified
@@ -2593,29 +2900,47 @@ ActorIsolation ActorIsolationRequest::evaluate(
             superclassIsolation = superclassIsolation.subst(subs);
           }
 
-          return inferredIsolation(superclassIsolation);
+          if (auto inferred = inferredIsolation(superclassIsolation))
+            return inferred;
         }
+      }
+    }
+
+    if (auto nominal = dyn_cast<NominalTypeDecl>(value)) {
+      // If the declaration is a nominal type and any of the protocols to which
+      // it directly conforms is isolated to a global actor, use that.
+      if (auto conformanceIsolation = getIsolationFromConformances(nominal))
+        if (auto inferred = inferredIsolation(*conformanceIsolation))
+          return inferred;
+
+      // If the declaration is a nominal type and any property wrappers on
+      // its stored properties require isolation, use that.
+      if (auto wrapperIsolation = getIsolationFromWrappers(nominal)) {
+        if (auto inferred = inferredIsolation(*wrapperIsolation))
+          return inferred;
       }
     }
   }
 
-  // Instance members and initializers can infer isolation from their context.
-  if (value->isInstanceMember() || isa<ConstructorDecl>(value)) {
+  // Infer isolation for a member.
+  if (auto memberPropagation = getMemberIsolationPropagation(value)) {
+    // If were only allowed to propagate global actors, do so.
+    bool onlyGlobal =
+        *memberPropagation == MemberIsolationPropagation::GlobalActor;
+
     // If the declaration is in an extension that has one of the isolation
     // attributes, use that.
     if (auto ext = dyn_cast<ExtensionDecl>(value->getDeclContext())) {
       if (auto isolationFromAttr = getIsolationFromAttributes(ext)) {
-        return inferredIsolation(*isolationFromAttr);
+        return inferredIsolation(*isolationFromAttr, onlyGlobal);
       }
     }
 
     // If the declaration is in a nominal type (or extension thereof) that
     // has isolation, use that.
     if (auto selfTypeDecl = value->getDeclContext()->getSelfNominalTypeDecl()) {
-      auto selfTypeIsolation = getActorIsolation(selfTypeDecl);
-      if (!selfTypeIsolation.isUnspecified()) {
-        return inferredIsolation(selfTypeIsolation);
-      }
+      if (auto selfTypeIsolation = getActorIsolation(selfTypeDecl))
+        return inferredIsolation(selfTypeIsolation, onlyGlobal);
     }
   }
 
@@ -2643,21 +2968,16 @@ void swift::checkOverrideActorIsolation(ValueDecl *value) {
 
   if (overriddenIsolation.requiresSubstitution()) {
     SubstitutionMap subs;
-    if (auto env = value->getInnermostDeclContext()
-            ->getGenericEnvironmentOfContext()) {
-      subs = SubstitutionMap::getOverrideSubstitutions(overridden, value, subs);
-      overriddenIsolation = overriddenIsolation.subst(subs);
+    if (Type selfType = value->getDeclContext()->getSelfInterfaceType()) {
+      subs = selfType->getMemberSubstitutionMap(
+          value->getModuleContext(), overridden);
     }
+
+    overriddenIsolation = overriddenIsolation.subst(subs);
   }
 
   // If the isolation matches, we're done.
   if (isolation == overriddenIsolation)
-    return;
-
-  // If the overridden declaration is @actorIndependent(unsafe) and the
-  // overriding declaration has been placed in a global actor, allow it.
-  if (overriddenIsolation.getKind() == ActorIsolation::IndependentUnsafe &&
-      isolation.isGlobalActor())
     return;
 
   // If the overridden declaration is from Objective-C with no actor annotation,
@@ -2671,7 +2991,6 @@ void swift::checkOverrideActorIsolation(ValueDecl *value) {
   if (overriddenIsolation == ActorIsolation::GlobalActorUnsafe) {
     switch (isolation) {
     case ActorIsolation::Independent:
-    case ActorIsolation::IndependentUnsafe:
     case ActorIsolation::Unspecified:
       return;
 
@@ -2700,7 +3019,6 @@ void swift::checkOverrideActorIsolation(ValueDecl *value) {
 
     case ActorIsolation::ActorInstance:
     case ActorIsolation::Independent:
-    case ActorIsolation::IndependentUnsafe:
       // Diagnose below.
       break;
 
@@ -2723,27 +3041,35 @@ void swift::checkOverrideActorIsolation(ValueDecl *value) {
   overridden->diagnose(diag::overridden_here);
 }
 
-static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc) {
-  if (dc->getASTContext().LangOpts.WarnConcurrency)
-    return true;
-
+bool swift::contextUsesConcurrencyFeatures(const DeclContext *dc) {
   while (!dc->isModuleScopeContext()) {
     if (auto closure = dyn_cast<AbstractClosureExpr>(dc)) {
+      // A closure with an explicit global actor or @actorIndependent
+      // uses concurrency features.
+      if (auto explicitClosure = dyn_cast<ClosureExpr>(closure)) {
+        if (explicitClosure->getAttrs().hasAttribute<ActorIndependentAttr>())
+          return true;
+
+        if (getExplicitGlobalActor(const_cast<ClosureExpr *>(explicitClosure)))
+          return true;
+      }
+
       // Async and concurrent closures use concurrency features.
       if (auto closureType = closure->getType()) {
         if (auto fnType = closureType->getAs<AnyFunctionType>())
-          if (fnType->isAsync() || fnType->isConcurrent())
+          if (fnType->isAsync() || fnType->isSendable())
             return true;
       }
     } else if (auto decl = dc->getAsDecl()) {
       // If any isolation attributes are present, we're using concurrency
       // features.
-      if (getIsolationFromAttributes(decl, /*shouldDiagnose=*/false))
+      if (getIsolationFromAttributes(
+              decl, /*shouldDiagnose=*/false, /*onlyExplicit=*/true))
         return true;
 
       if (auto func = dyn_cast<AbstractFunctionDecl>(decl)) {
         // Async and concurrent functions use concurrency features.
-        if (func->hasAsync() || func->isConcurrent())
+        if (func->hasAsync() || func->isSendable())
           return true;
 
         // If there is an explicit @asyncHandler, we're using concurrency
@@ -2754,15 +3080,17 @@ static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc) {
         // If we're in an accessor declaration, also check the storage
         // declaration.
         if (auto accessor = dyn_cast<AccessorDecl>(decl)) {
-          if (getIsolationFromAttributes(accessor->getStorage()))
+          if (getIsolationFromAttributes(
+                  accessor->getStorage(), /*shouldDiagnose=*/false,
+                  /*onlyExplicit=*/true))
             return true;
         }
       }
     }
 
     // If we're in an actor, we're using concurrency features.
-    if (auto classDecl = dc->getSelfClassDecl()) {
-      if (classDecl->isActor())
+    if (auto nominal = dc->getSelfNominalTypeDecl()) {
+      if (nominal->isActor())
         return true;
     }
 
@@ -2773,30 +3101,37 @@ static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc) {
   return false;
 }
 
+static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc) {
+  if (dc->getASTContext().LangOpts.WarnConcurrency)
+    return true;
+
+  return contextUsesConcurrencyFeatures(dc);
+}
+
 static DiagnosticBehavior toDiagnosticBehavior(const LangOptions &langOpts,
-                                               ConcurrentValueCheck check,
+                                               SendableCheck check,
                                                bool diagnoseImplicit = false) {
   switch (check) {
-  case ConcurrentValueCheck::ImpliedByStandardProtocol:
-    return shouldDiagnoseNonConcurrentValueViolations(langOpts)
+  case SendableCheck::ImpliedByStandardProtocol:
+    return shouldDiagnoseNonSendableViolations(langOpts)
         ? DiagnosticBehavior::Warning
         : DiagnosticBehavior::Ignore;
-  case ConcurrentValueCheck::Explicit:
+  case SendableCheck::Explicit:
     return DiagnosticBehavior::Unspecified;
-  case ConcurrentValueCheck::Implicit:
+  case SendableCheck::Implicit:
     return (diagnoseImplicit &&
-            shouldDiagnoseNonConcurrentValueViolations(langOpts))
+            shouldDiagnoseNonSendableViolations(langOpts))
       ? DiagnosticBehavior::Unspecified
       : DiagnosticBehavior::Ignore;
   }
 }
 
 /// Check the instance storage of the given nominal type to verify whether
-/// it is comprised only of ConcurrentValue instance storage.
-static bool checkConcurrentValueInstanceStorage(
-    NominalTypeDecl *nominal, DeclContext *dc, ConcurrentValueCheck check) {
+/// it is comprised only of Sendable instance storage.
+static bool checkSendableInstanceStorage(
+    NominalTypeDecl *nominal, DeclContext *dc, SendableCheck check) {
   // Stored properties of structs and classes must have
-  // ConcurrentValue-conforming types.
+  // Sendable-conforming types.
   const auto &langOpts = dc->getASTContext().LangOpts;
   auto behavior = toDiagnosticBehavior(langOpts, check);
   bool invalid = false;
@@ -2815,7 +3150,7 @@ static bool checkConcurrentValueInstanceStorage(
       }
 
       auto propertyType = dc->mapTypeIntoContext(property->getInterfaceType());
-      if (!isConcurrentValueType(dc, propertyType)) {
+      if (!isSendableType(dc, propertyType)) {
         if (behavior == DiagnosticBehavior::Ignore)
           return true;
         property->diagnose(diag::non_concurrent_type_member,
@@ -2831,7 +3166,7 @@ static bool checkConcurrentValueInstanceStorage(
     return invalid;
   }
 
-  // Associated values of enum cases must have ConcurrentValue-conforming
+  // Associated values of enum cases must have Sendable-conforming
   // types.
   if (auto enumDecl = dyn_cast<EnumDecl>(nominal)) {
     for (auto caseDecl : enumDecl->getAllCases()) {
@@ -2841,7 +3176,7 @@ static bool checkConcurrentValueInstanceStorage(
 
         auto elementType = dc->mapTypeIntoContext(
             element->getArgumentInterfaceType());
-        if (!isConcurrentValueType(dc, elementType)) {
+        if (!isSendableType(dc, elementType)) {
           if (behavior == DiagnosticBehavior::Ignore)
             return true;
           element->diagnose(diag::non_concurrent_type_member,
@@ -2859,8 +3194,8 @@ static bool checkConcurrentValueInstanceStorage(
   return invalid;
 }
 
-bool swift::checkConcurrentValueConformance(
-    ProtocolConformance *conformance, ConcurrentValueCheck check) {
+bool swift::checkSendableConformance(
+    ProtocolConformance *conformance, SendableCheck check) {
   auto conformanceDC = conformance->getDeclContext();
   auto nominal = conformance->getType()->getAnyNominal();
   if (!nominal)
@@ -2868,12 +3203,12 @@ bool swift::checkConcurrentValueConformance(
 
   auto classDecl = dyn_cast<ClassDecl>(nominal);
   if (classDecl) {
-    // Actors implicitly conform to ConcurrentValue and protect their state.
+    // Actors implicitly conform to Sendable and protect their state.
     if (classDecl->isActor())
       return false;
   }
 
-  // ConcurrentValue can only be used in the same source file.
+  // Sendable can only be used in the same source file.
   auto conformanceDecl = conformanceDC->getAsDecl();
   auto behavior = toDiagnosticBehavior(
       nominal->getASTContext().LangOpts, check, /*diagnoseImplicit=*/true);
@@ -2889,7 +3224,7 @@ bool swift::checkConcurrentValueConformance(
   }
 
   if (classDecl) {
-    // An non-final class cannot conform to `ConcurrentValue`.
+    // An non-final class cannot conform to `Sendable`.
     if (!classDecl->isFinal()) {
       classDecl->diagnose(diag::concurrent_value_nonfinal_class,
                           classDecl->getName())
@@ -2899,7 +3234,7 @@ bool swift::checkConcurrentValueConformance(
         return true;
     }
 
-    // A 'ConcurrentValue' class cannot inherit from another class, although
+    // A 'Sendable' class cannot inherit from another class, although
     // we allow `NSObject` for Objective-C interoperability.
     if (!isa<InheritedProtocolConformance>(conformance)) {
       if (auto superclassDecl = classDecl->getSuperclassDecl()) {
@@ -2917,18 +3252,18 @@ bool swift::checkConcurrentValueConformance(
     }
   }
 
-  return checkConcurrentValueInstanceStorage(nominal, conformanceDC, check);
+  return checkSendableInstanceStorage(nominal, conformanceDC, check);
 }
 
-NormalProtocolConformance *GetImplicitConcurrentValueRequest::evaluate(
+NormalProtocolConformance *GetImplicitSendableRequest::evaluate(
     Evaluator &evaluator, NominalTypeDecl *nominal) const {
-  // Only structs and enums can get implicit ConcurrentValue conformances.
+  // Only structs and enums can get implicit Sendable conformances.
   if (!isa<StructDecl>(nominal) && !isa<EnumDecl>(nominal))
     return nullptr;
 
   // Public, non-frozen structs and enums defined in Swift don't get implicit
-  // ConcurrentValue conformances.
-  if (!nominal->getASTContext().LangOpts.EnableInferPublicConcurrentValue &&
+  // Sendable conformances.
+  if (!nominal->getASTContext().LangOpts.EnableInferPublicSendable &&
       nominal->getFormalAccessScope(
           /*useDC=*/nullptr,
           /*treatUsableFromInlineAsPublic=*/true).isPublic() &&
@@ -2946,7 +3281,7 @@ NormalProtocolConformance *GetImplicitConcurrentValueRequest::evaluate(
       if (auto sourceFile = nominal->getParentSourceFile()) {
         switch (sourceFile->Kind) {
         case SourceFileKind::Interface:
-          // Interfaces have explicitly called-out ConcurrentValue conformances.
+          // Interfaces have explicitly called-out Sendable conformances.
           return nullptr;
 
         case SourceFileKind::Library:
@@ -2960,7 +3295,7 @@ NormalProtocolConformance *GetImplicitConcurrentValueRequest::evaluate(
     case FileUnitKind::Builtin:
     case FileUnitKind::SerializedAST:
     case FileUnitKind::Synthesized:
-      // Explicitly-handled modules don't infer ConcurrentValue conformances.
+      // Explicitly-handled modules don't infer Sendable conformances.
       return nullptr;
 
     case FileUnitKind::ClangModule:
@@ -2972,13 +3307,13 @@ NormalProtocolConformance *GetImplicitConcurrentValueRequest::evaluate(
     return nullptr;
   }
 
-  // Check the instance storage for ConcurrentValue conformance.
-  if (checkConcurrentValueInstanceStorage(
-          nominal, nominal, ConcurrentValueCheck::Implicit))
+  // Check the instance storage for Sendable conformance.
+  if (checkSendableInstanceStorage(
+          nominal, nominal, SendableCheck::Implicit))
     return nullptr;
 
   ASTContext &ctx = nominal->getASTContext();
-  auto proto = ctx.getProtocol(KnownProtocolKind::ConcurrentValue);
+  auto proto = ctx.getProtocol(KnownProtocolKind::Sendable);
   if (!proto)
     return nullptr;
 
@@ -2989,4 +3324,56 @@ NormalProtocolConformance *GetImplicitConcurrentValueRequest::evaluate(
       ConformanceEntryKind::Synthesized, nullptr);
 
   return conformance;
+}
+
+AnyFunctionType *swift::applyGlobalActorType(
+    AnyFunctionType *fnType, ValueDecl *funcOrEnum, DeclContext *dc) {
+  Type globalActorType;
+  switch (auto isolation = getActorIsolation(funcOrEnum)) {
+  case ActorIsolation::ActorInstance:
+  case ActorIsolation::Independent:
+  case ActorIsolation::Unspecified:
+    return fnType;
+
+  case ActorIsolation::GlobalActorUnsafe:
+    // Only treat as global-actor-qualified within code that has adopted
+    // Swift Concurrency features.
+    if (!contextUsesConcurrencyFeatures(dc))
+      return fnType;
+
+    LLVM_FALLTHROUGH;
+
+  case ActorIsolation::GlobalActor:
+    globalActorType = isolation.getGlobalActor();
+    break;
+  }
+
+  // If there's no implicit "self" declaration, apply the global actor to
+  // the outermost function type.
+  bool hasImplicitSelfDecl = isa<EnumElementDecl>(funcOrEnum) ||
+      (isa<AbstractFunctionDecl>(funcOrEnum) &&
+       cast<AbstractFunctionDecl>(funcOrEnum)->hasImplicitSelfDecl());
+  if (!hasImplicitSelfDecl) {
+    return fnType->withExtInfo(
+        fnType->getExtInfo().withGlobalActor(globalActorType));
+  }
+
+  // Dig out the inner function type.
+  auto innerFnType = fnType->getResult()->getAs<AnyFunctionType>();
+  if (!innerFnType)
+    return fnType;
+
+  // Update the inner function type with the global actor.
+  innerFnType = innerFnType->withExtInfo(
+      innerFnType->getExtInfo().withGlobalActor(globalActorType));
+
+  // Rebuild the outer function type around it.
+  if (auto genericFnType = dyn_cast<GenericFunctionType>(fnType)) {
+    return GenericFunctionType::get(
+        genericFnType->getGenericSignature(), fnType->getParams(),
+        Type(innerFnType), fnType->getExtInfo());
+  }
+
+  return FunctionType::get(
+      fnType->getParams(), Type(innerFnType), fnType->getExtInfo());
 }

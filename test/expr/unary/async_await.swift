@@ -7,7 +7,9 @@ func test1(asyncfp : () async -> Int, fp : () -> Int) async {
   _ = await asyncfp() + asyncfp()
   _ = await asyncfp() + fp()
   _ = await fp() + 42  // expected-warning {{no 'async' operations occur within 'await' expression}}
-  _ = asyncfp() // expected-error {{call is 'async' but is not marked with 'await'}}{{7-7=await }}
+  _ = 32 + asyncfp() + asyncfp() // expected-error {{expression is 'async' but is not marked with 'await'}}{{7-7=await }}
+  // expected-note@-1:12{{call is 'async'}}
+  // expected-note@-2:24{{call is 'async'}}
 }
 
 func getInt() async -> Int { return 5 }
@@ -23,7 +25,6 @@ func test2(
 }
 
 func test3() { // expected-note{{add 'async' to function 'test3()' to make it asynchronous}} {{13-13= async}}
-  // expected-note@-1{{add '@asyncHandler' to function 'test3()' to create an implicit asynchronous context}}{{1-1=@asyncHandler }}
   _ = await getInt() // expected-error{{'async' call in a function that does not support concurrency}}
 }
 
@@ -59,13 +60,12 @@ struct HasAsyncBad {
 }
 
 func testAutoclosure() async {
-  await acceptAutoclosureAsync(getInt()) // expected-error{{call is 'async' in an autoclosure argument that is not marked with 'await'}}{{32-32=await }}
-  await acceptAutoclosureNonAsync(getInt()) // expected-error{{'async' call in an autoclosure that does not support concurrency}}
-
   await acceptAutoclosureAsync(await getInt())
   await acceptAutoclosureNonAsync(await getInt()) // expected-error{{'async' call in an autoclosure that does not support concurrency}}
 
-  await acceptAutoclosureAsync(getInt()) // expected-error{{call is 'async' in an autoclosure argument that is not marked with 'await'}}{{32-32=await }}
+  await acceptAutoclosureAsync(42 + getInt())
+  // expected-error@-1:32{{expression is 'async' but is not marked with 'await'}}{{32-32=await }}
+  // expected-note@-2:37{{call is 'async' in an autoclosure argument}}
   await acceptAutoclosureNonAsync(getInt()) // expected-error{{'async' call in an autoclosure that does not support concurrency}}
 }
 
@@ -100,10 +100,12 @@ func testThrowingAndAsync() async throws {
 
   // Errors
   _ = await throwingAndAsync() // expected-error{{call can throw but is not marked with 'try'}}
-  // expected-note@-1{{did you mean to use 'try'?}}
-  // expected-note@-2{{did you mean to handle error as optional value?}}
-  // expected-note@-3{{did you mean to disable error propagation?}}
-  _ = try throwingAndAsync() // expected-error{{call is 'async' but is not marked with 'await'}}{{11-11=await }}
+  // expected-note@-1{{did you mean to use 'try'?}}{{7-7=try }}
+  // expected-note@-2{{did you mean to handle error as optional value?}}{{7-7=try? }}
+  // expected-note@-3{{did you mean to disable error propagation?}}{{7-7=try! }}
+  _ = try throwingAndAsync()
+  // expected-error@-1{{expression is 'async' but is not marked with 'await'}}{{11-11=await }}
+  // expected-note@-2{{call is 'async'}}
 }
 
 func testExhaustiveDoCatch() async {
@@ -141,7 +143,9 @@ func testExhaustiveDoCatch() async {
 
 // String interpolation
 func testStringInterpolation() async throws {
-  _ = "Eventually produces \(getInt())" // expected-error{{call is 'async' but is not marked with 'await'}}
+  // expected-error@+2:30{{expression is 'async' but is not marked with 'await'}}{{30-30=await }}
+  // expected-note@+1:35{{call is 'async'}}
+  _ = "Eventually produces \(32 + getInt())"
   _ = "Eventually produces \(await getInt())"
   _ = await "Eventually produces \(getInt())"
 }
@@ -166,7 +170,9 @@ extension Error {
 
 func testAsyncLet() async throws {
   async let x = await getInt()
-  print(x) // expected-error{{reference to async let 'x' is not marked with 'await'}}
+  print(x) // expected-error{{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-1:9{{reference to async let 'x' is 'async'}}
+
   print(await x)
 
   do {
@@ -190,8 +196,7 @@ func testAsyncLet() async throws {
   _ = await x5
 }
 
-// expected-note@+2 4{{add 'async' to function 'testAsyncLetOutOfAsync()' to make it asynchronous}} {{30-30= async}}
-// expected-note@+1 4{{add '@asyncHandler' to function 'testAsyncLetOutOfAsync()' to create an implicit asynchronous context}} {{1-1=@asyncHandler }}
+// expected-note@+1 4{{add 'async' to function 'testAsyncLetOutOfAsync()' to make it asynchronous}} {{30-30= async}}
 func testAsyncLetOutOfAsync() {
   async let x = 1 // expected-error{{'async let' in a function that does not support concurrency}}
   // FIXME: expected-error@-1{{'async' call in a function that does not support concurrency}}

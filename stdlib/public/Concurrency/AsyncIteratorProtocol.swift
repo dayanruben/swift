@@ -12,6 +12,7 @@
 
 import Swift
 
+@available(SwiftStdlib 5.5, *)
 @rethrows
 public protocol AsyncIteratorProtocol {
   associatedtype Element

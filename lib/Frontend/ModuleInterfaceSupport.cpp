@@ -69,11 +69,6 @@ llvm::Regex swift::getSwiftInterfaceFormatVersionRegex() {
                      ": ([0-9\\.]+)$", llvm::Regex::Newline);
 }
 
-llvm::Regex swift::getSwiftInterfaceModuleFlagsRegex() {
-  return llvm::Regex("^// " SWIFT_MODULE_FLAGS_KEY ":(.*)$",
-                     llvm::Regex::Newline);
-}
-
 llvm::Regex swift::getSwiftInterfaceCompilerVersionRegex() {
   return llvm::Regex("^// " SWIFT_COMPILER_VERSION_KEY
                      ": (.+)$", llvm::Regex::Newline);
@@ -521,7 +516,7 @@ public:
     if (!printOptions.shouldPrint(nominal))
       return;
 
-    /// is this nominal specifically an 'actor class'?
+    /// is this nominal specifically an 'actor'?
     bool actorClass = false;
     if (auto klass = dyn_cast<ClassDecl>(nominal))
       actorClass = klass->isActor();
@@ -550,11 +545,11 @@ public:
         if (!handledProtocols.insert(inherited).second)
           return TypeWalker::Action::SkipChildren;
 
-        // If 'nominal' is an 'actor class', we do not synthesize its 
-        // conformance to the Actor protocol through a dummy extension.
+        // If 'nominal' is an actor, we do not synthesize its conformance
+        // to the Actor protocol through a dummy extension.
         // There is a special restriction on the Actor protocol in that
-        // it is only valid to conform to Actor on an 'actor class' decl,
-        // not extensions of that 'actor class'.
+        // it is only valid to conform to Actor on an 'actor' decl,
+        // not extensions of that 'actor'.
         if (actorClass &&
             inherited->isSpecificProtocol(KnownProtocolKind::Actor))
           return TypeWalker::Action::SkipChildren;

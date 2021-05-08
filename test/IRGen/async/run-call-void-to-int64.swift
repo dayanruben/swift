@@ -8,12 +8,13 @@
 // REQUIRES: swift_test_mode_optimize_none
 // REQUIRES: concurrency
 // UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
 
 import Swift
 import _Concurrency
 
 // CHECK-LL: @voidToInt64Tu =
-// CHECK-LL: define hidden swift{{(tail)?}}cc void @voidToInt64(%swift.task* {{%[0-9]+}}, %swift.executor* {{%[0-9]+}}, %swift.context* swiftasync {{%[0-9]+}}) {{#[0-9]*}}
+// CHECK-LL: define hidden swift{{(tail)?}}cc void @voidToInt64(%swift.context* swiftasync {{%[0-9]+}}) {{#[0-9]*}}
 @_silgen_name("voidToInt64")
 func voidToInt64() async -> Int64 { return 42 }
 

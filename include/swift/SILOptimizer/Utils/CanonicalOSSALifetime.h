@@ -93,14 +93,34 @@
 #ifndef SWIFT_SILOPTIMIZER_UTILS_CANONICALOSSALIFETIME_H
 #define SWIFT_SILOPTIMIZER_UTILS_CANONICALOSSALIFETIME_H
 
+#include "swift/Basic/SmallPtrSetVector.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SILOptimizer/Analysis/DominanceAnalysis.h"
 #include "swift/SILOptimizer/Analysis/NonLocalAccessBlockAnalysis.h"
+#include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "swift/SILOptimizer/Utils/PrunedLiveness.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 
 namespace swift {
+
+/// Convert this struct_extract into a copy+destructure. Return the destructured
+/// result or invalid SILValue. The caller must delete the extract and its
+/// now-dead copy use.
+///
+/// If a copied-def is a struct-extract, attempt a destructure conversion
+///   %extract = struct_extract %... : $TypeWithSingleOwnershipValue
+///   %copy = copy_value %extract : $OwnershipValue
+/// To:
+///   %copy = copy_value %extract : $TypeWithSingleOwnershipValue
+///   (%extracted,...) = destructure %copy : $TypeWithSingleOwnershipValue
+///
+/// \p instModCallbacks If non-null, this routine uses
+/// InstModCallbacks::{setUseValue,RAUW}() internally to modify code. Otherwise,
+/// just performs standard operations.
+SILValue
+convertExtractToDestructure(StructExtractInst *extract,
+                            InstModCallbacks *instModCallbacks = nullptr);
 
 /// Information about consumes on the extended-lifetime boundary. Consuming uses
 /// within the lifetime are not included--they will consume a copy after
@@ -123,6 +143,13 @@ class CanonicalOSSAConsumeInfo {
   /// that should be canonicalized separately.
   llvm::SmallDenseMap<SILBasicBlock *, CopyValueInst *, 4> persistentCopies;
 
+  /// The set of non-destroy consumes that need to be poisoned. This is
+  /// determined in two steps. First findOrInsertDestroyInBlock() checks if the
+  /// lifetime shrank within the block. Second rewriteCopies() checks if the
+  /// consume is in remnantLiveOutBlock(). Finally injectPoison() inserts new
+  /// copies and poison destroys for everything in this set.
+  SmallPtrSetVector<SILInstruction *, 4> needsPoisonConsumes;
+
 public:
   bool hasUnclaimedConsumes() const { return !finalBlockConsumes.empty(); }
 
@@ -130,6 +157,19 @@ public:
     finalBlockConsumes.clear();
     debugAfterConsume.clear();
     persistentCopies.clear();
+    needsPoisonConsumes.clear();
+  }
+
+  void recordNeedsPoison(SILInstruction *consume) {
+    needsPoisonConsumes.insert(consume);
+  }
+
+  bool needsPoison(SILInstruction *consume) const {
+    return needsPoisonConsumes.count(consume);
+  }
+
+  ArrayRef<SILInstruction *> getNeedsPoisonConsumes() const {
+    return needsPoisonConsumes.getArrayRef();
   }
 
   bool hasFinalConsumes() const { return !finalBlockConsumes.empty(); }
@@ -158,6 +198,11 @@ public:
     debugAfterConsume.push_back(dvi);
   }
 
+  void popDebugAfterConsume(DebugValueInst *dvi) {
+    if (!debugAfterConsume.empty() && debugAfterConsume.back() == dvi)
+      debugAfterConsume.pop_back();
+  }
+
   ArrayRef<DebugValueInst *> getDebugInstsAfterConsume() const {
     return debugAfterConsume;
   }
@@ -175,6 +220,50 @@ public:
   SWIFT_ASSERT_ONLY_DECL(void dump() const LLVM_ATTRIBUTE_USED);
 };
 
+// Worklist of pointer-like things that have an invalid default value. Avoid
+// revisiting nodes--suitable for DAGs, but pops finished nodes without
+// preserving them in the vector.
+//
+// The primary API has two methods: intialize() and pop(). Others are provided
+// for flexibility.
+//
+// TODO: make this a better utility.
+template <typename T, unsigned SmallSize> struct PtrWorklist {
+  SmallPtrSet<T, SmallSize> ptrVisited;
+  SmallVector<T, SmallSize> ptrVector;
+
+  PtrWorklist() = default;
+
+  PtrWorklist(const PtrWorklist &) = delete;
+
+  void initialize(T t) {
+    clear();
+    insert(t);
+  }
+
+  template <typename R> void initializeRange(R &&range) {
+    clear();
+    ptrVisited.insert(range.begin(), range.end());
+    ptrVector.append(range.begin(), range.end());
+  }
+
+  T pop() { return empty() ? T() : ptrVector.pop_back_val(); }
+
+  bool empty() const { return ptrVector.empty(); }
+
+  unsigned size() const { return ptrVector.size(); }
+
+  void clear() {
+    ptrVector.clear();
+    ptrVisited.clear();
+  }
+
+  void insert(T t) {
+    if (ptrVisited.insert(t).second)
+      ptrVector.push_back(t);
+  }
+};
+
 /// Canonicalize OSSA lifetimes.
 ///
 /// Allows the allocation of analysis state to be reused across calls to
@@ -189,14 +278,19 @@ private:
   /// liveness may be pruned during canonicalization.
   bool pruneDebugMode;
 
+  /// If true, borrows scopes will be canonicalized allowing copies of
+  /// guaranteed values to be eliminated.
+  bool canonicalizeBorrowMode;
+
+  /// If true, then new destroy_value instructions will be poison.
+  bool poisonRefsMode;
+
   NonLocalAccessBlockAnalysis *accessBlockAnalysis;
   // Lazily initialize accessBlocks only when
   // extendLivenessThroughOverlappingAccess is invoked.
   NonLocalAccessBlocks *accessBlocks = nullptr;
 
   DominanceAnalysis *dominanceAnalysis;
-
-  DeadEndBlocks *deBlocks;
 
   /// Current copied def for which this state describes the liveness.
   SILValue currentDef;
@@ -221,29 +315,46 @@ private:
   /// outisde the pruned liveness at the time it is discovered.
   llvm::SmallPtrSet<DebugValueInst *, 8> debugValues;
 
-  /// Reuse a general worklist for def-use traversal.
-  SmallSetVector<SILValue, 8> defUseWorklist;
+  /// Reuse a general visited set for def-use traversal.
+  PtrWorklist<SILValue, 8> defUseWorklist;
 
   /// Reuse a general worklist for CFG traversal.
-  SmallSetVector<SILBasicBlock *, 8> blockWorklist;
+  PtrWorklist<SILBasicBlock *, 8> blockWorklist;
 
   /// Pruned liveness for the extended live range including copies. For this
   /// purpose, only consuming instructions are considered "lifetime
   /// ending". end_borrows do not end a liverange that may include owned copies.
   PrunedLiveness liveness;
 
+  /// remnantLiveOutBlocks are part of the original extended lifetime that are
+  /// not in canonical pruned liveness. There is a path from a PrunedLiveness
+  /// boundary to an original destroy that passes through a remnant block.
+  ///
+  /// These blocks would be equivalent to PrunedLiveness::LiveOut if
+  /// PrunedLiveness were recomputed using all original destroys as interesting
+  /// uses, minus blocks already marked PrunedLiveness::LiveOut. (Remnant blocks
+  /// may be in PrunedLiveness::LiveWithin).
+  SmallSetVector<SILBasicBlock *, 8> remnantLiveOutBlocks;
+
   /// Information about consuming instructions discovered in this caonical OSSA
   /// lifetime.
   CanonicalOSSAConsumeInfo consumes;
 
+  /// The callbacks to use when deleting/rauwing instructions.
+  InstModCallbacks instModCallbacks;
+
 public:
-  CanonicalizeOSSALifetime(bool pruneDebugMode,
-                           NonLocalAccessBlockAnalysis *accessBlockAnalysis,
-                           DominanceAnalysis *dominanceAnalysis,
-                           DeadEndBlocks *deBlocks)
+  CanonicalizeOSSALifetime(
+      bool pruneDebugMode, bool canonicalizeBorrowMode, bool poisonRefsMode,
+      NonLocalAccessBlockAnalysis *accessBlockAnalysis,
+      DominanceAnalysis *dominanceAnalysis,
+      InstModCallbacks instModCallbacks = InstModCallbacks())
       : pruneDebugMode(pruneDebugMode),
+        canonicalizeBorrowMode(canonicalizeBorrowMode),
+        poisonRefsMode(poisonRefsMode),
         accessBlockAnalysis(accessBlockAnalysis),
-        dominanceAnalysis(dominanceAnalysis), deBlocks(deBlocks) {}
+        dominanceAnalysis(dominanceAnalysis),
+        instModCallbacks(instModCallbacks) {}
 
   SILValue getCurrentDef() const { return currentDef; }
 
@@ -263,6 +374,7 @@ public:
     consumingBlocks.clear();
     debugValues.clear();
     liveness.clear();
+    remnantLiveOutBlocks.clear();
   }
 
   bool hasChanged() const { return changed; }
@@ -286,6 +398,10 @@ public:
   /// lifetime, call this API again on the value defined by the new copy.
   bool canonicalizeValueLifetime(SILValue def);
 
+  /// Return the inst mod callbacks struct used by this CanonicalizeOSSALifetime
+  /// to pass to other APIs that need to compose with CanonicalizeOSSALifetime.
+  InstModCallbacks getInstModCallbacks() const { return instModCallbacks; }
+
 protected:
   void recordDebugValue(DebugValueInst *dvi) {
     debugValues.insert(dvi);
@@ -299,6 +415,15 @@ protected:
 
   bool consolidateBorrowScope();
 
+  bool findBorrowScopeUses(llvm::SmallPtrSetImpl<SILInstruction *> &useInsts);
+
+  void filterOuterBorrowUseInsts(
+      llvm::SmallPtrSetImpl<SILInstruction *> &outerUseInsts);
+
+  void rewriteOuterBorrowUsesAndFindConsumes(
+      SILValue incomingValue,
+      llvm::SmallPtrSetImpl<SILInstruction *> &outerUseInsts);
+
   bool computeCanonicalLiveness();
 
   bool endsAccessOverlappingPrunedBoundary(SILInstruction *inst);
@@ -309,8 +434,36 @@ protected:
 
   void findOrInsertDestroys();
 
+  void insertDestroyOnCFGEdge(SILBasicBlock *predBB, SILBasicBlock *succBB,
+                              bool needsPoison);
+
   void rewriteCopies();
+
+  void injectPoison();
 };
+
+/// Canonicalize the passed in set of defs, eliminating in one batch any that
+/// are not needed given the canonical lifetime of the various underlying owned
+/// value introducers.
+///
+/// On success, returns the invalidation kind that the caller must use to
+/// invalidate analyses. Currently it will only ever return
+/// SILAnalysis::InvalidationKind::Instructions or None.
+///
+/// NOTE: This routine is guaranteed to not invalidate
+/// NonLocalAccessBlockAnalysis, so callers should lock it before invalidating
+/// instructions. E.x.:
+///
+///    accessBlockAnalysis->lockInvalidation();
+///    pass->invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
+///    accessBlockAnalysis->unlockInvalidation();
+///
+/// NOTE: We assume that all \p inputDefs is a set (that is it has no duplicate
+/// elements) and that all values have been generated by running a copy through
+/// CanonicalizeOSSALifetime::getCanonicalCopiedDef(copy)).
+SILAnalysis::InvalidationKind
+canonicalizeOSSALifetimes(CanonicalizeOSSALifetime &canonicalizeLifetime,
+                          ArrayRef<SILValue> inputDefs);
 
 } // end namespace swift
 

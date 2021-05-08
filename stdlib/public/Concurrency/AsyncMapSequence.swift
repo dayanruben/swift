@@ -12,6 +12,7 @@
 
 import Swift
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncSequence {
   @inlinable
   public __consuming func map<Transformed>(
@@ -21,6 +22,7 @@ extension AsyncSequence {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 public struct AsyncMapSequence<Base: AsyncSequence, Transformed> {
   @usableFromInline
   let base: Base
@@ -38,6 +40,7 @@ public struct AsyncMapSequence<Base: AsyncSequence, Transformed> {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncMapSequence: AsyncSequence {
   public typealias Element = Transformed
   public typealias AsyncIterator = Iterator

@@ -242,6 +242,9 @@ public:
       if (auto closure = dyn_cast<ClosureExpr>(expr)) {
         if (!shouldTypeCheckInEnclosingExpression(closure))
           return { false, expr };
+        for (auto &Param : *closure->getParameters()) {
+          Param->setSpecifier(swift::ParamSpecifier::Default);
+        }
       }
 
       // Now, we're ready to walk into sub expressions.
@@ -524,7 +527,10 @@ getTypeOfCompletionOperatorImpl(DeclContext *DC, Expr *expr,
       argTypes.emplace_back(solution.simplifyType(CS.getType(arg)));
   }
 
-  return FunctionType::get(argTypes, solution.simplifyType(CS.getType(expr)));
+  // FIXME: Verify ExtInfo state is correct, not working by accident.
+  FunctionType::ExtInfo info;
+  return FunctionType::get(argTypes, solution.simplifyType(CS.getType(expr)),
+                           info);
 }
 
 /// Return the type of operator function for specified LHS, or a null

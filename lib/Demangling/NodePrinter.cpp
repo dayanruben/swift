@@ -359,10 +359,6 @@ private:
     case Node::Kind::DependentPseudogenericSignature:
     case Node::Kind::Destructor:
     case Node::Kind::DidSet:
-    case Node::Kind::DifferentiableFunctionType:
-    case Node::Kind::EscapingDifferentiableFunctionType:
-    case Node::Kind::LinearFunctionType:
-    case Node::Kind::EscapingLinearFunctionType:
     case Node::Kind::DirectMethodReferenceAttribute:
     case Node::Kind::Directness:
     case Node::Kind::DynamicAttribute:
@@ -519,6 +515,7 @@ private:
     case Node::Kind::ResilientProtocolWitnessTable:
     case Node::Kind::GenericTypeParamDecl:
     case Node::Kind::ConcurrentFunctionType:
+    case Node::Kind::DifferentiableFunctionType:
     case Node::Kind::AsyncAnnotation:
     case Node::Kind::ThrowsAnnotation:
     case Node::Kind::EmptyList:
@@ -572,7 +569,10 @@ private:
     case Node::Kind::AutoDiffSubsetParametersThunk:
     case Node::Kind::AutoDiffFunctionKind:
     case Node::Kind::DifferentiabilityWitness:
+    case Node::Kind::NoDerivative:
     case Node::Kind::IndexSubset:
+    case Node::Kind::AsyncAwaitResumePartialFunction:
+    case Node::Kind::AsyncSuspendResumePartialFunction:
       return false;
     }
     printer_unreachable("bad node kind");
@@ -802,20 +802,19 @@ private:
     case Node::Kind::ObjCBlock:
       printConventionWithMangledCType("block");
       break;
-    case Node::Kind::DifferentiableFunctionType:
-      Printer << "@differentiable "; break;
-    case Node::Kind::EscapingDifferentiableFunctionType:
-      Printer << "@escaping @differentiable "; break;
-    case Node::Kind::LinearFunctionType:
-      Printer << "@differentiable(_linear) "; break;
-    case Node::Kind::EscapingLinearFunctionType:
-      Printer << "@escaping @differentiable(_linear) "; break;
     default:
       assert(false && "Unhandled function type in printFunctionType!");
     }
 
     unsigned startIndex = 0;
-    bool isConcurrent = false, isAsync = false, isThrows = false;
+    bool isSendable = false, isAsync = false, isThrows = false;
+    auto diffKind = MangledDifferentiabilityKind::NonDifferentiable;
+    if (node->getChild(startIndex)->getKind() ==
+        Node::Kind::DifferentiableFunctionType) {
+      diffKind =
+          (MangledDifferentiabilityKind)node->getChild(startIndex)->getIndex();
+      ++startIndex;
+    }
     if (node->getChild(startIndex)->getKind() == Node::Kind::ClangType) {
       // handled earlier
       ++startIndex;
@@ -827,15 +826,32 @@ private:
     if (node->getChild(startIndex)->getKind()
             == Node::Kind::ConcurrentFunctionType) {
       ++startIndex;
-      isConcurrent = true;
+      isSendable = true;
     }
     if (node->getChild(startIndex)->getKind() == Node::Kind::AsyncAnnotation) {
       ++startIndex;
       isAsync = true;
     }
 
-    if (isConcurrent)
-      Printer << "@concurrent ";
+    switch (diffKind) {
+    case MangledDifferentiabilityKind::Forward:
+      Printer << "@differentiable(_forward) ";
+      break;
+    case MangledDifferentiabilityKind::Reverse:
+      Printer << "@differentiable(reverse) ";
+      break;
+    case MangledDifferentiabilityKind::Linear:
+      Printer << "@differentiable(_linear) ";
+      break;
+    case MangledDifferentiabilityKind::Normal:
+      Printer << "@differentiable ";
+      break;
+    case MangledDifferentiabilityKind::NonDifferentiable:
+      break;
+    }
+
+    if (isSendable)
+      Printer << "@Sendable ";
 
     printFunctionParameters(LabelList, node->getChild(startIndex),
                             Options.ShowFunctionArgumentTypes);
@@ -1342,10 +1358,6 @@ NodePointer NodePrinter::print(NodePointer Node, bool asPrefixContext) {
   case Node::Kind::CFunctionPointer:
   case Node::Kind::ObjCBlock:
   case Node::Kind::EscapingObjCBlock:
-  case Node::Kind::DifferentiableFunctionType:
-  case Node::Kind::EscapingDifferentiableFunctionType:
-  case Node::Kind::LinearFunctionType:
-  case Node::Kind::EscapingLinearFunctionType:
     printFunctionType(nullptr, Node);
     return nullptr;
   case Node::Kind::ClangType:
@@ -1408,6 +1420,10 @@ NodePointer NodePrinter::print(NodePointer Node, bool asPrefixContext) {
     return nullptr;
   case Node::Kind::Owned:
     Printer << "__owned ";
+    print(Node->getChild(0));
+    return nullptr;
+  case Node::Kind::NoDerivative:
+    Printer << "@noDerivative ";
     print(Node->getChild(0));
     return nullptr;
   case Node::Kind::NonObjCAttribute:
@@ -2539,13 +2555,34 @@ NodePointer NodePrinter::print(NodePointer Node, bool asPrefixContext) {
     return nullptr;
 
   case Node::Kind::ConcurrentFunctionType:
-    Printer<< "@concurrent ";
+    Printer << "@Sendable ";
     return nullptr;
+  case Node::Kind::DifferentiableFunctionType: {
+    Printer << "@differentiable";
+    auto kind = (MangledDifferentiabilityKind)Node->getIndex();
+    switch (kind) {
+    case MangledDifferentiabilityKind::Forward:
+      Printer << "(_forward)";
+      break;
+    case MangledDifferentiabilityKind::Reverse:
+      Printer << "(reverse)";
+      break;
+    case MangledDifferentiabilityKind::Linear:
+      Printer << "(_linear)";
+      break;
+    case MangledDifferentiabilityKind::Normal:
+      break;
+    case MangledDifferentiabilityKind::NonDifferentiable:
+      assert(false && "Unexpected case NonDifferentiable");
+    }
+    Printer << ' ';
+    return nullptr;
+  }
   case Node::Kind::AsyncAnnotation:
-    Printer<< " async ";
+    Printer << " async ";
     return nullptr;
   case Node::Kind::ThrowsAnnotation:
-    Printer<< " throws ";
+    Printer << " throws ";
     return nullptr;
   case Node::Kind::EmptyList:
     Printer << " empty-list ";
@@ -2774,7 +2811,24 @@ NodePointer NodePrinter::print(NodePointer Node, bool asPrefixContext) {
   case Node::Kind::AsyncFunctionPointer:
     Printer << "async function pointer to ";
     return nullptr;
+  case Node::Kind::AsyncAwaitResumePartialFunction:
+    if (Options.ShowAsyncResumePartial) {
+      Printer << "(";
+      print(Node->getChild(0));
+      Printer << ")";
+      Printer << " await resume partial function for ";
+    }
+    return nullptr;
+  case Node::Kind::AsyncSuspendResumePartialFunction:
+    if (Options.ShowAsyncResumePartial) {
+      Printer << "(";
+      print(Node->getChild(0));
+      Printer << ")";
+      Printer << " suspend resume partial function for ";
+    }
+    return nullptr;
   }
+
   printer_unreachable("bad node kind!");
 }
 

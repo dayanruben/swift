@@ -105,6 +105,7 @@ public:
   void removeCachedAST();
 
   ImmutableTextSnapshotRef getLatestSnapshot() const;
+  std::pair<unsigned, unsigned> getLineAndColumnInBuffer(unsigned Offset);
 
   void parse(ImmutableTextSnapshotRef Snapshot, SwiftLangSupport &Lang,
              bool BuildSyntaxTree,
@@ -364,6 +365,7 @@ public:
   getFileSystem(const Optional<VFSOptions> &vfsOptions,
                 Optional<StringRef> primaryFile, std::string &error);
 
+  static SourceKit::UIdent getUIDForDeclLanguage(const swift::Decl *D);
   static SourceKit::UIdent getUIDForDecl(const swift::Decl *D,
                                          bool IsRef = false);
   static SourceKit::UIdent getUIDForExtensionOfDecl(const swift::Decl *D);

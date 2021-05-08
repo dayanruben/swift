@@ -254,6 +254,7 @@ OPERAND_OWNERSHIP(InteriorPointer, RefTailAddr)
 OPERAND_OWNERSHIP(InteriorPointer, OpenExistentialBox)
 // FIXME: HopToExecutorInst should be an instantaneous use.
 OPERAND_OWNERSHIP(InteriorPointer, HopToExecutor)
+OPERAND_OWNERSHIP(InteriorPointer, ExtractExecutor)
 
 // Instructions that propagate a value value within a borrow scope.
 OPERAND_OWNERSHIP(ForwardingBorrow, TupleExtract)
@@ -709,6 +710,7 @@ BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, SToUCheckedTrunc)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Expect)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Shl)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, GenericShl)
+BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, ShuffleVector)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Sizeof)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, StaticReport)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Strideof)
@@ -743,6 +745,10 @@ BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, PoundAssert)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, GlobalStringTablePointer)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, TypePtrAuthDiscriminator)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, IntInstrprofIncrement)
+BUILTIN_OPERAND_OWNERSHIP(DestroyingConsume, StartAsyncLet)
+BUILTIN_OPERAND_OWNERSHIP(DestroyingConsume, EndAsyncLet)
+BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, CreateTaskGroup)
+BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, DestroyTaskGroup)
 
 BUILTIN_OPERAND_OWNERSHIP(ForwardingConsume, COWBufferForReading)
 BUILTIN_OPERAND_OWNERSHIP(ForwardingConsume, UnsafeGuaranteed)
@@ -751,7 +757,7 @@ OperandOwnership
 OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskFuture(BuiltinInst *bi,
                                                               StringRef attr) {
   // The function operand is consumed by the new task.
-  if (&op == &bi->getOperandRef(3))
+  if (&op == &bi->getOperandRef(2))
     return OperandOwnership::DestroyingConsume;
   
   // FIXME: These are considered InteriorPointer because they may propagate a
@@ -765,7 +771,7 @@ OperandOwnership
 OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskGroupFuture(BuiltinInst *bi,
                                                                    StringRef attr) {
   // The function operand is consumed by the new task.
-  if (&op == &bi->getOperandRef(4))
+  if (&op == &bi->getOperandRef(3))
     return OperandOwnership::DestroyingConsume;
   
   // FIXME: These are considered InteriorPointer because they may propagate a
@@ -773,6 +779,33 @@ OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskGroupFuture(BuiltinInst *
   // then they should be InstantaneousUse instead and should not require a
   // guaranteed value.
   return OperandOwnership::InteriorPointer;
+}
+
+OperandOwnership OperandOwnershipBuiltinClassifier::
+visitResumeNonThrowingContinuationReturning(BuiltinInst *bi, StringRef attr) {
+  // The value operand is consumed.
+  if (&op == &bi->getOperandRef(1))
+    return OperandOwnership::DestroyingConsume;
+
+  return OperandOwnership::TrivialUse;
+}
+
+OperandOwnership OperandOwnershipBuiltinClassifier::
+visitResumeThrowingContinuationReturning(BuiltinInst *bi, StringRef attr) {
+  // The value operand is consumed.
+  if (&op == &bi->getOperandRef(1))
+    return OperandOwnership::DestroyingConsume;
+
+  return OperandOwnership::TrivialUse;
+}
+
+OperandOwnership OperandOwnershipBuiltinClassifier::
+visitResumeThrowingContinuationThrowing(BuiltinInst *bi, StringRef attr) {
+  // The value operand is consumed.
+  if (&op == &bi->getOperandRef(1))
+    return OperandOwnership::DestroyingConsume;
+
+  return OperandOwnership::TrivialUse;
 }
 
 BUILTIN_OPERAND_OWNERSHIP(InteriorPointer, CancelAsyncTask)
@@ -787,6 +820,10 @@ BUILTIN_OPERAND_OWNERSHIP(ForwardingBorrow, AutoDiffProjectTopLevelSubcontext)
 // ownership should be 'TrivialUse'.
 BUILTIN_OPERAND_OWNERSHIP(ForwardingConsume, ConvertTaskToJob)
 
+BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildOrdinarySerialExecutorRef)
+BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildDefaultActorExecutorRef)
+BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildMainActorExecutorRef)
+
 BUILTIN_OPERAND_OWNERSHIP(TrivialUse, AutoDiffCreateLinearMapContext)
 
 #undef BUILTIN_OPERAND_OWNERSHIP
@@ -798,6 +835,7 @@ BUILTIN_OPERAND_OWNERSHIP(TrivialUse, AutoDiffCreateLinearMapContext)
         "Builtin should never be visited! E.x.: It may not have arguments");   \
   }
 SHOULD_NEVER_VISIT_BUILTIN(GetCurrentAsyncTask)
+SHOULD_NEVER_VISIT_BUILTIN(GetCurrentExecutor)
 #undef SHOULD_NEVER_VISIT_BUILTIN
 
 // Builtins that should be lowered to SIL instructions so we should never see

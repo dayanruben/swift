@@ -1117,9 +1117,15 @@ public:
 
   llvm::Constant *tryGetConstantTable(IRGenModule &IGM,
                                       CanType conformingType) const override {
-    if (IGM.getOptions().LazyInitializeProtocolConformances &&
-        RootConformance->getDeclContext()->getParentModule() != IGM.getSwiftModule())
-      return nullptr;
+    if (IGM.getOptions().LazyInitializeProtocolConformances) {
+      const auto *MD = RootConformance->getDeclContext()->getParentModule();
+      // If the protocol conformance is defined in the current module or the
+      // module will be statically linked, then we can statically initialize the
+      // conformance as we know that the protocol conformance is guaranteed to
+      // be present.
+      if (!(MD == IGM.getSwiftModule() || MD->isStaticLibrary()))
+        return nullptr;
+    }
     return IGM.getAddrOfWitnessTable(RootConformance);
   }
 };
@@ -1333,6 +1339,8 @@ public:
 #endif
 
       SILFunction *Func = entry.getMethodWitness().Witness;
+      auto *afd = cast<AbstractFunctionDecl>(
+          entry.getMethodWitness().Requirement.getDecl());
       llvm::Constant *witness = nullptr;
       if (Func) {
         if (Func->isAsync()) {
@@ -1343,11 +1351,20 @@ public:
       } else {
         // The method is removed by dead method elimination.
         // It should be never called. We add a pointer to an error function.
-        witness = IGM.getDeletedMethodErrorFn();
+        if (afd->hasAsync()) {
+          witness = llvm::ConstantExpr::getBitCast(
+              IGM.getDeletedAsyncMethodErrorAsyncFunctionPointer(),
+              IGM.FunctionPtrTy);
+        } else {
+          witness = llvm::ConstantExpr::getBitCast(
+              IGM.getDeletedMethodErrorFn(), IGM.FunctionPtrTy);
+        }
       }
       witness = llvm::ConstantExpr::getBitCast(witness, IGM.Int8PtrTy);
 
-      auto &schema = IGM.getOptions().PointerAuth.ProtocolWitnesses;
+      PointerAuthSchema schema =
+          afd->hasAsync() ? IGM.getOptions().PointerAuth.AsyncProtocolWitnesses
+                          : IGM.getOptions().PointerAuth.ProtocolWitnesses;
       Table.addSignedPointer(witness, schema, requirement);
       return;
     }
@@ -3353,7 +3370,9 @@ FunctionPointer irgen::emitWitnessMethodValue(IRGenFunction &IGF,
   witnessFnPtr = IGF.Builder.CreateBitCast(witnessFnPtr,
                                            signature.getType()->getPointerTo());
 
-  auto &schema = IGF.getOptions().PointerAuth.ProtocolWitnesses;
+  auto &schema = fnType->isAsync()
+                     ? IGF.getOptions().PointerAuth.AsyncProtocolWitnesses
+                     : IGF.getOptions().PointerAuth.ProtocolWitnesses;
   auto authInfo = PointerAuthInfo::emit(IGF, schema, slot, member);
 
   return FunctionPointer(fnType, witnessFnPtr, authInfo, signature);

@@ -20,6 +20,9 @@
 #include "swift/Runtime/Concurrency.h"
 #include "swift/ABI/Task.h"
 #include "TaskPrivate.h"
+#include "Error.h"
+
+#define SWIFT_FATAL_ERROR swift_Concurrency_fatalError
 #include "../runtime/StackAllocator.h"
 #include <stdlib.h>
 
@@ -51,6 +54,12 @@ void swift::_swift_task_alloc_initialize(AsyncTask *task) {
   new (task->AllocatorPrivate) TaskAllocator();
 }
 
+void swift::_swift_task_alloc_initialize_with_slab(AsyncTask *task,
+                                                   void *firstSlabBuffer,
+                                                   size_t bufferCapacity) {
+  new (task->AllocatorPrivate) TaskAllocator(firstSlabBuffer, bufferCapacity);
+}
+
 static TaskAllocator &allocator(AsyncTask *task) {
   if (task)
     return reinterpret_cast<TaskAllocator &>(task->AllocatorPrivate);
@@ -66,10 +75,18 @@ void swift::_swift_task_alloc_destroy(AsyncTask *task) {
   allocator(task).~TaskAllocator();
 }
 
-void *swift::swift_task_alloc(AsyncTask *task, size_t size) {
+void *swift::swift_task_alloc(size_t size) {
+  return allocator(swift_task_getCurrent()).alloc(size);
+}
+
+void *swift::_swift_task_alloc_specific(AsyncTask *task, size_t size) {
   return allocator(task).alloc(size);
 }
 
-void swift::swift_task_dealloc(AsyncTask *task, void *ptr) {
+void swift::swift_task_dealloc(void *ptr) {
+  allocator(swift_task_getCurrent()).dealloc(ptr);
+}
+
+void swift::_swift_task_dealloc_specific(AsyncTask *task, void *ptr) {
   allocator(task).dealloc(ptr);
 }

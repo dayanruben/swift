@@ -8,11 +8,12 @@
 // REQUIRES: swift_test_mode_optimize_none
 // REQUIRES: concurrency
 // UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
 
 import _Concurrency
 
 // CHECK-LL: @genericToVoidTu =
-// CHECK-LL: define hidden swift{{(tail)?}}cc void @genericToVoid(%swift.task* {{%[0-9]+}}, %swift.executor* {{%[0-9]+}}, %swift.context* swiftasync {{%[0-9]+}}) {{#[0-9]*}}
+// CHECK-LL: define hidden swift{{(tail)?}}cc void @genericToVoid(
 @_silgen_name("genericToVoid")
 func genericToVoid<T>(_ t: T) async {
   print(t) // CHECK: 922337203685477580

@@ -16,7 +16,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "CFTypeInfo.h"
-#include "IAMInference.h"
 #include "ImporterImpl.h"
 #include "ClangDiagnosticConsumer.h"
 #include "swift/Subsystems.h"
@@ -447,34 +446,6 @@ StringRef importer::stripNotification(StringRef name) {
   if (name.size() <= notification.size() || !name.endswith(notification))
     return {};
   return name.drop_back(notification.size());
-}
-
-/// Whether the decl is from a module who requested import-as-member inference
-static bool moduleIsInferImportAsMember(const clang::NamedDecl *decl,
-                                        clang::Sema &clangSema) {
-  clang::Module *submodule;
-  if (auto m = decl->getImportedOwningModule()) {
-    submodule = m;
-  } else if (auto m = decl->getLocalOwningModule()) {
-    submodule = m;
-  } else if (auto m = clangSema.getPreprocessor().getCurrentModule()) {
-    submodule = m;
-  } else if (auto m = clangSema.getPreprocessor().getCurrentLexerSubmodule()) {
-    submodule = m;
-  } else {
-    return false;
-  }
-
-  while (submodule) {
-    if (submodule->IsSwiftInferImportAsMember) {
-      // HACK HACK HACK: This is a workaround for some module invalidation issue
-      // and inconsistency. This will go away soon.
-      return submodule->Name == "CoreGraphics";
-    }
-    submodule = submodule->Parent;
-  }
-
-  return false;
 }
 
 /// Match the name of the given Objective-C method to its enclosing class name
@@ -1315,6 +1286,7 @@ NameImporter::considerAsyncImport(
 
   // Initializers cannot be 'async'.
   // FIXME: We might eventually allow this.
+  // TODO: should the restriction be lifted in ClangImporter?
   if (isInitializer)
     return notAsync("initializers cannot be async");
 
@@ -1647,8 +1619,11 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
       else if (parsedName.IsSetter)
         result.info.accessorKind = ImportedAccessorKind::PropertySetter;
 
-      if (method && parsedName.IsFunctionName &&
-          result.info.accessorKind == ImportedAccessorKind::None) {
+      // only allow effectful property imports if through `swift_async_name`
+      const bool effectfulProperty = parsedName.IsGetter && nameAttr->isAsync;
+
+      // Consider throws and async imports.
+      if (method && (parsedName.IsFunctionName || effectfulProperty)) {
         // Get the parameters.
         ArrayRef<const clang::ParmVarDecl *> params{method->param_begin(),
                                                     method->param_end()};
@@ -1685,35 +1660,6 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
           }
         }
       }
-
-      return result;
-    }
-  } else if (swift3OrLaterName && (inferImportAsMember ||
-                                   moduleIsInferImportAsMember(D, clangSema)) &&
-             (isa<clang::VarDecl>(D) || isa<clang::FunctionDecl>(D)) &&
-             dc->isTranslationUnit()) {
-    auto inference = IAMResult::infer(swiftCtx, clangSema, D);
-    if (inference.isImportAsMember()) {
-      result.info.importAsMember = true;
-      result.declName = inference.name;
-      result.effectiveContext = inference.effectiveDC;
-
-      // Instance or static
-      if (inference.selfIndex) {
-        result.info.hasSelfIndex = true;
-        result.info.selfIndex = *inference.selfIndex;
-      }
-
-      // Property
-      if (inference.isGetter())
-        result.info.accessorKind = ImportedAccessorKind::PropertyGetter;
-      else if (inference.isSetter())
-        result.info.accessorKind = ImportedAccessorKind::PropertySetter;
-
-      // Inits are factory. These C functions are neither convenience nor
-      // designated, as they return a fully formed object of that type.
-      if (inference.isInit())
-        result.info.initKind = CtorInitializerKind::Factory;
 
       return result;
     }
@@ -1797,6 +1743,25 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
       isFunction = true;
       addEmptyArgNamesForClangFunction(functionDecl, argumentNames);
       break;
+    case clang::OverloadedOperatorKind::OO_Subscript: {
+      auto returnType = functionDecl->getReturnType();
+      if ((!returnType->isReferenceType() && !returnType->isAnyPointerType()) ||
+          returnType->getPointeeType().isConstQualified()) {
+        // If we are handling a non-reference return type, treat it as a getter
+        // so that we do not SILGen the value type operator[] as an rvalue.
+        baseName = "__operatorSubscriptConst";
+        result.info.accessorKind = ImportedAccessorKind::SubscriptGetter;
+      } else if (returnType->isAnyPointerType()) {
+        baseName = "__operatorSubscript";
+        result.info.accessorKind = ImportedAccessorKind::SubscriptGetter;
+      } else {
+        baseName = "__operatorSubscript";
+        result.info.accessorKind = ImportedAccessorKind::SubscriptSetter;
+      }
+      isFunction = true;
+      addEmptyArgNamesForClangFunction(functionDecl, argumentNames);
+      break;
+    }
     default:
       // We don't import these yet.
       return ImportedName();

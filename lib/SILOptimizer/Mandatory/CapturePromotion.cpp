@@ -1325,7 +1325,7 @@ examineAllocBoxInst(AllocBoxInst *abi, ReachabilityInfo &ri,
         // If our partial apply is concurrent and we can not promote this, emit
         // a warning that shows the variable, where the variable is captured,
         // and the mutation that we found.
-        if (pai->getFunctionType()->isConcurrent()) {
+        if (pai->getFunctionType()->isSendable()) {
           diagnoseInvalidCaptureByConcurrentClosure(abi, pai, state, user);
         }
 
@@ -1439,7 +1439,6 @@ processPartialApplyInst(SILOptFunctionBuilder &funcBuilder,
   // Initialize a SILBuilder and create a function_ref referencing the cloned
   // closure.
   SILBuilderWithScope builder(pai);
-  builder.addOpenedArchetypeOperands(pai);
   SILValue fnVal = builder.createFunctionRef(pai->getLoc(), clonedFn);
 
   // Populate the argument list for a new partial_apply instruction, taking into

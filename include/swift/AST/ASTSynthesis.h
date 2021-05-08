@@ -41,12 +41,15 @@ enum SingletonTypeSynthesizer {
   _any,
   _bridgeObject,
   _error,
+  _executor,
   _job,
   _nativeObject,
   _never,
   _rawPointer,
+  _rawUnsafeContinuation,
   _void,
   _word,
+  _serialExecutor,
 };
 inline Type synthesizeType(SynthesisContext &SC,
                            SingletonTypeSynthesizer kind) {
@@ -54,13 +57,18 @@ inline Type synthesizeType(SynthesisContext &SC,
   case _any: return SC.Context.TheAnyType;
   case _bridgeObject: return SC.Context.TheBridgeObjectType;
   case _error: return SC.Context.getExceptionType();
+  case _executor: return SC.Context.TheExecutorType;
   case _job: return SC.Context.TheJobType;
   case _nativeObject: return SC.Context.TheNativeObjectType;
   case _never: return SC.Context.getNeverType();
   case _rawPointer: return SC.Context.TheRawPointerType;
+  case _rawUnsafeContinuation: return SC.Context.TheRawUnsafeContinuationType;
   case _void: return SC.Context.TheEmptyTupleType;
   case _word: return BuiltinIntegerType::get(BuiltinIntegerWidth::pointer(),
                                              SC.Context);
+  case _serialExecutor:
+    return SC.Context.getProtocol(KnownProtocolKind::SerialExecutor)
+      ->getDeclaredInterfaceType();
   }
 }
 
@@ -131,7 +139,7 @@ struct VariadicSynthesizerStorage<> {
   constexpr VariadicSynthesizerStorage() {}
 
   template <class Fn>
-  void visit(const Fn &fn) const {}
+  void visit(Fn &&fn) const {}
 };
 template <class Head, class... Tail>
 struct VariadicSynthesizerStorage<Head, Tail...> {
@@ -141,7 +149,7 @@ struct VariadicSynthesizerStorage<Head, Tail...> {
     : head(head), tail(tail...) {}
 
   template <class Fn>
-  void visit(const Fn &fn) const {
+  void visit(Fn &&fn) const {
     fn(head);
     tail.visit(fn);
   }

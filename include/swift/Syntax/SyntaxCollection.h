@@ -20,6 +20,8 @@
 namespace swift {
 namespace syntax {
 
+// MARK: - SyntaxCollection
+
 template <SyntaxKind CollectionKind, typename Element>
 class SyntaxCollection;
 
@@ -58,20 +60,23 @@ class SyntaxCollection : public Syntax {
 private:
   static RC<const SyntaxData> makeData(std::initializer_list<Element> &Elements,
                                        const RC<SyntaxArena> &Arena) {
-    std::vector<const RawSyntax *> List;
-    List.reserve(Elements.size());
-    for (auto &Elt : Elements)
-      List.push_back(Elt.getRaw());
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, List,
-                                            SourcePresence::Present, Arena);
+    auto RawElements = llvm::map_iterator(
+        Elements.begin(),
+        [](const Element &Elt) -> const RawSyntax * { return Elt.getRaw(); });
+    auto Raw = RawSyntax::make(CollectionKind, RawElements, Elements.size(),
+                               SourcePresence::Present, Arena);
     return SyntaxData::makeRoot(AbsoluteRawSyntax::forRoot(Raw));
   }
 
 public:
-  SyntaxCollection(const RC<const SyntaxData> &Data) : Syntax(Data) {}
+  SyntaxCollection(const RC<const SyntaxData> &Data) : Syntax(Data) {
+    validate();
+  }
 
   SyntaxCollection(std::initializer_list<Element> list):
     SyntaxCollection(SyntaxCollection::makeData(list)) {}
+
+  void validate() {}
 
   /// Returns true if the collection is empty.
   bool empty() const {
@@ -115,9 +120,8 @@ public:
     NewLayout.reserve(OldLayout.size() + 1);
     std::copy(OldLayout.begin(), OldLayout.end(), back_inserter(NewLayout));
     NewLayout.push_back(E.getRaw());
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, NewLayout,
-                                            getRaw()->getPresence(),
-                                            getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, NewLayout,
+                               getRaw()->getPresence(), getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
@@ -127,9 +131,8 @@ public:
   SyntaxCollection<CollectionKind, Element> removingLast() const {
     assert(!empty());
     auto NewLayout = getRaw()->getLayout().drop_back();
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, NewLayout,
-                                            getRaw()->getPresence(),
-                                            getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, NewLayout,
+                               getRaw()->getPresence(), getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
@@ -140,9 +143,8 @@ public:
     std::vector<const RawSyntax *> NewLayout = {E.getRaw()};
     std::copy(OldLayout.begin(), OldLayout.end(),
               std::back_inserter(NewLayout));
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, NewLayout,
-                                            getRaw()->getPresence(),
-                                            getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, NewLayout,
+                               getRaw()->getPresence(), getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
@@ -152,9 +154,8 @@ public:
   SyntaxCollection<CollectionKind, Element> removingFirst() const {
     assert(!empty());
     auto NewLayout = getRaw()->getLayout().drop_front();
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, NewLayout,
-                                            getRaw()->getPresence(),
-                                            getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, NewLayout,
+                               getRaw()->getPresence(), getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
@@ -173,9 +174,8 @@ public:
     NewLayout.push_back(E.getRaw());
     std::copy(OldLayout.begin() + i, OldLayout.end(),
               std::back_inserter(NewLayout));
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, NewLayout,
-                                            getRaw()->getPresence(),
-                                            getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, NewLayout,
+                               getRaw()->getPresence(), getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
@@ -186,16 +186,15 @@ public:
     auto iterator = NewLayout.begin();
     std::advance(iterator, i);
     NewLayout.erase(iterator);
-    auto Raw = RawSyntax::makeAndCalcLength(CollectionKind, NewLayout,
-                                            getRaw()->getPresence(),
-                                            getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, NewLayout,
+                               getRaw()->getPresence(), getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
   /// Return an empty syntax collection of this type.
   SyntaxCollection<CollectionKind, Element> cleared() const {
-    auto Raw = RawSyntax::makeAndCalcLength(
-        CollectionKind, {}, getRaw()->getPresence(), getRaw()->getArena());
+    auto Raw = RawSyntax::make(CollectionKind, {}, getRaw()->getPresence(),
+                               getRaw()->getArena());
     return SyntaxCollection<CollectionKind, Element>(Data->replacingSelf(Raw));
   }
 
@@ -207,6 +206,85 @@ public:
     return kindof(S->getKind());
   }
 };
+
+// MARK: - SyntaxCollectionRef
+
+template <SyntaxKind CollectionKind, typename Element>
+class SyntaxCollectionRef;
+
+template <SyntaxKind CollectionKind, typename Element>
+struct SyntaxCollectionRefIterator {
+  const SyntaxCollectionRef<CollectionKind, Element> &Collection;
+  size_t Index;
+
+  OwnedSyntaxRef<Element> operator*() { return Collection.getChild(Index); }
+
+  SyntaxCollectionRefIterator<CollectionKind, Element> &operator++() {
+    ++Index;
+    return *this;
+  }
+
+  bool operator==(
+      const SyntaxCollectionRefIterator<CollectionKind, Element> &Other) {
+    return Collection.hasSameIdentityAs(Other.Collection) &&
+           Index == Other.Index;
+  }
+
+  bool operator!=(
+      const SyntaxCollectionRefIterator<CollectionKind, Element> &Other) {
+    return !operator==(Other);
+  }
+};
+
+/// A generic unbounded collection of \c SyntaxRef nodes.
+template <SyntaxKind CollectionKind, typename Element>
+class SyntaxCollectionRef : public SyntaxRef {
+  friend class Syntax;
+
+public:
+  SyntaxCollectionRef(const SyntaxDataRef *Data) : SyntaxRef(Data) {
+    validate();
+  }
+  SyntaxCollectionRef(const SyntaxDataRef *Data, no_validation_t)
+      : SyntaxRef(Data) {}
+
+  void validate() {}
+
+  /// Returns true if the collection is empty.
+  bool empty() const { return size() == 0; }
+
+  /// Returns the number of elements in the collection.
+  size_t size() const { return getRaw()->getLayout().size(); }
+
+  SyntaxCollectionRefIterator<CollectionKind, Element> begin() const {
+    return SyntaxCollectionRefIterator<CollectionKind, Element>{
+        /*Collection=*/*this,
+        /*Index=*/0,
+    };
+  }
+
+  SyntaxCollectionRefIterator<CollectionKind, Element> end() const {
+    return SyntaxCollectionRefIterator<CollectionKind, Element>{
+        /*Collection=*/*this,
+        /*Index=*/getRaw()->getLayout().size(),
+    };
+  }
+
+  /// Return the element at the given Index.
+  ///
+  /// Precondition: Index < size()
+  OwnedSyntaxRef<Element> getChild(const size_t Index) const {
+    assert(Index < size() && "Index out of bounds");
+    OwnedSyntaxRef<Element> Result;
+    getDataRef()->getChildRef(Index, Result.getDataPtr());
+    return Result;
+  }
+
+  static bool kindof(SyntaxKind Kind) { return Kind == CollectionKind; }
+
+  static bool classof(const SyntaxRef *S) { return kindof(S->getKind()); }
+};
+
 
 } // end namespace syntax
 } // end namespace swift

@@ -565,7 +565,7 @@ bool IsDeclRefinementOfRequest::evaluate(Evaluator &evaluator,
         origType->getInterfaceType()->getCanonicalType()->getAs<SubstitutableType>();
 
     // Make sure any duplicate bindings are equal to the one already recorded.
-    // Otherwise, the substition has conflicting generic arguments.
+    // Otherwise, the substitution has conflicting generic arguments.
     auto bound = substMap.find(interfaceTy);
     if (bound != substMap.end() && !bound->second->isEqual(substType))
       return CanType();
@@ -612,7 +612,7 @@ bool DisjunctionStep::shouldSkip(const DisjunctionChoice &choice) const {
 
   // Skip disabled overloads in the diagnostic mode if they do not have a
   // fix attached to them e.g. overloads where labels didn't match up.
-  if (choice.isDisabled() && !(CS.shouldAttemptFixes() && choice.hasFix()))
+  if (choice.isDisabled())
     return skip("disabled");
 
   // Skip unavailable overloads (unless in dignostic mode).
@@ -696,8 +696,18 @@ bool DisjunctionStep::shouldSkip(const DisjunctionChoice &choice) const {
   //        already have a solution involving non-generic operators,
   //        but continue looking for a better non-generic operator
   //        solution.
-  if (shouldSkipGenericOperators() && choice.isGenericOperator()) {
-    return skip("generic");
+  if (BestNonGenericScore && choice.isGenericOperator()) {
+    auto &score = BestNonGenericScore->Data;
+
+    // Not all of the unary operators have `CGFloat` overloads,
+    // so in order to preserve previous behavior (and overall
+    // best solution) with implicit Double<->CGFloat conversion
+    // we need to allow attempting generic operators for such cases.
+    if (score[SK_ImplicitValueConversion] > 0 && choice.isUnaryOperator())
+      return false;
+
+    if (shouldSkipGenericOperators())
+      return skip("generic");
   }
 
   return false;

@@ -12,6 +12,7 @@
 
 import Swift
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncSequence {
   @inlinable
   public __consuming func compactMap<ElementOfResult>(
@@ -21,6 +22,7 @@ extension AsyncSequence {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 public struct AsyncThrowingCompactMapSequence<Base: AsyncSequence, ElementOfResult> {
   @usableFromInline
   let base: Base
@@ -38,6 +40,7 @@ public struct AsyncThrowingCompactMapSequence<Base: AsyncSequence, ElementOfResu
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncThrowingCompactMapSequence: AsyncSequence {
   public typealias Element = ElementOfResult
   public typealias AsyncIterator = Iterator

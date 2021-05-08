@@ -2,9 +2,6 @@
 // REQUIRES: concurrency
 // REQUIRES: objc_interop
 
-// rdar_72047158
-// XFAIL: CPU=arm64e
-
 import Foundation
 
 // CHECK: %T16actor_class_objc7MyClassC = type <{ %swift.refcounted, %swift.defaultactor, %TSi }>
@@ -12,14 +9,14 @@ import Foundation
 
 // CHECK-LABEL: @"OBJC_METACLASS_$__TtC16actor_class_objc7MyClass" = global
 //   Metaclass is an instance of the root class.
-// CHECK-SAME: %objc_class* @"OBJC_METACLASS_$_NSObject",
+// CHECK-SAME: %objc_class* {{.*}}@"OBJC_METACLASS_$_NSObject{{(.ptrauth)?}}"
 //   Metaclass superclass is the metaclass of the superclass.
-// CHECK-SAME: %objc_class* @"OBJC_METACLASS_$_SwiftNativeNSObject",
+// CHECK-SAME: %objc_class* {{.*}}@"OBJC_METACLASS_$_SwiftNativeNSObject{{(.ptrauth)?}}"
 
 // CHECK: @"$s16actor_class_objc7MyClassCMf" = internal global
-// CHECK-SAME: @"$s16actor_class_objc7MyClassCfD"
-// CHECK-SAME: @"OBJC_METACLASS_$__TtC16actor_class_objc7MyClass"
-// CHECK-SAME: @"OBJC_CLASS_$_SwiftNativeNSObject"
+// CHECK-SAME: @"$s16actor_class_objc7MyClassCfD{{(.ptrauth)?}}"
+// CHECK-SAME: @"OBJC_METACLASS_$__TtC16actor_class_objc7MyClass{{(.ptrauth)?}}"
+// CHECK-SAME: @"OBJC_CLASS_$_SwiftNativeNSObject{{(.ptrauth)?}}"
 //   Flags: uses Swift refcounting
 // CHECK-SAME: i32 2,
 //   Instance size

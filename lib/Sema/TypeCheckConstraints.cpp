@@ -35,14 +35,14 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/SaveAndRestore.h"
+#include "llvm/Support/raw_ostream.h"
 #include <iterator>
 #include <map>
 #include <memory>
-#include <utility>
 #include <tuple>
+#include <utility>
 
 using namespace swift;
 using namespace constraints;
@@ -538,12 +538,14 @@ bool TypeChecker::typeCheckPatternBinding(PatternBindingDecl *PBD,
       }
     }
   }
-  
+
   if (hadError)
     PBD->setInvalid();
 
   PBD->setInitializerChecked(patternNumber);
-  
+
+  checkPatternBindingDeclAsyncUsage(PBD);
+
   return hadError;
 }
 
@@ -601,7 +603,7 @@ bool TypeChecker::typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt) {
     if (conformanceRef.hasEffect(EffectKind::Throws) &&
         stmt->getTryLoc().isInvalid()) {
       auto &diags = dc->getASTContext().Diags;
-      diags.diagnose(stmt->getAwaitLoc(), diag::throwing_call_unhandled)
+      diags.diagnose(stmt->getAwaitLoc(), diag::throwing_call_unhandled, "call")
         .fixItInsert(stmt->getAwaitLoc(), "try");
 
       return failed();
@@ -1029,14 +1031,13 @@ void Solution::dump(raw_ostream &out) const {
 
   out << "\n";
   out << "Trailing closure matching:\n";
-  for (auto &trailingClosureMatching : trailingClosureMatchingChoices) {
+  for (auto &argumentMatching : argumentMatchingChoices) {
     out.indent(2);
-    trailingClosureMatching.first->dump(sm, out);
-    switch (trailingClosureMatching.second) {
+    argumentMatching.first->dump(sm, out);
+    switch (argumentMatching.second.trailingClosureMatching) {
     case TrailingClosureMatching::Forward:
       out << ": forward\n";
       break;
-
     case TrailingClosureMatching::Backward:
       out << ": backward\n";
       break;
@@ -1799,8 +1800,7 @@ CheckedCastKind TypeChecker::typeCheckCheckedCast(Type fromType,
     }
   }
 
-  if (ConstraintSystem::isAnyHashableType(toType) ||
-      ConstraintSystem::isAnyHashableType(fromType)) {
+  if (toType->isAnyHashable() || fromType->isAnyHashable()) {
     return CheckedCastKind::ValueCast;
   }
 

@@ -37,6 +37,19 @@ inline bool requiresOSSACleanup(SILValue v) {
 // Defined in BasicBlockUtils.h
 struct JointPostDominanceSetComputer;
 
+/// Given a new phi that may use a guaranteed value, create nested borrow scopes
+/// for its incoming operands and end_borrows that cover the phi's extended
+/// borrow scope, which transitively includes any phis that use this phi.
+///
+/// Returns true if any changes were made.
+///
+/// Note: \p newPhi itself might not have Guaranteed ownership. A phi that
+/// converts Guaranteed to None ownership still needs nested borrows.
+///
+/// Note: This may be called on partially invalid OSSA form, where multiple
+/// newly created phis do not yet have a borrow scope.
+bool createBorrowScopeForPhiOperands(SILPhiArgument *newPhi);
+
 /// A struct that contains context shared in between different operation +
 /// "ownership fixup" utilities. Please do not put actual methods on this, it is
 /// meant to be composed with.
@@ -162,6 +175,64 @@ public:
 
   /// Perform the actual RAUW.
   SILBasicBlock::iterator perform();
+};
+
+/// An abstraction over LoadInst/LoadBorrowInst so one can handle both types of
+/// load using common code.
+struct LoadOperation {
+  llvm::PointerUnion<LoadInst *, LoadBorrowInst *> value;
+
+  LoadOperation() : value() {}
+  LoadOperation(SILInstruction *input) : value(nullptr) {
+    if (auto *li = dyn_cast<LoadInst>(input)) {
+      value = li;
+      return;
+    }
+
+    if (auto *lbi = dyn_cast<LoadBorrowInst>(input)) {
+      value = lbi;
+      return;
+    }
+  }
+
+  explicit operator bool() const { return !value.isNull(); }
+
+  SingleValueInstruction *operator*() const {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>();
+    return value.get<LoadBorrowInst *>();
+  }
+
+  const SingleValueInstruction *operator->() const {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>();
+    return value.get<LoadBorrowInst *>();
+  }
+
+  SingleValueInstruction *operator->() {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>();
+    return value.get<LoadBorrowInst *>();
+  }
+
+  SILValue getOperand() const {
+    if (value.is<LoadInst *>())
+      return value.get<LoadInst *>()->getOperand();
+    return value.get<LoadBorrowInst *>()->getOperand();
+  }
+
+  /// Return the ownership qualifier of the underlying load if we have a load or
+  /// None if we have a load_borrow.
+  ///
+  /// TODO: Rather than use an optional here, we should include an invalid
+  /// representation in LoadOwnershipQualifier.
+  Optional<LoadOwnershipQualifier> getOwnershipQualifier() const {
+    if (auto *lbi = value.dyn_cast<LoadBorrowInst *>()) {
+      return None;
+    }
+
+    return value.get<LoadInst *>()->getOwnershipQualifier();
+  }
 };
 
 } // namespace swift

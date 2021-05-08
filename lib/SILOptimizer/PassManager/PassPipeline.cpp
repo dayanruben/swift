@@ -185,6 +185,14 @@ SILPassPipelinePlan::getDiagnosticPassPipeline(const SILOptions &Options) {
   return P;
 }
 
+SILPassPipelinePlan SILPassPipelinePlan::getLowerHopToActorPassPipeline(
+    const SILOptions &Options) {
+  SILPassPipelinePlan P(Options);
+  P.startPipeline("Lower Hop to Actor");
+  P.addLowerHopToActor();
+  return P;
+}
+
 //===----------------------------------------------------------------------===//
 //                       Ownership Eliminator Pipeline
 //===----------------------------------------------------------------------===//
@@ -477,7 +485,7 @@ static void addPerfEarlyModulePassPipeline(SILPassPipelinePlan &P) {
   // Cleanup after SILGen: remove trivial copies to temporaries.
   P.addTempRValueOpt();
   // Cleanup after SILGen: remove unneeded borrows/copies.
-  if (!P.getOptions().DisableCopyPropagation) {
+  if (P.getOptions().EnableCopyPropagation) {
     P.addCopyPropagation();
   }
   P.addSemanticARCOpts();
@@ -738,6 +746,7 @@ SILPassPipelinePlan
 SILPassPipelinePlan::getLoweringPassPipeline(const SILOptions &Options) {
   SILPassPipelinePlan P(Options);
   P.startPipeline("Address Lowering");
+  P.addLowerHopToActor(); // FIXME: earlier for more opportunities?
   P.addOwnershipModelEliminator();
   P.addIRGenPrepare();
   P.addAddressLowering();

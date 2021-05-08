@@ -1445,8 +1445,7 @@ static bool isClangTypeMoreIndirectThanSubstType(TypeConverter &TC,
       return isClangTypeMoreIndirectThanSubstType(TC,
                     clangTy->getPointeeType().getTypePtr(), CanType(eltTy));
 
-    if (substTy->getAnyNominal() ==
-          TC.Context.getOpaquePointerDecl())
+    if (substTy->isOpaquePointer())
       // TODO: We could conceivably have an indirect opaque ** imported
       // as COpaquePointer. That shouldn't ever happen today, though,
       // since we only ever indirect the 'self' parameter of functions
@@ -2107,8 +2106,8 @@ static CanSILFunctionType getSILFunctionType(
       (!foreignInfo.Async || substFnInterfaceType->getExtInfo().isAsync())
       && "foreignAsync was set but function type is not async?");
 
-  // Map '@concurrent' to the appropriate `@concurrent` modifier.
-  bool isConcurrent = substFnInterfaceType->getExtInfo().isConcurrent();
+  // Map '@Sendable' to the appropriate `@Sendable` modifier.
+  bool isSendable = substFnInterfaceType->getExtInfo().isSendable();
 
   // Map 'async' to the appropriate `@async` modifier.
   bool isAsync = false;
@@ -2224,7 +2223,7 @@ static CanSILFunctionType getSILFunctionType(
   }
   auto silExtInfo = extInfoBuilder.withClangFunctionType(clangType)
                         .withIsPseudogeneric(pseudogeneric)
-                        .withConcurrent(isConcurrent)
+                        .withConcurrent(isSendable)
                         .withAsync(isAsync)
                         .build();
 
@@ -2671,8 +2670,7 @@ public:
         return ResultConvention::UnownedInnerPointer;
 
       auto type = tl.getLoweredType();
-      if (type.unwrapOptionalType().getStructOrBoundGenericStruct()
-          == type.getASTContext().getUnmanagedDecl())
+      if (type.unwrapOptionalType().getASTType()->isUnmanaged())
         return ResultConvention::UnownedInnerPointer;
       return ResultConvention::Unowned;
     }
@@ -4465,6 +4463,11 @@ SILFunctionType::isABICompatibleWith(CanSILFunctionType other,
   // The calling convention and function representation can't be changed.
   if (getRepresentation() != other->getRepresentation())
     return ABICompatibilityCheckResult::DifferentFunctionRepresentations;
+
+  // `() async -> ()` is not compatible with `() async -> @error Error`.
+  if (!hasErrorResult() && other->hasErrorResult() && isAsync()) {
+    return ABICompatibilityCheckResult::DifferentErrorResultConventions;
+  }
 
   // Check the results.
   if (getNumResults() != other->getNumResults())

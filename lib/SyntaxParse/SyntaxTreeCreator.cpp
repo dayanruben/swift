@@ -11,17 +11,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SyntaxParse/SyntaxTreeCreator.h"
-#include "swift/Syntax/RawSyntax.h"
-#include "swift/Syntax/SyntaxVisitor.h"
-#include "swift/Syntax/Trivia.h"
-#include "swift/Parse/ParsedTrivia.h"
-#include "swift/Parse/SyntaxParsingCache.h"
-#include "swift/Parse/Token.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsParse.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/Basic/OwnedString.h"
+#include "swift/Basic/SourceManager.h"
+#include "swift/Parse/ParsedRawSyntaxNode.h"
+#include "swift/Parse/ParsedTrivia.h"
+#include "swift/Parse/SyntaxParsingCache.h"
+#include "swift/Parse/Token.h"
+#include "swift/Syntax/RawSyntax.h"
+#include "swift/Syntax/SyntaxVisitor.h"
+#include "swift/Syntax/Trivia.h"
 
 using namespace swift;
 using namespace swift::syntax;
@@ -35,8 +37,10 @@ SyntaxTreeCreator::SyntaxTreeCreator(SourceManager &SM, unsigned bufferID,
   const char *Data = BufferContent.data();
   Arena->copyStringToArenaIfNecessary(Data, BufferContent.size());
   ArenaSourceBuffer = StringRef(Data, BufferContent.size());
-  Arena->setHotUseMemoryRegion(ArenaSourceBuffer.begin(),
-                               ArenaSourceBuffer.end());
+  if (!ArenaSourceBuffer.empty()) {
+    Arena->setHotUseMemoryRegion(ArenaSourceBuffer.begin(),
+                                 ArenaSourceBuffer.end());
+  }
 }
 
 SyntaxTreeCreator::~SyntaxTreeCreator() = default;
@@ -138,18 +142,10 @@ SyntaxTreeCreator::recordMissingToken(tok kind, SourceLoc loc) {
 OpaqueSyntaxNode
 SyntaxTreeCreator::recordRawSyntax(syntax::SyntaxKind kind,
                                    ArrayRef<OpaqueSyntaxNode> elements) {
-  SmallVector<const RawSyntax *, 16> parts;
-  parts.reserve(elements.size());
-  size_t TextLength = 0;
-  for (OpaqueSyntaxNode opaqueN : elements) {
-    auto Raw = static_cast<const RawSyntax *>(opaqueN);
-    parts.push_back(Raw);
-    if (Raw) {
-      TextLength += Raw->getTextLength();
-    }
-  }
-  auto raw =
-      RawSyntax::make(kind, parts, TextLength, SourcePresence::Present, Arena);
+  const RawSyntax *const *rawChildren =
+      reinterpret_cast<const RawSyntax *const *>(elements.begin());
+  auto raw = RawSyntax::make(kind, rawChildren, elements.size(),
+                             SourcePresence::Present, Arena);
   return static_cast<OpaqueSyntaxNode>(raw);
 }
 
@@ -187,17 +183,18 @@ OpaqueSyntaxNode SyntaxTreeCreator::makeDeferredToken(tok tokenKind,
 }
 
 OpaqueSyntaxNode SyntaxTreeCreator::makeDeferredLayout(
-    syntax::SyntaxKind k, bool IsMissing,
-    const ArrayRef<RecordedOrDeferredNode> &children) {
-  SmallVector<OpaqueSyntaxNode, 16> opaqueChildren;
-  opaqueChildren.reserve(children.size());
+    syntax::SyntaxKind kind, bool IsMissing,
+    const MutableArrayRef<ParsedRawSyntaxNode> &parsedChildren) {
+  assert(!IsMissing && "Missing layout nodes not implemented yet");
 
-  for (size_t i = 0; i < children.size(); ++i) {
-    opaqueChildren.push_back(children[i].getOpaque());
-  }
-
-  // Also see comment in makeDeferredToken
-  return recordRawSyntax(k, opaqueChildren);
+  auto rawChildren = llvm::map_iterator(
+      parsedChildren.begin(),
+      [](ParsedRawSyntaxNode &parsedChild) -> const RawSyntax * {
+        return static_cast<const RawSyntax *>(parsedChild.takeData());
+      });
+  auto raw = RawSyntax::make(kind, rawChildren, parsedChildren.size(),
+                             SourcePresence::Present, Arena);
+  return static_cast<OpaqueSyntaxNode>(raw);
 }
 
 OpaqueSyntaxNode
@@ -215,8 +212,30 @@ SyntaxTreeCreator::recordDeferredLayout(OpaqueSyntaxNode deferred) {
 }
 
 DeferredNodeInfo SyntaxTreeCreator::getDeferredChild(OpaqueSyntaxNode node,
-                                                     size_t ChildIndex,
-                                                     SourceLoc StartLoc) {
+                                                     size_t ChildIndex) const {
+  const RawSyntax *raw = static_cast<const RawSyntax *>(node);
+
+  const RawSyntax *Child = raw->getChild(ChildIndex);
+  if (Child == nullptr) {
+    return DeferredNodeInfo(
+        RecordedOrDeferredNode(nullptr, RecordedOrDeferredNode::Kind::Null),
+        syntax::SyntaxKind::Unknown, tok::NUM_TOKENS, /*IsMissing=*/false);
+  } else if (Child->isToken()) {
+    return DeferredNodeInfo(
+        RecordedOrDeferredNode(Child,
+                               RecordedOrDeferredNode::Kind::DeferredToken),
+        syntax::SyntaxKind::Token, Child->getTokenKind(), Child->isMissing());
+  } else {
+    return DeferredNodeInfo(
+        RecordedOrDeferredNode(Child,
+                               RecordedOrDeferredNode::Kind::DeferredLayout),
+        Child->getKind(), tok::NUM_TOKENS,
+        /*IsMissing=*/false);
+  }
+}
+
+CharSourceRange SyntaxTreeCreator::getDeferredChildRange(
+    OpaqueSyntaxNode node, size_t ChildIndex, SourceLoc StartLoc) const {
   const RawSyntax *raw = static_cast<const RawSyntax *>(node);
 
   // Compute the start offset of the child node by advancing StartLoc by the
@@ -230,22 +249,9 @@ DeferredNodeInfo SyntaxTreeCreator::getDeferredChild(OpaqueSyntaxNode node,
 
   const RawSyntax *Child = raw->getChild(ChildIndex);
   if (Child == nullptr) {
-    return DeferredNodeInfo(
-        RecordedOrDeferredNode(nullptr, RecordedOrDeferredNode::Kind::Null),
-        syntax::SyntaxKind::Unknown, tok::NUM_TOKENS, /*IsMissing=*/false,
-        CharSourceRange(StartLoc, /*Length=*/0));
-  } else if (Child->isToken()) {
-    return DeferredNodeInfo(
-        RecordedOrDeferredNode(Child,
-                               RecordedOrDeferredNode::Kind::DeferredToken),
-        syntax::SyntaxKind::Token, Child->getTokenKind(), Child->isMissing(),
-        CharSourceRange(StartLoc, Child->getTextLength()));
+    return CharSourceRange(StartLoc, /*Length=*/0);
   } else {
-    return DeferredNodeInfo(
-        RecordedOrDeferredNode(Child,
-                               RecordedOrDeferredNode::Kind::DeferredLayout),
-        Child->getKind(), tok::NUM_TOKENS,
-        /*IsMissing=*/false, CharSourceRange(StartLoc, Child->getTextLength()));
+    return CharSourceRange(StartLoc, Child->getTextLength());
   }
 }
 

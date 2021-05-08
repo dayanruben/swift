@@ -270,16 +270,13 @@ public:
     struct CachedNestedType {
       unsigned numConformancesPresent;
       CanType superclassPresent;
+      CanType concreteTypePresent;
       llvm::TinyPtrVector<TypeDecl *> types;
     };
 
     /// Cached nested-type information, which contains the best declaration
     /// for a given name.
     llvm::SmallDenseMap<Identifier, CachedNestedType> nestedTypeNameCache;
-
-    /// Cached access paths.
-    llvm::SmallDenseMap<const ProtocolDecl *, ConformanceAccessPath, 8>
-        conformanceAccessPathCache;
   };
 
   friend class RequirementSource;
@@ -426,6 +423,15 @@ public:
                         Type superclass,
                         FloatingRequirementSource source);
 
+  /// Update the layout constraint for the equivalence class of \c T.
+  ///
+  /// This assumes that the constraint has already been recorded.
+  ///
+  /// \returns true if anything in the equivalence class changed, false
+  /// otherwise.
+  bool updateLayout(ResolvedType type,
+                    LayoutConstraint layout);
+
 private:
   /// Add a new superclass requirement specifying that the given
   /// potential archetype has the given type as an ancestor.
@@ -527,8 +533,7 @@ public:
   LookUpConformanceInBuilder getLookupConformanceFn();
 
   /// Lookup a protocol conformance in a module-agnostic manner.
-  ProtocolConformanceRef lookupConformance(CanType dependentType,
-                                           Type conformingReplacementType,
+  ProtocolConformanceRef lookupConformance(Type conformingReplacementType,
                                            ProtocolDecl *conformedProtocol);
 
   /// Enumerate the requirements that describe the signature of this
@@ -613,6 +618,10 @@ public:
   /// because the type \c Dictionary<K,V> cannot be formed without it.
   void inferRequirements(ModuleDecl &module, ParameterList *params);
 
+  GenericSignature rebuildSignatureWithoutRedundantRequirements(
+                      bool allowConcreteGenericParams,
+                      const ProtocolDecl *requirementSignatureSelfProto) &&;
+
   /// Finalize the set of requirements and compute the generic
   /// signature.
   ///
@@ -620,7 +629,8 @@ public:
   /// generic signature builder no longer has valid state.
   GenericSignature computeGenericSignature(
                       bool allowConcreteGenericParams = false,
-                      bool allowBuilderToMove = true) &&;
+                      const ProtocolDecl *requirementSignatureSelfProto = nullptr,
+                      bool rebuildingWithoutRedundantConformances = false) &&;
 
   /// Compute the requirement signature for the given protocol.
   static GenericSignature computeRequirementSignature(ProtocolDecl *proto);
@@ -632,7 +642,8 @@ private:
   /// \param allowConcreteGenericParams If true, allow generic parameters to
   /// be made concrete.
   void finalize(TypeArrayView<GenericTypeParamType> genericParams,
-                bool allowConcreteGenericParams=false);
+                bool allowConcreteGenericParams,
+                const ProtocolDecl *requirementSignatureSelfProto);
 
 public:
   /// Process any delayed requirements that can be handled now.
@@ -640,10 +651,14 @@ public:
 
   class ExplicitRequirement;
 
-  bool isRedundantExplicitRequirement(ExplicitRequirement req) const;
+  bool isRedundantExplicitRequirement(const ExplicitRequirement &req) const;
 
 private:
-  void computeRedundantRequirements();
+  void computeRedundantRequirements(const ProtocolDecl *requirementSignatureSelfProto);
+
+  void diagnoseRedundantRequirements() const;
+
+  void diagnoseConflictingConcreteTypeRequirements() const;
 
   /// Describes the relationship between a given constraint and
   /// the canonical constraint of the equivalence class.
@@ -685,34 +700,6 @@ private:
                              conflictingDiag,
                            Diag<Type, T> redundancyDiag,
                            Diag<unsigned, Type, T> otherNoteDiag);
-
-  /// Check a list of constraints, removing self-derived constraints
-  /// and diagnosing redundant constraints.
-  ///
-  /// \param isSuitableRepresentative Determines whether the given constraint
-  /// is a suitable representative.
-  ///
-  /// \param checkConstraint Checks the given constraint against the
-  /// canonical constraint to determine which diagnostics (if any) should be
-  /// emitted.
-  ///
-  /// \returns the representative constraint.
-  template<typename T, typename DiagT>
-  Constraint<T> checkConstraintList(
-                           TypeArrayView<GenericTypeParamType> genericParams,
-                           std::vector<Constraint<T>> &constraints,
-                           RequirementKind kind,
-                           llvm::function_ref<bool(const Constraint<T> &)>
-                             isSuitableRepresentative,
-                           llvm::function_ref<
-                             ConstraintRelation(const Constraint<T>&)>
-                               checkConstraint,
-                           Optional<Diag<unsigned, Type, DiagT, DiagT>>
-                             conflictingDiag,
-                           Diag<Type, DiagT> redundancyDiag,
-                           Diag<unsigned, Type, DiagT> otherNoteDiag,
-                           llvm::function_ref<DiagT(const T&)> diagValue,
-                           bool removeSelfDerived);
 
   /// Check the concrete type constraints within the equivalence
   /// class of the given potential archetype.
@@ -787,6 +774,29 @@ public:
 
   /// Simplify the given dependent type down to its canonical representation.
   Type getCanonicalTypeParameter(Type type);
+
+  /// Replace any non-canonical dependent types in the given type with their
+  /// canonical representation. This is not a canonical type in the AST sense;
+  /// type sugar is preserved. The GenericSignature::getCanonicalTypeInContext()
+  /// method combines this with a subsequent getCanonicalType() call.
+  Type getCanonicalTypeInContext(Type type,
+                            TypeArrayView<GenericTypeParamType> genericParams);
+
+  /// Retrieve the conformance access path used to extract the conformance of
+  /// interface \c type to the given \c protocol.
+  ///
+  /// \param type The interface type whose conformance access path is to be
+  /// queried.
+  /// \param protocol A protocol to which \c type conforms.
+  ///
+  /// \returns the conformance access path that starts at a requirement of
+  /// this generic signature and ends at the conformance that makes \c type
+  /// conform to \c protocol.
+  ///
+  /// \seealso ConformanceAccessPath
+  ConformanceAccessPath getConformanceAccessPath(Type type,
+                                                 ProtocolDecl *protocol,
+                                                 GenericSignature sig);
 
   /// Verify the correctness of the given generic signature.
   ///
@@ -1422,6 +1432,9 @@ public:
   /// Whether this is an explicitly-stated requirement.
   bool isExplicit() const;
 
+  /// Whether this is a derived requirement.
+  bool isDerived() const;
+
   /// Whether this is a top-level requirement written in source.
   /// FIXME: This is a hack because expandConformanceRequirement()
   /// is too eager; we should remove this once we fix it properly.
@@ -1431,9 +1444,8 @@ public:
   /// inferred.
   FloatingRequirementSource asInferred(const TypeRepr *typeRepr) const;
 
-  /// Whether this requirement source is recursive when composed with
-  /// the given type.
-  bool isRecursive(Type rootType, GenericSignatureBuilder &builder) const;
+  /// Whether this requirement source is recursive.
+  bool isRecursive(GenericSignatureBuilder &builder) const;
 };
 
 /// Describes a specific constraint on a particular type.

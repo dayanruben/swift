@@ -166,6 +166,23 @@ func vector_bitcast_test(_ src: Builtin.Vec16xInt8) -> Builtin.Int16 {
   return Builtin.bitcast_Vec16xInt1_Int16(mask) // CHECK: bitcast
 }
 
+func vector_bitcast_test_ii(_ src: Builtin.Int16) -> Builtin.Vec16xInt8 {
+  // CHECK: vector_bitcast_test_ii
+  let v16x1 = Builtin.bitcast_Int16_Vec16xInt1(src) // CHECK: bitcast
+  return Builtin.sext_Vec16xInt1_Vec16xInt8(v16x1)   // CHECK: sext
+}
+
+func shufflevector_test(_ src: Builtin.FPIEEE32) -> Builtin.Vec4xFPIEEE32 {
+  // CHECK: insertelement <4 x float> zeroinitializer
+  // CHECK: shufflevector <4 x float>
+  let vec = Builtin.insertelement_Vec4xFPIEEE32_FPIEEE32_Int32(
+    Builtin.zeroInitializer(), src, Builtin.zeroInitializer()
+  )
+  return Builtin.shufflevector_Vec4xFPIEEE32_Vec4xInt32(
+    vec, vec, Builtin.zeroInitializer()
+  )
+}
+
 func intrinsic_test(_ i32: inout Builtin.Int32, i16: inout Builtin.Int16,
                     _ v8i16: Builtin.Vec8xInt16) {
   // CHECK: intrinsic_test
@@ -853,10 +870,8 @@ func globalStringTablePointerUse(_ str: String) -> Builtin.RawPointer {
 
 // CHECK-LABEL: define {{.*}}convertTaskToJob
 // CHECK:      call %swift.refcounted* @swift_retain(%swift.refcounted* returned %0)
-// CHECK-NEXT: [[T0:%.*]] = bitcast %swift.refcounted* %0 to i8*
-// CHECK-NEXT: [[T1:%.*]] = getelementptr inbounds i8, i8* [[T0]], i64 16
-// CHECK-NEXT: [[T2:%.*]] = bitcast i8* [[T1]] to %swift.job*
-// CHECK-NEXT: ret %swift.job* [[T2]]
+// CHECK-NEXT: [[T0:%.*]] = bitcast %swift.refcounted* %0 to %swift.job*
+// CHECK-NEXT: ret %swift.job* [[T0]]
 func convertTaskToJob(_ task: Builtin.NativeObject) -> Builtin.Job {
   return Builtin.convertTaskToJob(task)
 }

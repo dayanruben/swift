@@ -52,19 +52,25 @@ enum class DiagnosticOptions {
 
   /// After a fatal error subsequent diagnostics are suppressed.
   Fatal,
+
+  /// An API or ABI breakage diagnostic emitted by the API digester.
+  APIDigesterBreakage,
 };
 struct StoredDiagnosticInfo {
   DiagnosticKind kind : 2;
   bool pointsToFirstBadToken : 1;
   bool isFatal : 1;
+  bool isAPIDigesterBreakage : 1;
 
   constexpr StoredDiagnosticInfo(DiagnosticKind k, bool firstBadToken,
-                                 bool fatal)
-      : kind(k), pointsToFirstBadToken(firstBadToken), isFatal(fatal) {}
+                                 bool fatal, bool isAPIDigesterBreakage)
+      : kind(k), pointsToFirstBadToken(firstBadToken), isFatal(fatal),
+        isAPIDigesterBreakage(isAPIDigesterBreakage) {}
   constexpr StoredDiagnosticInfo(DiagnosticKind k, DiagnosticOptions opts)
       : StoredDiagnosticInfo(k,
                              opts == DiagnosticOptions::PointsToFirstBadToken,
-                             opts == DiagnosticOptions::Fatal) {}
+                             opts == DiagnosticOptions::Fatal,
+                             opts == DiagnosticOptions::APIDigesterBreakage) {}
 };
 
 // Reproduce the DiagIDs, as we want both the size and access to the raw ids
@@ -316,6 +322,10 @@ bool DiagnosticEngine::isDiagnosticPointsToFirstBadToken(DiagID ID) const {
   return storedDiagnosticInfos[(unsigned) ID].pointsToFirstBadToken;
 }
 
+bool DiagnosticEngine::isAPIDigesterBreakageDiagnostic(DiagID ID) const {
+  return storedDiagnosticInfos[(unsigned)ID].isAPIDigesterBreakage;
+}
+
 bool DiagnosticEngine::finishProcessing() {
   bool hadError = false;
   for (auto &Consumer : Consumers) {
@@ -399,7 +409,7 @@ static bool isInterestingTypealias(Type type) {
   else
     return false;
 
-  if (aliasDecl == type->getASTContext().getVoidDecl())
+  if (aliasDecl->getUnderlyingType()->isVoid())
     return false;
 
   // The 'Swift.AnyObject' typealias is not 'interesting'.
@@ -473,6 +483,18 @@ static Type getAkaTypeForDisplay(Type type) {
       return getAkaTypeForDisplay(visitTy->getDesugaredType());
     return visitTy;
   });
+}
+
+/// Determine whether this is the main actor type.
+static bool isMainActor(Type type) {
+  if (auto nominal = type->getAnyNominal()) {
+    if (nominal->getName().is("MainActor") &&
+        nominal->getParentModule()->getName() ==
+          nominal->getASTContext().Id_Concurrency)
+      return true;
+  }
+
+  return false;
 }
 
 /// Format a single diagnostic argument and write it to the given
@@ -556,6 +578,13 @@ static void formatDiagnosticArgument(StringRef Modifier,
 
     if (Arg.getKind() == DiagnosticArgumentKind::Type) {
       type = Arg.getAsType()->getWithoutParens();
+      if (type.isNull()) {
+        // FIXME: We should never receive a nullptr here, but this is causing
+        // crashes (rdar://75740683). Remove once ParenType never contains
+        // nullptr as the underlying type.
+        Out << "<null>";
+        break;
+      }
       if (type->getASTContext().TypeCheckerOpts.PrintFullConvention)
         printOptions.PrintFunctionRepresentationAttrs =
             PrintOptions::FunctionRepresentationMode::Full;
@@ -563,6 +592,13 @@ static void formatDiagnosticArgument(StringRef Modifier,
     } else {
       assert(Arg.getKind() == DiagnosticArgumentKind::FullyQualifiedType);
       type = Arg.getAsFullyQualifiedType().getType()->getWithoutParens();
+      if (type.isNull()) {
+        // FIXME: We should never receive a nullptr here, but this is causing
+        // crashes (rdar://75740683). Remove once ParenType never contains
+        // nullptr as the underlying type.
+        Out << "<null>";
+        break;
+      }
       if (type->getASTContext().TypeCheckerOpts.PrintFullConvention)
         printOptions.PrintFunctionRepresentationAttrs =
             PrintOptions::FunctionRepresentationMode::Full;
@@ -696,22 +732,21 @@ static void formatDiagnosticArgument(StringRef Modifier,
       break;
 
     case ActorIsolation::GlobalActor:
-    case ActorIsolation::GlobalActorUnsafe:
-      Out << "global actor " << FormatOpts.OpeningQuotationMark
-        << isolation.getGlobalActor().getString()
-        << FormatOpts.ClosingQuotationMark << "-isolated";
+    case ActorIsolation::GlobalActorUnsafe: {
+      Type globalActor = isolation.getGlobalActor();
+      if (isMainActor(globalActor)) {
+        Out << "main actor-isolated";
+      } else {
+        Out << "global actor " << FormatOpts.OpeningQuotationMark
+          << globalActor.getString()
+          << FormatOpts.ClosingQuotationMark << "-isolated";
+      }
       break;
+    }
 
     case ActorIsolation::Independent:
-      Out << "actor-independent";
-      break;
-
-    case ActorIsolation::IndependentUnsafe:
-      Out << "actor-independent-unsafe";
-      break;
-
     case ActorIsolation::Unspecified:
-      Out << "non-actor-isolated";
+      Out << "nonisolated";
       break;
     }
   }
@@ -1039,6 +1074,8 @@ DiagnosticEngine::diagnosticInfoForDiagnostic(const Diagnostic &diagnostic) {
           // Pretty-print the declaration we've picked.
           llvm::raw_svector_ostream out(buffer);
           TrackingPrinter printer(entries, out, bufferAccessLevel);
+          llvm::SaveAndRestore<bool> isPrettyPrinting(
+              IsPrettyPrintingDecl, true);
           ppDecl->print(
               printer,
               PrintOptions::printForDiagnostics(
@@ -1065,11 +1102,17 @@ DiagnosticEngine::diagnosticInfoForDiagnostic(const Diagnostic &diagnostic) {
     }
   }
 
+  // Currently, only API digester diagnostics are assigned a category.
+  StringRef Category;
+  if (isAPIDigesterBreakageDiagnostic(diagnostic.getID()))
+    Category = "api-digester-breaking-change";
+
   return DiagnosticInfo(
       diagnostic.getID(), loc, toDiagnosticKind(behavior),
       diagnosticStringFor(diagnostic.getID(), getPrintDiagnosticNames()),
-      diagnostic.getArgs(), getDefaultDiagnosticLoc(), /*child note info*/ {},
-      diagnostic.getRanges(), diagnostic.getFixIts(), diagnostic.isChildNote());
+      diagnostic.getArgs(), Category, getDefaultDiagnosticLoc(),
+      /*child note info*/ {}, diagnostic.getRanges(), diagnostic.getFixIts(),
+      diagnostic.isChildNote());
 }
 
 void DiagnosticEngine::emitDiagnostic(const Diagnostic &diagnostic) {
@@ -1113,12 +1156,10 @@ void DiagnosticEngine::emitDiagnostic(const Diagnostic &diagnostic) {
 
 llvm::StringRef
 DiagnosticEngine::diagnosticStringFor(const DiagID id,
-                                      bool printDiagnosticName) {
-  // TODO: Print diagnostic names from `localization`.
-  if (printDiagnosticName) {
-    return debugDiagnosticStrings[(unsigned)id];
-  }
-  auto defaultMessage = diagnosticStrings[(unsigned)id];
+                                      bool printDiagnosticNames) {
+  auto defaultMessage = printDiagnosticNames
+                            ? debugDiagnosticStrings[(unsigned)id]
+                            : diagnosticStrings[(unsigned)id];
   if (localization) {
     auto localizedMessage =
         localization.get()->getMessageOr(id, defaultMessage);

@@ -28,6 +28,7 @@
 #include "swift/AST/ModuleNameLookup.h"
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/PropertyWrappers.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Basic/STLExtras.h"
@@ -1673,8 +1674,10 @@ static void installPropertyWrapperMembersIfNeeded(NominalTypeDecl *target,
     if (auto var = dyn_cast<VarDecl>(member)) {
       if (var->hasAttachedPropertyWrapper()) {
         auto sourceFile = var->getDeclContext()->getParentSourceFile();
-        if (sourceFile && sourceFile->Kind != SourceFileKind::Interface)
-          (void)var->getPropertyWrapperBackingProperty();
+        if (sourceFile && sourceFile->Kind != SourceFileKind::Interface) {
+          (void)var->getPropertyWrapperAuxiliaryVariables();
+          (void)var->getPropertyWrapperInitializerInfo();
+        }
       }
     }
   }
@@ -2625,6 +2628,7 @@ CustomAttrNominalRequest::evaluate(Evaluator &evaluator,
   }
 
   ctx.Diags.diagnose(attr->getLocation(), diag::unknown_attribute, typeName);
+  attr->setInvalid();
 
   return nullptr;
 }
@@ -2751,7 +2755,35 @@ void FindLocalVal::checkPattern(const Pattern *Pat, DeclVisibilityKind Reason) {
     return;
   }
 }
-  
+void FindLocalVal::checkValueDecl(ValueDecl *D, DeclVisibilityKind Reason) {
+  if (!D)
+    return;
+  if (auto var = dyn_cast<VarDecl>(D)) {
+    auto dc = var->getDeclContext();
+    if ((isa<AbstractFunctionDecl>(dc) || isa<ClosureExpr>(dc)) &&
+        var->hasAttachedPropertyWrapper()) {
+      // FIXME: This is currently required to set the interface type of the
+      // auxiliary variables (unless 'var' is a closure param).
+      (void)var->getPropertyWrapperBackingPropertyType();
+
+      auto vars = var->getPropertyWrapperAuxiliaryVariables();
+      if (vars.backingVar) {
+        Consumer.foundDecl(vars.backingVar, Reason);
+      }
+      if (vars.projectionVar) {
+        Consumer.foundDecl(vars.projectionVar, Reason);
+      }
+      if (vars.localWrappedValueVar) {
+        Consumer.foundDecl(vars.localWrappedValueVar, Reason);
+
+        // If 'localWrappedValueVar' exists, the original var is shadowed.
+        return;
+      }
+    }
+  }
+  Consumer.foundDecl(D, Reason);
+}
+
 void FindLocalVal::checkParameterList(const ParameterList *params) {
   for (auto param : *params) {
     checkValueDecl(param, DeclVisibilityKind::FunctionParameter);
@@ -2838,7 +2870,19 @@ void FindLocalVal::visitBraceStmt(BraceStmt *S, bool isTopLevelCode) {
     if (SM.isBeforeInBuffer(Loc, S->getStartLoc()))
       return;
   } else {
-    if (!isReferencePointInRange(S->getSourceRange()))
+    SourceRange CheckRange = S->getSourceRange();
+    if (S->isImplicit()) {
+      // If the brace statement is implicit, it doesn't have an explicit '}'
+      // token. Thus, the last token in the brace stmt could be a string
+      // literal token, which can *contain* its interpolation segments.
+      // If one of these interpolation segments is the reference point, we'd
+      // return false from `isReferencePointInRange` because the string
+      // literal token's start location is before the interpolation token.
+      // To fix this, adjust the range we are checking to range until the end of
+      // the potential string interpolation token.
+      CheckRange.End = Lexer::getLocForEndOfToken(SM, CheckRange.End);
+    }
+    if (!isReferencePointInRange(CheckRange))
       return;
   }
 
@@ -2863,7 +2907,16 @@ void FindLocalVal::visitSwitchStmt(SwitchStmt *S) {
 }
 
 void FindLocalVal::visitCaseStmt(CaseStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
+  // The last token in a case stmt can be a string literal token, which can
+  // *contain* its interpolation segments. If one of these interpolation
+  // segments is the reference point, we'd return false from
+  // `isReferencePointInRange` because the string literal token's start location
+  // is before the interpolation token. To fix this, adjust the range we are
+  // checking to range until the end of the potential string interpolation
+  // token.
+  SourceRange CheckRange = {S->getStartLoc(),
+                            Lexer::getLocForEndOfToken(SM, S->getEndLoc())};
+  if (!isReferencePointInRange(CheckRange))
     return;
   // Pattern names aren't visible in the patterns themselves,
   // just in the body or in where guards.

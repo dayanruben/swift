@@ -54,7 +54,7 @@ static GenericParamList *cloneGenericParameters(ASTContext &ctx,
 
 LinearMapInfo::LinearMapInfo(ADContext &context, AutoDiffLinearMapKind kind,
                              SILFunction *original, SILFunction *derivative,
-                             AutoDiffConfig config,
+                             const AutoDiffConfig &config,
                              const DifferentiableActivityInfo &activityInfo,
                              SILLoopInfo *loopInfo)
     : kind(kind), original(original), derivative(derivative),
@@ -230,13 +230,19 @@ VarDecl *LinearMapInfo::addLinearMapDecl(ApplyInst *ai, SILType linearMapType) {
     params.push_back(
         AnyFunctionType::Param(param.getInterfaceType(), Identifier(), flags));
   }
+
   AnyFunctionType *astFnTy;
-  if (auto genSig = silFnTy->getSubstGenericSignature())
+  if (auto genSig = silFnTy->getSubstGenericSignature()) {
+    // FIXME: Verify ExtInfo state is correct, not working by accident.
+    GenericFunctionType::ExtInfo info;
     astFnTy = GenericFunctionType::get(
-        genSig, params, silFnTy->getAllResultsInterfaceType().getASTType());
-  else
+        genSig, params, silFnTy->getAllResultsInterfaceType().getASTType(),
+        info);
+  } else {
+    FunctionType::ExtInfo info;
     astFnTy = FunctionType::get(
-        params, silFnTy->getAllResultsInterfaceType().getASTType());
+        params, silFnTy->getAllResultsInterfaceType().getASTType(), info);
+  }
 
   auto *origBB = ai->getParent();
   auto *linMapStruct = getLinearMapStruct(origBB);
@@ -307,8 +313,7 @@ void LinearMapInfo::addLinearMapToStruct(ADContext &context, ApplyInst *ai) {
   auto *results = IndexSubset::get(original->getASTContext(), numResults,
                                    activeResultIndices);
   // Create autodiff indices for the `apply` instruction.
-  AutoDiffConfig
-  applyConfig(parameters, results);
+  AutoDiffConfig applyConfig(parameters, results);
 
   // Check for non-differentiable original function type.
   auto checkNondifferentiableOriginalFunctionType = [&](CanSILFunctionType

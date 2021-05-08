@@ -48,8 +48,12 @@ public:
   /// An Objective-C header to import and make implicitly visible.
   std::string ImplicitObjCHeaderPath;
 
-  /// The name of the module which the frontend is building.
+  /// The name of the module that the frontend is building.
   std::string ModuleName;
+
+  /// The ABI name of the module that the frontend is building, to be used in
+  /// mangling and metadata.
+  std::string ModuleABIName;
 
   /// The name of the library to link against when using this module.
   std::string ModuleLinkName;
@@ -79,6 +83,9 @@ public:
 
   /// For these modules, we should prefer using Swift interface when importing them.
   std::vector<std::string> PreferInterfaceForModules;
+
+  /// User-defined module version number.
+  llvm::VersionTuple UserModuleVersion;
 
   /// Emit index data for imported serialized swift system modules.
   bool IndexSystemModules = false;
@@ -130,7 +137,8 @@ public:
     REPL,      ///< REPL mode
 
     EmitAssembly, ///< Emit assembly
-    EmitIR,       ///< Emit LLVM IR
+    EmitIRGen,    ///< Emit LLVM IR before LLVM optimizations
+    EmitIR,       ///< Emit LLVM IR after LLVM optimizations
     EmitBC,       ///< Emit LLVM BC
     EmitObject,   ///< Emit object file
 
@@ -306,6 +314,9 @@ public:
   /// skip nodes entirely, depending on the errors involved.
   bool AllowModuleWithCompilerErrors = false;
 
+  /// True if the "-static" option is set.
+  bool Static = false;
+
   /// The different modes for validating TBD against the LLVM IR.
   enum class TBDValidationMode {
     Default,        ///< Do the default validation for the current platform.
@@ -389,6 +400,10 @@ public:
   ///
   /// \sa SymbolGraphASTWalker
   std::string SymbolGraphOutputDir;
+  
+  /// Whether to emit doc comment information in symbol graphs for symbols
+  /// which are inherited through classes or default implementations.
+  bool SkipInheritedDocs = false;
 
 private:
   static bool canActionEmitDependencies(ActionType);

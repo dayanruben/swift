@@ -93,9 +93,14 @@ static VarDecl *findValueProperty(ASTContext &ctx, NominalTypeDecl *nominal,
   case ActorIsolation::GlobalActor:
   case ActorIsolation::GlobalActorUnsafe:
   case ActorIsolation::Independent:
-  case ActorIsolation::IndependentUnsafe:
   case ActorIsolation::Unspecified:
     break;
+  }
+
+  // The property may not have any effects right now.
+  if (auto getter = var->getEffectfulGetAccessor()) {
+    getter->diagnose(diag::property_wrapper_effectful);
+    return nullptr;
   }
 
   return var;
@@ -239,6 +244,24 @@ findSuitableWrapperInit(ASTContext &ctx, NominalTypeDecl *nominal,
   return viableInitializers.empty() ? nullptr : viableInitializers.front();
 }
 
+/// Returns true if the enclosingInstance parameter is `Never`,
+/// implying that there should be NO enclosing instance.
+static bool enclosingInstanceTypeIsNever(ASTContext &ctx, SubscriptDecl *subscript) {
+  if (!subscript)
+    return false;
+
+  ParameterList *indices = subscript->getIndices();
+  assert(indices && indices->size() > 0);
+
+  ParamDecl *param = indices->get(0);
+  if (param->getArgumentName() != ctx.Id_enclosingInstance)
+    return false;
+
+  auto paramTy = param->getType();
+  auto neverTy = ctx.getNeverType();
+  return neverTy->isEqual(paramTy);
+}
+
 /// Determine whether we have a suitable static subscript to which we
 /// can pass along the enclosing self + key-paths.
 static SubscriptDecl *findEnclosingSelfSubscript(ASTContext &ctx,
@@ -380,6 +403,9 @@ PropertyWrapperTypeInfoRequest::evaluate(
     }
   }
 
+  result.requireNoEnclosingInstance =
+      enclosingInstanceTypeIsNever(ctx, result.enclosingInstanceWrappedSubscript);
+
   bool hasInvalidDynamicSelf = false;
   if (result.projectedValueVar &&
       result.projectedValueVar->getValueInterfaceType()->hasDynamicSelfType()) {
@@ -433,6 +459,18 @@ AttachedPropertyWrappersRequest::evaluate(Evaluator &evaluator,
       ctx.Diags.diagnose(attr->getLocation(), diag::property_wrapper_top_level);
       continue;
     }
+
+//    // If the property wrapper requested an `_enclosingInstance: Never`
+//    // it must be declared as static. TODO: or global once we allow wrappers on top-level code
+//    auto wrappedInfo = var->getPropertyWrapperTypeInfo();
+//    if (wrappedInfo.requireNoEnclosingInstance) {
+//      if (!var->isStatic()) {
+//        ctx.Diags.diagnose(var->getLocation(),
+//                           diag::property_wrapper_var_must_be_static,
+//                           var->getName());
+//        continue;
+//      }
+//    }
 
     // Check that the variable is part of a single-variable pattern.
     auto binding = var->getParentPatternBinding();
@@ -503,7 +541,7 @@ AttachedPropertyWrappersRequest::evaluate(Evaluator &evaluator,
         continue;
       }
     }
-    
+
     result.push_back(mutableAttr);
   }
 
@@ -545,15 +583,12 @@ PropertyWrapperBackingPropertyTypeRequest::evaluate(
   if (var->hasImplicitPropertyWrapper())
     return var->getInterfaceType();
 
-  Type rawType =
-      evaluateOrDefault(evaluator,
-                        AttachedPropertyWrapperTypeRequest{var, 0}, Type());
-
-  if (!rawType || rawType->hasError())
-    return Type();
-
   // The constraint system will infer closure parameter types
-  if (isa<ParamDecl>(var) && var->getInterfaceType()->hasError())
+  if (isa<ParamDecl>(var) && isa<ClosureExpr>(var->getDeclContext()))
+    return var->getPropertyWrapperBackingProperty()->getInterfaceType();
+
+  Type rawType = var->getAttachedPropertyWrapperType(0);
+  if (!rawType || rawType->hasError())
     return Type();
 
   // If there's an initializer of some sort, checking it will determine the
@@ -565,6 +600,8 @@ PropertyWrapperBackingPropertyTypeRequest::evaluate(
     (void)var->getInterfaceType();
     if (!binding->isInitializerChecked(index))
       TypeChecker::typeCheckPatternBinding(binding, index);
+    if (binding->isInvalid())
+      return Type();
   } else {
     using namespace constraints;
     auto dc = var->getInnermostDeclContext();
@@ -581,6 +618,36 @@ PropertyWrapperBackingPropertyTypeRequest::evaluate(
   ASTContext &ctx = var->getASTContext();
   Type type = ctx.getSideCachedPropertyWrapperBackingPropertyType(var);
   assert(type || ctx.Diags.hadAnyError());
+
+  if (!type)
+    return Type();
+
+  // Set the interface type of each synthesized declaration.
+  auto auxiliaryVars = var->getPropertyWrapperAuxiliaryVariables();
+  auxiliaryVars.backingVar->setInterfaceType(type);
+
+  if (auto *projection = auxiliaryVars.projectionVar) {
+    projection->setInterfaceType(computeProjectedValueType(var, type));
+  }
+
+  if (auto *wrappedValue = auxiliaryVars.localWrappedValueVar) {
+    wrappedValue->setInterfaceType(computeWrappedValueType(var, type));
+  }
+
+  {
+    auto *nominal = type->getDesugaredType()->getAnyNominal();
+    if (auto wrappedInfo = nominal->getPropertyWrapperTypeInfo()) {
+      if (wrappedInfo.requireNoEnclosingInstance &&
+          !var->isStatic()) {
+        ctx.Diags.diagnose(var->getNameLoc(),
+                           diag::property_wrapper_var_must_be_static,
+                           var->getName(), type);
+        // TODO: fixit insert static?
+        return Type();
+      }
+    }
+  }
+
   return type;
 }
 

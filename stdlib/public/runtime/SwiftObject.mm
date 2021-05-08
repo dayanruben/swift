@@ -36,7 +36,7 @@
 #include "swift/Strings.h"
 #include "../SwiftShims/RuntimeShims.h"
 #include "../SwiftShims/AssertionReporting.h"
-#include "CompatibilityOverride.h"
+#include "../CompatibilityOverride/CompatibilityOverride.h"
 #include "ErrorObject.h"
 #include "Private.h"
 #include "SwiftObject.h"
@@ -474,7 +474,7 @@ static auto const unTaggedNonNativeBridgeObjectBits
 
 #if defined(__x86_64__)
 static uintptr_t const objectPointerIsObjCBit = 0x4000000000000000ULL;
-#elif defined(__arm64__) || defined(__arch64__) || defined(_M_ARM64)
+#elif defined(__LP64__)
 static uintptr_t const objectPointerIsObjCBit = 0x4000000000000000ULL;
 #else
 static uintptr_t const objectPointerIsObjCBit = 0x00000002U;
@@ -1561,7 +1561,7 @@ const ClassMetadata *swift::getRootSuperclass() {
 }
 
 #define OVERRIDE_OBJC COMPATIBILITY_OVERRIDE
-#include "CompatibilityOverride.def"
+#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH
 
 #define OVERRIDE_FOREIGN COMPATIBILITY_OVERRIDE
-#include "CompatibilityOverride.def"
+#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH

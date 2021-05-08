@@ -193,11 +193,11 @@ def enable_copy_propagation : Flag<["-"], "enable-copy-propagation">,
 def disable_copy_propagation : Flag<["-"], "disable-copy-propagation">,
   HelpText<"Don't run SIL copy propagation to preserve object lifetime.">;
 
-def enable_infer_public_concurrent_value : Flag<["-"], "enable-infer-public-concurrent-value">,
-    HelpText<"Enable inference of ConcurrentValue conformances for public structs and enums">;
+def enable_infer_public_concurrent_value : Flag<["-"], "enable-infer-public-sendable">,
+    HelpText<"Enable inference of Sendable conformances for public structs and enums">;
 
-def disable_infer_public_concurrent_value : Flag<["-"], "disable-infer-public-concurrent-value">,
-    HelpText<"Disable inference of ConcurrentValue conformances for public structs and enums">;
+def disable_infer_public_concurrent_value : Flag<["-"], "disable-infer-public-sendable">,
+    HelpText<"Disable inference of Sendable conformances for public structs and enums">;
 
 } // end let Flags = [FrontendOption, NoDriverOption]
 
@@ -229,13 +229,13 @@ def enable_experimental_concurrency :
   Flag<["-"], "enable-experimental-concurrency">,
   HelpText<"Enable experimental concurrency model">;
 
+def enable_experimental_async_handler :
+  Flag<["-"], "enable-experimental-async-handler">,
+  HelpText<"Enable experimental @asyncHandler feature">;
+
 def enable_experimental_flow_sensitive_concurrent_captures :
   Flag<["-"], "enable-experimental-flow-sensitive-concurrent-captures">,
   HelpText<"Enable flow-sensitive concurrent captures">;
-
-def enable_experimental_enum_codable_derivation :
-  Flag<["-"], "enable-experimental-enum-codable-derivation">,
-  HelpText<"Enable experimental derivation of Codable for enums">;
 
 def enable_resilience : Flag<["-"], "enable-resilience">,
      HelpText<"Deprecated, use -enable-library-evolution instead">;
@@ -417,9 +417,8 @@ def disable_conformance_availability_errors : Flag<["-"],
   "disable-conformance-availability-errors">,
   HelpText<"Diagnose conformance availability violations as warnings">;
 
-def enable_infer_import_as_member :
-  Flag<["-"], "enable-infer-import-as-member">,
-  HelpText<"Infer when a global could be imported as a member">;
+def report_errors_to_debugger : Flag<["-"], "report-errors-to-debugger">,
+  HelpText<"Deprecated, will be removed in future versions.">;
 
 def enable_swift3_objc_inference : Flag<["-"], "enable-swift3-objc-inference">,
   Flags<[FrontendOption, HelpHidden]>,
@@ -429,6 +428,11 @@ def disable_swift3_objc_inference :
   Flag<["-"], "disable-swift3-objc-inference">,
   Flags<[FrontendOption, HelpHidden]>,
   HelpText<"Disable Swift 3's @objc inference rules for NSObject-derived classes and 'dynamic' members (emulates Swift 4 behavior)">;
+
+def library_level : Separate<["-"], "library-level">,
+  MetaVarName<"<level>">,
+  Flags<[FrontendOption, ModuleInterfaceOption]>,
+  HelpText<"Library distribution level 'api', 'spi' or 'other' (the default)">;
 
 def enable_implicit_dynamic : Flag<["-"], "enable-implicit-dynamic">,
   Flags<[FrontendOption, NoInteractiveOption, HelpHidden]>,

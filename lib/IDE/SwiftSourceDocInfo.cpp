@@ -198,7 +198,7 @@ bool NameMatcher::handleCustomAttrs(Decl *D) {
 
 bool NameMatcher::walkToDeclPre(Decl *D) {
   // Handle occurrences in any preceding doc comments
-  RawComment R = D->getRawComment();
+  RawComment R = D->getRawComment(/*SerializedOK=*/false);
   if (!R.isEmpty()) {
     for(SingleRawComment C: R.Comments) {
       while(!shouldSkip(C.Range))
@@ -423,6 +423,36 @@ std::pair<bool, Expr*> NameMatcher::walkToExprPre(Expr *E) {
         if (!walkToExprPost(E))
           return {false, nullptr};
         return {false, E};
+      }
+      case ExprKind::KeyPath: {
+        KeyPathExpr *KP = cast<KeyPathExpr>(E);
+
+        // Swift keypath components are visited already, so there's no need to
+        // handle them specially.
+        if (!KP->isObjC())
+          break;
+
+        for (auto Component: KP->getComponents()) {
+          switch (Component.getKind()) {
+          case KeyPathExpr::Component::Kind::UnresolvedProperty:
+          case KeyPathExpr::Component::Kind::Property:
+            tryResolve(ASTWalker::ParentTy(E), Component.getLoc());
+            break;
+          case KeyPathExpr::Component::Kind::DictionaryKey:
+          case KeyPathExpr::Component::Kind::Invalid:
+            break;
+          case KeyPathExpr::Component::Kind::OptionalForce:
+          case KeyPathExpr::Component::Kind::OptionalChain:
+          case KeyPathExpr::Component::Kind::OptionalWrap:
+          case KeyPathExpr::Component::Kind::UnresolvedSubscript:
+          case KeyPathExpr::Component::Kind::Subscript:
+          case KeyPathExpr::Component::Kind::Identity:
+          case KeyPathExpr::Component::Kind::TupleElement:
+            llvm_unreachable("Unexpected component in ObjC KeyPath expression");
+            break;
+          }
+        }
+        break;
       }
       default: // ignored
         break;
@@ -765,83 +795,6 @@ ReturnInfo(ASTContext &Ctx, ArrayRef<ReturnInfo> Branches):
   }
   if (AllExitStates.size() == 1) {
     Exit = *AllExitStates.begin();
-  }
-}
-
-void swift::ide::getLocationInfoForClangNode(ClangNode ClangNode,
-                                             ClangImporter *Importer,
-                  llvm::Optional<std::pair<unsigned, unsigned>> &DeclarationLoc,
-                                             StringRef &Filename) {
-  clang::ASTContext &ClangCtx = Importer->getClangASTContext();
-  clang::SourceManager &ClangSM = ClangCtx.getSourceManager();
-
-  clang::SourceRange SR = ClangNode.getLocation();
-  if (auto MD = dyn_cast_or_null<clang::ObjCMethodDecl>(ClangNode.getAsDecl())) {
-    SR = clang::SourceRange(MD->getSelectorStartLoc(),
-                            MD->getDeclaratorEndLoc());
-  }
-
-  clang::CharSourceRange CharRange =
-      clang::Lexer::makeFileCharRange(clang::CharSourceRange::getTokenRange(SR),
-                                      ClangSM, ClangCtx.getLangOpts());
-  if (CharRange.isInvalid())
-    return;
-
-  std::pair<clang::FileID, unsigned>
-      Decomp = ClangSM.getDecomposedLoc(CharRange.getBegin());
-  if (!Decomp.first.isInvalid()) {
-    if (auto FE = ClangSM.getFileEntryForID(Decomp.first)) {
-      Filename = FE->getName();
-
-      std::pair<clang::FileID, unsigned>
-          EndDecomp = ClangSM.getDecomposedLoc(CharRange.getEnd());
-
-      DeclarationLoc = { Decomp.second, EndDecomp.second-Decomp.second };
-    }
-  }
-}
-
-static unsigned getCharLength(SourceManager &SM, SourceRange TokenRange) {
-  SourceLoc CharEndLoc = Lexer::getLocForEndOfToken(SM, TokenRange.End);
-  return SM.getByteDistance(TokenRange.Start, CharEndLoc);
-}
-
-void swift::ide::getLocationInfo(const ValueDecl *VD,
-                  llvm::Optional<std::pair<unsigned, unsigned>> &DeclarationLoc,
-                                 StringRef &Filename) {
-  ASTContext &Ctx = VD->getASTContext();
-  SourceManager &SM = Ctx.SourceMgr;
-
-  auto ClangNode = VD->getClangNode();
-
-  if (VD->getLoc().isValid()) {
-    auto getSignatureRange = [&](const ValueDecl *VD) -> Optional<unsigned> {
-      if (auto FD = dyn_cast<AbstractFunctionDecl>(VD)) {
-        SourceRange R = FD->getSignatureSourceRange();
-        if (R.isValid())
-          return getCharLength(SM, R);
-      }
-      return None;
-    };
-    unsigned NameLen;
-    if (auto SigLen = getSignatureRange(VD)) {
-      NameLen = SigLen.getValue();
-    } else if (VD->hasName()) {
-      NameLen = VD->getBaseName().userFacingName().size();
-    } else {
-      NameLen = getCharLength(SM, VD->getLoc());
-    }
-
-    unsigned DeclBufID = SM.findBufferContainingLoc(VD->getLoc());
-    DeclarationLoc = { SM.getLocOffsetInBuffer(VD->getLoc(), DeclBufID),
-                       NameLen };
-    Filename = SM.getIdentifierForBuffer(DeclBufID);
-
-  } else if (ClangNode) {
-    ClangImporter *Importer =
-        static_cast<ClangImporter*>(Ctx.getClangModuleLoader());
-    return getLocationInfoForClangNode(ClangNode, Importer,
-                                       DeclarationLoc, Filename);
   }
 }
 

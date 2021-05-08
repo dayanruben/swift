@@ -43,6 +43,10 @@ ERROR(bridging_objcbridgeable_broken,none,
       "broken definition of '_ObjectiveCBridgeable' protocol: missing %0",
       (DeclName))
 
+ERROR(sil_function_redefinition,none,
+      "multiple definitions of symbol '%0'",
+      (StringRef))
+
 ERROR(invalid_sil_builtin,none,
       "INTERNAL ERROR: invalid use of builtin: %0",
       (StringRef))
@@ -103,8 +107,6 @@ ERROR(objc_selector_malformed,none,"the type ObjectiveC.Selector is malformed",
 // Capture before declaration diagnostics.
 ERROR(capture_before_declaration,none,
       "closure captures %0 before it is declared", (Identifier))
-ERROR(capture_before_declaration_defer,none,
-      "'defer' block captures %0 before it is declared", (Identifier))
 NOTE(captured_value_declared_here,none,
      "captured value declared here", ())
 
@@ -248,17 +250,25 @@ NOTE(designated_init_c_struct_fix,none,
 
 
 // Control flow diagnostics.
-ERROR(missing_return,none,
-      "missing return in a %select{function|closure}1 expected to return %0",
-      (Type, unsigned))
-ERROR(missing_return_last_expr,none,
-      "missing return in a %select{function|closure}1 expected to return %0; "
-      "did you mean to return the last expression?",
-      (Type, unsigned))
-ERROR(missing_never_call,none,
-      "%select{function|closure}1 with uninhabited return type %0 is missing "
+ERROR(missing_return_closure,none,
+      "missing return in closure expected to return %0",
+      (Type))
+ERROR(missing_never_call_closure,none,
+      "closure with uninhabited return type %0 is missing "
       "call to another never-returning function on all paths",
-      (Type, unsigned))
+      (Type))
+
+ERROR(missing_return_decl,none,
+      "missing return in %1 expected to return %0",
+      (Type, DescriptiveDeclKind))
+ERROR(missing_never_call_decl,none,
+      "%1 with uninhabited return type %0 is missing "
+      "call to another never-returning function on all paths",
+      (Type, DescriptiveDeclKind))
+
+NOTE(missing_return_last_expr_note,none,
+    "did you mean to return the last expression?", ())
+
 ERROR(guard_body_must_not_fallthrough,none,
       "'guard' body must not fall through, consider using a 'return' or 'throw'"
       " to exit the scope", ())

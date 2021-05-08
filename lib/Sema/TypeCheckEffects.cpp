@@ -29,6 +29,8 @@
 
 using namespace swift;
 
+using EffectList = SmallVector<EffectKind, 4>;
+
 static bool hasFunctionParameterWithEffect(EffectKind kind, Type type) {
   // Look through Optional types.
   type = type->lookThroughAllOptionalTypes();
@@ -216,6 +218,17 @@ bool ConformanceHasEffectRequest::evaluate(
   }
 
   return false;
+}
+
+/// \returns the getter decl iff its a prop/subscript with an effectful 'get'
+static AccessorDecl* getEffectfulGetOnlyAccessor(ConcreteDeclRef cdr) {
+  if (!cdr)
+    return nullptr;
+
+  if (auto storageDecl = dyn_cast<AbstractStorageDecl>(cdr.getDecl()))
+    return storageDecl->getEffectfulGetAccessor();
+
+  return nullptr;
 }
 
 namespace {
@@ -414,6 +427,7 @@ public:
   }
 
   std::pair<bool, Expr*> walkToExprPre(Expr *E) override {
+    visitExprPre(E);
     ShouldRecurse_t recurse = ShouldRecurse;
     if (isa<ErrorExpr>(E)) {
       asImpl().flagInvalidCode();
@@ -473,6 +487,8 @@ public:
   ShouldRecurse_t checkForEach(ForEachStmt *S) {
     return ShouldRecurse;
   }
+
+  void visitExprPre(Expr *expr) { asImpl().visitExprPre(expr); }
 };
 
 /// A potential reason why something might have an effect.
@@ -494,22 +510,30 @@ public:
     /// a throwing conformance as one of its generic arguments.
     ByConformance,
 
-    /// The initializer of an 'async let' unconditionally throws.
-    AsyncLetThrows,
+    /// The initializer of an 'async let' can throw.
+    AsyncLet,
+
+    /// The function accesses an unconditionally throws/async property.
+    PropertyAccess,
+    SubscriptAccess
   };
 
   static StringRef kindToString(Kind k) {
     switch (k) {
       case Kind::Apply:
         return "Apply";
+      case Kind::PropertyAccess:
+        return "PropertyAccess";
+      case Kind::SubscriptAccess:
+        return "SubscriptAccess";
       case Kind::ByClosure:
         return "ByClosure";
       case Kind::ByDefaultClosure:
         return "ByDefaultClosure";
       case Kind::ByConformance:
         return "ByConformance";
-      case Kind::AsyncLetThrows:
-        return "AsyncLetThrows";
+      case Kind::AsyncLet:
+        return "AsyncLet";
     }
   }
 
@@ -522,6 +546,12 @@ public:
   static PotentialEffectReason forApply() {
     return PotentialEffectReason(Kind::Apply);
   }
+  static PotentialEffectReason forPropertyAccess() {
+    return PotentialEffectReason(Kind::PropertyAccess);
+  }
+  static PotentialEffectReason forSubscriptAccess() {
+    return PotentialEffectReason(Kind::SubscriptAccess);
+  }
   static PotentialEffectReason forClosure(Expr *E) {
     PotentialEffectReason result(Kind::ByClosure);
     result.TheExpression = E;
@@ -533,8 +563,8 @@ public:
   static PotentialEffectReason forConformance() {
     return PotentialEffectReason(Kind::ByConformance);
   }
-  static PotentialEffectReason forThrowingAsyncLet() {
-    return PotentialEffectReason(Kind::AsyncLetThrows);
+  static PotentialEffectReason forAsyncLet() {
+    return PotentialEffectReason(Kind::AsyncLet);
   }
 
   Kind getKind() const { return TheKind; }
@@ -567,9 +597,9 @@ enum class ConditionalEffectKind {
 static void simple_display(llvm::raw_ostream &out, ConditionalEffectKind kind) {
   out << "ConditionalEffectKind::";
   switch(kind) {
-    case ConditionalEffectKind::None:         out << "None"; break;
-    case ConditionalEffectKind::Conditional:  out << "Conditional"; break;
-    case ConditionalEffectKind::Always:       out << "Always"; break;
+    case ConditionalEffectKind::None:         out << "None"; return;
+    case ConditionalEffectKind::Conditional:  out << "Conditional"; return;
+    case ConditionalEffectKind::Always:       out << "Always"; return;
   }
   llvm_unreachable("Bad conditional effect kind");
 }
@@ -613,6 +643,18 @@ class Classification {
 public:
   Classification() {}
 
+  /// Return a classification for multiple effects.
+  static Classification forEffect(EffectList kinds,
+                                  ConditionalEffectKind conditionalKind,
+                                  PotentialEffectReason reason) {
+    Classification result;
+
+    for (auto k : kinds)
+      result.merge(forEffect(k, conditionalKind, reason));
+
+    return result;
+  }
+
   static Classification forEffect(EffectKind kind,
                                   ConditionalEffectKind conditionalKind,
                                   PotentialEffectReason reason) {
@@ -621,22 +663,19 @@ public:
       result.ThrowKind = conditionalKind;
       result.ThrowReason = reason;
     } else {
-      assert(reason.getKind() != PotentialEffectReason::Kind::AsyncLetThrows);
-
       result.AsyncKind = conditionalKind;
       result.AsyncReason = reason;
     }
     return result;
   }
 
-  /// Return a classification saying that there's a throw site.
+  /// Return a classification saying that there's a throw / async operation.
   static Classification forUnconditional(EffectKind kind,
                                          PotentialEffectReason reason) {
     return forEffect(kind, ConditionalEffectKind::Always, reason);
   }
 
-  /// Return a classification saying that there's a rethrowing
-  /// throw site.
+  /// Return a classification saying that there's a rethrowing / reasync site.
   static Classification forConditional(EffectKind kind,
                                        PotentialEffectReason reason) {
     return forEffect(kind, ConditionalEffectKind::Conditional, reason);
@@ -718,8 +757,10 @@ public:
 
   /// Check to see if the given function application throws or is async.
   Classification classifyApply(ApplyExpr *E) {
-    if (isa<SelfApplyExpr>(E))
+    if (isa<SelfApplyExpr>(E)) {
+      assert(!E->implicitlyAsync());
       return Classification();
+    }
 
     // An apply expression is a potential throw site if the function throws.
     // But if the expression didn't type-check, suppress diagnostics.
@@ -870,7 +911,11 @@ private:
     assert(param->getInterfaceType()
                ->lookThroughAllOptionalTypes()
                ->castTo<AnyFunctionType>()
-               ->hasEffect(kind));
+               ->hasEffect(kind) ||
+           !param->getInterfaceType()
+               ->lookThroughAllOptionalTypes()
+               ->castTo<AnyFunctionType>()
+               ->getGlobalActor().isNull());
 
     // If we're currently doing rethrows-checking on the body of the
     // function which declares the parameter, it's rethrowing-only.
@@ -983,9 +1028,17 @@ private:
       return ShouldRecurse;
     }
     ShouldRecurse_t checkLookup(LookupExpr *E) {
-      return ShouldRecurse; // NOTE: currently, lookups can't throw
+      if (auto getter = getEffectfulGetOnlyAccessor(E->getMember()))
+        if (getter->hasThrows())
+          ThrowKind = ConditionalEffectKind::Always;
+
+      return ShouldRecurse;
     }
     ShouldRecurse_t checkDeclRef(DeclRefExpr *E) {
+      if (auto getter = getEffectfulGetOnlyAccessor(E->getDeclRef()))
+        if (getter->hasThrows())
+          ThrowKind = ConditionalEffectKind::Always;
+
       return ShouldNotRecurse;
     }
     ShouldRecurse_t checkAsyncLet(PatternBindingDecl *patternBinding) {
@@ -1048,6 +1101,8 @@ private:
         // guaranteed to give back None, which leaves our ThrowKind unchanged.
       }
     }
+
+    void visitExprPre(Expr *expr) { return; }
   };
 
   class FunctionAsyncClassifier
@@ -1087,25 +1142,34 @@ private:
       return ShouldRecurse;
     }
     ShouldRecurse_t checkLookup(LookupExpr *E) {
-      // FIXME should the logic from CheckEffectsCoverage::checkLookup be here?
+      if (E->isImplicitlyAsync()) {
+        AsyncKind = ConditionalEffectKind::Always;
+      } else if (auto getter = getEffectfulGetOnlyAccessor(E->getMember())) {
+        if (getter->hasAsync())
+          AsyncKind = ConditionalEffectKind::Always;
+      }
+
       return ShouldRecurse;
     }
     ShouldRecurse_t checkDeclRef(DeclRefExpr *E) {
-      // FIXME should the logic from CheckEffectsCoverage::checkDeclRef be here?
+      if (E->isImplicitlyAsync()) {
+        AsyncKind = ConditionalEffectKind::Always;
+      } else if (auto getter = getEffectfulGetOnlyAccessor(E->getDeclRef())) {
+        if (getter->hasAsync())
+          AsyncKind = ConditionalEffectKind::Always;
+      }
+
       return ShouldNotRecurse;
     }
     ShouldRecurse_t checkAsyncLet(PatternBindingDecl *patternBinding) {
-      // FIXME
-      llvm_unreachable("Test me");
-      // return ShouldRecurse;
+      AsyncKind = ConditionalEffectKind::Always;
+      return ShouldRecurse;
     }
     ShouldRecurse_t checkThrow(ThrowStmt *E) {
       return ShouldRecurse;
     }
     ShouldRecurse_t checkInterpolatedStringLiteral(InterpolatedStringLiteralExpr *E) {
-      // FIXME
-      llvm_unreachable("Test me");
-      //return ShouldRecurse;
+      return ShouldRecurse;
     }
 
     ShouldRecurse_t checkIfConfig(IfConfigDecl *D) {
@@ -1118,16 +1182,13 @@ private:
 
     ShouldRecurse_t checkForEach(ForEachStmt *S) {
       if (S->getAwaitLoc().isValid()) {
-        auto classification = Self.classifyConformance(
-            S->getSequenceConformance(),
-            EffectKind::Async);
-        IsInvalid |= classification.isInvalid();
-        AsyncKind = std::max(AsyncKind,
-                             classification.getConditionalKind(EffectKind::Async));
+        AsyncKind = std::max(AsyncKind, ConditionalEffectKind::Always);
       }
 
       return ShouldRecurse;
     }
+
+    void visitExprPre(Expr *expr) { return; }
   };
 
   Optional<ConditionalEffectKind>
@@ -1189,7 +1250,16 @@ private:
   Classification classifyArgument(Expr *arg, Type paramType, EffectKind kind) {
     arg = arg->getValueProvidingExpr();
 
-    if (isa<DefaultArgumentExpr>(arg)) {
+    if (auto *defaultArg = dyn_cast<DefaultArgumentExpr>(arg)) {
+      // Special-case a 'nil' default argument, which is known not to throw.
+      if (defaultArg->isCallerSide()) {
+        auto *callerSideArg = defaultArg->getCallerSideDefaultExpr();
+        if (isa<NilLiteralExpr>(callerSideArg)) {
+          if (callerSideArg->getType()->getOptionalObjectType())
+            return Classification();
+        }
+      }
+
       return classifyArgumentByType(arg->getType(),
                                     PotentialEffectReason::forDefaultClosure(),
                                     kind);
@@ -1365,6 +1435,14 @@ public:
   void setDiagnoseErrorOnTry(bool b) {
     DiagnoseErrorOnTry = b;
   }
+
+  /// Return true when the current context is under an interpolated string
+  bool isWithinInterpolatedString() const {
+    return InterpolatedString != nullptr;
+  }
+
+  /// Stores the location of the innermost await
+  SourceLoc awaitLoc = SourceLoc();
 
   /// Whether this is a function that rethrows.
   bool hasPolymorphicEffect(EffectKind kind) const {
@@ -1562,26 +1640,13 @@ public:
     IsNonExhaustiveCatch = value;
   }
 
-  static void diagnoseThrowInIllegalContext(DiagnosticEngine &Diags,
-                                            ASTNode node,
-                                            Kind kind) {
-    if (auto *e = node.dyn_cast<Expr*>()) {
-      if (isa<ApplyExpr>(e)) {
-        Diags.diagnose(e->getLoc(), diag::throwing_call_in_illegal_context,
-                       static_cast<unsigned>(kind));
-        return;
-      }
-    }
-
-    Diags.diagnose(node.getStartLoc(), diag::throw_in_illegal_context,
-                   static_cast<unsigned>(kind));
-  }
-
   static void maybeAddRethrowsNote(DiagnosticEngine &Diags, SourceLoc loc,
                                    const PotentialEffectReason &reason) {
     switch (reason.getKind()) {
     case PotentialEffectReason::Kind::Apply:
-    case PotentialEffectReason::Kind::AsyncLetThrows:
+    case PotentialEffectReason::Kind::PropertyAccess:
+    case PotentialEffectReason::Kind::SubscriptAccess:
+    case PotentialEffectReason::Kind::AsyncLet:
       // Already fully diagnosed.
       return;
     case PotentialEffectReason::Kind::ByClosure:
@@ -1598,17 +1663,47 @@ public:
     llvm_unreachable("bad reason kind");
   }
 
+  /// get a user-friendly name for the source of the effect
+  static StringRef getEffectSourceName(const PotentialEffectReason &reason) {
+    switch (reason.getKind()) {
+    case PotentialEffectReason::Kind::Apply:
+    case PotentialEffectReason::Kind::ByClosure:
+    case PotentialEffectReason::Kind::ByDefaultClosure:
+    case PotentialEffectReason::Kind::ByConformance:
+    case PotentialEffectReason::Kind::AsyncLet: // FIXME: not really the right name?
+      return "call";
+
+    case PotentialEffectReason::Kind::PropertyAccess:
+      return "property access";
+    case PotentialEffectReason::Kind::SubscriptAccess:
+      return "subscript access";
+    }
+  }
+
   void diagnoseUncoveredThrowSite(ASTContext &ctx, ASTNode E,
                                   const PotentialEffectReason &reason) {
     auto &Diags = ctx.Diags;
     auto message = diag::throwing_call_without_try;
-    if (reason.getKind() == PotentialEffectReason::Kind::AsyncLetThrows)
+    auto reasonKind = reason.getKind();
+
+    bool suggestTryFixIt = reasonKind == PotentialEffectReason::Kind::Apply;
+
+    if (reasonKind == PotentialEffectReason::Kind::AsyncLet) {
       message = diag::throwing_async_let_without_try;
+
+    } else if (reasonKind == PotentialEffectReason::Kind::PropertyAccess) {
+      message = diag::throwing_prop_access_without_try;
+      suggestTryFixIt = true;
+
+    } else if (reasonKind == PotentialEffectReason::Kind::SubscriptAccess) {
+      message = diag::throwing_subscript_access_without_try;
+      suggestTryFixIt = true;
+    }
 
     auto loc = E.getStartLoc();
     SourceLoc insertLoc;
     SourceRange highlight;
-    
+
     // Generate more specific messages in some cases.
     if (auto e = dyn_cast_or_null<ApplyExpr>(E.dyn_cast<Expr*>())) {
       if (isa<PrefixUnaryExpr>(e) || isa<PostfixUnaryExpr>(e) ||
@@ -1618,7 +1713,7 @@ public:
       }
       insertLoc = loc;
       highlight = e->getSourceRange();
-      
+
       if (InterpolatedString &&
           e->getCalledValue() &&
           e->getCalledValue()->getBaseName() ==
@@ -1627,7 +1722,7 @@ public:
         insertLoc = InterpolatedString->getLoc();
       }
     }
-    
+
     Diags.diagnose(loc, message).highlight(highlight);
     maybeAddRethrowsNote(Diags, loc, reason);
 
@@ -1638,8 +1733,12 @@ public:
     //
     // Let's suggest couple of alternative fix-its
     // because complete context is unavailable.
-    if (reason.getKind() != PotentialEffectReason::Kind::Apply)
+    if (!suggestTryFixIt)
       return;
+
+    // 'try' should go before 'await'
+    if (awaitLoc.isValid())
+      insertLoc = awaitLoc;
 
     Diags.diagnose(loc, diag::note_forgot_try)
         .fixItInsert(insertLoc, "try ");
@@ -1652,8 +1751,8 @@ public:
   void diagnoseThrowInLegalContext(DiagnosticEngine &Diags, ASTNode node,
                                    bool isTryCovered,
                                    const PotentialEffectReason &reason,
-                                   Diag<> diagForThrowingCall,
-                                   Diag<> diagForTrylessThrowingCall) {
+                                   Diag<StringRef> diagForThrowingCall,
+                                   Diag<StringRef> diagForTrylessThrowingCall) {
     auto loc = node.getStartLoc();
 
     // Allow the diagnostic to fire on the 'try' if we don't have
@@ -1666,10 +1765,12 @@ public:
       return;
     }
 
+    auto effectSource = getEffectSourceName(reason);
+
     if (isTryCovered) {
-      Diags.diagnose(loc, diagForThrowingCall);
+      Diags.diagnose(loc, diagForThrowingCall, effectSource);
     } else {
-      Diags.diagnose(loc, diagForTrylessThrowingCall);
+      Diags.diagnose(loc, diagForTrylessThrowingCall, effectSource);
     }
     maybeAddRethrowsNote(Diags, loc, reason);
   }
@@ -1713,7 +1814,8 @@ public:
     case Kind::CatchPattern:
     case Kind::CatchGuard:
     case Kind::DeferBody:
-      diagnoseThrowInIllegalContext(Diags, E, getKind());
+      Diags.diagnose(E.getStartLoc(), diag::throwing_op_in_illegal_context,
+                 static_cast<unsigned>(getKind()), getEffectSourceName(reason));
       return;
     }
     llvm_unreachable("bad context kind");
@@ -1780,78 +1882,34 @@ public:
     }
     llvm_unreachable("bad context kind");
   }
+  /// I did not want to add 'await' as a PotentialEffectReason, since it's
+  /// not actually an effect. So, we have this odd boolean hanging around.
+  unsigned effectReasonToIndex(Optional<PotentialEffectReason> maybeReason,
+                               bool forAwait = false) {
+    // while not actually an effect, in some instances we diagnose the
+    // appearance of an await within a non-async context.
+    if (forAwait)
+      return 2;
 
-  /// NOTE: the values backing these enums match up with a %select
-  /// in the diagnostics!
-  enum AsyncSiteKind {
-    Unspecified = 0,
-    Call = 1,
-    Await = 2,
-    AsyncLet = 3,
-    Property = 4,
-    Subscript = 5
-  };
+    if (!maybeReason.hasValue())
+      return 0; // Unspecified
 
-  void diagnoseUncoveredAsyncSite(ASTContext &ctx, ASTNode node,
-                                  AsyncSiteKind kind) {
-    SourceRange highlight = node.getSourceRange();
-    auto diag = diag::async_call_without_await;
+    switch(maybeReason.getValue().getKind()) {
+    case PotentialEffectReason::Kind::ByClosure:
+    case PotentialEffectReason::Kind::ByDefaultClosure:
+    case PotentialEffectReason::Kind::ByConformance:
+    case PotentialEffectReason::Kind::Apply:
+      return 1;
 
-    switch (kind) {
-    case AsyncSiteKind::AsyncLet:
-      // Reference to an 'async let' missing an 'await'.
-      if (auto declR = dyn_cast_or_null<DeclRefExpr>(node.dyn_cast<Expr*>())) {
-        if (auto var = dyn_cast<VarDecl>(declR->getDecl())) {
-          if (var->isAsyncLet()) {
-            ctx.Diags.diagnose(declR->getLoc(), diag::async_let_without_await,
-                               var->getName());
-            return;
-          }
-        }
-      }
-      LLVM_FALLTHROUGH; // fallthrough to a message about property access
+    case PotentialEffectReason::Kind::AsyncLet:
+      return 3;
 
-    case AsyncSiteKind::Property:
-      diag = diag::async_prop_access_without_await;
-      break;
+    case PotentialEffectReason::Kind::PropertyAccess:
+      return 4;
 
-    case AsyncSiteKind::Subscript:
-      diag = diag::async_subscript_access_without_await;
-      break;
-
-    case AsyncSiteKind::Unspecified:
-    case AsyncSiteKind::Call: {
-      if (Function) {
-        // To produce a better error message, check if it is an autoclosure.
-        // We do not use 'Context::isAutoClosure' b/c it gives conservative
-        // answers.
-        if (auto autoclosure = dyn_cast_or_null<AutoClosureExpr>(
-                Function->getAbstractClosureExpr())) {
-          switch (autoclosure->getThunkKind()) {
-          case AutoClosureExpr::Kind::None:
-            diag = diag::async_call_without_await_in_autoclosure;
-            break;
-
-          case AutoClosureExpr::Kind::AsyncLet:
-            diag = diag::async_call_without_await_in_async_let;
-            break;
-
-          case AutoClosureExpr::Kind::SingleCurryThunk:
-          case AutoClosureExpr::Kind::DoubleCurryThunk:
-            break;
-          }
-        }
-      }
-      break;
+    case PotentialEffectReason::Kind::SubscriptAccess:
+      return 5;
     }
-
-    case AsyncSiteKind::Await:
-      llvm_unreachable("diagnosing an uncovered await?");
-    };
-
-    ctx.Diags.diagnose(node.getStartLoc(), diag)
-        .fixItInsert(node.getStartLoc(), "await ")
-        .highlight(highlight);
   }
 
   void diagnoseAsyncInIllegalContext(DiagnosticEngine &Diags, ASTNode node) {
@@ -1897,13 +1955,16 @@ public:
 
   /// providing a \c kind helps tailor the emitted message.
   void diagnoseUnhandledAsyncSite(DiagnosticEngine &Diags, ASTNode node,
-                                  AsyncSiteKind kind) {
+                                  Optional<PotentialEffectReason> maybeReason,
+                                  bool forAwait = false) {
     switch (getKind()) {
-    case Kind::PotentiallyHandled:
+    case Kind::PotentiallyHandled: {
       Diags.diagnose(node.getStartLoc(), diag::async_in_nonasync_function,
-                     static_cast<unsigned>(kind), isAutoClosure());
+                     effectReasonToIndex(maybeReason, forAwait),
+                     isAutoClosure());
       maybeAddAsyncNote(Diags);
       return;
+    }
 
     case Kind::EnumElementInitializer:
     case Kind::GlobalVarInitializer:
@@ -2002,6 +2063,66 @@ class CheckEffectsCoverage : public EffectsHandlingWalker<CheckEffectsCoverage> 
   /// context.
   ConditionalEffectKind MaxThrowingKind;
 
+  struct DiagnosticInfo {
+    DiagnosticInfo(Expr &failingExpr,
+                   PotentialEffectReason reason) :
+      reason(reason),
+      expr(failingExpr) {}
+
+    /// Reason for throwing
+    PotentialEffectReason reason;
+
+    /// Failing expression
+    Expr &expr;
+  };
+
+  SmallVector<Expr *, 4> errorOrder;
+  llvm::DenseMap<Expr *, std::vector<DiagnosticInfo>> uncoveredAsync;
+  llvm::DenseMap<Expr *, Expr *> parentMap;
+
+  static bool isEffectAnchor(Expr *e) {
+    return isa<AbstractClosureExpr>(e) || isa<DiscardAssignmentExpr>(e) || isa<AssignExpr>(e);
+  }
+
+  static bool isAnchorTooEarly(Expr *e) {
+    return isa<AssignExpr>(e) || isa<DiscardAssignmentExpr>(e);
+  }
+
+  /// Find the top location where we should put the await
+  static Expr *walkToAnchor(Expr *e, llvm::DenseMap<Expr *, Expr *> &parentMap,
+                            bool isInterpolatedString) {
+    Expr *parent = e;
+    Expr *lastParent = e;
+    while (parent && !isEffectAnchor(parent)) {
+      lastParent = parent;
+      parent = parentMap[parent];
+    }
+
+    if (parent && !isAnchorTooEarly(parent)) {
+      return parent;
+    }
+
+    if (isInterpolatedString) {
+      // TODO: I'm being gentle with the casts to avoid breaking things
+      //       If we see incorrect fix-it locations in string interpolations
+      //       we need to change how this behaves
+      //       Assert builds will crash giving us a bug to fix, non-asserts will
+      //       quietly "just work".
+      assert(parent == nullptr && "Expected to be at top of expression");
+      assert(isa<CallExpr>(lastParent) &&
+             "Expected top of string interpolation to be CalExpr");
+      assert(isa<ParenExpr>(dyn_cast<CallExpr>(lastParent)->getArg()) &&
+             "Expected paren expr in string interpolation call");
+      if (CallExpr *callExpr = dyn_cast<CallExpr>(lastParent)) {
+        if (ParenExpr *body = dyn_cast<ParenExpr>(callExpr->getArg())) {
+          return body->getSubExpr();
+        }
+      }
+    }
+
+    return lastParent;
+  }
+
   void flagInvalidCode() {
     // Suppress warnings about useless try or catch.
     Flags.set(ContextFlags::HasAnyThrowSite);
@@ -2017,6 +2138,7 @@ class CheckEffectsCoverage : public EffectsHandlingWalker<CheckEffectsCoverage> 
     DeclContext *OldReasyncDC;
     ContextFlags OldFlags;
     ConditionalEffectKind OldMaxThrowingKind;
+    SourceLoc OldAwaitLoc;
 
   public:
     ContextScope(CheckEffectsCoverage &self, Optional<Context> newContext)
@@ -2024,7 +2146,8 @@ class CheckEffectsCoverage : public EffectsHandlingWalker<CheckEffectsCoverage> 
         OldRethrowsDC(self.RethrowsDC),
         OldReasyncDC(self.ReasyncDC),
         OldFlags(self.Flags),
-        OldMaxThrowingKind(self.MaxThrowingKind) {
+        OldMaxThrowingKind(self.MaxThrowingKind),
+        OldAwaitLoc(self.CurContext.awaitLoc) {
       if (newContext) self.CurContext = *newContext;
     }
 
@@ -2042,9 +2165,10 @@ class CheckEffectsCoverage : public EffectsHandlingWalker<CheckEffectsCoverage> 
       Self.Flags.clear(ContextFlags::HasTryThrowSite);
     }
 
-    void enterAwait() {
+    void enterAwait(SourceLoc awaitLoc) {
       Self.Flags.set(ContextFlags::IsAsyncCovered);
       Self.Flags.clear(ContextFlags::HasAnyAsyncSite);
+      Self.CurContext.awaitLoc = awaitLoc;
     }
 
     void enterAsyncLet() {
@@ -2141,6 +2265,7 @@ class CheckEffectsCoverage : public EffectsHandlingWalker<CheckEffectsCoverage> 
       Self.ReasyncDC = OldReasyncDC;
       Self.Flags = OldFlags;
       Self.MaxThrowingKind = OldMaxThrowingKind;
+      Self.CurContext.awaitLoc = OldAwaitLoc;
     }
   };
 
@@ -2159,6 +2284,13 @@ public:
     }
   }
 
+  ~CheckEffectsCoverage() {
+    for (Expr *anchor: errorOrder) {
+      diagnoseUncoveredAsyncSite(anchor);
+    }
+  }
+
+
   /// Mark that the current context is top-level code with
   /// throw-without-try enabled.
   void setTopLevelThrowWithoutTry() {
@@ -2176,6 +2308,12 @@ public:
   }
 
 private:
+  void visitExprPre(Expr *expr) {
+    if (parentMap.count(expr) == 0)
+      parentMap = expr->getParentMap();
+    return;
+  }
+
   ShouldRecurse_t checkClosure(ClosureExpr *E) {
     ContextScope scope(*this, Context::forClosure(E));
     scope.enterSubFunction();
@@ -2295,8 +2433,7 @@ private:
     classifier.ReasyncDC = ReasyncDC;
     auto classification = classifier.classifyApply(E);
 
-    checkThrowAsyncSite(E, /*requiresTry*/ true, classification,
-                        Context::Call);
+    checkThrowAsyncSite(E, /*requiresTry*/ true, classification);
 
     if (!classification.isInvalid()) {
       // HACK: functions can get queued multiple times in
@@ -2321,29 +2458,71 @@ private:
     return !type || type->hasError() ? ShouldNotRecurse : ShouldRecurse;
   }
 
-  ShouldRecurse_t checkLookup(LookupExpr *E) {
-    if (E->isImplicitlyAsync()) {
-      Context::AsyncSiteKind lookupKind = Context::Property;
-      // check the kind of thing we're looking up to give better diagnostics
-      if (auto valueDecl = E->getMember().getDecl())
-        if (isa<SubscriptDecl>(valueDecl))
-          lookupKind = Context::Subscript;
 
+  static EffectList gatherEffects(AbstractFunctionDecl *afd) {
+    EffectList effects;
+    if (afd->hasAsync()) effects.push_back(EffectKind::Async);
+    if (afd->hasThrows()) effects.push_back(EffectKind::Throws);
+    return effects;
+  }
+
+  /// check the kind of property with an effect to give better diagnostics
+  static PotentialEffectReason getKindOfEffectfulProp(ConcreteDeclRef cdr) {
+    if (isa<SubscriptDecl>(cdr.getDecl()))
+      return PotentialEffectReason::forSubscriptAccess();
+
+    assert(isa<VarDecl>(cdr.getDecl()));
+    return PotentialEffectReason::forPropertyAccess();
+  }
+
+  ShouldRecurse_t checkLookup(LookupExpr *E) {
+    auto member = E->getMember();
+    if (auto getter = getEffectfulGetOnlyAccessor(member)) {
+      auto effects = gatherEffects(getter);
+
+      // We might have a situation where the getter is just 'throws', but
+      // this specific Lookup is implicitly async due to actor-isolation.
+      if (E->isImplicitlyAsync()) {
+        assert(!getter->hasAsync()
+                   && "an explicitly async decl accessed implicitly-async?");
+        effects.push_back(EffectKind::Async);
+      }
+
+      checkThrowAsyncSite(E, getter->hasThrows(),
+                          Classification::forEffect(effects,
+                                  ConditionalEffectKind::Always,
+                                  getKindOfEffectfulProp(member)));
+
+    } else if (E->isImplicitlyAsync()) {
       checkThrowAsyncSite(E, /*requiresTry=*/false,
             Classification::forUnconditional(EffectKind::Async,
-                                             PotentialEffectReason::forApply()),
-                          lookupKind);
+                                             getKindOfEffectfulProp(member)));
     }
 
     return ShouldRecurse;
   }
 
   ShouldRecurse_t checkDeclRef(DeclRefExpr *E) {
-    if (E->isImplicitlyAsync()) {
+    if (auto getter = getEffectfulGetOnlyAccessor(E->getDeclRef())) {
+      auto effects = gatherEffects(getter);
+
+      // We might have a situation where the getter is just 'throws', but
+      // this specific DeclRef is implicitly async due to actor-isolation.
+      if (E->isImplicitlyAsync()) {
+        assert(!getter->hasAsync()
+                && "an explicitly async decl accessed implicitly-async?");
+        effects.push_back(EffectKind::Async);
+      }
+
+      checkThrowAsyncSite(E, getter->hasThrows(),
+                          Classification::forEffect(effects,
+                                  ConditionalEffectKind::Always,
+                                  PotentialEffectReason::forPropertyAccess()));
+
+    } else if (E->isImplicitlyAsync()) {
       checkThrowAsyncSite(E, /*requiresTry=*/false,
             Classification::forUnconditional(EffectKind::Async,
-                                             PotentialEffectReason::forApply()),
-                          Context::Property);
+                                   PotentialEffectReason::forPropertyAccess()));
 
     } else if (auto decl = E->getDecl()) {
       if (auto var = dyn_cast<VarDecl>(decl)) {
@@ -2363,14 +2542,14 @@ private:
 
           auto result = Classification::forUnconditional(
                        EffectKind::Async,
-                       PotentialEffectReason::forApply());
+                       PotentialEffectReason::forAsyncLet());
           if (throws) {
             result.merge(Classification::forUnconditional(
                            EffectKind::Throws,
-                           PotentialEffectReason::forThrowingAsyncLet()));
+                           PotentialEffectReason::forAsyncLet()));
           }
-          checkThrowAsyncSite(E, /*requiresTry=*/throws, result,
-                              Context::AsyncLet);
+          checkThrowAsyncSite(E, /*requiresTry=*/throws, result);
+
         }
       }
     }
@@ -2382,7 +2561,7 @@ private:
     // Diagnose async let in a context that doesn't handle async.
     if (!CurContext.handlesAsync(ConditionalEffectKind::Always)) {
       CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, patternBinding,
-                                            Context::AsyncLet);
+                                          PotentialEffectReason::forAsyncLet());
     }
 
     return ShouldRecurse;
@@ -2439,14 +2618,12 @@ private:
     return ShouldRecurse;
   }
 
-  /// providing a \c kind helps tailor any possible diagnostic messages
-  /// related to async-ness
   void checkThrowAsyncSite(ASTNode E, bool requiresTry,
-                           const Classification &classification,
-                           Context::AsyncSiteKind kind) {
-    // Suppress all diagnostics when there's an un-analyzable throw site.
+                           const Classification &classification) {
+    // Suppress all diagnostics when there's an un-analyzable throw/async site.
     if (classification.isInvalid()) {
       Flags.set(ContextFlags::HasAnyThrowSite);
+      Flags.set(ContextFlags::HasAnyAsyncSite);
       if (requiresTry) Flags.set(ContextFlags::HasTryThrowSite);
       return;
     }
@@ -2466,11 +2643,23 @@ private:
 
       // Diagnose async calls in a context that doesn't handle async.
       if (!CurContext.handlesAsync(asyncKind)) {
-        CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, E, kind);
+        CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, E,
+                                              classification.getAsyncReason());
       }
       // Diagnose async calls that are outside of an await context.
       else if (!Flags.has(ContextFlags::IsAsyncCovered)) {
-        CurContext.diagnoseUncoveredAsyncSite(Ctx, E, kind);
+        Expr *expr = E.dyn_cast<Expr*>();
+        Expr *anchor = walkToAnchor(expr, parentMap,
+                                    CurContext.isWithinInterpolatedString());
+
+        auto key = uncoveredAsync.find(anchor);
+        if (key == uncoveredAsync.end()) {
+          uncoveredAsync.insert({anchor, {}});
+          errorOrder.push_back(anchor);
+        }
+        uncoveredAsync[anchor].emplace_back(
+            *expr,
+            classification.getAsyncReason());
       }
     }
 
@@ -2509,12 +2698,13 @@ private:
       break;
     }
   }
+
   ShouldRecurse_t checkAwait(AwaitExpr *E) {
 
     // Walk the operand.
     ContextScope scope(*this, None);
-    scope.enterAwait();
-    
+    scope.enterAwait(E->getAwaitLoc());
+
     E->getSubExpr()->walk(*this);
 
     // Warn about 'await' expressions that weren't actually needed, unless of
@@ -2524,9 +2714,10 @@ private:
       if (CurContext.handlesAsync(ConditionalEffectKind::Conditional))
         Ctx.Diags.diagnose(E->getAwaitLoc(), diag::no_async_in_await);
       else
-        CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, E, Context::Await);
+        CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, E, None,
+                                              /*forAwait=*/ true);
     }
-    
+
     // Inform the parent of the walk that an 'await' exists here.
     scope.preserveCoverageFromAwaitOperand();
     return ShouldNotRecurse;
@@ -2590,25 +2781,114 @@ private:
     if (!S->getAwaitLoc().isValid())
       return ShouldRecurse;
 
+    // A 'for await' is always async. There's no effect polymorphism
+    // via the conformance in a 'reasync' function body.
+    Flags.set(ContextFlags::HasAnyAsyncSite);
+
+    if (!CurContext.handlesAsync(ConditionalEffectKind::Always))
+      CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, S, None);
+
     ApplyClassifier classifier;
     classifier.RethrowsDC = RethrowsDC;
     classifier.ReasyncDC = ReasyncDC;
 
+    // A 'for try await' might be effect polymorphic via the conformance
+    // in a 'rethrows' function body.
     if (S->getTryLoc().isValid()) {
       auto classification = classifier.classifyConformance(
           S->getSequenceConformance(), EffectKind::Throws);
       auto throwsKind = classification.getConditionalKind(EffectKind::Throws);
+
+      if (throwsKind != ConditionalEffectKind::None)
+        Flags.set(ContextFlags::HasAnyThrowSite);
+
       if (!CurContext.handlesThrows(throwsKind))
         CurContext.diagnoseUnhandledThrowStmt(Ctx.Diags, S);
     }
 
-    auto classification = classifier.classifyConformance(
-        S->getSequenceConformance(), EffectKind::Async);
-    auto asyncKind = classification.getConditionalKind(EffectKind::Async);
-    if (!CurContext.handlesAsync(asyncKind))
-      CurContext.diagnoseUnhandledAsyncSite(Ctx.Diags, S, Context::Unspecified);
-
     return ShouldRecurse;
+  }
+
+  void diagnoseUncoveredAsyncSite(const Expr *anchor) const {
+    auto asyncPointIter = uncoveredAsync.find(anchor);
+    if (asyncPointIter == uncoveredAsync.end())
+      return;
+    const std::vector<DiagnosticInfo> &errors = asyncPointIter->getSecond();
+    SourceLoc awaitInsertLoc = anchor->getStartLoc();
+    if (const AnyTryExpr *tryExpr = dyn_cast<AnyTryExpr>(anchor))
+      awaitInsertLoc = tryExpr->getSubExpr()->getStartLoc();
+    else if (const AutoClosureExpr *autoClosure = dyn_cast<AutoClosureExpr>(anchor)) {
+      if (const AnyTryExpr *tryExpr = dyn_cast<AnyTryExpr>(autoClosure->getSingleExpressionBody()))
+        awaitInsertLoc = tryExpr->getSubExpr()->getStartLoc();
+    }
+
+    Ctx.Diags.diagnose(anchor->getStartLoc(), diag::async_expr_without_await)
+      .fixItInsert(awaitInsertLoc, "await ")
+      .highlight(anchor->getSourceRange());
+
+    for (const DiagnosticInfo &diag: errors) {
+      switch (diag.reason.getKind()) {
+        case PotentialEffectReason::Kind::AsyncLet:
+          if (auto declR = dyn_cast<DeclRefExpr>(&diag.expr)) {
+            if (auto var = dyn_cast<VarDecl>(declR->getDecl())) {
+              if (var->isAsyncLet()) {
+                Ctx.Diags.diagnose(declR->getLoc(),
+                                   diag::async_let_without_await,
+                                   var->getName());
+                continue;
+              }
+            }
+          }
+          LLVM_FALLTHROUGH; // fallthrough to a message about PropertyAccess
+        case PotentialEffectReason::Kind::PropertyAccess:
+          Ctx.Diags.diagnose(diag.expr.getStartLoc(),
+                             diag::async_access_without_await, 1);
+          continue;
+
+        case PotentialEffectReason::Kind::SubscriptAccess:
+          Ctx.Diags.diagnose(diag.expr.getStartLoc(),
+                             diag::async_access_without_await, 2);
+          continue;
+
+        case PotentialEffectReason::Kind::ByClosure:
+        case PotentialEffectReason::Kind::ByDefaultClosure:
+        case PotentialEffectReason::Kind::ByConformance:
+        case PotentialEffectReason::Kind::Apply: {
+         if (auto autoclosure = dyn_cast<AutoClosureExpr>(anchor)) {
+           switch(autoclosure->getThunkKind()) {
+             case AutoClosureExpr::Kind::None:
+               Ctx.Diags.diagnose(diag.expr.getStartLoc(),
+                                  diag::async_call_without_await_in_autoclosure);
+               break;
+             case AutoClosureExpr::Kind::AsyncLet:
+               Ctx.Diags.diagnose(diag.expr.getStartLoc(),
+                                  diag::async_call_without_await_in_async_let);
+               break;
+             case AutoClosureExpr::Kind::SingleCurryThunk:
+             case AutoClosureExpr::Kind::DoubleCurryThunk:
+               Ctx.Diags.diagnose(diag.expr.getStartLoc(),
+                                  diag::async_access_without_await, 0);
+               break;
+           }
+          continue;
+         }
+
+         auto *call = dyn_cast<ApplyExpr>(&diag.expr);
+         if (call && call->implicitlyAsync()) {
+           // Emit a tailored note if the call is implicitly async, meaning the
+           // callee is isolated to an actor.
+           auto callee = call->getCalledValue();
+           Ctx.Diags.diagnose(diag.expr.getStartLoc(), diag::actor_isolated_sync_func,
+                              callee->getDescriptiveKind(), callee->getName());
+         } else {
+           Ctx.Diags.diagnose(diag.expr.getStartLoc(),
+                              diag::async_access_without_await, 0);
+         }
+
+         continue;
+        }
+      }
+    }
   }
 };
 

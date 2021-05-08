@@ -26,6 +26,7 @@
 // REQUIRES: executable_test
 // REQUIRES: concurrency
 // UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
 
 import StdlibUnittest
 #if _runtime(_ObjC)
@@ -342,7 +343,7 @@ CastsTests.test("Dynamic cast to ObjC protocol") {
 #endif
 
 // SR-6126
-if #available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *) {
+if #available(macOS 11.3, iOS 14.5, tvOS 14.5, watchOS 7.4, *) {
 CastsTests.test("Nil handling for Optionals and Arrays (SR-6126)") {
   func check(_ arg: Int??) -> String {
     switch arg {
@@ -621,6 +622,7 @@ CastsTests.test("NSNull?.none -> Any? should set outer nil") {
 }
 #endif
 
+if #available(macOS 11.3, iOS 14.5, tvOS 14.5, watchOS 7.4, *) {
 CastsTests.test("Int??.some(nil) => Int??? should inject naturally") {
   let a: Int?? = .some(nil)
   let b = a as? Int???
@@ -629,7 +631,9 @@ CastsTests.test("Int??.some(nil) => Int??? should inject naturally") {
   let e = d!
   expectNil(e)
 }
+}
 
+if #available(macOS 11.3, iOS 14.5, tvOS 14.5, watchOS 7.4, *) {
 CastsTests.test("Int??.some(nil) => String??? should inject naturally") {
   let a: Int?? = .some(nil)
   let b = runtimeCast(a, to: String???.self)
@@ -638,7 +642,9 @@ CastsTests.test("Int??.some(nil) => String??? should inject naturally") {
   let e = d!
   expectNil(e)
 }
+}
 
+if #available(macOS 11.3, iOS 14.5, tvOS 14.5, watchOS 7.4, *) {
 CastsTests.test("Int??.some(nil) => Any??? should inject naturally") {
   let a: Int?? = .some(nil)
   let b = a as? Any???
@@ -646,6 +652,7 @@ CastsTests.test("Int??.some(nil) => Any??? should inject naturally") {
   let d = c!
   let e = d!
   expectNil(e)
+}
 }
 
 #if _runtime(_ObjC)
@@ -922,6 +929,29 @@ CastsTests.test("Optional cast to AnyHashable") {
   // xh is AnyHashable("Baz")
   // yh is AnyHashable(Optional("Baz"))
   expectNotEqual(xh, yh)
+}
+
+// Repeatedly casting to AnyHashable should still test equal.
+// (This was broken for a while because repeatedly casting to
+// AnyHashable could end up with multiple nested AnyHashables.)
+// rdar://75180619
+CastsTests.test("Recursive AnyHashable") {
+  struct P: Hashable {
+    var x: Int
+  }
+  struct S {
+    var x: AnyHashable?
+    init<T: Hashable>(_ x: T?) {
+      self.x = x
+    }
+  }
+  let p = P(x: 0)
+  let hp = p as AnyHashable?
+  print(hp.debugDescription)
+  let s = S(hp)
+  print(s.x.debugDescription)
+  expectEqual(s.x, hp)
+  expectEqual(s.x, p)
 }
 
 runAllTests()

@@ -4,6 +4,11 @@
 // REQUIRES: concurrency
 // REQUIRES: libdispatch
 
+// rdar://76038845
+// UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
+
+@available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *)
 actor Counter {
   private var value = 0
   private let scratchBuffer: UnsafeMutableBufferPointer<Int>
@@ -26,6 +31,7 @@ actor Counter {
 }
 
 
+@available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *)
 func worker(identity: Int, counters: [Counter], numIterations: Int) async {
   for i in 0..<numIterations {
     let counterIndex = Int.random(in: 0 ..< counters.count)
@@ -35,6 +41,7 @@ func worker(identity: Int, counters: [Counter], numIterations: Int) async {
   }
 }
 
+@available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *)
 func runTest(numCounters: Int, numWorkers: Int, numIterations: Int) async {
   // Create counter actors.
   var counters: [Counter] = []
@@ -46,7 +53,7 @@ func runTest(numCounters: Int, numWorkers: Int, numIterations: Int) async {
   var workers: [Task.Handle<Void, Error>] = []
   for i in 0..<numWorkers {
     workers.append(
-      Task.runDetached { [counters] in
+      detach { [counters] in
         await Task.sleep(UInt64.random(in: 0..<100) * 1_000_000)
         await worker(identity: i, counters: counters, numIterations: numIterations)
       }
@@ -61,8 +68,15 @@ func runTest(numCounters: Int, numWorkers: Int, numIterations: Int) async {
   print("DONE!")
 }
 
+@available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *)
 @main struct Main {
   static func main() async {
-    await runTest(numCounters: 10, numWorkers: 100, numIterations: 1000)
+    // Useful for debugging: specify counter/worker/iteration counts
+    let args = CommandLine.arguments
+    let counters = args.count >= 2 ? Int(args[1])! : 10
+    let workers = args.count >= 3 ? Int(args[2])! : 100
+    let iterations = args.count >= 4 ? Int(args[3])! : 1000
+    print("counters: \(counters), workers: \(workers), iterations: \(iterations)")
+    await runTest(numCounters: counters, numWorkers: workers, numIterations: iterations)
   }
 }

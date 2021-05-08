@@ -40,14 +40,13 @@ using namespace Lowering;
 SILGenFunction::SILGenFunction(SILGenModule &SGM, SILFunction &F,
                                DeclContext *DC)
     : SGM(SGM), F(F), silConv(SGM.M), FunctionDC(DC),
-      StartOfPostmatter(F.end()), B(*this), OpenedArchetypesTracker(&F),
+      StartOfPostmatter(F.end()), B(*this),
       CurrentSILLoc(F.getLocation()), Cleanups(*this),
       StatsTracer(SGM.M.getASTContext().Stats,
                   "SILGen-function", &F) {
   assert(DC && "creating SGF without a DeclContext?");
   B.setInsertionPoint(createBasicBlock());
   B.setCurrentDebugScope(F.getDebugScope());
-  B.setOpenedArchetypesTracker(&OpenedArchetypesTracker);
 }
 
 /// SILGenFunction destructor - called after the entire function's AST has been
@@ -245,22 +244,16 @@ void SILGenFunction::emitCaptures(SILLocation loc,
       auto &Diags = getASTContext().Diags;
 
       SourceLoc loc;
-      bool isDeferBody;
       if (closure.kind == SILDeclRef::Kind::DefaultArgGenerator) {
         auto *param = getParameterAt(closure.getDecl(),
                                      closure.defaultArgIndex);
         loc = param->getLoc();
-        isDeferBody = false;
       } else {
         auto f = *closure.getAnyFunctionRef();
         loc = f.getLoc();
-        isDeferBody = f.isDeferBody();
       }
 
-      Diags.diagnose(loc,
-                     isDeferBody
-                     ? diag::capture_before_declaration_defer
-                     : diag::capture_before_declaration,
+      Diags.diagnose(loc, diag::capture_before_declaration,
                      vd->getBaseIdentifier());
       Diags.diagnose(vd->getLoc(), diag::captured_value_declared_here);
       Diags.diagnose(capture.getLoc(), diag::value_captured_here);
@@ -518,17 +511,29 @@ void SILGenFunction::emitFunction(FuncDecl *fd) {
   emitProlog(captureInfo, fd->getParameters(), fd->getImplicitSelfDecl(), fd,
              fd->getResultInterfaceType(), fd->hasThrows(), fd->getThrowsLoc());
   prepareEpilog(true, fd->hasThrows(), CleanupLocation(fd));
-  for (auto *param : *fd->getParameters()) {
-    param->visitAuxiliaryDecls([&](VarDecl *auxiliaryVar) {
-      visit(auxiliaryVar);
-    });
-  }
 
   if (fd->isAsyncHandler() &&
       // If F.isAsync() we are emitting the asyncHandler body and not the
       // original asyncHandler.
       !F.isAsync()) {
     emitAsyncHandler(fd);
+  } else if (llvm::any_of(*fd->getParameters(),
+                          [](ParamDecl *p){ return p->hasAttachedPropertyWrapper(); })) {
+    // If any parameters have property wrappers, emit the local auxiliary
+    // variables before emitting the function body.
+    LexicalScope BraceScope(*this, CleanupLocation(fd));
+    for (auto *param : *fd->getParameters()) {
+      param->visitAuxiliaryDecls([&](VarDecl *auxiliaryVar) {
+        SILLocation WrapperLoc(auxiliaryVar);
+        WrapperLoc.markAsPrologue();
+        if (auto *patternBinding = auxiliaryVar->getParentPatternBinding())
+          visitPatternBindingDecl(patternBinding);
+
+        visit(auxiliaryVar);
+      });
+    }
+
+    emitStmt(fd->getTypecheckedBody());
   } else {
     emitStmt(fd->getTypecheckedBody());
   }
@@ -914,7 +919,8 @@ void SILGenFunction::emitGeneratorFunction(SILDeclRef function, Expr *value,
     if (function.kind == SILDeclRef::Kind::PropertyWrapperBackingInitializer) {
       param->setInterfaceType(vd->getPropertyWrapperInitValueInterfaceType());
     } else {
-      auto *placeholder = vd->getPropertyWrapperBackingPropertyInfo().getProjectedValuePlaceholder();
+      auto *placeholder =
+          vd->getPropertyWrapperInitializerInfo().getProjectedValuePlaceholder();
       auto interfaceType = placeholder->getType();
       if (interfaceType->hasArchetype())
         interfaceType = interfaceType->mapTypeOutOfContext();
@@ -940,24 +946,24 @@ void SILGenFunction::emitGeneratorFunction(SILDeclRef function, Expr *value,
     // in the initializer expression to the given parameter.
     if (function.kind == SILDeclRef::Kind::PropertyWrapperBackingInitializer) {
       auto var = cast<VarDecl>(function.getDecl());
-      auto wrappedInfo = var->getPropertyWrapperBackingPropertyInfo();
+      auto initInfo = var->getPropertyWrapperInitializerInfo();
       auto param = params->get(0);
-      auto *placeholder = wrappedInfo.getWrappedValuePlaceholder();
+      auto *placeholder = initInfo.getWrappedValuePlaceholder();
       opaqueValue.emplace(
           *this, placeholder->getOpaqueValuePlaceholder(),
           maybeEmitValueOfLocalVarDecl(param, AccessKind::Read));
 
-      assert(value == wrappedInfo.getInitFromWrappedValue());
+      assert(value == initInfo.getInitFromWrappedValue());
     } else if (function.kind == SILDeclRef::Kind::PropertyWrapperInitFromProjectedValue) {
       auto var = cast<VarDecl>(function.getDecl());
-      auto wrappedInfo = var->getPropertyWrapperBackingPropertyInfo();
+      auto initInfo = var->getPropertyWrapperInitializerInfo();
       auto param = params->get(0);
-      auto *placeholder = wrappedInfo.getProjectedValuePlaceholder();
+      auto *placeholder = initInfo.getProjectedValuePlaceholder();
       opaqueValue.emplace(
           *this, placeholder->getOpaqueValuePlaceholder(),
           maybeEmitValueOfLocalVarDecl(param, AccessKind::Read));
 
-      assert(value == wrappedInfo.getInitFromProjectedValue());
+      assert(value == initInfo.getInitFromProjectedValue());
     }
 
     emitReturnExpr(Loc, value);
@@ -991,8 +997,8 @@ void SILGenFunction::emitGeneratorFunction(SILDeclRef function, VarDecl *var) {
     }
   }
 
-  emitProlog(/*paramList*/ nullptr, /*selfParam*/ nullptr, interfaceType, dc,
-             /*throws=*/false, SourceLoc());
+  emitBasicProlog(/*paramList*/ nullptr, /*selfParam*/ nullptr,
+                  interfaceType, dc, /*throws=*/ false,SourceLoc());
   prepareEpilog(true, false, CleanupLocation(loc));
 
   auto pbd = var->getParentPatternBinding();

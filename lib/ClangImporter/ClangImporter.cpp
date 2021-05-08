@@ -15,7 +15,6 @@
 //===----------------------------------------------------------------------===//
 #include "swift/ClangImporter/ClangImporter.h"
 #include "ClangDiagnosticConsumer.h"
-#include "IAMInference.h"
 #include "ImporterImpl.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ClangModuleLoader.h"
@@ -66,6 +65,8 @@
 #include "llvm/Support/FileCollector.h"
 #include "llvm/Support/Memory.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/YAMLTraits.h"
+#include "llvm/Support/YAMLParser.h"
 #include <algorithm>
 #include <memory>
 
@@ -636,6 +637,7 @@ importer::getNormalInvocationArguments(
         invocationArgStrs.insert(invocationArgStrs.end(), {"-D_ARM_"});
         break;
       case llvm::Triple::aarch64:
+      case llvm::Triple::aarch64_32:
         invocationArgStrs.insert(invocationArgStrs.end(), {"-D_ARM64_"});
         break;
       case llvm::Triple::x86:
@@ -766,6 +768,7 @@ importer::addCommonInvocationArguments(
              (triple.isiOS() || triple.isWatchOS()))
       invocationArgStrs.push_back("-mcpu=apple-a12");
     else if (triple.getArch() == llvm::Triple::aarch64 ||
+             triple.getArch() == llvm::Triple::aarch64_32 ||
              triple.getArch() == llvm::Triple::aarch64_be) {
       invocationArgStrs.push_back("-mcpu=apple-a7");
     }
@@ -992,8 +995,38 @@ ClangImporter::createClangInvocation(ClangImporter *importer,
                                                  &tempDiagClient,
                                                  /*owned*/false);
 
-  return clang::createInvocationFromCommandLine(invocationArgs, tempClangDiags,
-                                                nullptr, false, CC1Args);
+  auto CI = clang::createInvocationFromCommandLine(
+      invocationArgs, tempClangDiags, nullptr, false, CC1Args);
+
+  if (!CI) {
+    return CI;
+  }
+
+  // FIXME: clang fails to generate a module if there is a `-fmodule-map-file`
+  // argument pointing to a missing file.
+  // Such missing module files occur frequently in SourceKit. If the files are
+  // missing, SourceKit fails to build SwiftShims (which wouldn't have required
+  // the missing module file), thus fails to load the stdlib and hence looses
+  // all semantic functionality.
+  // To work around this issue, drop all `-fmodule-map-file` arguments pointing
+  // to missing files and report the error that clang would throw manually.
+  // rdar://77516546 is tracking that the clang importer should be more
+  // resilient and provide a module even if there were building it.
+  auto VFS = clang::createVFSFromCompilerInvocation(
+      *CI, *tempClangDiags,
+      importer->Impl.SwiftContext.SourceMgr.getFileSystem());
+  std::vector<std::string> FilteredModuleMapFiles;
+  for (auto ModuleMapFile : CI->getFrontendOpts().ModuleMapFiles) {
+    if (VFS->exists(ModuleMapFile)) {
+      FilteredModuleMapFiles.push_back(ModuleMapFile);
+    } else {
+      importer->Impl.diagnose(SourceLoc(), diag::module_map_not_found,
+                              ModuleMapFile);
+    }
+  }
+  CI->getFrontendOpts().ModuleMapFiles = FilteredModuleMapFiles;
+
+  return CI;
 }
 
 std::unique_ptr<ClangImporter>
@@ -1055,8 +1088,7 @@ ClangImporter::create(ASTContext &ctx,
           importer->Impl.BridgingHeaderLookupTable,
           importer->Impl.LookupTables, importer->Impl.SwiftContext,
           importer->Impl.getBufferImporterForDiagnostics(),
-          importer->Impl.platformAvailability,
-          importer->Impl.InferImportAsMember));
+          importer->Impl.platformAvailability));
 
   // Create a compiler instance.
   {
@@ -1172,7 +1204,7 @@ ClangImporter::create(ASTContext &ctx,
 
   importer->Impl.nameImporter.reset(new NameImporter(
       importer->Impl.SwiftContext, importer->Impl.platformAvailability,
-      importer->Impl.getClangSema(), importer->Impl.InferImportAsMember));
+      importer->Impl.getClangSema()));
 
   // FIXME: These decls are not being parsed correctly since (a) some of the
   // callbacks are still being added, and (b) the logic to parse them has
@@ -1366,7 +1398,7 @@ bool ClangImporter::Implementation::importHeader(
   // to correct. The fix would be explicitly importing on the command line.
   if (implicitImport && !allParsedDecls.empty() &&
     BridgingHeaderExplicitlyRequested) {
-    SwiftContext.Diags.diagnose(
+    diagnose(
       diagLoc, diag::implicit_bridging_header_imported_from_module,
       llvm::sys::path::filename(headerName), adapter->getName());
   }
@@ -1401,8 +1433,7 @@ bool ClangImporter::Implementation::importHeader(
 
   // FIXME: What do we do if there was already an error?
   if (!hadError && clangDiags.hasErrorOccurred()) {
-    SwiftContext.Diags.diagnose(diagLoc, diag::bridging_header_error,
-                                headerName);
+    diagnose(diagLoc, diag::bridging_header_error, headerName);
     return true;
   }
 
@@ -1450,8 +1481,7 @@ bool ClangImporter::importBridgingHeader(StringRef header, ModuleDecl *adapter,
   clang::FileManager &fileManager = Impl.Instance->getFileManager();
   auto headerFile = fileManager.getFile(header, /*OpenFile=*/true);
   if (!headerFile) {
-    Impl.SwiftContext.Diags.diagnose(diagLoc, diag::bridging_header_missing,
-                                     header);
+    Impl.diagnose(diagLoc, diag::bridging_header_missing, header);
     return true;
   }
 
@@ -1519,8 +1549,7 @@ std::string ClangImporter::getBridgingHeaderContents(StringRef headerPath,
 
   success |= !rewriteInstance.getDiagnostics().hasErrorOccurred();
   if (!success) {
-    Impl.SwiftContext.Diags.diagnose({},
-                                     diag::could_not_rewrite_bridging_header);
+    Impl.diagnose({}, diag::could_not_rewrite_bridging_header);
     return "";
   }
 
@@ -1607,9 +1636,8 @@ ClangImporter::emitBridgingPCH(StringRef headerPath,
   emitInstance->ExecuteAction(*action);
 
   if (emitInstance->getDiagnostics().hasErrorOccurred()) {
-    Impl.SwiftContext.Diags.diagnose({},
-                                     diag::bridging_header_pch_error,
-                                     outputPCHPath, headerPath);
+    Impl.diagnose({}, diag::bridging_header_pch_error,
+                  outputPCHPath, headerPath);
     return true;
   }
   return false;
@@ -1668,9 +1696,7 @@ bool ClangImporter::emitPrecompiledModule(StringRef moduleMapPath,
   emitInstance->ExecuteAction(*action);
 
   if (emitInstance->getDiagnostics().hasErrorOccurred()) {
-    Impl.SwiftContext.Diags.diagnose({},
-                                     diag::emit_pcm_error,
-                                     outputPath, moduleMapPath);
+    Impl.diagnose({}, diag::emit_pcm_error, outputPath, moduleMapPath);
     return true;
   }
   return false;
@@ -1693,7 +1719,7 @@ bool ClangImporter::dumpPrecompiledModule(StringRef modulePath,
   dumpInstance->ExecuteAction(*action);
 
   if (dumpInstance->getDiagnostics().hasErrorOccurred()) {
-    Impl.SwiftContext.Diags.diagnose({}, diag::dump_pcm_error, modulePath);
+    Impl.diagnose({}, diag::dump_pcm_error, modulePath);
     return true;
   }
   return false;
@@ -1737,7 +1763,14 @@ bool ClangImporter::isModuleImported(const clang::Module *M) {
   return M->NameVisibility == clang::Module::NameVisibilityKind::AllVisible;
 }
 
-bool ClangImporter::canImportModule(ImportPath::Element moduleID) {
+static std::string getScalaNodeText(llvm::yaml::Node *N) {
+  SmallString<32> Buffer;
+  return cast<llvm::yaml::ScalarNode>(N)->getValue(Buffer).str();
+}
+
+bool ClangImporter::canImportModule(ImportPath::Element moduleID,
+                                    llvm::VersionTuple version,
+                                    bool underlyingVersion) {
   // Look up the top-level module to see if it exists.
   // FIXME: This only works with top-level modules.
   auto &clangHeaderSearch = Impl.getClangPreprocessor().getHeaderSearchInfo();
@@ -1752,7 +1785,66 @@ bool ClangImporter::canImportModule(ImportPath::Element moduleID) {
   clang::Module::UnresolvedHeaderDirective mh;
   clang::Module *m;
   auto &ctx = Impl.getClangASTContext();
-  return clangModule->isAvailable(ctx.getLangOpts(), getTargetInfo(), r, mh, m);
+  auto available = clangModule->isAvailable(ctx.getLangOpts(), getTargetInfo(),
+                                            r, mh, m);
+  if (!available)
+    return false;
+  if (version.empty())
+    return true;
+  assert(available);
+  assert(!version.empty());
+  llvm::VersionTuple currentVersion;
+  StringRef path = getClangASTContext().getSourceManager()
+    .getFilename(clangModule->DefinitionLoc);
+  // Look for the .tbd file inside .framework dir to get the project version
+  // number.
+  std::string fwName = (llvm::Twine(moduleID.Item.str()) + ".framework").str();
+  auto pos = path.find(fwName);
+  while (pos != StringRef::npos) {
+    llvm::SmallString<256> buffer(path.substr(0, pos + fwName.size()));
+    llvm::sys::path::append(buffer, llvm::Twine(moduleID.Item.str()) + ".tbd");
+    auto tbdPath = buffer.str();
+    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> tbdBufOrErr =
+      llvm::MemoryBuffer::getFile(tbdPath);
+    // .tbd file doesn't exist, break.
+    if (!tbdBufOrErr) {
+      break;
+    }
+    StringRef tbdBuffer = tbdBufOrErr->get()->getBuffer();
+
+    // Use a new source manager instead of the one from ASTContext because we
+    // don't want the Json file to be persistent.
+    SourceManager SM;
+    llvm::yaml::Stream Stream(llvm::MemoryBufferRef(tbdBuffer, tbdPath),
+                              SM.getLLVMSourceMgr());
+    auto DI = Stream.begin();
+    assert(DI != Stream.end() && "Failed to read a document");
+    llvm::yaml::Node *N = DI->getRoot();
+    assert(N && "Failed to find a root");
+    auto *pairs = dyn_cast_or_null<llvm::yaml::MappingNode>(N);
+    if (!pairs)
+      break;
+    for (auto &keyValue: *pairs) {
+      auto key = getScalaNodeText(keyValue.getKey());
+      // Look for field "current-version" in the .tbd file.
+      if (key == "current-version") {
+        auto ver = getScalaNodeText(keyValue.getValue());
+        currentVersion.tryParse(ver);
+        break;
+      }
+    }
+    break;
+  }
+  // Diagnose unable to checking the current version.
+  if (currentVersion.empty()) {
+    Impl.diagnose(moduleID.Loc, diag::cannot_find_project_version, "Clang",
+                  moduleID.Item.str());
+    return true;
+  }
+  assert(!currentVersion.empty());
+  // Give a green light if the version on disk is greater or equal to the version
+  // specified in the canImport condition.
+  return currentVersion >= version;
 }
 
 ModuleDecl *ClangImporter::Implementation::loadModuleClang(
@@ -2089,7 +2181,6 @@ ClangImporter::Implementation::Implementation(
     DWARFImporterDelegate *dwarfImporterDelegate)
     : SwiftContext(ctx),
       ImportForwardDeclarations(ctx.ClangImporterOpts.ImportForwardDeclarations),
-      InferImportAsMember(ctx.ClangImporterOpts.InferImportAsMember),
       DisableSwiftBridgeAttr(ctx.ClangImporterOpts.DisableSwiftBridgeAttr),
       BridgingHeaderExplicitlyRequested(!ctx.ClangImporterOpts.BridgingHeader.empty()),
       DisableOverlayModules(ctx.ClangImporterOpts.DisableOverlayModules),
@@ -2741,36 +2832,41 @@ void ClangImporter::lookupTypeDecl(
   clang::DeclarationName clangName(
       &Impl.Instance->getASTContext().Idents.get(rawName));
 
-  clang::Sema::LookupNameKind lookupKind;
+  SmallVector<clang::Sema::LookupNameKind, 1> lookupKinds;
   switch (kind) {
   case ClangTypeKind::Typedef:
-    lookupKind = clang::Sema::LookupOrdinaryName;
+    lookupKinds.push_back(clang::Sema::LookupOrdinaryName);
     break;
   case ClangTypeKind::Tag:
-    lookupKind = clang::Sema::LookupTagName;
+    lookupKinds.push_back(clang::Sema::LookupTagName);
+    lookupKinds.push_back(clang::Sema::LookupNamespaceName);
     break;
   case ClangTypeKind::ObjCProtocol:
-    lookupKind = clang::Sema::LookupObjCProtocolName;
+    lookupKinds.push_back(clang::Sema::LookupObjCProtocolName);
     break;
   }
 
   // Perform name lookup into the global scope.
   auto &sema = Impl.Instance->getSema();
-  clang::LookupResult lookupResult(sema, clangName, clang::SourceLocation(),
-                                   lookupKind);
   bool foundViaClang = false;
-  if (!Impl.DisableSourceImport &&
-      sema.LookupName(lookupResult, /*Scope=*/nullptr)) {
-    for (auto clangDecl : lookupResult) {
-      if (!isa<clang::TypeDecl>(clangDecl) &&
-          !isa<clang::ObjCContainerDecl>(clangDecl) &&
-          !isa<clang::ObjCCompatibleAliasDecl>(clangDecl)) {
-        continue;
-      }
-      auto *imported = Impl.importDecl(clangDecl, Impl.CurrentVersion);
-      if (auto *importedType = dyn_cast_or_null<TypeDecl>(imported)) {
-        foundViaClang = true;
-        receiver(importedType);
+
+  for (auto lookupKind : lookupKinds) {
+    clang::LookupResult lookupResult(sema, clangName, clang::SourceLocation(),
+                                     lookupKind);
+    if (!Impl.DisableSourceImport &&
+        sema.LookupName(lookupResult, /*Scope=*/ sema.TUScope)) {
+      for (auto clangDecl : lookupResult) {
+        if (!isa<clang::TypeDecl>(clangDecl) &&
+            !isa<clang::NamespaceDecl>(clangDecl) &&
+            !isa<clang::ObjCContainerDecl>(clangDecl) &&
+            !isa<clang::ObjCCompatibleAliasDecl>(clangDecl)) {
+          continue;
+        }
+        auto *imported = Impl.importDecl(clangDecl, Impl.CurrentVersion);
+        if (auto *importedType = dyn_cast_or_null<TypeDecl>(imported)) {
+          foundViaClang = true;
+          receiver(importedType);
+        }
       }
     }
   }

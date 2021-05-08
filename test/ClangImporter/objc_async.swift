@@ -1,9 +1,11 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -typecheck -I %S/Inputs/custom-modules -enable-experimental-concurrency %s -verify
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -typecheck -I %S/Inputs/custom-modules -enable-experimental-concurrency -enable-experimental-async-handler %s -verify
 
 // REQUIRES: objc_interop
 // REQUIRES: concurrency
 import Foundation
 import ObjCConcurrency
+
+@MainActor func onlyOnMainActor() { }
 
 func testSlowServer(slowServer: SlowServer) async throws {
   let _: Int = await slowServer.doSomethingSlow("mail")
@@ -27,7 +29,8 @@ func testSlowServer(slowServer: SlowServer) async throws {
 
   // still async version...
   let _: Int = slowServer.doSomethingConflicted("thinking")
-  // expected-error@-1{{call is 'async' but is not marked with 'await'}}{{16-16=await }}
+  // expected-error@-1{{expression is 'async' but is not marked with 'await'}}{{16-16=await }}
+  // expected-note@-2{{call is 'async'}}
 
   let _: String? = try await slowServer.fortune()
   let _: Int = try await slowServer.magicNumber(withSeed: 42)
@@ -49,6 +52,8 @@ func testSlowServer(slowServer: SlowServer) async throws {
 
 
   _ = await slowServer.operations()
+
+  _ = await slowServer.runOnMainThread()
 }
 
 func testSlowServerSynchronous(slowServer: SlowServer) {
@@ -63,6 +68,18 @@ func testSlowServerSynchronous(slowServer: SlowServer) {
 
   let s = slowServer.operations
   _ = s + []
+
+  slowServer.runOnMainThread { s in
+    print(s)
+    onlyOnMainActor() // okay because runOnMainThread has a @MainActor closure
+  }
+
+  slowServer.overridableButRunsOnMainThread { s in
+    print(s)
+    onlyOnMainActor() // okay because parameter has @_unsafeMainActor
+  }
+
+  let _: Int = slowServer.overridableButRunsOnMainThread // expected-error{{cannot convert value of type '(((String) -> Void)?) -> Void' to specified type 'Int'}}
 }
 
 func testSlowServerOldSchool(slowServer: SlowServer) {
@@ -73,11 +90,32 @@ func testSlowServerOldSchool(slowServer: SlowServer) {
   _ = slowServer.allOperations
 }
 
+func testSendable(fn: () -> Void) { // expected-note{{parameter 'fn' is implicitly non-concurrent}}
+  doSomethingConcurrently(fn)
+  // expected-error@-1{{passing non-concurrent parameter 'fn' to function expecting a @Sendable closure}}
+  doSomethingConcurrentlyButUnsafe(fn) // okay, @Sendable not part of the type
+
+  var x = 17
+  doSomethingConcurrently {
+    print(x) // expected-error{{reference to captured var 'x' in concurrently-executing code}}
+    x = x + 1 // expected-error{{mutation of captured var 'x' in concurrently-executing code}}
+    // expected-error@-1{{reference to captured var 'x' in concurrently-executing code}}
+  }
+}
+
+func testSendableInAsync() async {
+  var x = 17
+  doSomethingConcurrentlyButUnsafe {
+    x = 42 // expected-error{{mutation of captured var 'x' in concurrently-executing code}}
+  }
+  print(x)
+}
+
 // Check import of attributes
 func globalAsync() async { }
 
 actor MySubclassCheckingSwiftAttributes : ProtocolWithSwiftAttributes {
-  func syncMethod() { } // expected-note {{calls to instance method 'syncMethod()' from outside of its actor context are implicitly asynchronous}}
+  func syncMethod() { } // expected-note 2{{calls to instance method 'syncMethod()' from outside of its actor context are implicitly asynchronous}}
 
   func independentMethod() {
     syncMethod() // expected-error{{ctor-isolated instance method 'syncMethod()' can not be referenced from a non-isolated context}}
@@ -88,14 +126,14 @@ actor MySubclassCheckingSwiftAttributes : ProtocolWithSwiftAttributes {
   }
 
   func mainActorMethod() {
-    syncMethod()
+    syncMethod() // expected-error{{actor-isolated instance method 'syncMethod()' can not be referenced from synchronous context of global actor 'MainActor'}}
   }
 
   func uiActorMethod() { }
 }
 
-// ConcurrentValue conformance inference for imported types.
-func acceptCV<T: ConcurrentValue>(_: T) { }
+// Sendable conformance inference for imported types.
+func acceptCV<T: Sendable>(_: T) { }
 func testCV(r: NSRange) {
   acceptCV(r)
 }
@@ -115,7 +153,7 @@ class MyButton : NXButton {
   }
 
   @SomeGlobalActor func testOther() {
-    onButtonPress() // expected-error{{instance method 'onButtonPress()' isolated to global actor 'MainActor' can not be referenced from different global actor 'SomeGlobalActor'}}
+    onButtonPress() // expected-error{{call to main actor-isolated instance method 'onButtonPress()' in a synchronous global actor 'SomeGlobalActor'-isolated context}}
   }
 
   func test() {
@@ -125,4 +163,11 @@ class MyButton : NXButton {
 
 func testButtons(mb: MyButton) {
   mb.onButtonPress()
+}
+
+
+func testMirrored(instance: ClassWithAsync) async {
+  await instance.instanceAsync()
+  await instance.protocolMethod()
+  await instance.customAsyncName()
 }

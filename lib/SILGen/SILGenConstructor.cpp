@@ -12,6 +12,7 @@
 
 #include "ArgumentSource.h"
 #include "Conversion.h"
+#include "ExecutorBreadcrumb.h"
 #include "Initialization.h"
 #include "LValue.h"
 #include "RValue.h"
@@ -116,8 +117,8 @@ static RValue maybeEmitPropertyWrapperInitFromValue(
       !originalProperty->isPropertyMemberwiseInitializedWithWrappedType())
     return std::move(arg);
 
-  auto wrapperInfo = originalProperty->getPropertyWrapperBackingPropertyInfo();
-  if (!wrapperInfo || !wrapperInfo.hasInitFromWrappedValue())
+  auto initInfo = originalProperty->getPropertyWrapperInitializerInfo();
+  if (!initInfo.hasInitFromWrappedValue())
     return std::move(arg);
 
   return SGF.emitApplyOfPropertyWrapperBackingInitializer(loc, originalProperty,
@@ -245,8 +246,8 @@ static void emitImplicitValueConstructor(SILGenFunction &SGF,
         // memberwise initialized and has an original wrapped value, apply
         // the property wrapper backing initializer.
         if (auto *wrappedVar = field->getOriginalWrappedProperty()) {
-          auto wrappedInfo = wrappedVar->getPropertyWrapperBackingPropertyInfo();
-          auto *placeholder = wrappedInfo.getWrappedValuePlaceholder();
+          auto initInfo = wrappedVar->getPropertyWrapperInitializerInfo();
+          auto *placeholder = initInfo.getWrappedValuePlaceholder();
           if (placeholder && placeholder->getOriginalWrappedValue()) {
             auto arg = SGF.emitRValue(placeholder->getOriginalWrappedValue());
             maybeEmitPropertyWrapperInitFromValue(SGF, Loc, field, subs,
@@ -290,8 +291,8 @@ static void emitImplicitValueConstructor(SILGenFunction &SGF,
       // If this is a property wrapper backing storage var that isn't
       // memberwise initialized, use the original wrapped value if it exists.
       if (auto *wrappedVar = field->getOriginalWrappedProperty()) {
-        auto wrappedInfo = wrappedVar->getPropertyWrapperBackingPropertyInfo();
-        auto *placeholder = wrappedInfo.getWrappedValuePlaceholder();
+        auto initInfo = wrappedVar->getPropertyWrapperInitializerInfo();
+        auto *placeholder = initInfo.getWrappedValuePlaceholder();
         if (placeholder && placeholder->getOriginalWrappedValue()) {
           init = placeholder->getOriginalWrappedValue();
         }
@@ -350,12 +351,19 @@ void SILGenFunction::emitValueConstructor(ConstructorDecl *ctor) {
   SILValue selfLV = VarLocs[selfDecl].value;
 
   // Emit the prolog.
-  emitProlog(ctor->getParameters(),
-             /*selfParam=*/nullptr,
-             ctor->getResultInterfaceType(), ctor,
-             ctor->hasThrows(),
-             ctor->getThrowsLoc());
+  emitBasicProlog(ctor->getParameters(),
+                  /*selfParam=*/nullptr,
+                  ctor->getResultInterfaceType(), ctor,
+                  ctor->hasThrows(),
+                  ctor->getThrowsLoc());
   emitConstructorMetatypeArg(*this, ctor);
+
+  // Make sure we've hopped to the right global actor, if any.
+  if (ctor->hasAsync()) {
+    SILLocation prologueLoc(selfDecl);
+    prologueLoc.markAsPrologue();
+    emitConstructorPrologActorHop(prologueLoc, getActorIsolation(ctor));
+  }
 
   // Create a basic block to jump to for the implicit 'self' return.
   // We won't emit this until after we've emitted the body.
@@ -662,6 +670,18 @@ static void emitDefaultActorInitialization(SILGenFunction &SGF,
                       { self.borrow(SGF, loc).getValue() });
 }
 
+void SILGenFunction::emitConstructorPrologActorHop(
+                                           SILLocation loc,
+                                           Optional<ActorIsolation> maybeIso) {
+  if (!maybeIso)
+    return;
+
+  if (auto executor = emitExecutor(loc, *maybeIso, None)) {
+    ExpectedExecutor = *executor;
+    B.createHopToExecutor(loc, *executor);
+  }
+}
+
 void SILGenFunction::emitClassConstructorInitializer(ConstructorDecl *ctor) {
   MagicFunctionName = SILGenModule::getMagicFunctionName(ctor);
 
@@ -717,12 +737,19 @@ void SILGenFunction::emitClassConstructorInitializer(ConstructorDecl *ctor) {
 
   // Emit the prolog for the non-self arguments.
   // FIXME: Handle self along with the other body patterns.
-  uint16_t ArgNo = emitProlog(ctor->getParameters(), /*selfParam=*/nullptr,
-                              TupleType::getEmpty(F.getASTContext()), ctor,
-                              ctor->hasThrows(), ctor->getThrowsLoc());
+  uint16_t ArgNo = emitBasicProlog(ctor->getParameters(), /*selfParam=*/nullptr,
+                                   TupleType::getEmpty(F.getASTContext()), ctor,
+                                   ctor->hasThrows(), ctor->getThrowsLoc());
 
   SILType selfTy = getLoweredLoadableType(selfDecl->getType());
   ManagedValue selfArg = B.createInputFunctionArgument(selfTy, selfDecl);
+
+  // Make sure we've hopped to the right global actor, if any.
+  if (ctor->hasAsync() && !selfClassDecl->isActor()) {
+    SILLocation prologueLoc(selfDecl);
+    prologueLoc.markAsPrologue();
+    emitConstructorPrologActorHop(prologueLoc, getActorIsolation(ctor));
+  }
 
   if (!NeedsBoxForSelf) {
     SILLocation PrologueLoc(selfDecl);

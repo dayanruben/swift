@@ -43,7 +43,6 @@ class GenericSignatureBuilder;
 class NominalTypeDecl;
 class NormalProtocolConformance;
 class RootProtocolConformance;
-class TypeResolution;
 class TypeResolutionOptions;
 class TypoCorrectionResults;
 class ExprPattern;
@@ -264,42 +263,6 @@ void checkUnsupportedProtocolType(ASTContext &ctx,
 void checkUnsupportedProtocolType(ASTContext &ctx,
                                   GenericParamList *genericParams);
 
-/// Resolve a reference to the given type declaration within a particular
-/// context.
-///
-/// This routine aids unqualified name lookup for types by performing the
-/// resolution necessary to rectify the declaration found by name lookup with
-/// the declaration context from which name lookup started.
-///
-/// \param typeDecl The type declaration found by name lookup.
-/// \param isSpecialized Whether the type will have generic arguments applied.
-/// \param resolution The resolution to perform.
-///
-/// \returns the resolved type.
-Type resolveTypeInContext(TypeDecl *typeDecl, DeclContext *foundDC,
-                          TypeResolution resolution, bool isSpecialized);
-
-/// Apply generic arguments to the unbound generic type represented by the
-/// given declaration and parent type.
-///
-/// This function requires the correct number of generic arguments,
-/// whereas applyGenericArguments emits diagnostics in those cases.
-///
-/// \param decl The declaration that the resulting bound generic type
-/// shall reference.
-/// \param parentTy The parent type.
-/// \param loc The source location for diagnostic reporting.
-/// \param resolution The type resolution.
-/// \param genericArgs The list of generic arguments to apply.
-///
-/// \returns A BoundGenericType bound to the given arguments, or null on
-/// error.
-///
-/// \see applyGenericArguments
-Type applyUnboundGenericArguments(GenericTypeDecl *decl, Type parentTy,
-                                  SourceLoc loc, TypeResolution resolution,
-                                  ArrayRef<Type> genericArgs);
-
 /// Substitute the given base type into the type of the given nested type,
 /// producing the effective type that the nested type will have.
 ///
@@ -422,6 +385,13 @@ bool typesSatisfyConstraint(Type t1, Type t2, bool openArchetypes,
 /// (that is, a typealias or shorthand syntax) equivalent to the result type
 /// of the function, set the result type of the expression to that sugar type.
 Expr *substituteInputSugarTypeForResult(ApplyExpr *E);
+
+/// Type check a \c StmtConditionElement.
+/// Sets \p isFalsable to \c true if the condition might evaluate to \c false,
+/// otherwise leaves \p isFalsable untouched.
+/// \returns \c true if there was an error type checking, \c false otherwise.
+bool typeCheckStmtConditionElement(StmtConditionElement &elt, bool &isFalsable,
+                                   DeclContext *dc);
 
 void typeCheckASTNode(ASTNode &node, DeclContext *DC,
                       bool LeaveBodyUnchecked = false);
@@ -1184,6 +1154,12 @@ UnresolvedMemberExpr *getUnresolvedMemberChainBase(Expr *expr);
 bool typeSupportsBuilderOp(Type builderType, DeclContext *dc, Identifier fnName,
                            ArrayRef<Identifier> argLabels = {},
                            SmallVectorImpl<ValueDecl *> *allResults = nullptr);
+
+/// Forces all changes specified by the module's access notes file to be
+/// applied to this declaration. It is safe to call this function more than
+/// once.
+void applyAccessNote(ValueDecl *VD);
+
 }; // namespace TypeChecker
 
 /// Temporary on-stack storage and unescaping for encoded diagnostic
@@ -1346,6 +1322,12 @@ void checkUnknownAttrRestrictions(
 /// let vs. var. This function does not perform any of that validation, leaving
 /// it to later stages.
 void bindSwitchCasePatternVars(DeclContext *dc, CaseStmt *stmt);
+
+/// If the given function has a global actor that should be reflected in
+/// references to its function type from the given declaration context,
+/// update the given function type to include the global actor.
+AnyFunctionType *applyGlobalActorType(
+    AnyFunctionType *fnType, ValueDecl *funcOrEnum, DeclContext *dc);
 
 } // end namespace swift
 

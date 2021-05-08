@@ -18,6 +18,7 @@
 #define SWIFT_SEMA_TYPECHECKCONCURRENCY_H
 
 #include "swift/AST/ConcreteDeclRef.h"
+#include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/Type.h"
 #include <cassert>
 
@@ -28,7 +29,9 @@ class ActorIsolation;
 class AnyFunctionType;
 class ASTContext;
 class ClassDecl;
+class ClosureExpr;
 class ConcreteDeclRef;
+class CustomAttr;
 class Decl;
 class DeclContext;
 class EnumElementDecl;
@@ -129,7 +132,7 @@ public:
     return data.actorType;
   }
 
-  /// Retrieve the actor class that the declaration is within.
+  /// Retrieve the actor that the declaration is within.
   Type getGlobalActor() const {
     assert(kind == GlobalActor || kind == GlobalActorUnsafe);
     return Type(data.globalActor);
@@ -166,7 +169,11 @@ public:
   }
 
   /// Determine the isolation rules for a given declaration.
-  static ActorIsolationRestriction forDeclaration(ConcreteDeclRef declRef);
+  ///
+  /// \param fromExpression Indicates that the reference is coming from an
+  /// expression.
+  static ActorIsolationRestriction forDeclaration(
+      ConcreteDeclRef declRef, bool fromExpression = true);
 
   operator Kind() const { return kind; };
 };
@@ -174,6 +181,10 @@ public:
 /// Check that the actor isolation of an override matches that of its
 /// overridden declaration.
 void checkOverrideActorIsolation(ValueDecl *value);
+
+/// Determine whether the given context uses concurrency features, such
+/// as async functions or actors.
+bool contextUsesConcurrencyFeatures(const DeclContext *dc);
 
 /// Diagnose the presence of any non-concurrent types when referencing a
 /// given declaration from a particular declaration context.
@@ -188,7 +199,7 @@ void checkOverrideActorIsolation(ValueDecl *value);
 /// specific types at the use site.
 ///
 /// \param dc The declaration context from which the reference occurs. This is
-/// used to perform lookup of conformances to the \c ConcurrentValue protocol.
+/// used to perform lookup of conformances to the \c Sendable protocol.
 ///
 /// \param loc The location at which the reference occurs, which will be
 /// used when emitting diagnostics.
@@ -199,28 +210,38 @@ void checkOverrideActorIsolation(ValueDecl *value);
 /// \returns true if an problem was detected, false otherwise.
 bool diagnoseNonConcurrentTypesInReference(
     ConcreteDeclRef declRef, const DeclContext *dc, SourceLoc loc,
-    ConcurrentReferenceKind refKind);
+    ConcurrentReferenceKind refKind,
+    DiagnosticBehavior behavior = DiagnosticBehavior::Unspecified);
 
 /// How the concurrent value check should be performed.
-enum class ConcurrentValueCheck {
-  /// ConcurrentValue conformance was explicitly stated and should be
+enum class SendableCheck {
+  /// Sendable conformance was explicitly stated and should be
   /// fully checked.
   Explicit,
 
-  /// ConcurrentValue conformance was implied by one of the standard library
-  /// protocols that added ConcurrentValue after-the-fact.
+  /// Sendable conformance was implied by one of the standard library
+  /// protocols that added Sendable after-the-fact.
   ImpliedByStandardProtocol,
 
-  /// Implicit conformance to ConcurrentValue for structs and enums.
+  /// Implicit conformance to Sendable for structs and enums.
   Implicit,
 };
 
-/// Check the correctness of the given ConcurrentValue conformance.
+/// Given a set of custom attributes, pick out the global actor attributes
+/// and perform any necessary resolution and diagnostics, returning the
+/// global actor attribute and type it refers to (or \c None).
+Optional<std::pair<CustomAttr *, NominalTypeDecl *>>
+checkGlobalActorAttributes(
+    SourceLoc loc, DeclContext *dc, ArrayRef<CustomAttr *> attrs);
+
+/// Get the explicit global actor specified for a closure.
+Type getExplicitGlobalActor(ClosureExpr *closure);
+
+/// Check the correctness of the given Sendable conformance.
 ///
 /// \returns true if an error occurred.
-bool checkConcurrentValueConformance(
-    ProtocolConformance *conformance, ConcurrentValueCheck check);
-
+bool checkSendableConformance(
+    ProtocolConformance *conformance, SendableCheck check);
 } // end namespace swift
 
 #endif /* SWIFT_SEMA_TYPECHECKCONCURRENCY_H */

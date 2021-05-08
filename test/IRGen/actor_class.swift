@@ -1,18 +1,16 @@
 // RUN: %target-swift-frontend -emit-ir %s -swift-version 5 -enable-experimental-concurrency | %IRGenFileCheck %s
 // REQUIRES: concurrency
 
-// rdar_72047158
-// XFAIL: CPU=arm64e
 
 // CHECK: %T11actor_class7MyClassC = type <{ %swift.refcounted, %swift.defaultactor, %TSi }>
 // CHECK: %swift.defaultactor = type { [10 x i8*] }
 
 // CHECK-objc-LABEL: @"$s11actor_class7MyClassCMm" = global
-// CHECK-objc-SAME: %objc_class* @"OBJC_METACLASS_$__TtCs12_SwiftObject"
+// CHECK-objc-SAME: @"OBJC_METACLASS_$__TtCs12_SwiftObject{{(.ptrauth)?}}"
 
 // CHECK: @"$s11actor_class7MyClassCMf" = internal global
-// CHECK-SAME: @"$s11actor_class7MyClassCfD"
-// CHECK-objc-SAME: %objc_class* @"OBJC_CLASS_$__TtCs12_SwiftObject"
+// CHECK-SAME: @"$s11actor_class7MyClassCfD{{(.ptrauth)?}}"
+// CHECK-objc-SAME: @"OBJC_CLASS_$__TtCs12_SwiftObject{{(.ptrauth)?}}"
 // CHECK-nonobjc-SAME: %swift.type* null,
 //   Flags: uses Swift refcounting
 // CHECK-SAME: i32 2,

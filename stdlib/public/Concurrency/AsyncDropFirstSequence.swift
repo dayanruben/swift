@@ -12,6 +12,7 @@
 
 import Swift
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncSequence {
   @inlinable
   public __consuming func dropFirst(
@@ -23,6 +24,7 @@ extension AsyncSequence {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 public struct AsyncDropFirstSequence<Base: AsyncSequence> {
   @usableFromInline
   let base: Base
@@ -37,6 +39,7 @@ public struct AsyncDropFirstSequence<Base: AsyncSequence> {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncDropFirstSequence: AsyncSequence {
   public typealias Element = Base.Element
   public typealias AsyncIterator = Iterator
@@ -75,6 +78,7 @@ extension AsyncDropFirstSequence: AsyncSequence {
   }
 }
 
+@available(SwiftStdlib 5.5, *)
 extension AsyncDropFirstSequence {
   @inlinable
   public __consuming func dropFirst(

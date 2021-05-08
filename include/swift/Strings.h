@@ -47,6 +47,9 @@ constexpr static const StringLiteral CXX_TEMPLATE_INST_PREFIX =
 constexpr static const StringLiteral SEMANTICS_PROGRAMTERMINATION_POINT =
     "programtermination_point";
 
+constexpr static const StringLiteral SEMANTICS_DEFAULT_ACTOR =
+    "defaultActor";
+
 constexpr static const StringLiteral DEFAULT_ACTOR_STORAGE_FIELD_NAME =
     "$defaultActor";
 
@@ -122,6 +125,9 @@ constexpr static BuiltinNameStringLiteral BUILTIN_TYPE_NAME_UNSAFEVALUEBUFFER =
 /// The name of the Builtin type for Job
 constexpr static BuiltinNameStringLiteral BUILTIN_TYPE_NAME_JOB = {
     "Builtin.Job"};
+/// The name of the Builtin type for ExecutorRef
+constexpr static BuiltinNameStringLiteral BUILTIN_TYPE_NAME_EXECUTOR = {
+    "Builtin.Executor"};
 /// The name of the Builtin type for DefaultActorStorage
 constexpr static BuiltinNameStringLiteral BUILTIN_TYPE_NAME_DEFAULTACTORSTORAGE = {
     "Builtin.DefaultActorStorage"};
