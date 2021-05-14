@@ -253,12 +253,12 @@ extension Task {
   /// This is a port of the C++ FlagSet.
   struct JobFlags {
     /// Kinds of schedulable jobs.
-    enum Kind: Int {
+    enum Kind: Int32 {
       case task = 0
     }
 
     /// The actual bit representation of these flags.
-    var bits: Int = 0
+    var bits: Int32 = 0
 
     /// The kind of job described by these flags.
     var kind: Kind {
@@ -277,11 +277,11 @@ extension Task {
     /// The priority given to the job.
     var priority: Priority? {
       get {
-        Priority(rawValue: (bits & 0xFF00) >> 8)
+        Priority(rawValue: (Int(bits) & 0xFF00) >> 8)
       }
 
       set {
-        bits = (bits & ~0xFF00) | ((newValue?.rawValue ?? 0) << 8)
+        bits = (bits & ~0xFF00) | Int32((newValue?.rawValue ?? 0) << 8)
       }
     }
 
@@ -410,7 +410,7 @@ public func detach<T>(
   flags.isFuture = true
 
   // Create the asynchronous task future.
-  let (task, _) = Builtin.createAsyncTaskFuture(flags.bits, operation)
+  let (task, _) = Builtin.createAsyncTaskFuture(Int(flags.bits), operation)
 
   // Enqueue the resulting job.
   _enqueueJobGlobal(Builtin.convertTaskToJob(task))
@@ -463,7 +463,7 @@ public func detach<T>(
   flags.isFuture = true
 
   // Create the asynchronous task future.
-  let (task, _) = Builtin.createAsyncTaskFuture(flags.bits, operation)
+  let (task, _) = Builtin.createAsyncTaskFuture(Int(flags.bits), operation)
 
   // Enqueue the resulting job.
   _enqueueJobGlobal(Builtin.convertTaskToJob(task))
@@ -533,7 +533,16 @@ public func async<T>(
   flags.isContinuingAsyncTask = true
 
   // Create the asynchronous task future.
-  let (task, _) = Builtin.createAsyncTaskFuture(flags.bits, operation)
+  let (task, _) = Builtin.createAsyncTaskFuture(Int(flags.bits), operation)
+
+  // Copy all task locals to the newly created task.
+  // We must copy them rather than point to the current task since the new task
+  // is not structured and may out-live the current task.
+  //
+  // WARNING: This MUST be done BEFORE we enqueue the task,
+  // because it acts as-if it was running inside the task and thus does not
+  // take any extra steps to synchronize the task-local operations.
+  _taskLocalsCopy(to: task)
 
   // Enqueue the resulting job.
   _enqueueJobGlobal(Builtin.convertTaskToJob(task))
@@ -569,23 +578,12 @@ public func async<T>(
   flags.isContinuingAsyncTask = true
 
   // Create the asynchronous task future.
-  let (task, _) = Builtin.createAsyncTaskFuture(flags.bits, operation)
+  let (task, _) = Builtin.createAsyncTaskFuture(Int(flags.bits), operation)
 
   // Enqueue the resulting job.
   _enqueueJobGlobal(Builtin.convertTaskToJob(task))
 
   return Task.Handle(task)
-}
-
-// ==== Async Handler ----------------------------------------------------------
-
-// TODO: remove this?
-@available(SwiftStdlib 5.5, *)
-func _runAsyncHandler(operation: @escaping () async -> ()) {
-  typealias ConcurrentFunctionType = @Sendable () async -> ()
-  detach(
-    operation: unsafeBitCast(operation, to: ConcurrentFunctionType.self)
-  )
 }
 
 // ==== Async Sleep ------------------------------------------------------------
@@ -597,19 +595,13 @@ extension Task {
   ///
   /// This function does _not_ block the underlying thread.
   public static func sleep(_ duration: UInt64) async {
-    // Set up the job flags for a new task.
-    var flags = Task.JobFlags()
-    flags.kind = .task
-    flags.priority = .default
-    flags.isFuture = true
+    let currentTask = Builtin.getCurrentAsyncTask()
+    let priority = getJobFlags(currentTask).priority ?? Task.currentPriority._downgradeUserInteractive
 
-    // Create the asynchronous task future.
-    let (task, _) = Builtin.createAsyncTaskFuture(flags.bits, {})
-
-    // Enqueue the resulting job.
-    _enqueueJobGlobalWithDelay(duration, Builtin.convertTaskToJob(task))
-
-    await Handle<Void, Never>(task).get()
+    return await Builtin.withUnsafeContinuation { (continuation: Builtin.RawUnsafeContinuation) -> Void in
+      let job = _taskCreateNullaryContinuationJob(priority: priority.rawValue, continuation: continuation)
+      _enqueueJobGlobalWithDelay(duration, job)
+    }
   }
 }
 
@@ -625,22 +617,13 @@ extension Task {
   /// if the task is the highest-priority task in the system, it might go
   /// immediately back to executing.
   public static func yield() async {
-    // Prepare the job flags
-    var flags = JobFlags()
-    flags.kind = .task
-    flags.priority = .default
-    flags.isFuture = true
+    let currentTask = Builtin.getCurrentAsyncTask()
+    let priority = getJobFlags(currentTask).priority ?? Task.currentPriority._downgradeUserInteractive
 
-    // Create the asynchronous task future, it will do nothing, but simply serves
-    // as a way for us to yield our execution until the executor gets to it and
-    // resumes us.
-    // TODO: consider if it would be useful for this task to be a child task
-    let (task, _) = Builtin.createAsyncTaskFuture(flags.bits, {})
-
-    // Enqueue the resulting job.
-    _enqueueJobGlobal(Builtin.convertTaskToJob(task))
-
-    let _ = await Handle<Void, Never>(task).get()
+    return await Builtin.withUnsafeContinuation { (continuation: Builtin.RawUnsafeContinuation) -> Void in
+      let job = _taskCreateNullaryContinuationJob(priority: priority.rawValue, continuation: continuation)
+      _enqueueJobGlobal(job)
+    }
   }
 }
 
@@ -817,6 +800,10 @@ func _taskCancel(_ task: Builtin.NativeObject)
 @available(SwiftStdlib 5.5, *)
 @_silgen_name("swift_task_isCancelled")
 func _taskIsCancelled(_ task: Builtin.NativeObject) -> Bool
+
+@available(SwiftStdlib 5.5, *)
+@_silgen_name("swift_task_createNullaryContinuationJob")
+func _taskCreateNullaryContinuationJob(priority: Int, continuation: Builtin.RawUnsafeContinuation) -> Builtin.Job
 
 @available(SwiftStdlib 5.5, *)
 @usableFromInline
