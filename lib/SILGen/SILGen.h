@@ -86,8 +86,6 @@ public:
   /// Set of delayed conformances that have already been forced.
   llvm::DenseSet<NormalProtocolConformance *> forcedConformances;
 
-  SILFunction *emitTopLevelFunction(SILLocation Loc);
-
   size_t anonymousSymbolCounter = 0;
 
   Optional<SILDeclRef> StringToNSStringFn;
@@ -177,7 +175,8 @@ public:
                                            CanSILFunctionType thunkType,
                                            CanSILFunctionType fromType,
                                            CanSILFunctionType toType,
-                                           CanType dynamicSelfType);
+                                           CanType dynamicSelfType,
+                                           CanType fromGlobalActor);
   
   /// Get or create the declaration of a completion handler block
   /// implementation function for an ObjC API that was imported
@@ -328,6 +327,9 @@ public:
 
   /// Emits a thunk from a Swift function to the native Swift convention.
   void emitNativeToForeignThunk(SILDeclRef thunk);
+
+  /// Emits a thunk from an actor function to a potentially distributed call.
+  void emitDistributedThunk(SILDeclRef thunk);
   
   void preEmitFunction(SILDeclRef constant, SILFunction *F, SILLocation L);
   void postEmitFunction(SILDeclRef constant, SILFunction *F);

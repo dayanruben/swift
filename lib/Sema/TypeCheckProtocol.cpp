@@ -2773,6 +2773,29 @@ bool ConformanceChecker::checkActorIsolation(
   switch (auto witnessRestriction =
               ActorIsolationRestriction::forDeclaration(
                   witness, /*fromExpression=*/false)) {
+  case ActorIsolationRestriction::DistributedActorSelf: {
+    if (witness->isSynthesized()) {
+      // Some of our synthesized properties get special treatment,
+      // they are always available, regardless if the actor is remote even.
+      auto &C = requirement->getASTContext();
+
+      // actorAddress is special, it is *always* available.
+      // even if the actor is 'remote' it is always available and immutable.
+      if (witness->getName() == C.Id_actorAddress &&
+          witness->getInterfaceType()->isEqual(
+              C.getActorAddressDecl()->getDeclaredInterfaceType()))
+        return false;
+
+      // TODO: we don't *really* need to expose the transport like that... reconsider?
+      if (witness->getName() == C.Id_actorTransport &&
+          witness->getInterfaceType()->isEqual(
+              C.getActorTransportDecl()->getDeclaredInterfaceType()))
+        return false;
+    }
+
+    // continue checking ActorSelf rules
+    LLVM_FALLTHROUGH;
+  }
   case ActorIsolationRestriction::ActorSelf: {
     // An actor-isolated witness can only conform to an actor-isolated
     // requirement.
@@ -2798,7 +2821,8 @@ bool ConformanceChecker::checkActorIsolation(
 
   case ActorIsolationRestriction::CrossActorSelf:
     return diagnoseNonConcurrentTypesInReference(
-        witness, DC, witness->getLoc(), ConcurrentReferenceKind::CrossActor);
+        witness, DC->getParentModule(), witness->getLoc(),
+        ConcurrentReferenceKind::CrossActor);
 
   case ActorIsolationRestriction::GlobalActorUnsafe:
     witnessIsUnsafe = true;
@@ -2827,6 +2851,7 @@ bool ConformanceChecker::checkActorIsolation(
   bool requirementIsUnsafe = false;
   switch (auto requirementIsolation = getActorIsolation(requirement)) {
   case ActorIsolation::ActorInstance:
+  case ActorIsolation::DistributedActorInstance:
     llvm_unreachable("There are not actor protocols");
 
   case ActorIsolation::GlobalActorUnsafe:
@@ -2863,7 +2888,8 @@ bool ConformanceChecker::checkActorIsolation(
       return false;
 
     return diagnoseNonConcurrentTypesInReference(
-      witness, DC, witness->getLoc(), ConcurrentReferenceKind::CrossActor);
+      witness, DC->getParentModule(), witness->getLoc(),
+      ConcurrentReferenceKind::CrossActor);
   }
 
   // If the witness has a global actor but the requirement does not, we have
@@ -2897,7 +2923,8 @@ bool ConformanceChecker::checkActorIsolation(
 
     if (isCrossActor) {
       return diagnoseNonConcurrentTypesInReference(
-        witness, DC, witness->getLoc(), ConcurrentReferenceKind::CrossActor);
+        witness, DC->getParentModule(), witness->getLoc(),
+        ConcurrentReferenceKind::CrossActor);
     }
 
     witness->diagnose(
@@ -3898,7 +3925,8 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
       // a member that could in turn satisfy *this* requirement.
       auto derivableProto = cast<ProtocolDecl>(derivable->getDeclContext());
       auto conformance =
-          TypeChecker::conformsToProtocol(Adoptee, derivableProto, DC);
+          TypeChecker::conformsToProtocol(Adoptee, derivableProto,
+                                          DC->getParentModule());
       if (conformance.isConcrete()) {
         (void)conformance.getConcrete()->getWitnessDecl(derivable);
       }
@@ -4918,7 +4946,7 @@ void swift::diagnoseConformanceFailure(Type T,
   // If we're checking conformance of an existential type to a protocol,
   // do a little bit of extra work to produce a better diagnostic.
   if (T->isExistentialType() &&
-      TypeChecker::containsProtocol(T, Proto, DC)) {
+      TypeChecker::containsProtocol(T, Proto, DC->getParentModule())) {
 
     if (!T->isObjCExistentialType()) {
       diags.diagnose(ComplainLoc, diag::type_cannot_conform, true,
@@ -4956,12 +4984,8 @@ void swift::diagnoseConformanceFailure(Type T,
 
       // If the reason is that the raw type does not conform to
       // Equatable, say so.
-      auto equatableProto = ctx.getProtocol(KnownProtocolKind::Equatable);
-      if (!equatableProto)
-        return;
-
-      if (TypeChecker::conformsToProtocol(rawType, equatableProto, enumDecl)
-              .isInvalid()) {
+      if (!TypeChecker::conformsToKnownProtocol(
+              rawType, KnownProtocolKind::Equatable, DC->getParentModule())) {
         SourceLoc loc = enumDecl->getInherited()[0].getSourceRange().Start;
         diags.diagnose(loc, diag::enum_raw_type_not_equatable, rawType);
         return;
@@ -5051,7 +5075,7 @@ void ConformanceChecker::emitDelayedDiags() {
 }
 
 ProtocolConformanceRef
-TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC,
+TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M,
                               bool skipConditionalRequirements) {
   // Existential types don't need to conform, i.e., they only need to
   // contain the protocol.
@@ -5060,7 +5084,7 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC,
     // *and* has a witness table.
     if (T->isEqual(Proto->getDeclaredInterfaceType()) &&
         Proto->requiresSelfConformanceWitnessTable()) {
-      auto &ctx = DC->getASTContext();
+      auto &ctx = M->getASTContext();
       return ProtocolConformanceRef(ctx.getSelfConformance(Proto));
     }
 
@@ -5071,8 +5095,8 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC,
     if (auto superclass = layout.getSuperclass()) {
       auto result =
           (skipConditionalRequirements
-           ? DC->getParentModule()->lookupConformance(superclass, Proto)
-           : TypeChecker::conformsToProtocol(superclass, Proto, DC));
+           ? M->lookupConformance(superclass, Proto)
+           : TypeChecker::conformsToProtocol(superclass, Proto, M));
       if (result) {
         return result;
       }
@@ -5097,14 +5121,13 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC,
 
   // For non-existential types, this is equivalent to checking conformance.
   return (skipConditionalRequirements
-          ? DC->getParentModule()->lookupConformance(T, Proto)
-          : TypeChecker::conformsToProtocol(T, Proto, DC));
+          ? M->lookupConformance(T, Proto)
+          : TypeChecker::conformsToProtocol(T, Proto, M));
 }
 
 ProtocolConformanceRef
-TypeChecker::conformsToProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC) {
+TypeChecker::conformsToProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M) {
   // Look up conformance in the module.
-  ModuleDecl *M = DC->getParentModule();
   auto lookupResult = M->lookupConformance(T, Proto);
   if (lookupResult.isInvalid()) {
     return ProtocolConformanceRef::forInvalid();
@@ -5115,12 +5138,10 @@ TypeChecker::conformsToProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC) {
          "unhandled recursion: missing conditional requirements when they're "
          "required");
 
-  // If we have a conditional requirements that
-  // we need to check, do so now.
+  // If we have a conditional requirements that we need to check, do so now.
   if (!condReqs->empty()) {
     auto conditionalCheckResult = checkGenericArguments(
-        DC, SourceLoc(), SourceLoc(), T,
-        {lookupResult.getRequirement()->getSelfInterfaceType()}, *condReqs,
+        M, *condReqs,
         [](SubstitutableType *dependentType) { return Type(dependentType); });
     switch (conditionalCheckResult) {
     case RequirementCheckResult::Success:
@@ -5135,9 +5156,17 @@ TypeChecker::conformsToProtocol(Type T, ProtocolDecl *Proto, DeclContext *DC) {
   return lookupResult;
 }
 
+bool TypeChecker::conformsToKnownProtocol(Type type, KnownProtocolKind protocol,
+                                          ModuleDecl *module) {
+  if (auto *proto =
+          TypeChecker::getProtocol(module->getASTContext(), SourceLoc(), protocol))
+    return (bool)TypeChecker::conformsToProtocol(type, proto, module);
+  return false;
+}
+
 bool
 TypeChecker::couldDynamicallyConformToProtocol(Type type, ProtocolDecl *Proto,
-                                               DeclContext *DC) {
+                                               ModuleDecl *M) {
   // An existential may have a concrete underlying type with protocol conformances
   // we cannot know statically.
   if (type->isExistentialType())
@@ -5154,7 +5183,6 @@ TypeChecker::couldDynamicallyConformToProtocol(Type type, ProtocolDecl *Proto,
       return true;
   }
 
-  ModuleDecl *M = DC->getParentModule();
   // For standard library collection types such as Array, Set or Dictionary
   // which have custom casting machinery implemented for situations like:
   //
@@ -5166,7 +5194,7 @@ TypeChecker::couldDynamicallyConformToProtocol(Type type, ProtocolDecl *Proto,
   // are met or not.
   if (type->isKnownStdlibCollectionType())
     return !M->lookupConformance(type, Proto).isInvalid();
-  return !conformsToProtocol(type, Proto, DC).isInvalid();
+  return !conformsToProtocol(type, Proto, M).isInvalid();
 }
 
 /// Exposes TypeChecker functionality for querying protocol conformance.
@@ -6291,6 +6319,9 @@ ValueDecl *TypeChecker::deriveProtocolRequirement(DeclContext *DC,
   case KnownDerivableProtocolKind::Differentiable:
     return derived.deriveDifferentiable(Requirement);
 
+  case KnownDerivableProtocolKind::DistributedActor:
+    return derived.deriveDistributedActor(Requirement);
+
   case KnownDerivableProtocolKind::OptionSet:
       llvm_unreachable(
           "When possible, OptionSet is derived via memberwise init synthesis");
@@ -6453,12 +6484,14 @@ void TypeChecker::inferDefaultWitnesses(ProtocolDecl *proto) {
     if (!assocType)
       continue;
 
+    auto *module = proto->getParentModule();
+
     // Find the associated type nearest our own protocol, which might have
     // a default not available in the associated type referenced by the
     // (canonicalized) requirement.
     if (assocType->getProtocol() != proto) {
       SmallVector<ValueDecl *, 2> found;
-      proto->getModuleContext()->lookupQualified(
+      module->lookupQualified(
                            proto, DeclNameRef(assocType->getName()),
                            NL_QualifiedDefault|NL_ProtocolMembers|NL_OnlyTypes,
                            found);
@@ -6478,7 +6511,7 @@ void TypeChecker::inferDefaultWitnesses(ProtocolDecl *proto) {
       proto->mapTypeIntoContext(defaultAssocType);
     auto requirementProto = req.getProtocolDecl();
     auto conformance = conformsToProtocol(defaultAssocTypeInContext,
-                                          requirementProto, proto);
+                                          requirementProto, module);
     if (conformance.isInvalid()) {
       // Diagnose the lack of a conformance. This is potentially an ABI
       // incompatibility.

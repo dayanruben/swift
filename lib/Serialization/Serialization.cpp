@@ -76,10 +76,7 @@ using namespace llvm::support;
 using swift::version::Version;
 using llvm::BCBlockRAII;
 
-
-ASTContext &SerializerBase::getASTContext() {
-  return M->getASTContext();
-}
+ASTContext &SerializerBase::getASTContext() const { return M->getASTContext(); }
 
 /// Used for static_assert.
 static constexpr bool declIDFitsIn32Bits() {
@@ -644,8 +641,9 @@ serialization::TypeID Serializer::addTypeRef(Type ty) {
 
 #ifndef NDEBUG
   PrettyStackTraceType trace(M->getASTContext(), "serializing", typeToSerialize);
-  assert(M->getASTContext().LangOpts.AllowModuleWithCompilerErrors ||
-         !typeToSerialize || !typeToSerialize->hasError() && "serializing type with an error");
+  assert((allowCompilerErrors() || !typeToSerialize ||
+          !typeToSerialize->hasError()) &&
+         "serializing type with an error");
 #endif
 
   return TypesToSerialize.addRef(typeToSerialize);
@@ -966,11 +964,20 @@ void Serializer::writeHeader(const SerializationOptions &options) {
     if (auto minor = options.UserModuleVersion.getMinor()) {
       userModuleMinor = *minor;
     }
+    auto userModuleSubminor = 0;
+    if (auto subMinor = options.UserModuleVersion.getSubminor()) {
+      userModuleSubminor = *subMinor;
+    }
+    auto userModuleBuild = 0;
+    if (auto build = options.UserModuleVersion.getBuild()) {
+      userModuleBuild = *build;
+    }
     Metadata.emit(ScratchRecord,
                   SWIFTMODULE_VERSION_MAJOR, SWIFTMODULE_VERSION_MINOR,
                   shortVersionStringLength,
                   compatibilityVersionStringLength,
                   userModuleMajor, userModuleMinor,
+                  userModuleSubminor, userModuleBuild,
                   versionString.str());
 
     Target.emit(ScratchRecord, M->getASTContext().LangOpts.Target.str());
@@ -1006,7 +1013,7 @@ void Serializer::writeHeader(const SerializationOptions &options) {
         Strategy.emit(ScratchRecord, unsigned(M->getResilienceStrategy()));
       }
 
-      if (getASTContext().LangOpts.AllowModuleWithCompilerErrors) {
+      if (allowCompilerErrors()) {
         options_block::IsAllowModuleWithCompilerErrorsEnabledLayout
             AllowErrors(Out);
         AllowErrors.emit(ScratchRecord);
@@ -1430,8 +1437,7 @@ void Serializer::writeASTBlockEntity(
   using namespace decls_block;
 
   // The conformance must be complete, or we can't serialize it.
-  assert(conformance->isComplete() ||
-         getASTContext().LangOpts.AllowModuleWithCompilerErrors);
+  assert(conformance->isComplete() || allowCompilerErrors());
   assert(NormalConformancesToSerialize.hasRef(conformance));
 
   auto protocol = conformance->getProtocol();
@@ -1622,6 +1628,8 @@ static bool shouldSerializeMember(Decl *D) {
     llvm_unreachable("decl should never be a member");
 
   case DeclKind::MissingMember:
+    if (D->getASTContext().LangOpts.AllowModuleWithCompilerErrors)
+      return false;
     llvm_unreachable("should never need to reserialize a member placeholder");
 
   case DeclKind::IfConfig:
@@ -2850,7 +2858,7 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
     // Retrieve the type of the pattern.
     auto getPatternType = [&] {
       if (!pattern->hasType()) {
-        if (S.getASTContext().LangOpts.AllowModuleWithCompilerErrors)
+        if (S.allowCompilerErrors())
           return ErrorType::get(S.getASTContext());
         llvm_unreachable("all nodes should have types");
       }
@@ -3077,10 +3085,7 @@ public:
 
     SmallVector<TypeID, 8> inheritedAndDependencyTypes;
     for (auto inherited : extension->getInherited()) {
-      if (extension->getASTContext().LangOpts.AllowModuleWithCompilerErrors &&
-          !inherited.getType())
-        continue;
-      assert(!inherited.getType()->hasArchetype());
+      assert(!inherited.getType() || !inherited.getType()->hasArchetype());
       inheritedAndDependencyTypes.push_back(S.addTypeRef(inherited.getType()));
     }
     size_t numInherited = inheritedAndDependencyTypes.size();
@@ -3318,7 +3323,7 @@ public:
 
     SmallVector<TypeID, 4> inheritedAndDependencyTypes;
     for (auto inherited : theStruct->getInherited()) {
-      assert(!inherited.getType()->hasArchetype());
+      assert(!inherited.getType() || !inherited.getType()->hasArchetype());
       inheritedAndDependencyTypes.push_back(S.addTypeRef(inherited.getType()));
     }
 
@@ -3363,7 +3368,7 @@ public:
 
     SmallVector<TypeID, 4> inheritedAndDependencyTypes;
     for (auto inherited : theEnum->getInherited()) {
-      assert(!inherited.getType()->hasArchetype());
+      assert(!inherited.getType() || !inherited.getType()->hasArchetype());
       inheritedAndDependencyTypes.push_back(S.addTypeRef(inherited.getType()));
     }
 
@@ -3421,7 +3426,7 @@ public:
 
     SmallVector<TypeID, 4> inheritedAndDependencyTypes;
     for (auto inherited : theClass->getInherited()) {
-      assert(!inherited.getType()->hasArchetype());
+      assert(!inherited.getType() || !inherited.getType()->hasArchetype());
       inheritedAndDependencyTypes.push_back(S.addTypeRef(inherited.getType()));
     }
 
@@ -3479,10 +3484,11 @@ public:
     llvm::SmallSetVector<Type, 4> dependencyTypes;
 
     for (auto element : proto->getInherited()) {
-      assert(!element.getType()->hasArchetype());
-      inheritedAndDependencyTypes.push_back(S.addTypeRef(element.getType()));
-      if (element.getType()->is<ProtocolType>())
-        dependencyTypes.insert(element.getType());
+      auto elementType = element.getType();
+      assert(!elementType || !elementType->hasArchetype());
+      inheritedAndDependencyTypes.push_back(S.addTypeRef(elementType));
+      if (elementType && elementType->is<ProtocolType>())
+        dependencyTypes.insert(elementType);
     }
 
     for (Requirement req : proto->getRequirementSignature()) {
@@ -3616,8 +3622,7 @@ public:
         getRawStableDefaultArgumentKind(argKind),
         defaultArgumentText);
 
-    if (interfaceType->hasError() &&
-        !S.getASTContext().LangOpts.AllowModuleWithCompilerErrors) {
+    if (interfaceType->hasError() && !S.allowCompilerErrors()) {
       param->getDeclContext()->printContext(llvm::errs());
       interfaceType->dump(llvm::errs());
       llvm_unreachable("error in interface type of parameter");
@@ -3984,8 +3989,8 @@ void Serializer::writeASTBlockEntity(const Decl *D) {
     }
   };
 
-  assert(getASTContext().LangOpts.AllowModuleWithCompilerErrors ||
-         !D->isInvalid() && "cannot create a module with an invalid decl");
+  assert((allowCompilerErrors() || !D->isInvalid()) &&
+         "cannot create a module with an invalid decl");
   if (isDeclXRef(D)) {
     writeCrossReference(D);
     return;
@@ -4147,7 +4152,7 @@ public:
   void visitType(const TypeBase *) = delete;
 
   void visitErrorType(const ErrorType *ty) {
-    if (S.getASTContext().LangOpts.AllowModuleWithCompilerErrors) {
+    if (S.allowCompilerErrors()) {
       using namespace decls_block;
       unsigned abbrCode = S.DeclTypeAbbrCodes[ErrorTypeLayout::Code];
       ErrorTypeLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode,
@@ -5243,8 +5248,7 @@ static void collectInterestingNestedDeclarations(
         if (!nominalParent) {
           const DeclContext *DC = member->getDeclContext();
           nominalParent = DC->getSelfNominalTypeDecl();
-          assert(nominalParent ||
-                 nestedType->getASTContext().LangOpts.AllowModuleWithCompilerErrors &&
+          assert((nominalParent || S.allowCompilerErrors()) &&
                  "parent context is not a type or extension");
         }
         nestedTypeDecls[nestedType->getName()].push_back({
@@ -5528,6 +5532,10 @@ void Serializer::writeToStream(
   }
 
   S.writeToStream(os);
+}
+
+bool Serializer::allowCompilerErrors() const {
+  return getASTContext().LangOpts.AllowModuleWithCompilerErrors;
 }
 
 void swift::serializeToBuffers(

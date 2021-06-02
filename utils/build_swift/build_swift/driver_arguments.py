@@ -288,6 +288,9 @@ def create_argument_parser():
            help='instead of building, write JSON to stdout containing '
                 'various values used to build in this configuration')
 
+    option(['--reconfigure'], store_true,
+           help="Reconfigure all projects as we build")
+
     option('--legacy-impl', store_true('legacy_impl'),
            help='use legacy implementation')
 
@@ -1170,6 +1173,10 @@ def create_argument_parser():
     option('--enable-experimental-concurrency', toggle_true,
            default=True,
            help='Enable experimental Swift concurrency model.')
+
+    option('--enable-experimental-distributed', toggle_true,
+           default=True,
+           help='Enable experimental Swift distributed actors.')
 
     # -------------------------------------------------------------------------
     in_group('Unsupported options')

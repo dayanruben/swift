@@ -5,8 +5,14 @@
 // REQUIRES: executable_test
 // UNSUPPORTED: use_os_stdlib
 
+// rdar://78109470
+// UNSUPPORTED: back_deployment_runtime
+
 // https://bugs.swift.org/browse/SR-14466
 // UNSUPPORTED: OS=windows-msvc
+
+// Race condition
+// REQUIRES: rdar78033828
 
 import _Concurrency
 import StdlibUnittest

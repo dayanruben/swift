@@ -1753,7 +1753,7 @@ ERROR(version_component_not_number,none,
       "version component contains non-numeric characters", ())
 ERROR(compiler_version_too_many_components,none,
       "compiler version must not have more than five components", ())
-WARNING(unused_compiler_version_component,none,
+WARNING(unused_compiler_version_component,NoUsage,
       "the second version component is not used for comparison", ())
 ERROR(empty_version_component,none,
       "found empty version component", ())
@@ -1822,7 +1822,7 @@ ERROR(pound_available_package_description_not_allowed, none,
 ERROR(availability_query_repeated_platform, none,
       "version for '%0' already specified", (StringRef))
 
-ERROR(attr_requires_concurrency,none,
+ERROR(attr_requires_concurrency, none,
       "'%0' %select{attribute|modifier}1 is only valid when experimental "
       "concurrency is enabled",
       (StringRef, bool))

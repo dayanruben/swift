@@ -16,6 +16,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticsRefactoring.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/ForeignAsyncConvention.h"
 #include "swift/AST/GenericParamList.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/Pattern.h"
@@ -1304,7 +1305,9 @@ bool RefactoringActionExtractFunction::performChange() {
     }
     OS << ")";
 
-    if (RangeInfo.ThrowingUnhandledError)
+    if (RangeInfo.UnhandledEffects.contains(EffectKind::Async))
+      OS << " async";
+    if (RangeInfo.UnhandledEffects.contains(EffectKind::Throws))
       OS << " " << tok::kw_throws;
 
     bool InsertedReturnType = false;
@@ -1332,6 +1335,12 @@ bool RefactoringActionExtractFunction::performChange() {
     llvm::raw_svector_ostream OS(Buffer);
     if (RangeInfo.exit() == ExitState::Positive)
       OS << tok::kw_return <<" ";
+
+    if (RangeInfo.UnhandledEffects.contains(EffectKind::Throws))
+      OS << tok::kw_try << " ";
+    if (RangeInfo.UnhandledEffects.contains(EffectKind::Async))
+      OS << "await ";
+
     CallNameOffset = Buffer.size() - ReplaceBegin;
     OS << PreferredName << "(";
     for (auto &RD : Parameters) {
@@ -2469,11 +2478,11 @@ bool RefactoringActionConvertToSwitchStmt::performChange() {
     SmallString<64> ConditionalPattern = SmallString<64>();
 
     Expr *walkToExprPost(Expr *E) override {
-      if (E->getKind() != ExprKind::Binary)
+      auto *BE = dyn_cast<BinaryExpr>(E);
+      if (!BE)
         return E;
-      auto BE = dyn_cast<BinaryExpr>(E);
       if (isFunctionNameAllowed(BE))
-        appendPattern(dyn_cast<BinaryExpr>(E)->getArg());
+        appendPattern(BE->getLHS(), BE->getRHS());
       return E;
     }
 
@@ -2499,10 +2508,10 @@ bool RefactoringActionConvertToSwitchStmt::performChange() {
       || FunctionName == "__derived_struct_equals";
     }
 
-    void appendPattern(TupleExpr *Tuple) {
-      auto PatternArgument = Tuple->getElements().back();
+    void appendPattern(Expr *LHS, Expr *RHS) {
+      auto *PatternArgument = RHS;
       if (PatternArgument->getKind() == ExprKind::DeclRef)
-        PatternArgument = Tuple->getElements().front();
+        PatternArgument = LHS;
       if (ConditionalPattern.size() > 0)
         ConditionalPattern.append(", ");
       ConditionalPattern.append(Lexer::getCharSourceRangeFromSourceRange(SM, PatternArgument->getSourceRange()).str());
@@ -4195,6 +4204,13 @@ struct AsyncHandlerDesc {
     return params();
   }
 
+  /// If the completion handler has an Error parameter, return it.
+  Optional<AnyFunctionType::Param> getErrorParam() const {
+    if (HasError && Type == HandlerType::PARAMS)
+      return params().back();
+    return None;
+  }
+
   /// Get the type of the error that will be thrown by the \c async method or \c
   /// None if the completion handler doesn't accept an error parameter.
   /// This may be more specialized than the generic 'Error' type if the
@@ -4403,42 +4419,112 @@ struct AsyncHandlerParamDesc : public AsyncHandlerDesc {
   }
 };
 
-enum class ConditionType { INVALID, NIL, NOT_NIL };
+/// The type of a condition in a conditional statement.
+enum class ConditionType {
+  NIL,             // == nil
+  NOT_NIL,         // != nil
+  IS_TRUE,         // if b
+  IS_FALSE,        // if !b
+  SUCCESS_PATTERN, // case .success
+  FAILURE_PATTEN   // case .failure
+};
+
+/// Indicates whether a condition describes a success or failure path. For
+/// example, a check for whether an error parameter is present is a failure
+/// path. A check for a nil error parameter is a success path. This is distinct
+/// from ConditionType, as it relies on contextual information about what values
+/// need to be checked for success or failure.
+enum class ConditionPath { SUCCESS, FAILURE };
+
+static ConditionPath flippedConditionPath(ConditionPath Path) {
+  switch (Path) {
+  case ConditionPath::SUCCESS:
+    return ConditionPath::FAILURE;
+  case ConditionPath::FAILURE:
+    return ConditionPath::SUCCESS;
+  }
+  llvm_unreachable("Unhandled case in switch!");
+}
 
 /// Finds the `Subject` being compared to in various conditions. Also finds any
 /// pattern that may have a bound name.
 struct CallbackCondition {
-  ConditionType Type = ConditionType::INVALID;
+  Optional<ConditionType> Type;
   const Decl *Subject = nullptr;
   const Pattern *BindPattern = nullptr;
-  // Bit of a hack. When the `Subject` is a `Result` type we use this to
-  // distinguish between the `.success` and `.failure` case (as opposed to just
-  // checking whether `Subject` == `TheErrDecl`)
-  bool ErrorCase = false;
-
-  CallbackCondition() = default;
 
   /// Initializes a `CallbackCondition` with a `!=` or `==` comparison of
-  /// an `Optional` typed `Subject` to `nil`, ie.
+  /// an `Optional` typed `Subject` to `nil`, or a `Bool` typed `Subject` to a
+  /// boolean literal, ie.
   ///   - `<Subject> != nil`
   ///   - `<Subject> == nil`
+  ///   - `<Subject> != true`
+  ///   - `<Subject> == false`
   CallbackCondition(const BinaryExpr *BE, const FuncDecl *Operator) {
     bool FoundNil = false;
-    for (auto *Operand : BE->getArg()->getElements()) {
+    BooleanLiteralExpr *FoundBool = nullptr;
+    bool DidUnwrapOptional = false;
+
+    for (auto *Operand : {BE->getLHS(), BE->getRHS()}) {
+      Operand = Operand->getSemanticsProvidingExpr();
+      if (auto *IIOE = dyn_cast<InjectIntoOptionalExpr>(Operand)) {
+        Operand = IIOE->getSubExpr()->getSemanticsProvidingExpr();
+        DidUnwrapOptional = true;
+      }
       if (isa<NilLiteralExpr>(Operand)) {
         FoundNil = true;
+      } else if (auto *BLE = dyn_cast<BooleanLiteralExpr>(Operand)) {
+        FoundBool = BLE;
       } else if (auto *DRE = dyn_cast<DeclRefExpr>(Operand)) {
         Subject = DRE->getDecl();
       }
     }
 
-    if (Subject && FoundNil) {
+    if (!Subject)
+      return;
+
+    if (FoundNil) {
       if (Operator->getBaseName() == "==") {
         Type = ConditionType::NIL;
       } else if (Operator->getBaseName() == "!=") {
         Type = ConditionType::NOT_NIL;
       }
+    } else if (FoundBool) {
+      if (Operator->getBaseName() == "==") {
+        Type = FoundBool->getValue() ? ConditionType::IS_TRUE
+                                     : ConditionType::IS_FALSE;
+      } else if (Operator->getBaseName() == "!=" && !DidUnwrapOptional) {
+        // Note that we don't consider this case if we unwrapped an optional,
+        // as e.g optBool != false is a check for true *or* nil.
+        Type = FoundBool->getValue() ? ConditionType::IS_FALSE
+                                     : ConditionType::IS_TRUE;
+      }
     }
+  }
+
+  /// A bool condition expression.
+  explicit CallbackCondition(const Expr *E) {
+    if (!E->getType()->isBool())
+      return;
+
+    auto CondType = ConditionType::IS_TRUE;
+    E = E->getSemanticsProvidingExpr();
+
+    // If we have a prefix negation operator, this is a check for false.
+    if (auto *PrefixOp = dyn_cast<PrefixUnaryExpr>(E)) {
+      auto *Callee = PrefixOp->getCalledValue();
+      if (Callee && Callee->isOperator() && Callee->getBaseName() == "!") {
+        CondType = ConditionType::IS_FALSE;
+        E = PrefixOp->getArg()->getSemanticsProvidingExpr();
+      }
+    }
+
+    auto *DRE = dyn_cast<DeclRefExpr>(E);
+    if (!DRE)
+      return;
+
+    Subject = DRE->getDecl();
+    Type = CondType;
   }
 
   /// Initializes a `CallbackCondition` with binding of an `Optional` or
@@ -4480,67 +4566,19 @@ struct CallbackCondition {
     }
   }
 
-  bool isValid() const { return Type != ConditionType::INVALID; }
-
-  /// Given an `if` condition `Cond` and a set of `Decls`, find any
-  /// `CallbackCondition`s in `Cond` that use one of those `Decls` and add them
-  /// to the map `AddTo`. Return `true` if all elements in the condition are
-  /// "handled", ie. every condition can be mapped to a single `Decl` in
-  /// `Decls`.
-  static bool all(StmtCondition Cond, llvm::DenseSet<const Decl *> Decls,
-                  llvm::DenseMap<const Decl *, CallbackCondition> &AddTo) {
-    bool Handled = true;
-    for (auto &CondElement : Cond) {
-      if (auto *BoolExpr = CondElement.getBooleanOrNull()) {
-        SmallVector<Expr *, 1> Exprs;
-        Exprs.push_back(BoolExpr);
-
-        while (!Exprs.empty()) {
-          auto *Next = Exprs.pop_back_val();
-          if (auto *ACE = dyn_cast<AutoClosureExpr>(Next))
-            Next = ACE->getSingleExpressionBody();
-
-          if (auto *BE = dyn_cast_or_null<BinaryExpr>(Next)) {
-            auto *Operator = isOperator(BE);
-            if (Operator) {
-              if (Operator->getBaseName() == "&&") {
-                auto Args = BE->getArg()->getElements();
-                Exprs.insert(Exprs.end(), Args.begin(), Args.end());
-              } else {
-                addCond(CallbackCondition(BE, Operator), Decls, AddTo, Handled);
-              }
-              continue;
-            }
-          }
-
-          Handled = false;
-        }
-      } else if (auto *P = CondElement.getPatternOrNull()) {
-        addCond(CallbackCondition(P, CondElement.getInitializer()), Decls,
-                AddTo, Handled);
-      }
-    }
-    return Handled && !AddTo.empty();
-  }
+  bool isValid() const { return Type.hasValue(); }
 
 private:
-  static void addCond(const CallbackCondition &CC,
-                      llvm::DenseSet<const Decl *> Decls,
-                      llvm::DenseMap<const Decl *, CallbackCondition> &AddTo,
-                      bool &Handled) {
-    if (!CC.isValid() || !Decls.count(CC.Subject) ||
-        !AddTo.try_emplace(CC.Subject, CC).second)
-      Handled = false;
-  }
-
   void initFromEnumPattern(const Decl *D, const EnumElementPattern *EEP) {
     if (auto *EED = EEP->getElementDecl()) {
       auto eedTy = EED->getParentEnum()->getDeclaredType();
       if (!eedTy || !eedTy->isResult())
         return;
-      if (EED->getNameStr() == StringRef("failure"))
-        ErrorCase = true;
-      Type = ConditionType::NOT_NIL;
+      if (EED->getNameStr() == StringRef("failure")) {
+        Type = ConditionType::FAILURE_PATTEN;
+      } else {
+        Type = ConditionType::SUCCESS_PATTERN;
+      }
       Subject = D;
       BindPattern = EEP->getSubPattern();
     }
@@ -4571,6 +4609,32 @@ private:
     Type = ConditionType::NOT_NIL;
     Subject = BaseDRE->getDecl();
     BindPattern = P;
+  }
+};
+
+/// A CallbackCondition with additional semantic information about whether it
+/// is for a success path or failure path.
+struct ClassifiedCondition : public CallbackCondition {
+  ConditionPath Path;
+
+  /// Whether this represents an Obj-C style boolean flag check for success.
+  bool IsObjCStyleFlagCheck;
+
+  explicit ClassifiedCondition(CallbackCondition Cond, ConditionPath Path,
+                               bool IsObjCStyleFlagCheck)
+      : CallbackCondition(Cond), Path(Path),
+        IsObjCStyleFlagCheck(IsObjCStyleFlagCheck) {}
+};
+
+/// A wrapper for a map of parameter decls to their classified conditions, or
+/// \c None if they are not present in any conditions.
+struct ClassifiedCallbackConditions final
+    : llvm::MapVector<const Decl *, ClassifiedCondition> {
+  Optional<ClassifiedCondition> lookup(const Decl *D) const {
+    auto Res = find(D);
+    if (Res == end())
+      return None;
+    return Res->second;
   }
 };
 
@@ -4719,7 +4783,7 @@ public:
     Nodes.addNode(Node);
   }
 
-  void addBinding(const CallbackCondition &FromCondition,
+  void addBinding(const ClassifiedCondition &FromCondition,
                   DiagnosticEngine &DiagEngine) {
     if (!FromCondition.BindPattern)
       return;
@@ -4743,9 +4807,8 @@ public:
     BoundNames.try_emplace(FromCondition.Subject, Name);
   }
 
-  void addAllBindings(
-      const llvm::DenseMap<const Decl *, CallbackCondition> &FromConditions,
-      DiagnosticEngine &DiagEngine) {
+  void addAllBindings(const ClassifiedCallbackConditions &FromConditions,
+                      DiagnosticEngine &DiagEngine) {
     for (auto &Entry : FromConditions) {
       addBinding(Entry.second, DiagEngine);
       if (DiagEngine.hadAnyError())
@@ -4753,6 +4816,23 @@ public:
     }
   }
 };
+
+/// Whether or not the given statement starts a new scope. Note that most
+/// statements are handled by the \c BraceStmt check. The others listed are
+/// a somewhat special case since they can also declare variables in their
+/// condition.
+static bool startsNewScope(Stmt *S) {
+  switch (S->getKind()) {
+  case StmtKind::Brace:
+  case StmtKind::If:
+  case StmtKind::While:
+  case StmtKind::ForEach:
+  case StmtKind::Case:
+    return true;
+  default:
+    return false;
+  }
+}
 
 struct ClassifiedBlocks {
   ClassifiedBlock SuccessBlock;
@@ -4774,21 +4854,24 @@ struct CallbackClassifier {
   /// Updates the success and error block of `Blocks` with nodes and bound
   /// names from `Body`. Errors are added through `DiagEngine`, possibly
   /// resulting in partially filled out blocks.
-  static void classifyInto(ClassifiedBlocks &Blocks,
+  static void classifyInto(ClassifiedBlocks &Blocks, const FuncDecl *Callee,
+                           ArrayRef<const ParamDecl *> SuccessParams,
                            llvm::DenseSet<SwitchStmt *> &HandledSwitches,
                            DiagnosticEngine &DiagEngine,
                            llvm::DenseSet<const Decl *> UnwrapParams,
                            const ParamDecl *ErrParam, HandlerType ResultType,
                            BraceStmt *Body) {
     assert(!Body->getElements().empty() && "Cannot classify empty body");
-    CallbackClassifier Classifier(Blocks, HandledSwitches, DiagEngine,
-                                  UnwrapParams, ErrParam,
-                                  ResultType == HandlerType::RESULT);
+    CallbackClassifier Classifier(Blocks, Callee, SuccessParams,
+                                  HandledSwitches, DiagEngine, UnwrapParams,
+                                  ErrParam, ResultType == HandlerType::RESULT);
     Classifier.classifyNodes(Body->getElements(), Body->getRBraceLoc());
   }
 
 private:
   ClassifiedBlocks &Blocks;
+  const FuncDecl *Callee;
+  ArrayRef<const ParamDecl *> SuccessParams;
   llvm::DenseSet<SwitchStmt *> &HandledSwitches;
   DiagnosticEngine &DiagEngine;
   ClassifiedBlock *CurrentBlock;
@@ -4796,15 +4879,16 @@ private:
   const ParamDecl *ErrParam;
   bool IsResultParam;
 
-  CallbackClassifier(ClassifiedBlocks &Blocks,
+  CallbackClassifier(ClassifiedBlocks &Blocks, const FuncDecl *Callee,
+                     ArrayRef<const ParamDecl *> SuccessParams,
                      llvm::DenseSet<SwitchStmt *> &HandledSwitches,
                      DiagnosticEngine &DiagEngine,
                      llvm::DenseSet<const Decl *> UnwrapParams,
                      const ParamDecl *ErrParam, bool IsResultParam)
-      : Blocks(Blocks), HandledSwitches(HandledSwitches),
-        DiagEngine(DiagEngine), CurrentBlock(&Blocks.SuccessBlock),
-        UnwrapParams(UnwrapParams), ErrParam(ErrParam),
-        IsResultParam(IsResultParam) {}
+      : Blocks(Blocks), Callee(Callee), SuccessParams(SuccessParams),
+        HandledSwitches(HandledSwitches), DiagEngine(DiagEngine),
+        CurrentBlock(&Blocks.SuccessBlock), UnwrapParams(UnwrapParams),
+        ErrParam(ErrParam), IsResultParam(IsResultParam) {}
 
   void classifyNodes(ArrayRef<ASTNode> Nodes, SourceLoc endCommentLoc) {
     for (auto I = Nodes.begin(), E = Nodes.end(); I < E; ++I) {
@@ -4834,12 +4918,269 @@ private:
     CurrentBlock->addPossibleCommentLoc(endCommentLoc);
   }
 
+  /// Whether any of the provided ASTNodes have a child expression that force
+  /// unwraps the error parameter. Note that this doesn't walk into new scopes.
+  bool hasForceUnwrappedErrorParam(ArrayRef<ASTNode> Nodes) {
+    if (IsResultParam || !ErrParam)
+      return false;
+
+    class ErrUnwrapFinder : public ASTWalker {
+      const ParamDecl *ErrParam;
+      bool FoundUnwrap = false;
+
+    public:
+      explicit ErrUnwrapFinder(const ParamDecl *ErrParam)
+          : ErrParam(ErrParam) {}
+      bool foundUnwrap() const { return FoundUnwrap; }
+
+      std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+        // Don't walk into ternary conditionals as they may have additional
+        // conditions such as err != nil that make a force unwrap now valid.
+        if (isa<IfExpr>(E))
+          return {false, E};
+
+        auto *FVE = dyn_cast<ForceValueExpr>(E);
+        if (!FVE)
+          return {true, E};
+
+        auto *DRE = dyn_cast<DeclRefExpr>(FVE->getSubExpr());
+        if (!DRE)
+          return {true, E};
+
+        if (DRE->getDecl() != ErrParam)
+          return {true, E};
+
+        // If we find the node we're looking for, make a note of it, and abort
+        // the walk.
+        FoundUnwrap = true;
+        return {false, nullptr};
+      }
+
+      std::pair<bool, Stmt *> walkToStmtPre(Stmt *S) override {
+        // Don't walk into new explicit scopes, we only want to consider force
+        // unwraps in the immediate conditional body.
+        if (!S->isImplicit() && startsNewScope(S))
+          return {false, S};
+        return {true, S};
+      }
+
+      bool walkToDeclPre(Decl *D) override {
+        // Don't walk into new explicit DeclContexts.
+        return D->isImplicit() || !isa<DeclContext>(D);
+      }
+    };
+    for (auto Node : Nodes) {
+      ErrUnwrapFinder walker(ErrParam);
+      Node.walk(walker);
+      if (walker.foundUnwrap())
+        return true;
+    }
+    return false;
+  }
+
+  /// Given a callback condition, classify it as a success or failure path.
+  Optional<ClassifiedCondition>
+  classifyCallbackCondition(const CallbackCondition &Cond,
+                            const NodesToPrint &SuccessNodes, Stmt *ElseStmt) {
+    if (!Cond.isValid())
+      return None;
+
+    // For certain types of condition, they need to appear in certain lists.
+    auto CondType = *Cond.Type;
+    switch (CondType) {
+    case ConditionType::NOT_NIL:
+    case ConditionType::NIL:
+      if (!UnwrapParams.count(Cond.Subject))
+        return None;
+      break;
+    case ConditionType::IS_TRUE:
+    case ConditionType::IS_FALSE:
+      if (!llvm::is_contained(SuccessParams, Cond.Subject))
+        return None;
+      break;
+    case ConditionType::SUCCESS_PATTERN:
+    case ConditionType::FAILURE_PATTEN:
+      if (!IsResultParam || Cond.Subject != ErrParam)
+        return None;
+      break;
+    }
+
+    // Let's start with a success path, and flip any negative conditions.
+    auto Path = ConditionPath::SUCCESS;
+
+    // If it's an error param, that's a flip.
+    if (Cond.Subject == ErrParam && !IsResultParam)
+      Path = flippedConditionPath(Path);
+
+    // If we have a nil, false, or failure condition, that's a flip.
+    switch (CondType) {
+    case ConditionType::NIL:
+    case ConditionType::IS_FALSE:
+    case ConditionType::FAILURE_PATTEN:
+      Path = flippedConditionPath(Path);
+      break;
+    case ConditionType::IS_TRUE:
+    case ConditionType::NOT_NIL:
+    case ConditionType::SUCCESS_PATTERN:
+      break;
+    }
+
+    // If we have a bool condition, it could be an Obj-C style flag check, which
+    // we do some extra checking for. Otherwise, we're done.
+    if (CondType != ConditionType::IS_TRUE &&
+        CondType != ConditionType::IS_FALSE) {
+      return ClassifiedCondition(Cond, Path, /*ObjCFlagCheck*/ false);
+    }
+
+    // Check to see if the async alternative function has a convention that
+    // specifies where the flag is and what it indicates.
+    Optional<std::pair</*Idx*/ unsigned, /*SuccessFlag*/ bool>> CustomFlag;
+    if (auto *AsyncAlt = Callee->getAsyncAlternative()) {
+      if (auto Conv = AsyncAlt->getForeignAsyncConvention()) {
+        if (auto Idx = Conv->completionHandlerFlagParamIndex()) {
+          auto IsSuccessFlag = Conv->completionHandlerFlagIsErrorOnZero();
+          CustomFlag = std::make_pair(*Idx, IsSuccessFlag);
+        }
+      }
+    }
+    if (CustomFlag) {
+      auto Idx = CustomFlag->first;
+      if (Idx < 0 || Idx >= SuccessParams.size())
+        return None;
+
+      if (SuccessParams[Idx] != Cond.Subject)
+        return None;
+
+      // The path may need to be flipped depending on whether the flag indicates
+      // success.
+      auto IsSuccessFlag = CustomFlag->second;
+      if (!IsSuccessFlag)
+        Path = flippedConditionPath(Path);
+
+      return ClassifiedCondition(Cond, Path, /*ObjCStyleFlagCheck*/ true);
+    }
+
+    // If we've reached here, we have a bool flag check that isn't specified in
+    // the async convention. We apply a heuristic to see if the error param is
+    // force unwrapped in the conditional body. In that case, the user is
+    // expecting it to be the error path, and it's more likely than not that the
+    // flag value conveys no more useful information in the error block.
+
+    // First check the success block.
+    auto FoundInSuccessBlock =
+        hasForceUnwrappedErrorParam(SuccessNodes.getNodes());
+
+    // Then check the else block if we have it.
+    if (ASTNode ElseNode = ElseStmt) {
+      // Unwrap the BraceStmt of the else clause if needed. This is needed as
+      // we won't walk into BraceStmts by default as they introduce new
+      // scopes.
+      ArrayRef<ASTNode> Nodes;
+      if (auto *BS = dyn_cast<BraceStmt>(ElseStmt)) {
+        Nodes = BS->getElements();
+      } else {
+        Nodes = llvm::makeArrayRef(ElseNode);
+      }
+      if (hasForceUnwrappedErrorParam(Nodes)) {
+        // If we also found an unwrap in the success block, we don't know what's
+        // happening here.
+        if (FoundInSuccessBlock)
+          return None;
+
+        // Otherwise we can determine this as a success condition. Note this is
+        // flipped as if the error is present in the else block, this condition
+        // is for success.
+        return ClassifiedCondition(Cond, ConditionPath::SUCCESS,
+                                   /*ObjCStyleFlagCheck*/ true);
+      }
+    }
+
+    if (FoundInSuccessBlock) {
+      // Note that the path is flipped as if the error is present in the success
+      // block, this condition is for failure.
+      return ClassifiedCondition(Cond, ConditionPath::FAILURE,
+                                 /*ObjCStyleFlagCheck*/ true);
+    }
+
+    // Otherwise we can't classify this.
+    return None;
+  }
+
+  /// Classifies all the conditions present in a given StmtCondition, taking
+  /// into account its success body and failure body. Returns \c true if there
+  /// were any conditions that couldn't be classified, \c false otherwise.
+  bool classifyConditionsOf(StmtCondition Cond,
+                            const NodesToPrint &ThenNodesToPrint,
+                            Stmt *ElseStmt,
+                            ClassifiedCallbackConditions &Conditions) {
+    bool UnhandledConditions = false;
+    Optional<ClassifiedCondition> ObjCFlagCheck;
+    auto TryAddCond = [&](CallbackCondition CC) {
+      auto Classified =
+          classifyCallbackCondition(CC, ThenNodesToPrint, ElseStmt);
+
+      // If we couldn't classify this, or if there are multiple Obj-C style flag
+      // checks, this is unhandled.
+      if (!Classified || (ObjCFlagCheck && Classified->IsObjCStyleFlagCheck)) {
+        UnhandledConditions = true;
+        return;
+      }
+
+      // If we've seen multiple conditions for the same subject, don't handle
+      // this.
+      if (!Conditions.insert({CC.Subject, *Classified}).second) {
+        UnhandledConditions = true;
+        return;
+      }
+
+      if (Classified->IsObjCStyleFlagCheck)
+        ObjCFlagCheck = Classified;
+    };
+
+    for (auto &CondElement : Cond) {
+      if (auto *BoolExpr = CondElement.getBooleanOrNull()) {
+        SmallVector<Expr *, 1> Exprs;
+        Exprs.push_back(BoolExpr);
+
+        while (!Exprs.empty()) {
+          auto *Next = Exprs.pop_back_val()->getSemanticsProvidingExpr();
+          if (auto *ACE = dyn_cast<AutoClosureExpr>(Next))
+            Next = ACE->getSingleExpressionBody()->getSemanticsProvidingExpr();
+
+          if (auto *BE = dyn_cast_or_null<BinaryExpr>(Next)) {
+            auto *Operator = isOperator(BE);
+            if (Operator) {
+              // If we have an && operator, decompose its arguments.
+              if (Operator->getBaseName() == "&&") {
+                Exprs.push_back(BE->getLHS());
+                Exprs.push_back(BE->getRHS());
+              } else {
+                // Otherwise check to see if we have an == nil or != nil
+                // condition.
+                TryAddCond(CallbackCondition(BE, Operator));
+              }
+              continue;
+            }
+          }
+
+          // Check to see if we have a lone bool condition.
+          TryAddCond(CallbackCondition(Next));
+        }
+      } else if (auto *P = CondElement.getPatternOrNull()) {
+        TryAddCond(CallbackCondition(P, CondElement.getInitializer()));
+      }
+    }
+    return UnhandledConditions || Conditions.empty();
+  }
+
+  /// Classifies the conditions of a conditional statement, and adds the
+  /// necessary nodes to either the success or failure block.
   void classifyConditional(Stmt *Statement, StmtCondition Condition,
                            NodesToPrint ThenNodesToPrint, Stmt *ElseStmt) {
-    llvm::DenseMap<const Decl *, CallbackCondition> CallbackConditions;
-    bool UnhandledConditions =
-        !CallbackCondition::all(Condition, UnwrapParams, CallbackConditions);
-    CallbackCondition ErrCondition = CallbackConditions.lookup(ErrParam);
+    ClassifiedCallbackConditions CallbackConditions;
+    bool UnhandledConditions = classifyConditionsOf(
+        Condition, ThenNodesToPrint, ElseStmt, CallbackConditions);
+    auto ErrCondition = CallbackConditions.lookup(ErrParam);
 
     if (UnhandledConditions) {
       // Some unknown conditions. If there's an else, assume we can't handle
@@ -4855,12 +5196,11 @@ private:
       } else if (ElseStmt) {
         DiagEngine.diagnose(Statement->getStartLoc(),
                             diag::unknown_callback_conditions);
-      } else if (ErrCondition.isValid() &&
-                 ErrCondition.Type == ConditionType::NOT_NIL) {
+      } else if (ErrCondition && ErrCondition->Path == ConditionPath::FAILURE) {
         Blocks.ErrorBlock.addNode(Statement);
       } else {
         for (auto &Entry : CallbackConditions) {
-          if (Entry.second.Type == ConditionType::NIL) {
+          if (Entry.second.Path == ConditionPath::FAILURE) {
             Blocks.ErrorBlock.addNode(Statement);
             return;
           }
@@ -4870,42 +5210,36 @@ private:
       return;
     }
 
-    ClassifiedBlock *ThenBlock = &Blocks.SuccessBlock;
-    ClassifiedBlock *ElseBlock = &Blocks.ErrorBlock;
+    // If all the conditions were classified, make sure they're all consistently
+    // on the success or failure path.
+    Optional<ConditionPath> Path;
+    for (auto &Entry : CallbackConditions) {
+      auto &Cond = Entry.second;
+      if (!Path) {
+        Path = Cond.Path;
+      } else if (*Path != Cond.Path) {
+        // Similar to the unknown conditions case. Add the whole if unless
+        // there's an else, in which case use the fallback instead.
+        // TODO: Split the `if` statement
 
-    if (ErrCondition.isValid() && (!IsResultParam || ErrCondition.ErrorCase) &&
-        ErrCondition.Type == ConditionType::NOT_NIL) {
-      ClassifiedBlock *TempBlock = ThenBlock;
-      ThenBlock = ElseBlock;
-      ElseBlock = TempBlock;
-    } else {
-      ConditionType CondType = ConditionType::INVALID;
-      for (auto &Entry : CallbackConditions) {
-        if (IsResultParam || Entry.second.Subject != ErrParam) {
-          if (CondType == ConditionType::INVALID) {
-            CondType = Entry.second.Type;
-          } else if (CondType != Entry.second.Type) {
-            // Similar to the unknown conditions case. Add the whole if unless
-            // there's an else, in which case use the fallback instead.
-            // TODO: Split the `if` statement
-
-            if (ElseStmt) {
-              DiagEngine.diagnose(Statement->getStartLoc(),
-                                  diag::mixed_callback_conditions);
-            } else {
-              CurrentBlock->addNode(Statement);
-            }
-            return;
-          }
+        if (ElseStmt) {
+          DiagEngine.diagnose(Statement->getStartLoc(),
+                              diag::mixed_callback_conditions);
+        } else {
+          CurrentBlock->addNode(Statement);
         }
-      }
-
-      if (CondType == ConditionType::NIL) {
-        ClassifiedBlock *TempBlock = ThenBlock;
-        ThenBlock = ElseBlock;
-        ElseBlock = TempBlock;
+        return;
       }
     }
+    assert(Path && "Didn't classify a path?");
+
+    auto *ThenBlock = &Blocks.SuccessBlock;
+    auto *ElseBlock = &Blocks.ErrorBlock;
+
+    // If the condition is for a failure path, the error block is ThenBlock, and
+    // the success block is ElseBlock.
+    if (*Path == ConditionPath::FAILURE)
+      std::swap(ThenBlock, ElseBlock);
 
     // We'll be dropping the statement, but make sure to keep any attached
     // comments.
@@ -4976,13 +5310,16 @@ private:
         return;
       }
 
-      CallbackCondition CC(ErrParam, &Items[0]);
-      ClassifiedBlock *Block = &Blocks.SuccessBlock;
-      ClassifiedBlock *OtherBlock = &Blocks.ErrorBlock;
-      if (CC.ErrorCase) {
-        Block = &Blocks.ErrorBlock;
-        OtherBlock = &Blocks.SuccessBlock;
-      }
+      auto *Block = &Blocks.SuccessBlock;
+      auto *OtherBlock = &Blocks.ErrorBlock;
+      auto SuccessNodes = NodesToPrint::inBraceStmt(CS->getBody());
+
+      // Classify the case pattern.
+      auto CC = classifyCallbackCondition(
+          CallbackCondition(ErrParam, &Items[0]), SuccessNodes,
+          /*elseStmt*/ nullptr);
+      if (CC && CC->Path == ConditionPath::FAILURE)
+        std::swap(Block, OtherBlock);
 
       // We'll be dropping the case, but make sure to keep any attached
       // comments. Because these comments will effectively be part of the
@@ -4993,8 +5330,9 @@ private:
       if (CS == Cases.back())
         Block->addPossibleCommentLoc(SS->getRBraceLoc());
 
-      setNodes(Block, OtherBlock, NodesToPrint::inBraceStmt(CS->getBody()));
-      Block->addBinding(CC, DiagEngine);
+      setNodes(Block, OtherBlock, std::move(SuccessNodes));
+      if (CC)
+        Block->addBinding(*CC, DiagEngine);
       if (DiagEngine.hadAnyError())
         return;
     }
@@ -5003,30 +5341,13 @@ private:
   }
 };
 
-/// Whether or not the given statement starts a new scope. Note that most
-/// statements are handled by the \c BraceStmt check. The others listed are
-/// a somewhat special case since they can also declare variables in their
-/// condition.
-static bool startsNewScope(Stmt *S) {
-  switch (S->getKind()) {
-  case StmtKind::Brace:
-  case StmtKind::If:
-  case StmtKind::While:
-  case StmtKind::ForEach:
-  case StmtKind::Case:
-    return true;
-  default:
-    return false;
-  }
-}
-
-/// Name of a decl if it has one, an empty \c Identifier otherwise.
-static Identifier getDeclName(const Decl *D) {
+/// Base name of a decl if it has one, an empty \c DeclBaseName otherwise.
+static DeclBaseName getDeclName(const Decl *D) {
   if (auto *VD = dyn_cast<ValueDecl>(D)) {
     if (VD->hasName())
-      return VD->getBaseIdentifier();
+      return VD->getBaseName();
   }
-  return Identifier();
+  return DeclBaseName();
 }
 
 class DeclCollector : private SourceEntityWalker {
@@ -5301,7 +5622,7 @@ class AsyncConverter : private SourceEntityWalker {
   llvm::DenseMap<const Decl *, Identifier> Names;
   // Names of decls in each scope, where the first element is the initial scope
   // and the last is the current scope.
-  llvm::SmallVector<llvm::DenseSet<Identifier>, 4> ScopedNames;
+  llvm::SmallVector<llvm::DenseSet<DeclBaseName>, 4> ScopedNames;
   // Mapping of \c BraceStmt -> declarations referenced in that statement
   // without first being declared. These are used to fill the \c ScopeNames
   // map on entering that scope.
@@ -5397,6 +5718,41 @@ public:
     return true;
   }
 
+  /// Creates an async alternative function that forwards onto the completion
+  /// handler function through
+  /// withCheckedContinuation/withCheckedThrowingContinuation.
+  bool createAsyncWrapper() {
+    assert(Buffer.empty() && "AsyncConverter can only be used once");
+    auto *FD = cast<FuncDecl>(StartNode.get<Decl *>());
+
+    // First add the new async function declaration.
+    addFuncDecl(FD);
+    OS << tok::l_brace << "\n";
+
+    // Then add the body.
+    OS << tok::kw_return << " ";
+    if (TopHandler.HasError)
+      OS << tok::kw_try << " ";
+
+    OS << "await ";
+
+    // withChecked[Throwing]Continuation { cont in
+    if (TopHandler.HasError) {
+      OS << "withCheckedThrowingContinuation";
+    } else {
+      OS << "withCheckedContinuation";
+    }
+    OS << " " << tok::l_brace << " cont " << tok::kw_in << "\n";
+
+    // fnWithHandler(args...) { ... }
+    auto ClosureStr = getAsyncWrapperCompletionClosure("cont", TopHandler);
+    addForwardingCallTo(FD, TopHandler, /*HandlerReplacement*/ ClosureStr);
+
+    OS << tok::r_brace << "\n"; // end continuation closure
+    OS << tok::r_brace << "\n"; // end function body
+    return true;
+  }
+
   void replace(ASTNode Node, SourceEditConsumer &EditConsumer,
                SourceLoc StartOverride = SourceLoc()) {
     SourceRange Range = Node.getSourceRange();
@@ -5432,6 +5788,130 @@ private:
     return TopHandler.isValid();
   }
 
+  /// Prints a tuple of elements, or a lone single element if only one is
+  /// present, using the provided printing function.
+  template <typename T, typename PrintFn>
+  void addTupleOf(ArrayRef<T> Elements, llvm::raw_ostream &OS,
+                  PrintFn PrintElt) {
+    if (Elements.size() == 1) {
+      PrintElt(Elements[0]);
+      return;
+    }
+    OS << tok::l_paren;
+    llvm::interleave(Elements, PrintElt, [&]() { OS << tok::comma << " "; });
+    OS << tok::r_paren;
+  }
+
+  /// Retrieve the completion handler closure argument for an async wrapper
+  /// function.
+  std::string
+  getAsyncWrapperCompletionClosure(StringRef ContName,
+                                   const AsyncHandlerParamDesc &HandlerDesc) {
+    std::string OutputStr;
+    llvm::raw_string_ostream OS(OutputStr);
+
+    OS << " " << tok::l_brace; // start closure
+
+    // Prepare parameter names for the closure.
+    auto SuccessParams = HandlerDesc.getSuccessParams();
+    SmallVector<SmallString<4>, 2> SuccessParamNames;
+    for (auto idx : indices(SuccessParams)) {
+      SuccessParamNames.emplace_back("res");
+
+      // If we have multiple success params, number them e.g res1, res2...
+      if (SuccessParams.size() > 1)
+        SuccessParamNames.back().append(std::to_string(idx + 1));
+    }
+    Optional<SmallString<4>> ErrName;
+    if (HandlerDesc.getErrorParam())
+      ErrName.emplace("err");
+
+    auto HasAnyParams = !SuccessParamNames.empty() || ErrName;
+    if (HasAnyParams)
+      OS << " ";
+
+    // res1, res2
+    llvm::interleave(
+        SuccessParamNames, [&](auto Name) { OS << Name; },
+        [&]() { OS << tok::comma << " "; });
+
+    // , err
+    if (ErrName) {
+      if (!SuccessParamNames.empty())
+        OS << tok::comma << " ";
+
+      OS << *ErrName;
+    }
+    if (HasAnyParams)
+      OS << " " << tok::kw_in;
+
+    OS << "\n";
+
+    // The closure body.
+    switch (HandlerDesc.Type) {
+    case HandlerType::PARAMS: {
+      // For a (Success?, Error?) -> Void handler, we do an if let on the error.
+      if (ErrName) {
+        // if let err = err {
+        OS << tok::kw_if << " " << tok::kw_let << " ";
+        OS << *ErrName << " " << tok::equal << " " << *ErrName << " ";
+        OS << tok::l_brace << "\n";
+
+        // cont.resume(throwing: err)
+        OS << ContName << tok::period << "resume" << tok::l_paren;
+        OS << "throwing" << tok::colon << " " << *ErrName;
+        OS << tok::r_paren << "\n";
+
+        // return }
+        OS << tok::kw_return << "\n";
+        OS << tok::r_brace << "\n";
+      }
+
+      // If we have any success params that we need to unwrap, insert a guard.
+      for (auto Idx : indices(SuccessParamNames)) {
+        auto &Name = SuccessParamNames[Idx];
+        auto ParamTy = SuccessParams[Idx].getParameterType();
+        if (!HandlerDesc.shouldUnwrap(ParamTy))
+          continue;
+
+        // guard let res = res else {
+        OS << tok::kw_guard << " " << tok::kw_let << " ";
+        OS << Name << " " << tok::equal << " " << Name << " " << tok::kw_else;
+        OS << " " << tok::l_brace << "\n";
+
+        // fatalError(...)
+        OS << "fatalError" << tok::l_paren;
+        OS << "\"Expected non-nil success param '" << Name;
+        OS << "' for nil error\"";
+        OS << tok::r_paren << "\n";
+
+        // End guard.
+        OS << tok::r_brace << "\n";
+      }
+
+      // cont.resume(returning: (res1, res2, ...))
+      OS << ContName << tok::period << "resume" << tok::l_paren;
+      OS << "returning" << tok::colon << " ";
+      addTupleOf(llvm::makeArrayRef(SuccessParamNames), OS,
+                 [&](auto Ref) { OS << Ref; });
+      OS << tok::r_paren << "\n";
+      break;
+    }
+    case HandlerType::RESULT: {
+      // cont.resume(with: res)
+      assert(SuccessParamNames.size() == 1);
+      OS << ContName << tok::period << "resume" << tok::l_paren;
+      OS << "with" << tok::colon << " " << SuccessParamNames[0];
+      OS << tok::r_paren << "\n";
+      break;
+    }
+    case HandlerType::INVALID:
+      llvm_unreachable("Should not have an invalid handler here");
+    }
+
+    OS << tok::r_brace << "\n"; // end closure
+    return OutputStr;
+  }
 
   /// Retrieves the location for the start of a comment attached to the token
   /// at the provided location, or the location itself if there is no comment.
@@ -5896,6 +6376,9 @@ private:
                                  const AsyncHandlerDesc &HandlerDesc,
                                  const ClosureExpr *Callback,
                                  PtrArrayRef<Expr *> ArgList) {
+    auto *Callee = getUnderlyingFunc(CE->getFn());
+    assert(Callee);
+
     ArrayRef<const ParamDecl *> CallbackParams =
         Callback->getParameters()->getArray();
     auto CallbackBody = Callback->getBody();
@@ -5927,9 +6410,9 @@ private:
       }
       if (ErrParam)
         UnwrapParams.insert(ErrParam);
-      CallbackClassifier::classifyInto(Blocks, HandledSwitches, DiagEngine,
-                                       UnwrapParams, ErrParam, HandlerDesc.Type,
-                                       CallbackBody);
+      CallbackClassifier::classifyInto(
+          Blocks, Callee, SuccessParams, HandledSwitches, DiagEngine,
+          UnwrapParams, ErrParam, HandlerDesc.Type, CallbackBody);
     }
 
     if (DiagEngine.hadAnyError()) {
@@ -6075,16 +6558,9 @@ private:
         }
         OS << " ";
       }
-      if (SuccessParams.size() > 1)
-        OS << tok::l_paren;
-      OS << newNameFor(SuccessParams.front());
-      for (const auto Param : SuccessParams.drop_front()) {
-        OS << tok::comma << " ";
-        OS << newNameFor(Param);
-      }
-      if (SuccessParams.size() > 1) {
-        OS << tok::r_paren;
-      }
+      // 'res =' or '(res1, res2, ...) ='
+      addTupleOf(SuccessParams, OS,
+                 [&](auto &Param) { OS << newNameFor(Param); });
       OS << " " << tok::equal << " ";
     }
 
@@ -6221,7 +6697,7 @@ private:
   Identifier assignUniqueName(const Decl *D, StringRef BoundName) {
     Identifier Ident;
     if (BoundName.empty()) {
-      BoundName = getDeclName(D).str();
+      BoundName = getDeclName(D).userFacingName();
       if (BoundName.empty())
         return Ident;
     }
@@ -6271,22 +6747,46 @@ private:
   /// 'await' keyword.
   void addCallToAsyncMethod(const FuncDecl *FD,
                             const AsyncHandlerDesc &HandlerDesc) {
+    // The call to the async function is the same as the call to the old
+    // completion handler function, minus the completion handler arg.
+    addForwardingCallTo(FD, HandlerDesc, /*HandlerReplacement*/ "");
+  }
+
+  /// Adds a forwarding call to the old completion handler function, with
+  /// \p HandlerReplacement that allows for a custom replacement or, if empty,
+  /// removal of the completion handler closure.
+  void addForwardingCallTo(
+      const FuncDecl *FD, const AsyncHandlerDesc &HandlerDesc,
+      StringRef HandlerReplacement, bool CanUseTrailingClosure = true) {
     OS << FD->getBaseName() << tok::l_paren;
-    bool FirstParam = true;
-    for (auto Param : *FD->getParameters()) {
+
+    auto *Params = FD->getParameters();
+    for (auto Param : *Params) {
       if (Param == HandlerDesc.getHandler()) {
-        /// We don't need to pass the completion handler to the async method.
-        continue;
+        /// If we're not replacing the handler with anything, drop it.
+        if (HandlerReplacement.empty())
+          continue;
+
+        // If this is the last param, and we can use a trailing closure, do so.
+        if (CanUseTrailingClosure && Param == Params->back()) {
+          OS << tok::r_paren << " ";
+          OS << HandlerReplacement;
+          return;
+        }
+        // Otherwise fall through to do the replacement.
       }
-      if (!FirstParam) {
+
+      if (Param != Params->front())
         OS << tok::comma << " ";
-      } else {
-        FirstParam = false;
-      }
-      if (!Param->getArgumentName().empty()) {
+
+      if (!Param->getArgumentName().empty())
         OS << Param->getArgumentName() << tok::colon << " ";
+
+      if (Param == HandlerDesc.getHandler()) {
+        OS << HandlerReplacement;
+      } else {
+        OS << Param->getParameterName();
       }
-      OS << Param->getParameterName();
     }
     OS << tok::r_paren;
   }
@@ -6408,19 +6908,10 @@ private:
   /// Adds the result type of a refactored async function that previously
   /// returned results via a completion handler described by \p HandlerDesc.
   void addAsyncFuncReturnType(const AsyncHandlerDesc &HandlerDesc) {
+    // Type or (Type1, Type2, ...)
     SmallVector<Type, 2> Scratch;
-    auto ReturnTypes = HandlerDesc.getAsyncReturnTypes(Scratch);
-    if (ReturnTypes.size() > 1) {
-      OS << tok::l_paren;
-    }
-
-    llvm::interleave(
-        ReturnTypes, [&](Type Ty) { Ty->print(OS); },
-        [&]() { OS << tok::comma << " "; });
-
-    if (ReturnTypes.size() > 1) {
-      OS << tok::r_paren;
-    }
+    addTupleOf(HandlerDesc.getAsyncReturnTypes(Scratch), OS,
+               [&](auto Ty) { Ty->print(OS); });
   }
 
   /// If \p FD is generic, adds a type annotation with the return type of the
@@ -6449,6 +6940,24 @@ private:
     }
   }
 };
+
+/// Adds an attribute to describe a completion handler function's async
+/// alternative if necessary.
+void addCompletionHandlerAsyncAttrIfNeccessary(
+    ASTContext &Ctx, const FuncDecl *FD,
+    const AsyncHandlerParamDesc &HandlerDesc,
+    SourceEditConsumer &EditConsumer) {
+  if (!Ctx.LangOpts.EnableExperimentalConcurrency)
+    return;
+
+  llvm::SmallString<0> HandlerAttribute;
+  llvm::raw_svector_ostream OS(HandlerAttribute);
+  OS << "@completionHandlerAsync(\"";
+  HandlerDesc.printAsyncFunctionName(OS);
+  OS << "\", completionHandlerIndex: " << HandlerDesc.Index << ")\n";
+  EditConsumer.accept(Ctx.SourceMgr, FD->getAttributeInsertionLoc(false),
+                      HandlerAttribute);
+}
 
 } // namespace asyncrefactorings
 
@@ -6571,16 +7080,7 @@ bool RefactoringActionAddAsyncAlternative::performChange() {
                       "@available(*, deprecated, message: \"Prefer async "
                       "alternative instead\")\n");
 
-  if (Ctx.LangOpts.EnableExperimentalConcurrency) {
-    // Add an attribute to describe its async alternative
-    llvm::SmallString<0> HandlerAttribute;
-    llvm::raw_svector_ostream OS(HandlerAttribute);
-    OS << "@completionHandlerAsync(\"";
-    HandlerDesc.printAsyncFunctionName(OS);
-    OS << "\", completionHandlerIndex: " << HandlerDesc.Index << ")\n";
-    EditConsumer.accept(SM, FD->getAttributeInsertionLoc(false),
-                        HandlerAttribute);
-  }
+  addCompletionHandlerAsyncAttrIfNeccessary(Ctx, FD, HandlerDesc, EditConsumer);
 
   AsyncConverter LegacyBodyCreator(TheFile, SM, DiagEngine, FD, HandlerDesc);
   if (LegacyBodyCreator.createLegacyBody()) {
@@ -6592,6 +7092,43 @@ bool RefactoringActionAddAsyncAlternative::performChange() {
 
   return false;
 }
+
+bool RefactoringActionAddAsyncWrapper::isApplicable(
+    const ResolvedCursorInfo &CursorInfo, DiagnosticEngine &Diag) {
+  using namespace asyncrefactorings;
+
+  auto *FD = findFunction(CursorInfo);
+  if (!FD)
+    return false;
+
+  auto HandlerDesc =
+      AsyncHandlerParamDesc::find(FD, /*RequireAttributeOrName=*/false);
+  return HandlerDesc.isValid();
+}
+
+bool RefactoringActionAddAsyncWrapper::performChange() {
+  using namespace asyncrefactorings;
+
+  auto *FD = findFunction(CursorInfo);
+  assert(FD &&
+         "Should not run performChange when refactoring is not applicable");
+
+  auto HandlerDesc =
+      AsyncHandlerParamDesc::find(FD, /*RequireAttributeOrName=*/false);
+  assert(HandlerDesc.isValid() &&
+         "Should not run performChange when refactoring is not applicable");
+
+  AsyncConverter Converter(TheFile, SM, DiagEngine, FD, HandlerDesc);
+  if (!Converter.createAsyncWrapper())
+    return true;
+
+  addCompletionHandlerAsyncAttrIfNeccessary(Ctx, FD, HandlerDesc, EditConsumer);
+
+  // Add the async wrapper.
+  Converter.insertAfter(FD, EditConsumer);
+  return false;
+}
+
 } // end of anonymous namespace
 
 StringRef swift::ide::

@@ -757,9 +757,19 @@ DisableImplicitConcurrencyImport("disable-implicit-concurrency-module-import",
                                  llvm::cl::desc("Disable implicit import of _Concurrency module"),
                                  llvm::cl::init(false));
 
+static llvm::cl::opt<bool>
+EnableExperimentalDistributed("enable-experimental-distributed",
+                              llvm::cl::desc("Enable experimental distributed actors and functions"),
+                              llvm::cl::init(false));
+
 static llvm::cl::list<std::string>
 AccessNotesPath("access-notes-path", llvm::cl::desc("Path to access notes file"),
                 llvm::cl::cat(Category));
+
+static llvm::cl::opt<bool>
+AllowCompilerErrors("allow-compiler-errors",
+                    llvm::cl::desc("Whether to attempt to continue despite compiler errors"),
+                    llvm::cl::init(false));
 
 } // namespace options
 
@@ -3847,6 +3857,13 @@ int main(int argc, char *argv[]) {
     InitInvok.getLangOptions().DisableImplicitConcurrencyModuleImport = true;
   }
 
+  if (options::EnableExperimentalDistributed) {
+    // distributed implies concurrency features:
+    InitInvok.getLangOptions().EnableExperimentalConcurrency = true;
+    // enable 'distributed' parsing and features
+    InitInvok.getLangOptions().EnableExperimentalDistributed = true;
+  }
+
   if (!options::Triple.empty())
     InitInvok.setTargetTriple(options::Triple);
   if (!options::SwiftVersion.empty()) {
@@ -3917,6 +3934,12 @@ int main(int argc, char *argv[]) {
       options::ExplicitSwiftModuleMap;
     InitInvok.getFrontendOptions().DisableImplicitModules = true;
   }
+
+  if (options::AllowCompilerErrors) {
+    InitInvok.getFrontendOptions().AllowModuleWithCompilerErrors = true;
+    InitInvok.getLangOptions().AllowModuleWithCompilerErrors = true;
+  }
+
   // Process the clang arguments last and allow them to override previously
   // set options.
   if (!CCArgs.empty()) {

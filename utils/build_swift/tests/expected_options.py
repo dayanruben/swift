@@ -146,6 +146,7 @@ EXPECTED_DEFAULTS = {
     'enable_asan': False,
     'enable_experimental_differentiable_programming': True,
     'enable_experimental_concurrency': True,
+    'enable_experimental_distributed': True,
     'enable_lsan': False,
     'enable_sanitize_coverage': False,
     'disable_guaranteed_normal_arguments': False,
@@ -197,6 +198,7 @@ EXPECTED_DEFAULTS = {
     'native_llvm_tools_path': None,
     'native_swift_tools_path': None,
     'dump_config': False,
+    'reconfigure': False,
     'relocate_xdg_cache_home_under_build_subdir': False,
     'show_sdks': False,
     'skip_build': False,
@@ -506,6 +508,7 @@ EXPECTED_OPTIONS = [
 
     SetTrueOption('--legacy-impl', dest='legacy_impl'),
     SetTrueOption('--infer', dest='infer_dependencies'),
+    SetTrueOption('--reconfigure'),
 
     EnableOption('--android'),
     EnableOption('--build-external-benchmarks'),
@@ -521,6 +524,7 @@ EXPECTED_OPTIONS = [
     EnableOption('--enable-asan'),
     EnableOption('--enable-experimental-differentiable-programming'),
     EnableOption('--enable-experimental-concurrency'),
+    EnableOption('--enable-experimental-distributed'),
     EnableOption('--enable-lsan'),
     EnableOption('--enable-sanitize-coverage'),
     EnableOption('--enable-tsan'),

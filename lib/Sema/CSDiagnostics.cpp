@@ -165,7 +165,8 @@ Type FailureDiagnostic::restoreGenericParameters(
 bool FailureDiagnostic::conformsToKnownProtocol(
     Type type, KnownProtocolKind protocol) const {
   auto &cs = getConstraintSystem();
-  return constraints::conformsToKnownProtocol(cs.DC, type, protocol);
+  return TypeChecker::conformsToKnownProtocol(type, protocol,
+                                              cs.DC->getParentModule());
 }
 
 Type RequirementFailure::getOwnerType() const {
@@ -456,7 +457,7 @@ bool MissingConformanceFailure::diagnoseAsError() {
   if (isPatternMatchingOperator(anchor)) {
     auto *expr = castToExpr(anchor);
     if (auto *binaryOp = dyn_cast_or_null<BinaryExpr>(findParentExpr(expr))) {
-      auto *caseExpr = binaryOp->getArg()->getElement(0);
+      auto *caseExpr = binaryOp->getLHS();
 
       llvm::SmallPtrSet<Expr *, 4> anchors;
       for (const auto *fix : getSolution().Fixes) {
@@ -2073,10 +2074,10 @@ AssignmentFailure::getMemberRef(ConstraintLocator *locator) const {
   if (!member->choice.isDecl())
     return member->choice;
 
-  auto *DC = getDC();
   auto *decl = member->choice.getDecl();
   if (isa<SubscriptDecl>(decl) &&
-      isValidDynamicMemberLookupSubscript(cast<SubscriptDecl>(decl), DC)) {
+      isValidDynamicMemberLookupSubscript(cast<SubscriptDecl>(decl),
+                                          getParentModule())) {
     auto *subscript = cast<SubscriptDecl>(decl);
     // If this is a keypath dynamic member lookup, we have to
     // adjust the locator to find member referred by it.
@@ -2754,7 +2755,7 @@ bool ContextualFailure::diagnoseThrowsTypeMismatch() const {
           Ctx.getProtocol(KnownProtocolKind::ErrorCodeProtocol)) {
     Type errorCodeType = getFromType();
     auto conformance = TypeChecker::conformsToProtocol(
-        errorCodeType, errorCodeProtocol, getDC());
+        errorCodeType, errorCodeProtocol, getParentModule());
     if (conformance) {
       Type errorType =
           conformance
@@ -2962,7 +2963,8 @@ bool ContextualFailure::tryProtocolConformanceFixIt(
   SmallVector<std::string, 8> missingProtoTypeStrings;
   SmallVector<ProtocolDecl *, 8> missingProtocols;
   for (auto protocol : layout.getProtocols()) {
-    if (!TypeChecker::conformsToProtocol(fromType, protocol->getDecl(), getDC())) {
+    if (!TypeChecker::conformsToProtocol(fromType, protocol->getDecl(),
+                                         getParentModule())) {
       missingProtoTypeStrings.push_back(protocol->getString());
       missingProtocols.push_back(protocol->getDecl());
     }
@@ -4078,11 +4080,9 @@ bool AllowTypeOrInstanceMemberFailure::diagnoseAsError() {
           ValueDecl *decl0 = overloadedFn->getDecls()[0];
           
           if (decl0->getBaseName() == decl0->getASTContext().Id_MatchOperator) {
-            assert(binaryExpr->getArg()->getElements().size() == 2);
-            
             // If the rhs of '~=' is the enum type, a single dot suffixes
             // since the type can be inferred
-            Type secondArgType = getType(binaryExpr->getArg()->getElement(1));
+            Type secondArgType = getType(binaryExpr->getRHS());
             if (secondArgType->isEqual(baseTy)) {
               Diag->fixItInsert(loc, ".");
               return true;
@@ -6135,10 +6135,10 @@ bool ArgumentMismatchFailure::diagnoseAsError() {
 bool ArgumentMismatchFailure::diagnoseAsNote() {
   auto *locator = getLocator();
   if (auto *callee = getCallee()) {
-    emitDiagnosticAt(
-        callee, diag::candidate_has_invalid_argument_at_position, getToType(),
-        getParamPosition(),
-        locator->isLastElement<LocatorPathElt::LValueConversion>());
+    emitDiagnosticAt(callee, diag::candidate_has_invalid_argument_at_position,
+                     getToType(), getParamPosition(),
+                     locator->isLastElement<LocatorPathElt::LValueConversion>(),
+                     getFromType());
     return true;
   }
 
@@ -6152,8 +6152,8 @@ bool ArgumentMismatchFailure::diagnoseUseOfReferenceEqualityOperator() const {
     return false;
 
   auto *binaryOp = castToExpr<BinaryExpr>(getRawAnchor());
-  auto *lhs = binaryOp->getArg()->getElement(0);
-  auto *rhs = binaryOp->getArg()->getElement(1);
+  auto *lhs = binaryOp->getLHS();
+  auto *rhs = binaryOp->getRHS();
 
   auto name = *getOperatorName(binaryOp->getFn());
 
@@ -6219,8 +6219,8 @@ bool ArgumentMismatchFailure::diagnosePatternMatchingMismatch() const {
     return false;
 
   auto *op = castToExpr<BinaryExpr>(getRawAnchor());
-  auto *lhsExpr = op->getArg()->getElement(0);
-  auto *rhsExpr = op->getArg()->getElement(1);
+  auto *lhsExpr = op->getLHS();
+  auto *rhsExpr = op->getRHS();
 
   auto lhsType = getType(lhsExpr);
   auto rhsType = getType(rhsExpr);
@@ -7034,9 +7034,9 @@ bool AbstractRawRepresentableFailure::diagnoseAsNote() {
     }
   } else if (auto argConv =
                  locator->getLastElementAs<LocatorPathElt::ApplyArgToParam>()) {
-    diagnostic.emplace(
-        emitDiagnostic(diag::candidate_has_invalid_argument_at_position,
-                       RawReprType, argConv->getParamIdx(), /*inOut=*/false));
+    diagnostic.emplace(emitDiagnostic(
+        diag::candidate_has_invalid_argument_at_position, RawReprType,
+        argConv->getParamIdx(), /*inOut=*/false, ExpectedType));
   }
 
   if (diagnostic) {
