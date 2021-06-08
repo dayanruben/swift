@@ -1341,6 +1341,17 @@ PatternBindingDecl *PatternBindingDecl::createImplicit(
   return Result;
 }
 
+PatternBindingDecl *PatternBindingDecl::createForDebugger(
+    ASTContext &Ctx, StaticSpellingKind StaticSpelling, Pattern *Pat, Expr *E,
+    DeclContext *Parent) {
+  auto *Result = createImplicit(Ctx, StaticSpelling, Pat, E, Parent);
+  Result->Bits.PatternBindingDecl.IsDebugger = true;
+  for (auto &entry : Result->getMutablePatternList()) {
+    entry.setFromDebugger();
+  }
+  return Result;
+}
+
 PatternBindingDecl *
 PatternBindingDecl::create(ASTContext &Ctx, SourceLoc StaticLoc,
                            StaticSpellingKind StaticSpelling,
@@ -6310,6 +6321,12 @@ ParamDecl *ParamDecl::cloneWithoutType(const ASTContext &Ctx, ParamDecl *PD) {
   if (PD->isImplicit()) {
     Clone->setImplicit();
   }
+  return Clone;
+}
+
+ParamDecl *ParamDecl::clone(const ASTContext &Ctx, ParamDecl *PD) {
+  auto *Clone = ParamDecl::cloneWithoutType(Ctx, PD);
+  Clone->setInterfaceType(PD->getInterfaceType());
   return Clone;
 }
 

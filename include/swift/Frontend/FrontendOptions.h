@@ -182,12 +182,6 @@ public:
   /// the module.
   bool CheckOnoneSupportCompleteness = false;
 
-  /// If set, dumps wall time taken to check each function body to llvm::errs().
-  bool DebugTimeFunctionBodies = false;
-
-  /// If set, dumps wall time taken to check each expression.
-  bool DebugTimeExpressionTypeChecking = false;
-
   /// The path to which we should output statistics files.
   std::string StatsOutputDir;
 
@@ -313,6 +307,9 @@ public:
   /// The path at which to either serialize or deserialize the dependency scanner cache.
   std::string SerializedDependencyScannerCachePath;
 
+  /// Emit remarks indicating use of the serialized module dependency scanning cache
+  bool EmitDependencyScannerCacheRemarks = false;
+
   /// After performing a dependency scanning action, serialize and deserialize the
   /// dependency cache before producing the result.
   bool TestDependencyScannerCacheSerialization = false;
@@ -421,6 +418,9 @@ public:
   /// Whether to emit doc comment information in symbol graphs for symbols
   /// which are inherited through classes or default implementations.
   bool SkipInheritedDocs = false;
+
+  /// Whether to include symbols with SPI information in the symbol graph.
+  bool IncludeSPISymbolsInSymbolGraph = false;
 
 private:
   static bool canActionEmitDependencies(ActionType);
