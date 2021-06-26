@@ -915,7 +915,7 @@ public:
   bool isCached() const { return true; }
 };
 
-/// Determine whether the given class is an distributed actor.
+/// Determine whether the given class is a distributed actor.
 class IsDistributedActorRequest :
     public SimpleRequest<IsDistributedActorRequest,
         bool(NominalTypeDecl *),
@@ -1018,6 +1018,20 @@ private:
 public:
   // Caching
   bool isCached() const { return true; }
+};
+
+/// Determine whether the given function should have an isolated 'self'.
+class HasIsolatedSelfRequest :
+    public SimpleRequest<HasIsolatedSelfRequest,
+                         bool(ValueDecl *),
+                         RequestFlags::Uncached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  bool evaluate(Evaluator &evaluator, ValueDecl *func) const;
 };
 
 /// Request whether the storage has a mutating getter.
@@ -1400,7 +1414,7 @@ private:
 
 public:
   // Separate caching.
-  bool isCached() const;
+  bool isCached() const { return true; }
 
   /// Abstract generic signature requests never have source-location info.
   SourceLoc getNearestLoc() const {
@@ -1435,7 +1449,7 @@ private:
 
 public:
   // Separate caching.
-  bool isCached() const;
+  bool isCached() const { return true; }
 
   /// Inferred generic signature requests don't have source-location info.
   SourceLoc getNearestLoc() const {

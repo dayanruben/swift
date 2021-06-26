@@ -160,6 +160,9 @@ def no_serialize_debugging_options :
 def autolink_library : Separate<["-"], "autolink-library">,
   HelpText<"Add dependent library">, Flags<[FrontendOption]>;
 
+def public_autolink_library : Separate<["-"], "public-autolink-library">,
+  HelpText<"Add public dependent library">, Flags<[FrontendOption]>;
+
 def disable_typo_correction : Flag<["-"], "disable-typo-correction">,
   HelpText<"Disable typo correction">;
 
@@ -434,6 +437,10 @@ def enable_experimental_static_assert :
   Flag<["-"], "enable-experimental-static-assert">,
   HelpText<"Enable experimental #assert">;
 
+def enable_experimental_opaque_return_types :
+  Flag<["-"], "enable-experimental-opaque-return-types">,
+  HelpText<"Enable experimental extensions to opaque return type support">;
+
 def enable_deserialization_recovery :
   Flag<["-"], "enable-deserialization-recovery">,
   HelpText<"Attempt to recover from missing xrefs (etc) in swiftmodules">;
@@ -452,6 +459,10 @@ def enable_conformance_availability_errors : Flag<["-"],
 def disable_conformance_availability_errors : Flag<["-"],
   "disable-conformance-availability-errors">,
   HelpText<"Diagnose conformance availability violations as warnings">;
+
+def warn_on_potentially_unavailable_enum_case : Flag<["-"],
+  "warn-on-potentially-unavailable-enum-case">,
+  HelpText<"Downgrade potential unavailability of enum case to a warning">;
 
 def report_errors_to_debugger : Flag<["-"], "report-errors-to-debugger">,
   HelpText<"Deprecated, will be removed in future versions.">;

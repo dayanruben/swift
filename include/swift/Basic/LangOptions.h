@@ -134,6 +134,9 @@ namespace swift {
     /// Should conformance availability violations be diagnosed as errors?
     bool EnableConformanceAvailabilityErrors = false;
 
+    /// Should potential unavailability on enum cases be downgraded to a warning?
+    bool WarnOnPotentiallyUnavailableEnumCase = false;
+
     /// Maximum number of typo corrections we are allowed to perform.
     /// This is disabled by default until we can get typo-correction working within acceptable performance bounds.
     unsigned TypoCorrectionLimit = 0;
@@ -282,6 +285,11 @@ namespace swift {
 
     /// Enable experimental concurrency model.
     bool EnableExperimentalConcurrency = false;
+
+    /// Enable experimental support for additional opaque return type features,
+    /// i.e. named opaque return types (with 'where' clause support), and opaque
+    /// types in nested position within the function return type.
+    bool EnableExperimentalOpaqueReturnTypes = false;
 
     /// Enable experimental flow-sensitive concurrent captures.
     bool EnableExperimentalFlowSensitiveConcurrentCaptures = false;
