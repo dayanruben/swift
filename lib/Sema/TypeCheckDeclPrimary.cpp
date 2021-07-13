@@ -73,7 +73,7 @@ using namespace swift;
 static void checkInheritanceClause(
     llvm::PointerUnion<const TypeDecl *, const ExtensionDecl *> declUnion) {
   const DeclContext *DC;
-  ArrayRef<TypeLoc> inheritedClause;
+  ArrayRef<InheritedEntry> inheritedClause;
   const ExtensionDecl *ext = nullptr;
   const TypeDecl *typeDecl = nullptr;
   const Decl *decl;
@@ -1681,6 +1681,9 @@ public:
       (void) VD->isObjC();
       (void) VD->isDynamic();
 
+      // Check for actor isolation.
+      (void)getActorIsolation(VD);
+
       // If this is a member of a nominal type, don't allow it to have a name of
       // "Type" or "Protocol" since we reserve the X.Type and X.Protocol
       // expressions to mean something builtin to the language.  We *do* allow
@@ -2102,6 +2105,14 @@ public:
           SD->supportsMutation()) {
         SD->diagnose(diag::dynamic_self_in_mutable_subscript);
       }
+    }
+
+    // Reject "class" methods on actors.
+    if (SD->getStaticSpelling() == StaticSpellingKind::KeywordClass &&
+        SD->getDeclContext()->getSelfClassDecl() &&
+        SD->getDeclContext()->getSelfClassDecl()->isActor()) {
+      SD->diagnose(diag::class_subscript_not_in_class, false)
+          .fixItReplace(SD->getStaticLoc(), "static");
     }
 
     // Now check all the accessors.
@@ -2742,6 +2753,14 @@ public:
           }
         }
       }
+    }
+
+    // Reject "class" methods on actors.
+    if (StaticSpelling == StaticSpellingKind::KeywordClass &&
+        FD->getDeclContext()->getSelfClassDecl() &&
+        FD->getDeclContext()->getSelfClassDecl()->isActor()) {
+      FD->diagnose(diag::class_func_not_in_class, false)
+          .fixItReplace(FD->getStaticLoc(), "static");
     }
 
     // Member functions need some special validation logic.

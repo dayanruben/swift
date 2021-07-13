@@ -273,8 +273,8 @@ ERROR(cannot_infer_closure_parameter_type,none,
 ERROR(cannot_infer_closure_type,none,
       "unable to infer closure type in the current context", ())
 ERROR(cannot_infer_closure_result_type,none,
-      "unable to infer%select{ complex|}0 closure return type; "
-      "add explicit type to disambiguate", (bool))
+      "cannot infer return type for closure with multiple statements; "
+      "add explicit type to disambiguate", ())
 FIXIT(insert_closure_return_type_placeholder,
       "%select{| () }0-> <#Result#> %select{|in }0",
       (bool))
@@ -3890,6 +3890,12 @@ ERROR(converting_noattrfunc_to_type,none,
       "converting %select{non-escaping|non-concurrent function}0 value to %1 "
       "may %select{allow it to escape|introduce data races}0",
       (unsigned, Type))
+NOTE(escape_expected_at_parameter_position,none,
+     "parameter #%0 expects escaping value of type %1",
+     (unsigned, Type))
+NOTE(add_explicit_escaping,none,
+     "add explicit @escaping to function parameter #%0",
+     (unsigned))
 
 ERROR(converting_func_loses_global_actor,none,
       "converting function value of type %0 to %1 loses global actor %2",
@@ -4359,10 +4365,7 @@ ERROR(distributed_actor_protocol_illegal_inheritance,none,
       "non-distributed actor type %0 cannot conform to the 'DistributedActor' protocol",
       (DeclName))
 
-// FIXME: This diagnostic was temporarily downgraded from an error because
-// it spuriously triggers when building the Foundation module from its textual
-// swiftinterface. (rdar://78932296)
-WARNING(unowned_executor_outside_actor,none,
+ERROR(unowned_executor_outside_actor,none,
       "'unownedExecutor' can only be implemented within the main "
       "definition of an actor", ())
 ERROR(override_implicit_unowned_executor,none,
@@ -4436,7 +4439,7 @@ NOTE(distributed_actor_isolated_method_note,none,
       "only 'distributed' functions can be called from outside the distributed actor",
       ())
 ERROR(distributed_actor_isolated_method,none,
-      "only 'distributed' functions can be called from outside the distributed actor", // TODO: more like 'non-distributed' ... defined here
+      "only 'distributed' functions can be called from outside the distributed actor", // TODO: improve error message to be more like 'non-distributed' ... defined here
       ())
 ERROR(distributed_actor_func_param_not_codable,none,
       "distributed function parameter '%0' of type %1 does not conform to 'Codable'",
@@ -4447,6 +4450,12 @@ ERROR(distributed_actor_func_result_not_codable,none,
 ERROR(distributed_actor_remote_func_implemented_manually,none,
       "Distributed function's %0 remote counterpart %1 cannot not be implemented manually.",
       (Identifier, Identifier))
+ERROR(nonisolated_distributed_actor_storage,none,
+      "'nonisolated' can not be applied to distributed actor stored properties",
+      ())
+ERROR(distributed_actor_func_nonisolated, none,
+      "function %0 cannot be both 'nonisolated' and 'distributed'",
+      (DeclName))
 ERROR(distributed_actor_remote_func_is_not_static,none,
       "remote function %0 must be static.",
       (DeclName))
@@ -4511,15 +4520,22 @@ ERROR(concurrent_value_class_mutable_property,none,
       (DeclName, DescriptiveDeclKind, DeclName))
 ERROR(concurrent_value_outside_source_file,none,
       "conformance to 'Sendable' must occur in the same source file as "
-      "%0 %1; use 'UnsafeSendable' for retroactive conformance",
+      "%0 %1; use '@unchecked Sendable' for retroactive conformance",
       (DescriptiveDeclKind, DeclName))
 ERROR(concurrent_value_nonfinal_class,none,
       "non-final class %0 cannot conform to `Sendable`; "
-      "use `UnsafeSendable`", (DeclName))
+      "use `@unchecked Sendable`", (DeclName))
 ERROR(concurrent_value_inherit,none,
       "`Sendable` class %1 cannot inherit from another class"
       "%select{| other than 'NSObject'}0",
       (bool, DeclName))
+
+WARNING(unchecked_conformance_not_special,none,
+      "@unchecked conformance to %0 has no meaning", (Type))
+ERROR(unchecked_not_inheritance_clause,none,
+      "'unchecked' attribute only applies in inheritance clauses", ())
+ERROR(unchecked_not_existential,none,
+      "'unchecked' attribute cannot apply to non-protocol type %0", (Type))
 
 ERROR(nonisolated_let,none,
       "'nonisolated' is meaningless on 'let' declarations because "
@@ -4588,7 +4604,7 @@ ERROR(distributed_actor_independent_property_must_be_let,none,
       "_distributedActorIndependent can be applied to properties, however they must be 'let'",
       ())
 NOTE(distributed_actor_isolated_property,none,
-      "distributed actor state is only available within the actor instance",
+      "distributed actor state is only available within the actor instance", // TODO: reword in terms of isolation
       ())
 
 ERROR(concurrency_lib_missing,none,
@@ -4608,6 +4624,8 @@ ERROR(global_actor_on_local_variable,none,
       "local variable %0 cannot have a global actor", (DeclName))
 ERROR(global_actor_non_unsafe_init,none,
       "global actor attribute %0 argument can only be '(unsafe)'", (Type))
+ERROR(global_actor_non_final_class,none,
+      "non-final class %0 cannot be a global actor", (DeclName))
       
 ERROR(actor_isolation_multiple_attr,none,
       "%0 %1 has multiple actor-isolation attributes ('%2' and '%3')",
@@ -4615,6 +4633,9 @@ ERROR(actor_isolation_multiple_attr,none,
 ERROR(actor_isolation_override_mismatch,none,
       "%0 %1 %2 has different actor isolation from %3 overridden declaration",
       (ActorIsolation, DescriptiveDeclKind, DeclName, ActorIsolation))
+ERROR(actor_isolation_superclass_mismatch,none,
+      "%0 class %1 has different actor isolation from %2 superclass %3",
+      (ActorIsolation, DeclName, ActorIsolation, DeclName))
 
 //------------------------------------------------------------------------------
 // MARK: Type Check Types
@@ -4719,10 +4740,6 @@ ERROR(invalid_ownership_is_let,none,
       (ReferenceOwnership))
 ERROR(ownership_invalid_in_protocols,none,
       "%0 cannot be applied to a property declaration in a protocol",
-      (ReferenceOwnership))
-WARNING(ownership_invalid_in_protocols_compat_warning,none,
-      "%0 should not be applied to a property declaration "
-      "in a protocol and will be disallowed in future versions",
       (ReferenceOwnership))
 
 // required
