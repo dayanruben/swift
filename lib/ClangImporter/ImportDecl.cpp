@@ -771,9 +771,8 @@ static VarDecl *findAnonymousInnerFieldDecl(VarDecl *importedFieldDecl,
   auto anonymousFieldTypeDecl
       = anonymousFieldType->getStructOrBoundGenericStruct();
 
-  const auto flags = NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions;
   for (auto decl : anonymousFieldTypeDecl->lookupDirect(
-                       importedFieldDecl->getName(), flags)) {
+                       importedFieldDecl->getName())) {
     if (isa<VarDecl>(decl)) {
       return cast<VarDecl>(decl);
     }
@@ -2469,23 +2468,12 @@ namespace {
     }
 
     Decl *VisitNamespaceDecl(const clang::NamespaceDecl *decl) {
-      // If we have a name for this declaration, use it.
-      Optional<ImportedName> correctSwiftName;
-      auto importedName = importFullName(decl, correctSwiftName);
-      if (!importedName) return nullptr;
-
-      auto extensionDC =
-          Impl.importDeclContextOf(decl, importedName.getEffectiveContext());
-      if (!extensionDC)
-        return nullptr;
-
-      SourceLoc loc = Impl.importSourceLoc(decl->getBeginLoc());
       DeclContext *dc = nullptr;
       // If this is a top-level namespace, don't put it in the module we're
       // importing, put it in the "__ObjC" module that is implicitly imported.
       // This way, if we have multiple modules that all open the same namespace,
       // we won't import multiple enums with the same name in swift.
-      if (extensionDC->getContextKind() == DeclContextKind::FileUnit)
+      if (!decl->getParent()->isNamespace())
         dc = Impl.ImportedHeaderUnit;
       else {
         // This is a nested namespace, we need to find its extension decl
@@ -2493,49 +2481,85 @@ namespace {
         // that we add this to the parent enum (in the "__ObjC" module) and not
         // to the extension.
         auto parentNS = cast<clang::NamespaceDecl>(decl->getParent());
-        auto parent = Impl.importDecl(parentNS, getVersion());
+        auto parent =
+            Impl.importDecl(parentNS, getVersion(), /*UseCanonicalDecl*/ false);
         // Sometimes when the parent namespace is imported, this namespace
         // also gets imported. If that's the case, then the parent namespace
         // will be an enum (because it was able to be fully imported) in which
         // case we need to bail here.
-        auto cachedResult =
-            Impl.ImportedDecls.find({decl->getCanonicalDecl(), getVersion()});
+        auto cachedResult = Impl.ImportedDecls.find({decl, getVersion()});
         if (cachedResult != Impl.ImportedDecls.end())
           return cachedResult->second;
         dc = cast<ExtensionDecl>(parent)
                  ->getExtendedType()
                  ->getEnumOrBoundGenericEnum();
       }
-      auto *enumDecl = Impl.createDeclWithClangNode<EnumDecl>(
-          decl, AccessLevel::Public, loc,
-          importedName.getDeclName().getBaseIdentifier(),
-          Impl.importSourceLoc(decl->getLocation()), None, nullptr, dc);
-      if (isa<clang::NamespaceDecl>(decl->getParent()))
-        cast<EnumDecl>(dc)->addMember(enumDecl);
 
-      // We are creating an extension, so put it at the top level. This is done
-      // after creating the enum, though, because we may need the correctly
-      // nested decl context above when creating the enum.
-      while (extensionDC->getParent() &&
-             extensionDC->getContextKind() != DeclContextKind::FileUnit)
-        extensionDC = extensionDC->getParent();
-
-      auto *extension = ExtensionDecl::create(Impl.SwiftContext, loc, nullptr,
-                                              {}, extensionDC, nullptr, decl);
-      Impl.SwiftContext.evaluator.cacheOutput(ExtendedTypeRequest{extension},
-                                              enumDecl->getDeclaredType());
-      Impl.SwiftContext.evaluator.cacheOutput(ExtendedNominalRequest{extension},
-                                              std::move(enumDecl));
-      // Keep track of what members we've already added so we don't add the same
-      // member twice. Note: we can't use "ImportedDecls" for this because we
-      // might import a decl that we don't add (for example, if it was a
-      // parameter to another decl).
-      SmallPtrSet<Decl *, 16> addedMembers;
+      EnumDecl *enumDecl = nullptr;
+      // Try to find an already created enum for this namespace.
       for (auto redecl : decl->redecls()) {
-        // This will be reset as the EnumDecl after we return from
-        // VisitNamespaceDecl.
-        Impl.ImportedDecls[{redecl->getCanonicalDecl(), getVersion()}] =
-            extension;
+        auto extension = Impl.ImportedDecls.find({redecl, getVersion()});
+        if (extension != Impl.ImportedDecls.end()) {
+          enumDecl = cast<EnumDecl>(
+              cast<ExtensionDecl>(extension->second)->getExtendedNominal());
+          break;
+        }
+      }
+      // If we're seeing this namespace for the first time, we need to create a
+      // new enum in the "__ObjC" module.
+      if (!enumDecl) {
+        // If we don't have a name for this declaration, bail.
+        Optional<ImportedName> correctSwiftName;
+        auto importedName = importFullName(decl, correctSwiftName);
+        if (!importedName)
+          return nullptr;
+
+        enumDecl = Impl.createDeclWithClangNode<EnumDecl>(
+            decl, AccessLevel::Public,
+            Impl.importSourceLoc(decl->getBeginLoc()),
+            importedName.getDeclName().getBaseIdentifier(),
+            Impl.importSourceLoc(decl->getLocation()), None, nullptr, dc);
+        if (isa<clang::NamespaceDecl>(decl->getParent()))
+          cast<EnumDecl>(dc)->addMember(enumDecl);
+      }
+
+      for (auto redecl : decl->redecls()) {
+        if (Impl.ImportedDecls.find({redecl, getVersion()}) !=
+            Impl.ImportedDecls.end())
+          continue;
+
+        Optional<ImportedName> correctSwiftName;
+        auto importedName = importFullName(redecl, correctSwiftName);
+        if (!importedName)
+          continue;
+
+        auto extensionDC = Impl.importDeclContextOf(
+            redecl, importedName.getEffectiveContext());
+        if (!extensionDC)
+          continue;
+
+        // We are creating an extension, so put it at the top level. This is
+        // done after creating the enum, though, because we may need the
+        // correctly nested decl context above when creating the enum.
+        while (extensionDC->getParent() &&
+               extensionDC->getContextKind() != DeclContextKind::FileUnit)
+          extensionDC = extensionDC->getParent();
+
+        auto *extension = ExtensionDecl::create(
+            Impl.SwiftContext, Impl.importSourceLoc(decl->getBeginLoc()),
+            nullptr, {}, extensionDC, nullptr, redecl);
+        enumDecl->addExtension(extension);
+        Impl.ImportedDecls[{redecl, getVersion()}] = extension;
+
+        Impl.SwiftContext.evaluator.cacheOutput(ExtendedTypeRequest{extension},
+                                                enumDecl->getDeclaredType());
+        Impl.SwiftContext.evaluator.cacheOutput(ExtendedNominalRequest{extension},
+                                                std::move(enumDecl));
+        // Keep track of what members we've already added so we don't add the
+        // same member twice. Note: we can't use "ImportedDecls" for this
+        // because we might import a decl that we don't add (for example, if it
+        // was a parameter to another decl).
+        SmallPtrSet<Decl *, 16> addedMembers;
 
         // Insert these backwards into "namespaceDecls" so we can pop them off
         // the end without loosing order.
@@ -2566,7 +2590,8 @@ namespace {
             continue;
           }
 
-          auto member = Impl.importDecl(nd, getVersion());
+          bool useCanonicalDecl = !isa<clang::NamespaceDecl>(nd);
+          auto member = Impl.importDecl(nd, getVersion(), useCanonicalDecl);
           if (!member || addedMembers.count(member) ||
               isa<clang::NamespaceDecl>(nd))
             continue;
@@ -2581,10 +2606,7 @@ namespace {
         }
       }
 
-      if (!extension->getMembers().empty())
-        enumDecl->addExtension(extension);
-
-      return enumDecl;
+      return Impl.ImportedDecls[{decl, getVersion()}];
     }
 
     Decl *VisitUsingDirectiveDecl(const clang::UsingDirectiveDecl *decl) {
@@ -3502,6 +3524,10 @@ namespace {
       SmallVector<ConstructorDecl *, 4> ctors;
       SmallVector<TypeDecl *, 4> nestedTypes;
 
+      // Store the already imported members in a set to avoid importing the same
+      // decls multiple times.
+      SmallPtrSet<clang::Decl *, 16> importedMembers;
+
       // FIXME: Import anonymous union fields and support field access when
       // it is nested in a struct.
 
@@ -3518,6 +3544,12 @@ namespace {
           if (recordDecl->isInjectedClassName()) {
             continue;
           }
+        }
+
+        // If we've already imported this decl & added it to the resulting
+        // struct, skip it so we don't add the same member twice.
+        if (!importedMembers.insert(m->getCanonicalDecl()).second) {
+          continue;
         }
 
         auto nd = dyn_cast<clang::NamedDecl>(m);
@@ -3547,12 +3579,6 @@ namespace {
             continue;
           }
         }
-
-        // If we've already imported this decl, skip it so we don't add the same
-        // member twice.
-        if (Impl.ImportedDecls.find({nd->getCanonicalDecl(), getVersion()}) !=
-            Impl.ImportedDecls.end())
-          continue;
 
         // If we encounter an IndirectFieldDecl, ensure that its parent is
         // importable before attempting to import it because they are dependent
@@ -9231,7 +9257,8 @@ DeclContext *ClangImporter::Implementation::importDeclContextImpl(
   // Category decls with same name can be merged and using canonical decl always
   // leads to the first category of the given name. We'd like to keep these
   // categories separated.
-  auto useCanonical = !isa<clang::ObjCCategoryDecl>(decl);
+  auto useCanonical =
+      !isa<clang::ObjCCategoryDecl>(decl) && !isa<clang::NamespaceDecl>(decl);
   auto swiftDecl = importDeclForDeclContext(ImportingDecl, decl->getName(),
                                             decl, CurrentVersion, useCanonical);
   if (!swiftDecl)
@@ -9624,8 +9651,7 @@ synthesizeConstantGetterBody(AbstractFunctionDecl *afd, void *voidContext) {
     DeclName initName = DeclName(ctx, DeclBaseName::createConstructor(),
                                  { ctx.Id_rawValue });
     auto nominal = type->getAnyNominal();
-    const auto flags = NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions;
-    for (auto found : nominal->lookupDirect(initName, flags)) {
+    for (auto found : nominal->lookupDirect(initName)) {
       init = dyn_cast<ConstructorDecl>(found);
       if (init && init->getDeclContext() == nominal)
         break;

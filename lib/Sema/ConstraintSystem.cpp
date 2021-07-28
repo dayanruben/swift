@@ -998,8 +998,11 @@ ConstraintSystem::getPropertyWrapperInformation(
         if (!decl->hasAttachedPropertyWrapper())
           return None;
 
-        return std::make_pair(decl,
-                              decl->getPropertyWrapperBackingPropertyType());
+        auto backingTy = decl->getPropertyWrapperBackingPropertyType();
+        if (!backingTy)
+          return None;
+
+        return std::make_pair(decl, backingTy);
       });
 }
 
@@ -1399,12 +1402,8 @@ static void bindArchetypesFromContext(
       continue;
     }
 
-    // If it's not generic, there's nothing to do.
     auto genericSig = parentDC->getGenericSignatureOfContext();
-    if (!genericSig)
-      break;
-
-    for (auto *paramTy : genericSig->getGenericParams()) {
+    for (auto *paramTy : genericSig.getGenericParams()) {
       Type contextTy = cs.DC->mapTypeIntoContext(paramTy);
       bindPrimaryArchetype(paramTy, contextTy);
     }
@@ -1436,7 +1435,7 @@ void ConstraintSystem::openGenericParameters(DeclContext *outerDC,
   assert(sig);
 
   // Create the type variables for the generic parameters.
-  for (auto gp : sig->getGenericParams()) {
+  for (auto gp : sig.getGenericParams()) {
     auto *paramLocator = getConstraintLocator(
         locator.withPathElement(LocatorPathElt::GenericParameter(gp)));
 
@@ -1459,7 +1458,7 @@ void ConstraintSystem::openGenericRequirements(
     DeclContext *outerDC, GenericSignature signature,
     bool skipProtocolSelfConstraint, ConstraintLocatorBuilder locator,
     llvm::function_ref<Type(Type)> substFn) {
-  auto requirements = signature->getRequirements();
+  auto requirements = signature.getRequirements();
   for (unsigned pos = 0, n = requirements.size(); pos != n; ++pos) {
     const auto &req = requirements[pos];
 
@@ -3779,16 +3778,7 @@ static bool diagnoseContextualFunctionCallGenericAmbiguity(
                                             TypeVariableType *typeVar) {
     auto argParamMatch = argMatching->second.parameterBindings[argIdx];
     auto param = applyFnType->getParams()[argParamMatch.front()];
-    if (param.isVariadic()) {
-      auto paramType = param.getParameterType();
-      // Variadic parameter is constructed as an ArraySliceType(which is
-      // just sugared type for a bound generic) with the closure type as
-      // element.
-      auto baseType = paramType->getDesugaredType()->castTo<BoundGenericType>();
-      auto paramFnType = baseType->getGenericArgs()[0]->castTo<FunctionType>();
-      return cs.typeVarOccursInType(typeVar, paramFnType->getResult());
-    }
-    auto paramFnType = param.getParameterType()->castTo<FunctionType>();
+    auto paramFnType = param.getPlainType()->castTo<FunctionType>();
     return cs.typeVarOccursInType(typeVar, paramFnType->getResult());
   };
 
@@ -5585,7 +5575,7 @@ static Optional<Requirement> getRequirement(ConstraintSystem &cs,
   if (auto openedGeneric =
           reqLocator->findLast<LocatorPathElt::OpenedGeneric>()) {
     auto signature = openedGeneric->getSignature();
-    return signature->getRequirements()[reqLoc->getIndex()];
+    return signature.getRequirements()[reqLoc->getIndex()];
   }
 
   return None;

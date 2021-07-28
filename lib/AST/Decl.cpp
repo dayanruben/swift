@@ -889,6 +889,9 @@ AvailabilityContext Decl::getAvailabilityForLinkage() const {
   if (auto *accessor = dyn_cast<AccessorDecl>(this))
     return accessor->getStorage()->getAvailabilityForLinkage();
 
+  if (auto *opaqueTypeDecl = dyn_cast<OpaqueTypeDecl>(this))
+    return opaqueTypeDecl->getNamingDecl()->getAvailabilityForLinkage();
+
   if (auto *ext = dyn_cast<ExtensionDecl>(this))
     if (auto *nominal = ext->getExtendedNominal())
       return nominal->getAvailabilityForLinkage();
@@ -913,6 +916,9 @@ bool Decl::isAlwaysWeakImported() const {
 
   if (auto *accessor = dyn_cast<AccessorDecl>(this))
     return accessor->getStorage()->isAlwaysWeakImported();
+
+  if (auto *opaqueTypeDecl = dyn_cast<OpaqueTypeDecl>(this))
+    return opaqueTypeDecl->getNamingDecl()->isAlwaysWeakImported();
 
   if (auto *ext = dyn_cast<ExtensionDecl>(this))
     if (auto *nominal = ext->getExtendedNominal())
@@ -959,18 +965,12 @@ GenericContext::GenericContext(DeclContextKind Kind, DeclContext *Parent,
 
 TypeArrayView<GenericTypeParamType>
 GenericContext::getInnermostGenericParamTypes() const {
-  if (auto sig = getGenericSignature())
-    return sig->getInnermostGenericParams();
-  else
-    return { };
+  return getGenericSignature().getInnermostGenericParams();
 }
 
 /// Retrieve the generic requirements.
 ArrayRef<Requirement> GenericContext::getGenericRequirements() const {
-  if (auto sig = getGenericSignature())
-    return sig->getRequirements();
-  else
-    return { };
+  return getGenericSignature().getRequirements();
 }
 
 GenericParamList *GenericContext::getGenericParams() const {
@@ -1001,10 +1001,7 @@ GenericSignature GenericContext::getGenericSignature() const {
 }
 
 GenericEnvironment *GenericContext::getGenericEnvironment() const {
-  if (auto genericSig = getGenericSignature())
-    return genericSig->getGenericEnvironment();
-
-  return nullptr;
+  return getGenericSignature().getGenericEnvironment();
 }
 
 void GenericContext::setGenericSignature(GenericSignature genericSig) {
@@ -1576,7 +1573,7 @@ SourceRange PatternBindingEntry::getSourceRange(bool omitAccessors) const {
 bool PatternBindingEntry::hasInitStringRepresentation() const {
   if (InitContextAndFlags.getInt().contains(PatternFlags::IsText))
     return !InitStringRepresentation.empty();
-  return getInit() && getInit()->getSourceRange().isValid();
+  return getOriginalInit() && getOriginalInit()->getSourceRange().isValid();
 }
 
 StringRef PatternBindingEntry::getInitStringRepresentation(
@@ -2682,8 +2679,10 @@ static Type mapSignatureFunctionType(ASTContext &ctx, Type type,
   for (const auto &param : funcTy->getParams()) {
     auto newParamType = mapSignatureParamType(ctx, param.getPlainType());
 
-    // Don't allow overloading by @_nonEphemeral.
-    auto newFlags = param.getParameterFlags().withNonEphemeral(false);
+    // Don't allow overloading by @_nonEphemeral or isolated.
+    auto newFlags = param.getParameterFlags()
+        .withNonEphemeral(false)
+        .withIsolated(false);
 
     // For the 'self' of a method, strip off 'inout'.
     if (isMethod) {
@@ -2919,7 +2918,8 @@ bool ValueDecl::isObjCDynamicInGenericClass() const {
   if (!classDecl)
     return false;
 
-  return classDecl->isGenericContext() && !classDecl->usesObjCGenericsModel();
+  return classDecl->isGenericContext()
+             && !classDecl->isTypeErasedGenericClass();
 }
 
 bool ValueDecl::shouldUseObjCMethodReplacement() const {
@@ -4190,7 +4190,7 @@ bool NominalTypeDecl::isTypeErasedGenericClass() const {
   // ObjC classes are type erased.
   // TODO: Unless they have magic methods...
   if (auto clas = dyn_cast<ClassDecl>(this))
-    return clas->hasClangNode() && clas->isGenericContext();
+    return clas->isTypeErasedGenericClass();
   return false;
 }
 
@@ -4846,8 +4846,7 @@ ValueDecl *ProtocolDecl::getSingleRequirement(DeclName name) const {
 }
 
 AssociatedTypeDecl *ProtocolDecl::getAssociatedType(Identifier name) const {
-  const auto flags = NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions;
-  auto results = const_cast<ProtocolDecl *>(this)->lookupDirect(name, flags);
+  auto results = const_cast<ProtocolDecl *>(this)->lookupDirect(name);
   for (auto candidate : results) {
     if (candidate->getDeclContext() == this &&
         isa<AssociatedTypeDecl>(candidate)) {
@@ -5994,7 +5993,7 @@ bool VarDecl::isMemberwiseInitialized(bool preferDeclaredProperties) const {
 }
 
 bool VarDecl::isAsyncLet() const {
-  return getAttrs().hasAttribute<AsyncAttr>() || getAttrs().hasAttribute<SpawnAttr>();
+  return getAttrs().hasAttribute<AsyncAttr>();
 }
 
 void ParamDecl::setSpecifier(Specifier specifier) {
@@ -8517,7 +8516,7 @@ void swift::simple_display(llvm::raw_ostream &out, AccessorKind kind) {
 }
 
 SourceLoc swift::extractNearestSourceLoc(const Decl *decl) {
-  auto loc = decl->getLoc();
+  auto loc = decl->getLoc(/*SerializedOK=*/false);
   if (loc.isValid())
     return loc;
 

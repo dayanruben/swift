@@ -702,13 +702,9 @@ static void recordShadowedDecls(ArrayRef<ValueDecl *> decls,
     if (decl->isRecursiveValidation())
       continue;
 
-    CanGenericSignature signature;
-
-    auto *dc = decl->getInnermostDeclContext();
-    if (auto genericSig = dc->getGenericSignatureOfContext())
-      signature = genericSig->getCanonicalSignature();
-
     // Record this declaration based on its signature.
+    auto *dc = decl->getInnermostDeclContext();
+    auto signature = dc->getGenericSignatureOfContext().getCanonicalSignature();
     auto &known = collisions[signature.getPointer()];
     if (known.size() == 1) {
       collisionSignatures.push_back(signature.getPointer());
@@ -1438,8 +1434,6 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
   ASTContext &ctx = decl->getASTContext();
   const bool useNamedLazyMemberLoading = (ctx.LangOpts.NamedLazyMemberLoading &&
                                           decl->hasLazyMembers());
-  const bool disableAdditionalExtensionLoading =
-      flags.contains(NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions);
   const bool includeAttrImplements =
       flags.contains(NominalTypeDecl::LookupDirectFlags::IncludeAttrImplements);
 
@@ -1455,8 +1449,7 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
   // If we're allowed to load extensions, call prepareExtensions to ensure we
   // properly invalidate the lazily-complete cache for any extensions brought in
   // by modules loaded after-the-fact. This can happen with the LLDB REPL.
-  if (!disableAdditionalExtensionLoading)
-    decl->prepareExtensions();
+  decl->prepareExtensions();
 
   auto &Table = *decl->LookupTable;
   if (!useNamedLazyMemberLoading) {
@@ -1464,12 +1457,10 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
     // all extensions).
     (void)decl->getMembers();
 
-    if (!disableAdditionalExtensionLoading) {
-      for (auto E : decl->getExtensions())
-        (void)E->getMembers();
+    for (auto E : decl->getExtensions())
+      (void)E->getMembers();
 
-      Table.updateLookupTable(decl);
-    }
+    Table.updateLookupTable(decl);
   } else if (!Table.isLazilyComplete(name.getBaseName())) {
     // The lookup table believes it doesn't have a complete accounting of this
     // name - either because we're never seen it before, or another extension
@@ -1477,13 +1468,8 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
     // us a hand.
     DeclBaseName baseName(name.getBaseName());
     populateLookupTableEntryFromLazyIDCLoader(ctx, Table, baseName, decl);
+    populateLookupTableEntryFromExtensions(ctx, Table, baseName, decl);
 
-    if (!disableAdditionalExtensionLoading) {
-      populateLookupTableEntryFromExtensions(ctx, Table, baseName, decl);
-    }
-
-    // FIXME: If disableAdditionalExtensionLoading is true, we should
-    // not mark the entry as complete.
     Table.markLazilyComplete(baseName);
   }
 
