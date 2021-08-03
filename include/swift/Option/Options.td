@@ -603,6 +603,10 @@ def experimental_emit_module_separately:
   Flags<[FrontendOption, NoInteractiveOption, HelpHidden]>,
   HelpText<"Schedule a swift module emission job instead of a merge-modules job (new Driver only)">;
 
+def requirement_machine_EQ : Joined<["-"], "requirement-machine=">,
+  Flags<[FrontendOption, ModuleInterfaceOption]>,
+  HelpText<"Control usage of experimental generics implementation: 'on', 'off', or 'verify'">;
+
 // Diagnostic control options
 def suppress_warnings : Flag<["-"], "suppress-warnings">,
   Flags<[FrontendOption]>,
@@ -1230,12 +1234,6 @@ def disable_autolinking_runtime_compatibility_dynamic_replacements
     : Flag<[ "-" ], "disable-autolinking-runtime-compatibility-dynamic-replacements">,
       Flags<[ FrontendOption ]>,
       HelpText<"Do not use autolinking for the dynamic replacement runtime "
-               "compatibility library">;
-
-def disable_autolinking_runtime_compatibility_concurrency
-    : Flag<[ "-" ], "disable-autolinking-runtime-compatibility-concurrency">,
-      Flags<[ FrontendOption ]>,
-      HelpText<"Do not use autolinking for the concurrency runtime "
                "compatibility library">;
 
 def emit_symbol_graph: Flag<["-"], "emit-symbol-graph">,

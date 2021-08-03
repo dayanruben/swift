@@ -2161,7 +2161,7 @@ static void addAssocTypeDeductionString(llvm::SmallString<128> &str,
 static Type getTypeForDisplay(ModuleDecl *module, ValueDecl *decl) {
   // For a constructor, we only care about the parameter types.
   if (auto ctor = dyn_cast<ConstructorDecl>(decl)) {
-    return AnyFunctionType::composeInput(module->getASTContext(),
+    return AnyFunctionType::composeTuple(module->getASTContext(),
                                          ctor->getMethodInterfaceType()
                                              ->castTo<FunctionType>()
                                              ->getParams(),
@@ -3248,7 +3248,8 @@ void ConformanceChecker::recordTypeWitness(AssociatedTypeDecl *assocType,
     // Find the conformance for this overridden protocol.
     auto overriddenConformance =
       DC->getParentModule()->lookupConformance(Adoptee,
-                                               overridden->getProtocol());
+                                               overridden->getProtocol(),
+                                               /*allowMissing=*/true);
     if (overriddenConformance.isInvalid() ||
         !overriddenConformance.isConcrete())
       continue;
@@ -4198,11 +4199,12 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
                                     NormalProtocolConformance *conformance) {
           auto &diags = witness->getASTContext().Diags;
           SourceLoc diagLoc = getLocForDiagnosingWitness(conformance, witness);
-          diags.diagnose(diagLoc,
-                         diag::witness_unavailable,
-                         witness->getDescriptiveKind(),
-                         witness->getName(),
-                         conformance->getProtocol()->getName());
+          auto *attr = AvailableAttr::isUnavailable(witness);
+          EncodedDiagnosticMessage EncodedMessage(attr->Message);
+          diags.diagnose(diagLoc, diag::witness_unavailable,
+                         witness->getDescriptiveKind(), witness->getName(),
+                         conformance->getProtocol()->getName(),
+                         EncodedMessage.Message);
           emitDeclaredHereIfNeeded(diags, diagLoc, witness);
           diags.diagnose(requirement, diag::kind_declname_declared_here,
                          DescriptiveDeclKind::Requirement,
@@ -5179,7 +5181,7 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M,
 ProtocolConformanceRef
 TypeChecker::conformsToProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M) {
   // Look up conformance in the module.
-  auto lookupResult = M->lookupConformance(T, Proto);
+  auto lookupResult = M->lookupConformance(T, Proto, /*alllowMissing=*/true);
   if (lookupResult.isInvalid()) {
     return ProtocolConformanceRef::forInvalid();
   }
@@ -5830,11 +5832,13 @@ diagnoseMissingAppendInterpolationMethod(NominalTypeDecl *typeDecl) {
 
 void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
   auto *const dc = idc->getAsGenericContext();
+  auto *sf = dc->getParentSourceFile();
 
-  // For anything imported from Clang, lazily check conformances.
-  if (isa<ClangModuleUnit>(dc->getModuleScopeContext()))
-    return;
+  assert(sf != nullptr &&
+         "checkConformancesInContext() should not be called on imported "
+         "or deserialized DeclContexts");
 
+  // Catch invalid extensions.
   const auto *const nominal = dc->getSelfNominalTypeDecl();
   if (!nominal)
     return;
@@ -6055,8 +6059,7 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
   // If there were any unsatisfied requirements, check whether there
   // are any near-matches we should diagnose.
   if (!unsatisfiedReqs.empty() && !anyInvalid) {
-    SourceFile *SF = dc->getParentSourceFile();
-    if (SF && SF->Kind != SourceFileKind::Interface) {
+    if (sf->Kind != SourceFileKind::Interface) {
       // Find all of the members that aren't used to satisfy
       // requirements, and check whether they are close to an
       // unsatisfied or defaulted requirement.
@@ -6140,27 +6143,25 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
       }
     }
 
-    if (auto *sf = dc->getParentSourceFile()) {
-      // For any unsatisfied optional @objc requirements that remain
-      // unsatisfied, note them in the AST for @objc selector collision
-      // checking.
-      for (auto req : unsatisfiedReqs) {
-        // Skip non-@objc requirements.
-        if (!req->isObjC()) continue;
+    // For any unsatisfied optional @objc requirements that remain
+    // unsatisfied, note them in the AST for @objc selector collision
+    // checking.
+    for (auto req : unsatisfiedReqs) {
+      // Skip non-@objc requirements.
+      if (!req->isObjC()) continue;
 
-        // Skip unavailable requirements.
-        if (req->getAttrs().isUnavailable(Context)) continue;
+      // Skip unavailable requirements.
+      if (req->getAttrs().isUnavailable(Context)) continue;
 
-        // Record this requirement.
-        if (auto funcReq = dyn_cast<AbstractFunctionDecl>(req)) {
-          sf->ObjCUnsatisfiedOptReqs.emplace_back(dc, funcReq);
-        } else {
-          auto storageReq = cast<AbstractStorageDecl>(req);
-          if (auto getter = storageReq->getParsedAccessor(AccessorKind::Get))
-            sf->ObjCUnsatisfiedOptReqs.emplace_back(dc, getter);
-          if (auto setter = storageReq->getParsedAccessor(AccessorKind::Set))
-            sf->ObjCUnsatisfiedOptReqs.emplace_back(dc, setter);
-        }
+      // Record this requirement.
+      if (auto funcReq = dyn_cast<AbstractFunctionDecl>(req)) {
+        sf->ObjCUnsatisfiedOptReqs.emplace_back(dc, funcReq);
+      } else {
+        auto storageReq = cast<AbstractStorageDecl>(req);
+        if (auto getter = storageReq->getParsedAccessor(AccessorKind::Get))
+          sf->ObjCUnsatisfiedOptReqs.emplace_back(dc, getter);
+        if (auto setter = storageReq->getParsedAccessor(AccessorKind::Set))
+          sf->ObjCUnsatisfiedOptReqs.emplace_back(dc, setter);
       }
     }
   }

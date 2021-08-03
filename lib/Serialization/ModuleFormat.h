@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -56,7 +56,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 618; // inherited entries
+const uint16_t SWIFTMODULE_VERSION_MINOR = 622; // builtin conformance kind
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -1612,6 +1612,11 @@ namespace decls_block {
     BCVBR<8>                     // alignment
   >;
 
+  using AssociatedTypeLayout = BCRecordLayout<
+    ASSOCIATED_TYPE,
+    DeclIDField                  // associated type decl
+  >;
+
   /// Specifies the private discriminator string for a private declaration. This
   /// identifies the declaration's original source file in some opaque way.
   using PrivateDiscriminatorLayout = BCRecordLayout<
@@ -1669,6 +1674,15 @@ namespace decls_block {
   using InheritedProtocolConformanceLayout = BCRecordLayout<
     INHERITED_PROTOCOL_CONFORMANCE,
     TypeIDField // the conforming type
+  >;
+
+  using BuiltinProtocolConformanceLayout = BCRecordLayout<
+    BUILTIN_PROTOCOL_CONFORMANCE,
+    TypeIDField, // the conforming type
+    DeclIDField, // the protocol
+    GenericSignatureIDField, // the generic signature
+    BCFixed<2> // the builtin conformance kind
+    // the (optional) conditional requirements follow
   >;
 
   // Refers to a normal protocol conformance in the given module via its id.
@@ -1873,10 +1887,11 @@ namespace decls_block {
     BC_AVAIL_TUPLE, // Introduced
     BC_AVAIL_TUPLE, // Deprecated
     BC_AVAIL_TUPLE, // Obsoleted
-    BCVBR<5>,   // platform
-    BCVBR<5>,   // number of bytes in message string
-    BCVBR<5>,   // number of bytes in rename string
-    BCBlob      // platform, followed by message
+    BCVBR<5>,    // platform
+    DeclIDField, // rename declaration (if any)
+    BCVBR<5>,    // number of bytes in message string
+    BCVBR<5>,    // number of bytes in rename string
+    BCBlob       // message, followed by rename
   >;
 
   using OriginallyDefinedInDeclAttrLayout = BCRecordLayout<
@@ -1932,13 +1947,6 @@ namespace decls_block {
     IdentifierIDField, // Original name.
     DeclIDField, // Original function declaration.
     BCArray<BCFixed<1>> // Transposed parameter indices' bitvector.
-  >;
-
-  using CompletionHandlerAsyncDeclAttrLayout = BCRecordLayout<
-    CompletionHandlerAsync_DECL_ATTR,
-    BCFixed<1>,                 // Implicit flag.
-    BCVBR<5>,                   // Completion handler index
-    DeclIDField                 // Mapped async function decl
   >;
 
 #define SIMPLE_DECL_ATTR(X, CLASS, ...)         \

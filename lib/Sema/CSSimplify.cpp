@@ -786,7 +786,9 @@ static bool matchCallArgumentsImpl(
       unsigned argIdx = 0;
       for (const auto &binding : parameterBindings) {
         paramToArgMap.push_back(argIdx);
-        argIdx += binding.size();
+        // Ignore argument bindings that were synthesized due to missing args.
+         argIdx += llvm::count_if(
+             binding, [numArgs](unsigned argIdx) { return argIdx < numArgs; });
       }
     }
 
@@ -802,6 +804,10 @@ static bool matchCallArgumentsImpl(
         // needs to move (fromArgIdx) and the argument location
         // it should move to (toArgIdx).
         const auto fromArgIdx = binding[paramBindIdx];
+
+        // Ignore argument bindings that were synthesized due to missing args.
+        if (fromArgIdx >= numArgs)
+          continue;
 
         // Does nothing for variadic tail.
         if (params[paramIdx].isVariadic() && paramBindIdx > 0) {
@@ -2006,7 +2012,7 @@ static bool fixMissingArguments(ConstraintSystem &cs, ASTNode anchor,
   // synthesized arguments to it.
   if (argumentTuple) {
     cs.addConstraint(ConstraintKind::Bind, *argumentTuple,
-                     FunctionType::composeInput(ctx, args,
+                     FunctionType::composeTuple(ctx, args,
                                                 /*canonicalVararg=*/false),
                      cs.getConstraintLocator(anchor));
   }
@@ -2223,7 +2229,7 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
   };
 
   auto implodeParams = [&](SmallVectorImpl<AnyFunctionType::Param> &params) {
-    auto input = AnyFunctionType::composeInput(getASTContext(), params,
+    auto input = AnyFunctionType::composeTuple(getASTContext(), params,
                                                /*canonicalVararg=*/false);
 
     params.clear();
@@ -6028,7 +6034,7 @@ ConstraintSystem::simplifyConstructionConstraint(
     }
 
     // Tuple construction is simply tuple conversion.
-    Type argType = AnyFunctionType::composeInput(getASTContext(),
+    Type argType = AnyFunctionType::composeTuple(getASTContext(),
                                                  fnType->getParams(),
                                                  /*canonicalVararg=*/false);
     Type resultType = fnType->getResult();
@@ -6219,7 +6225,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
   case ConstraintKind::LiteralConformsTo: {
     // Check whether this type conforms to the protocol.
     auto conformance = DC->getParentModule()->lookupConformance(
-        type, protocol);
+        type, protocol, /*allowMissing=*/true);
     if (conformance) {
       return recordConformance(conformance);
     }
@@ -6478,6 +6484,12 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyTransitivelyConformsTo(
 
   // If the type doesn't conform, let's check whether
   // an Optional or Unsafe{Mutable}Pointer from it would.
+
+  // If the current score is equal to the best score, fail without checking
+  // implicit conversions, because an implicit conversion would lead to a
+  // worse score anyway.
+  if (solverState && solverState->BestScore && CurrentScore == *solverState->BestScore)
+    return SolutionKind::Error;
 
   SmallVector<Type, 4> typesToCheck;
 
@@ -6945,7 +6957,7 @@ ConstraintSystem::simplifyFunctionComponentConstraint(
     ConstraintLocator::PathElementKind locKind;
 
     if (kind == ConstraintKind::FunctionInput) {
-      type = AnyFunctionType::composeInput(getASTContext(),
+      type = AnyFunctionType::composeTuple(getASTContext(),
                                            funcTy->getParams(),
                                            /*canonicalVararg=*/false);
       locKind = ConstraintLocator::FunctionArgument;
@@ -7360,7 +7372,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
       if (!ctor->isGenericContext()) {
         auto args = ctor->getMethodInterfaceType()
                         ->castTo<FunctionType>()->getParams();
-        auto argType = AnyFunctionType::composeInput(getASTContext(), args,
+        auto argType = AnyFunctionType::composeTuple(getASTContext(), args,
                                                      /*canonicalVarargs=*/false);
         if (argType->isEqual(favoredType))
           if (!isDeclUnavailable(decl, memberLocator))

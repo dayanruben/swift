@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -543,6 +543,39 @@ ModuleFile::readConformanceChecked(llvm::BitstreamCursor &Cursor,
     return ProtocolConformanceRef(conformance);
   }
 
+  case BUILTIN_PROTOCOL_CONFORMANCE: {
+    TypeID conformingTypeID;
+    DeclID protoID;
+    GenericSignatureID genericSigID;
+    unsigned builtinConformanceKind;
+    BuiltinProtocolConformanceLayout::readRecord(scratch, conformingTypeID,
+                                                 protoID, genericSigID,
+                                                 builtinConformanceKind);
+
+    Type conformingType = getType(conformingTypeID);
+
+    auto decl = getDeclChecked(protoID);
+    if (!decl)
+      return decl.takeError();
+
+    auto proto = cast<ProtocolDecl>(decl.get());
+    auto genericSig = getGenericSignatureChecked(genericSigID);
+    if (!genericSig)
+      return genericSig.takeError();
+
+    // Read the conditional requirements.
+    SmallVector<Requirement, 4> conditionalRequirements;
+    auto error = readGenericRequirementsChecked(
+        conditionalRequirements, Cursor);
+    if (error)
+      return std::move(error);
+
+    auto conformance = getContext().getBuiltinConformance(
+        conformingType, proto, *genericSig, conditionalRequirements,
+        static_cast<BuiltinConformanceKind>(builtinConformanceKind));
+    return ProtocolConformanceRef(conformance);
+  }
+
   case NORMAL_PROTOCOL_CONFORMANCE_ID: {
     NormalConformanceID conformanceID;
     NormalProtocolConformanceIdLayout::readRecord(scratch, conformanceID);
@@ -856,6 +889,36 @@ llvm::Error ModuleFile::readGenericRequirementsChecked(
   return llvm::Error::success();
 }
 
+void ModuleFile::readAssociatedTypes(
+                   SmallVectorImpl<AssociatedTypeDecl *> &assocTypes,
+                   llvm::BitstreamCursor &Cursor) {
+  using namespace decls_block;
+
+  BCOffsetRAII lastRecordOffset(Cursor);
+  SmallVector<uint64_t, 8> scratch;
+  StringRef blobData;
+
+  while (true) {
+    lastRecordOffset.reset();
+
+    llvm::BitstreamEntry entry =
+        fatalIfUnexpected(Cursor.advance(AF_DontPopBlockAtEnd));
+    if (entry.Kind != llvm::BitstreamEntry::Record)
+      break;
+
+    scratch.clear();
+    unsigned recordID = fatalIfUnexpected(
+        Cursor.readRecord(entry.ID, scratch, &blobData));
+    if (recordID != ASSOCIATED_TYPE)
+      break;
+
+    DeclID declID;
+    AssociatedTypeLayout::readRecord(scratch, declID);
+
+    assocTypes.push_back(cast<AssociatedTypeDecl>(getDecl(declID)));
+  }
+}
+
 /// Advances past any records that might be part of a requirement signature.
 static llvm::Error skipGenericRequirements(llvm::BitstreamCursor &Cursor) {
   using namespace decls_block;
@@ -881,6 +944,38 @@ static llvm::Error skipGenericRequirements(llvm::BitstreamCursor &Cursor) {
 
     default:
       // This record is not a generic requirement.
+      return llvm::Error::success();
+    }
+
+    lastRecordOffset.reset();
+  }
+  return llvm::Error::success();
+}
+
+/// Advances past any lazy associated type member records.
+static llvm::Error skipAssociatedTypeMembers(llvm::BitstreamCursor &Cursor) {
+  using namespace decls_block;
+
+  BCOffsetRAII lastRecordOffset(Cursor);
+
+  while (true) {
+    Expected<llvm::BitstreamEntry> maybeEntry =
+        Cursor.advance(AF_DontPopBlockAtEnd);
+    if (!maybeEntry)
+      return maybeEntry.takeError();
+    llvm::BitstreamEntry entry = maybeEntry.get();
+    if (entry.Kind != llvm::BitstreamEntry::Record)
+      break;
+
+    Expected<unsigned> maybeRecordID = Cursor.skipRecord(entry.ID);
+    if (!maybeRecordID)
+      return maybeRecordID.takeError();
+    switch (maybeRecordID.get()) {
+    case ASSOCIATED_TYPE:
+      break;
+
+    default:
+      // This record is not an associated type.
       return llvm::Error::success();
     }
 
@@ -3522,6 +3617,11 @@ public:
     if (llvm::Error Err = skipGenericRequirements(MF.DeclTypeCursor))
       MF.fatal(std::move(Err));
 
+    proto->setLazyAssociatedTypeMembers(&MF,
+                                        MF.DeclTypeCursor.GetCurrentBitNo());
+    if (llvm::Error Err = skipAssociatedTypeMembers(MF.DeclTypeCursor))
+      MF.fatal(std::move(Err));
+
     proto->setMemberLoader(&MF, MF.DeclTypeCursor.GetCurrentBitNo());
 
     return proto;
@@ -4315,7 +4415,9 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
         DEF_VER_TUPLE_PIECES(Introduced);
         DEF_VER_TUPLE_PIECES(Deprecated);
         DEF_VER_TUPLE_PIECES(Obsoleted);
+        DeclID renameDeclID;
         unsigned platform, messageSize, renameSize;
+
         // Decode the record, pulling the version tuple information.
         serialization::decls_block::AvailableDeclAttrLayout::readRecord(
             scratch, isImplicit, isUnavailable, isDeprecated,
@@ -4323,7 +4425,12 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
             LIST_VER_TUPLE_PIECES(Introduced),
             LIST_VER_TUPLE_PIECES(Deprecated),
             LIST_VER_TUPLE_PIECES(Obsoleted),
-            platform, messageSize, renameSize);
+            platform, renameDeclID, messageSize, renameSize);
+
+        ValueDecl *renameDecl = nullptr;
+        if (renameDeclID) {
+          renameDecl = cast<ValueDecl>(MF.getDecl(renameDeclID));
+        }
 
         StringRef message = blobData.substr(0, messageSize);
         blobData = blobData.substr(messageSize);
@@ -4350,7 +4457,7 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
 
         Attr = new (ctx) AvailableAttr(
           SourceLoc(), SourceRange(),
-          (PlatformKind)platform, message, rename,
+          (PlatformKind)platform, message, rename, renameDecl,
           Introduced, SourceRange(),
           Deprecated, SourceRange(),
           Obsoleted, SourceRange(),
@@ -4473,10 +4580,12 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
 
         Expected<Type> deserialized = MF.getTypeChecked(typeID);
         if (!deserialized) {
-          if (deserialized.errorIsA<XRefNonLoadedModuleError>()) {
+          if (deserialized.errorIsA<XRefNonLoadedModuleError>() ||
+              MF.allowCompilerErrors()) {
             // A custom attribute defined behind an implementation-only import
             // is safe to drop when it can't be deserialized.
-            // rdar://problem/56599179
+            // rdar://problem/56599179. When allowing errors we're doing a best
+            // effort to create a module, so ignore in that case as well.
             consumeError(deserialized.takeError());
             skipAttr = true;
           } else
@@ -4615,21 +4724,6 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
 
         Attr = SPIAccessControlAttr::create(ctx, SourceLoc(),
                                             SourceRange(), spis);
-        break;
-      }
-
-      case decls_block::CompletionHandlerAsync_DECL_ATTR: {
-        bool isImplicit;
-        uint64_t handlerIndex;
-        uint64_t asyncFunctionDeclID;
-        serialization::decls_block::CompletionHandlerAsyncDeclAttrLayout::
-            readRecord(scratch, isImplicit, handlerIndex, asyncFunctionDeclID);
-
-        auto mappedFunctionDecl =
-            cast<AbstractFunctionDecl>(MF.getDecl(asyncFunctionDeclID));
-        Attr = new (ctx) CompletionHandlerAsyncAttr(
-            *mappedFunctionDecl, handlerIndex, /*handlerIndexLoc*/ SourceLoc(),
-            /*atLoc*/ SourceLoc(), /*range*/ SourceRange(), isImplicit);
         break;
       }
 
@@ -6236,9 +6330,15 @@ ModuleFile::loadAllConformances(const Decl *D, uint64_t contextData,
     if (!conformance) {
       auto unconsumedError =
         consumeErrorIfXRefNonLoadedModule(conformance.takeError());
-      if (unconsumedError)
-        fatal(std::move(unconsumedError));
-      return;
+      if (unconsumedError) {
+        // Ignore if allowing errors, it's just doing a best effort to produce
+        // *some* module anyway.
+        if (allowCompilerErrors())
+          consumeError(std::move(unconsumedError));
+        else
+          fatal(std::move(unconsumedError));
+      }
+      continue;
     }
 
     if (conformance.get().isConcrete())
@@ -6359,8 +6459,17 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
           "serialized conformances do not match requirement signature",
           llvm::inconvertibleErrorCode()));
     }
-    while (conformanceCount--)
-      reqConformances.push_back(readConformance(DeclTypeCursor));
+    while (conformanceCount--) {
+      auto conformance = readConformanceChecked(DeclTypeCursor);
+      if (conformance) {
+        reqConformances.push_back(conformance.get());
+      } else if (allowCompilerErrors()) {
+        consumeError(conformance.takeError());
+        reqConformances.push_back(ProtocolConformanceRef::forInvalid());
+      } else {
+        fatal(conformance.takeError());
+      }
+    }
   }
   conformance->setSignatureConformances(reqConformances);
 
@@ -6473,8 +6582,11 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
     if (!witnessSubstitutions) {
       // Missing module errors are most likely caused by an
       // implementation-only import hiding types and decls.
-      // rdar://problem/52837313
-      if (witnessSubstitutions.errorIsA<XRefNonLoadedModuleError>()) {
+      // rdar://problem/52837313. Ignore completely if allowing
+      // errors - we're just doing a best effort to create the
+      // module in that case.
+      if (witnessSubstitutions.errorIsA<XRefNonLoadedModuleError>() ||
+          allowCompilerErrors()) {
         consumeError(witnessSubstitutions.takeError());
         isOpaque = true;
       }
@@ -6514,6 +6626,14 @@ void ModuleFile::loadRequirementSignature(const ProtocolDecl *decl,
   BCOffsetRAII restoreOffset(DeclTypeCursor);
   fatalIfNotSuccess(DeclTypeCursor.JumpToBit(contextData));
   readGenericRequirements(reqs, DeclTypeCursor);
+}
+
+void ModuleFile::loadAssociatedTypes(const ProtocolDecl *decl,
+                                     uint64_t contextData,
+                           SmallVectorImpl<AssociatedTypeDecl *> &assocTypes) {
+  BCOffsetRAII restoreOffset(DeclTypeCursor);
+  fatalIfNotSuccess(DeclTypeCursor.JumpToBit(contextData));
+  readAssociatedTypes(assocTypes, DeclTypeCursor);
 }
 
 static Optional<ForeignErrorConvention::Kind>

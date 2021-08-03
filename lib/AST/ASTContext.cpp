@@ -41,6 +41,7 @@
 #include "swift/AST/PropertyWrappers.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/RawComment.h"
+#include "swift/AST/SearchPathOptions.h"
 #include "swift/AST/SILLayout.h"
 #include "swift/AST/SemanticAttrs.h"
 #include "swift/AST/SourceFile.h"
@@ -438,6 +439,10 @@ struct ASTContext::Implementation {
 
     /// The set of inherited protocol conformances.
     llvm::FoldingSet<InheritedProtocolConformance> InheritedConformances;
+
+    /// The set of builtin protocol conformances.
+    llvm::DenseMap<std::pair<Type, ProtocolDecl *>,
+                   BuiltinProtocolConformance *> BuiltinConformances;
 
     /// The set of substitution maps (uniqued by their storage).
     llvm::FoldingSet<SubstitutionMap::Storage> SubstitutionMaps;
@@ -1641,20 +1646,23 @@ Optional<ModuleDependencies> ASTContext::getModuleDependencies(
     bool cacheOnly) {
   // Retrieve the dependencies for this module.
   if (cacheOnly) {
+    auto searchPathSet = getAllModuleSearchPathsSet();
     // Check whether we've cached this result.
     if (!isUnderlyingClangModule) {
-      if (auto found = cache.findDependencies(moduleName,
-                                              ModuleDependenciesKind::SwiftTextual))
+      if (auto found = cache.findDependencies(
+              moduleName,
+              {ModuleDependenciesKind::SwiftTextual, searchPathSet}))
         return found;
-      if (auto found = cache.findDependencies(moduleName,
-                                              ModuleDependenciesKind::SwiftTextual))
+      if (auto found = cache.findDependencies(
+              moduleName, {ModuleDependenciesKind::SwiftBinary, searchPathSet}))
         return found;
-      if (auto found = cache.findDependencies(moduleName,
-                                              ModuleDependenciesKind::SwiftPlaceholder))
+      if (auto found = cache.findDependencies(
+              moduleName,
+              {ModuleDependenciesKind::SwiftPlaceholder, searchPathSet}))
         return found;
     }
-    if (auto found = cache.findDependencies(moduleName,
-                                            ModuleDependenciesKind::Clang))
+    if (auto found = cache.findDependencies(
+            moduleName, {ModuleDependenciesKind::Clang, searchPathSet}))
       return found;
   } else {
     for (auto &loader : getImpl().ModuleLoaders) {
@@ -1662,8 +1670,8 @@ Optional<ModuleDependencies> ASTContext::getModuleDependencies(
           loader.get() != getImpl().TheClangModuleLoader)
         continue;
 
-      if (auto dependencies = loader->getModuleDependencies(moduleName, cache,
-                                                            delegate))
+      if (auto dependencies =
+              loader->getModuleDependencies(moduleName, cache, delegate))
         return dependencies;
     }
   }
@@ -1684,6 +1692,65 @@ ASTContext::getSwiftModuleDependencies(StringRef moduleName,
       return dependencies;
   }
   return None;
+}
+
+namespace {
+  static StringRef
+  pathStringFromFrameworkSearchPath(const SearchPathOptions::FrameworkSearchPath &next) {
+    return next.Path;
+  };
+}
+
+std::vector<std::string> ASTContext::getDarwinImplicitFrameworkSearchPaths()
+const {
+  assert(LangOpts.Target.isOSDarwin());
+  SmallString<128> systemFrameworksScratch;
+  systemFrameworksScratch = SearchPathOpts.SDKPath;
+  llvm::sys::path::append(systemFrameworksScratch, "System", "Library", "Frameworks");
+
+  SmallString<128> frameworksScratch;
+  frameworksScratch = SearchPathOpts.SDKPath;
+  llvm::sys::path::append(frameworksScratch, "Library", "Frameworks");
+  return {systemFrameworksScratch.str().str(), frameworksScratch.str().str()};
+}
+
+llvm::StringSet<> ASTContext::getAllModuleSearchPathsSet()
+const {
+  llvm::StringSet<> result;
+  result.insert(SearchPathOpts.ImportSearchPaths.begin(),
+                SearchPathOpts.ImportSearchPaths.end());
+
+  // Framework paths are "special", they contain more than path strings,
+  // but path strings are all we care about here.
+  using FrameworkPathView = ArrayRefView<SearchPathOptions::FrameworkSearchPath,
+                                         StringRef,
+                                         pathStringFromFrameworkSearchPath>;
+  FrameworkPathView frameworkPathsOnly{SearchPathOpts.FrameworkSearchPaths};
+  result.insert(frameworkPathsOnly.begin(), frameworkPathsOnly.end());
+
+  if (LangOpts.Target.isOSDarwin()) {
+    auto implicitFrameworkSearchPaths = getDarwinImplicitFrameworkSearchPaths();
+    result.insert(implicitFrameworkSearchPaths.begin(),
+                  implicitFrameworkSearchPaths.end());
+  }
+  result.insert(SearchPathOpts.RuntimeLibraryImportPaths.begin(),
+                SearchPathOpts.RuntimeLibraryImportPaths.end());
+
+  // ClangImporter special-cases the path for SwiftShims, so do the same here
+  // If there are no shims in the resource dir, add a search path in the SDK.
+  SmallString<128> shimsPath(SearchPathOpts.RuntimeResourcePath);
+  llvm::sys::path::append(shimsPath, "shims");
+  if (!llvm::sys::fs::exists(shimsPath)) {
+    shimsPath = SearchPathOpts.SDKPath;
+    llvm::sys::path::append(shimsPath, "usr", "lib", "swift", "shims");
+  }
+  result.insert(shimsPath.str());
+
+  // Clang system modules are found in the SDK root
+  SmallString<128> clangSysRootPath(SearchPathOpts.SDKPath);
+  llvm::sys::path::append(clangSysRootPath, "usr", "include");
+  result.insert(clangSysRootPath.str());
+  return result;
 }
 
 void ASTContext::loadExtensions(NominalTypeDecl *nominal,
@@ -1928,6 +1995,22 @@ ASTContext::getOrCreateRequirementMachine(CanGenericSignature sig) {
   machine->addGenericSignature(sig);
 
   return machine;
+}
+
+bool ASTContext::isRecursivelyConstructingRequirementMachine(
+      CanGenericSignature sig) {
+  auto &rewriteCtx = getImpl().TheRewriteContext;
+  if (!rewriteCtx)
+    return false;
+
+  auto arena = getArena(sig);
+  auto &machines = getImpl().getArena(arena).RequirementMachines;
+
+  auto found = machines.find(sig);
+  if (found == machines.end())
+    return false;
+
+  return !found->second->isComplete();
 }
 
 Optional<llvm::TinyPtrVector<ValueDecl *>>
@@ -2243,6 +2326,29 @@ ASTContext::getSelfConformance(ProtocolDecl *protocol) {
   return entry;
 }
 
+/// Produce the builtin conformance for some non-nominal to some protocol.
+BuiltinProtocolConformance *
+ASTContext::getBuiltinConformance(
+    Type type, ProtocolDecl *protocol,
+    GenericSignature genericSig,
+    ArrayRef<Requirement> conditionalRequirements,
+    BuiltinConformanceKind kind
+) {
+  auto key = std::make_pair(type, protocol);
+  AllocationArena arena = getArena(type->getRecursiveProperties());
+  auto &builtinConformances = getImpl().getArena(arena).BuiltinConformances;
+
+  auto &entry = builtinConformances[key];
+  if (!entry) {
+    auto size = BuiltinProtocolConformance::
+        totalSizeToAlloc<Requirement>(conditionalRequirements.size());
+    auto mem = this->Allocate(size, alignof(BuiltinProtocolConformance), arena);
+    entry = new (mem) BuiltinProtocolConformance(
+        type, protocol, genericSig, conditionalRequirements, kind);
+  }
+  return entry;
+}
+
 /// If one of the ancestor conformances already has a matching type, use
 /// that instead.
 static ProtocolConformance *collapseSpecializedConformance(
@@ -2259,6 +2365,7 @@ static ProtocolConformance *collapseSpecializedConformance(
     case ProtocolConformanceKind::Normal:
     case ProtocolConformanceKind::Inherited:
     case ProtocolConformanceKind::Self:
+    case ProtocolConformanceKind::Builtin:
       // If the conformance matches, return it.
       if (conformance->getType()->isEqual(type)) {
         for (auto subConformance : substitutions.getConformances())
@@ -2496,6 +2603,7 @@ size_t ASTContext::Implementation::Arena::getTotalMemory() const {
     // NormalConformances ?
     // SpecializedConformances ?
     // InheritedConformances ?
+    // BuiltinConformances ?
 }
 
 void AbstractFunctionDecl::setForeignErrorConvention(
@@ -3317,7 +3425,7 @@ AnyFunctionType *AnyFunctionType::withExtInfo(ExtInfo info) const {
                                   getParams(), getResult(), info);
 }
 
-void AnyFunctionType::decomposeInput(
+void AnyFunctionType::decomposeTuple(
     Type type, SmallVectorImpl<AnyFunctionType::Param> &result) {
   switch (type->getKind()) {
   case TypeKind::Tuple: {
@@ -3366,7 +3474,7 @@ Type AnyFunctionType::Param::getParameterType(bool forCanonical,
   return type;
 }
 
-Type AnyFunctionType::composeInput(ASTContext &ctx, ArrayRef<Param> params,
+Type AnyFunctionType::composeTuple(ASTContext &ctx, ArrayRef<Param> params,
                                    bool canonicalVararg) {
   SmallVector<TupleTypeElt, 4> elements;
   for (const auto &param : params) {

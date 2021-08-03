@@ -4787,7 +4787,9 @@ ProtocolDecl::ProtocolDecl(DeclContext *DC, SourceLoc ProtocolLoc,
   Bits.ProtocolDecl.NumRequirementsInSignature = 0;
   Bits.ProtocolDecl.HasMissingRequirements = false;
   Bits.ProtocolDecl.KnownProtocol = 0;
-    setTrailingWhereClause(TrailingWhere);
+  Bits.ProtocolDecl.HasAssociatedTypes = 0;
+  Bits.ProtocolDecl.HasLazyAssociatedTypes = 0;
+  setTrailingWhereClause(TrailingWhere);
 }
 
 bool ProtocolDecl::isMarkerProtocol() const {
@@ -4806,26 +4808,40 @@ ArrayRef<ProtocolDecl *> ProtocolDecl::getInheritedProtocols() const {
                            {});
 }
 
-llvm::TinyPtrVector<AssociatedTypeDecl *>
+ArrayRef<AssociatedTypeDecl *>
 ProtocolDecl::getAssociatedTypeMembers() const {
-  llvm::TinyPtrVector<AssociatedTypeDecl *> result;
+  if (Bits.ProtocolDecl.HasAssociatedTypes)
+    return AssociatedTypes;
+
+  auto *self = const_cast<ProtocolDecl *>(this);
+  self->Bits.ProtocolDecl.HasAssociatedTypes = 1;
 
   // Clang-imported protocols never have associated types.
   if (hasClangNode())
-    return result;
+    return ArrayRef<AssociatedTypeDecl *>();
 
   // Deserialized @objc protocols never have associated types.
-  if (!getParentSourceFile() && isObjC())
-    return result;
+  if (getParentSourceFile() == nullptr && isObjC())
+    return ArrayRef<AssociatedTypeDecl *>();
 
-  // Find the associated type declarations.
-  for (auto member : getMembers()) {
-    if (auto ATD = dyn_cast<AssociatedTypeDecl>(member)) {
-      result.push_back(ATD);
+  SmallVector<AssociatedTypeDecl *, 2> result;
+  if (Bits.ProtocolDecl.HasLazyAssociatedTypes) {
+    auto &ctx = getASTContext();
+    auto contextData = static_cast<LazyProtocolData *>(
+        ctx.getOrCreateLazyContextData(this, nullptr));
+
+    contextData->loader->loadAssociatedTypes(
+        this, contextData->associatedTypesData, result);
+  } else {
+    for (auto member : getMembers()) {
+      if (auto ATD = dyn_cast<AssociatedTypeDecl>(member)) {
+        result.push_back(ATD);
+      }
     }
   }
 
-  return result;
+  self->AssociatedTypes = getASTContext().AllocateCopy(result);
+  return AssociatedTypes;
 }
 
 ValueDecl *ProtocolDecl::getSingleRequirement(DeclName name) const {
@@ -5188,6 +5204,18 @@ ProtocolDecl::setLazyRequirementSignature(LazyMemberLoader *lazyLoader,
   // FIXME: (transitional) increment the redundant "always-on" counter.
   if (auto *Stats = getASTContext().Stats)
     ++Stats->getFrontendCounters().NumLazyRequirementSignatures;
+}
+
+void
+ProtocolDecl::setLazyAssociatedTypeMembers(LazyMemberLoader *lazyLoader,
+                                           uint64_t associatedTypesData) {
+  assert(!Bits.ProtocolDecl.HasAssociatedTypes);
+  assert(!Bits.ProtocolDecl.HasLazyAssociatedTypes);
+
+  auto contextData = static_cast<LazyProtocolData *>(
+      getASTContext().getOrCreateLazyContextData(this, lazyLoader));
+  contextData->associatedTypesData = associatedTypesData;
+  Bits.ProtocolDecl.HasLazyAssociatedTypes = true;
 }
 
 ArrayRef<Requirement> ProtocolDecl::getCachedRequirementSignature() const {
@@ -7053,9 +7081,132 @@ bool AbstractFunctionDecl::hasDynamicSelfResult() const {
 }
 
 AbstractFunctionDecl *AbstractFunctionDecl::getAsyncAlternative() const {
-  auto mutableFunc = const_cast<AbstractFunctionDecl *>(this);
-  return evaluateOrDefault(getASTContext().evaluator,
-                           AsyncAlternativeRequest{mutableFunc}, nullptr);
+  // Async functions can't have async alternatives
+  if (hasAsync())
+    return nullptr;
+
+  const AvailableAttr *avAttr = nullptr;
+  for (const auto *attr : getAttrs().getAttributes<AvailableAttr>()) {
+    // If there's an attribute with an already-resolved rename decl, use it
+    if (attr->RenameDecl) {
+      avAttr = attr;
+      break;
+    }
+
+    // Otherwise prefer the first availability attribute with no platform and
+    // rename parameter, falling back to the first with a rename. Note that
+    // `getAttrs` is in reverse source order, so the last attribute is the
+    // first in source
+    if (!attr->Rename.empty() && (attr->Platform == PlatformKind::none ||
+                                  !avAttr))
+      avAttr = attr;
+  }
+
+  auto *renamedDecl = evaluateOrDefault(
+      getASTContext().evaluator, RenamedDeclRequest{this, avAttr}, nullptr);
+  auto *alternative = dyn_cast_or_null<AbstractFunctionDecl>(renamedDecl);
+  if (!alternative || !alternative->hasAsync())
+    return nullptr;
+  return alternative;
+}
+
+static bool isPotentialCompletionHandler(const ParamDecl *param) {
+  if (!param->getType())
+    return false;
+
+  const AnyFunctionType *paramType = param->getType()->getAs<AnyFunctionType>();
+  return paramType && paramType->getResult()->isVoid() &&
+         !paramType->isNoEscape() && !param->isAutoClosure();
+}
+
+Optional<unsigned> AbstractFunctionDecl::findPotentialCompletionHandlerParam(
+    const AbstractFunctionDecl *asyncAlternative) const {
+  const ParameterList *params = getParameters();
+  if (params->size() == 0)
+    return None;
+
+  // If no async alternative given, just find the last parameter that matches
+  // a completion handler signature
+  if (!asyncAlternative) {
+    for (int i = params->size() - 1; i >= 0; --i) {
+      if (isPotentialCompletionHandler(params->get(i)))
+        return i;
+    }
+    return None;
+  }
+
+  // If this is an imported function with an async convention then we already
+  // have the index, grab it from there
+  auto asyncConvention = asyncAlternative->getForeignAsyncConvention();
+  if (asyncConvention) {
+    auto errorConvention = asyncAlternative->getForeignErrorConvention();
+    unsigned handlerIndex = asyncConvention->completionHandlerParamIndex();
+    if (errorConvention &&
+        !errorConvention->isErrorParameterReplacedWithVoid() &&
+        handlerIndex >= errorConvention->getErrorParameterIndex()) {
+      handlerIndex--;
+    }
+    return handlerIndex;
+  }
+
+  // Otherwise, match up the parameters of each function and return the single
+  // missing parameter that must also match a completion handler signature.
+  // Ignore any defaulted params in the alternative if their label is different
+  // to the corresponding param in the original function.
+
+  const ParameterList *asyncParams = asyncAlternative->getParameters();
+  unsigned paramIndex = 0;
+  unsigned asyncParamIndex = 0;
+  Optional<unsigned> potentialParam;
+  while (paramIndex < params->size() || asyncParamIndex < asyncParams->size()) {
+    if (paramIndex >= params->size()) {
+      // Have more async params than original params, if we haven't found a
+      // completion handler then there isn't going to be any. If we have then
+      // ensure the rest of the async params are defaulted
+      if (!potentialParam ||
+          !asyncParams->get(asyncParamIndex)->isDefaultArgument())
+        return None;
+      asyncParamIndex++;
+      continue;
+    }
+
+    auto *param = params->get(paramIndex);
+    bool paramMatches = false;
+    if (asyncParamIndex < asyncParams->size()) {
+      const ParamDecl *asyncParam = asyncParams->get(asyncParamIndex);
+
+      // Skip if the labels are different and it's defaulted
+      if (param->getArgumentName() != asyncParam->getArgumentName() &&
+          asyncParam->isDefaultArgument()) {
+        asyncParamIndex++;
+        continue;
+      }
+
+      // Don't have types for some reason, just return no match
+      if (!param->getType() || !asyncParam->getType())
+        return None;
+
+      paramMatches = param->getType()->matchesParameter(asyncParam->getType(),
+                                                        TypeMatchOptions());
+    }
+
+    if (paramMatches) {
+      paramIndex++;
+      asyncParamIndex++;
+      continue;
+    }
+
+    // Param doesn't match, either it's the first completion handler or these
+    // functions don't match
+    if (potentialParam || !isPotentialCompletionHandler(param))
+      return None;
+
+    // The next original param should match the current async, so don't
+    // increment the async index
+    potentialParam = paramIndex;
+    paramIndex++;
+  }
+  return potentialParam;
 }
 
 bool AbstractFunctionDecl::argumentNameIsAPIByDefault() const {
@@ -7757,6 +7908,28 @@ bool AccessorDecl::isSimpleDidSet() const {
   auto mutableThis = const_cast<AccessorDecl *>(this);
   return evaluateOrDefault(getASTContext().evaluator,
                            SimpleDidSetRequest{mutableThis}, false);
+}
+
+void AccessorDecl::printUserFacingName(raw_ostream &out) const {
+  switch (getAccessorKind()) {
+  case AccessorKind::Get:
+    out << "getter:";
+    break;
+  case AccessorKind::Set:
+    out << "setter:";
+    break;
+  default:
+    out << getName();
+    return;
+  }
+
+  out << getStorage()->getName() << "(";
+  if (this->isSetter()) {
+    for (const auto *param : *getParameters()) {
+      out << param->getName() << ":";
+    }
+  }
+  out << ")";
 }
 
 StaticSpellingKind FuncDecl::getCorrectStaticSpelling() const {
