@@ -609,7 +609,7 @@ ModuleFile::readConformanceChecked(llvm::BitstreamCursor &Cursor,
       module = getAssociatedModule();
 
     SmallVector<ProtocolConformance *, 2> conformances;
-    nominal->lookupConformance(module, proto, conformances);
+    nominal->lookupConformance(proto, conformances);
     PrettyStackTraceModuleFile traceMsg(
         "If you're seeing a crash here, check that your SDK and dependencies "
         "are at least as new as the versions used to build", *this);
@@ -3461,9 +3461,10 @@ public:
       return cast<OpaqueTypeDecl>(declOrOffset.get());
       
     // Create the decl.
-    auto opaqueDecl =
-      new (ctx) OpaqueTypeDecl(nullptr, nullptr, declContext,
-                               interfaceSig, interfaceType);
+    auto opaqueDecl = new (ctx)
+        OpaqueTypeDecl(/*NamingDecl*/ nullptr,
+                       /*GenericParams*/ nullptr, declContext, interfaceSig,
+                       /*UnderlyingInterfaceTypeRepr*/ nullptr, interfaceType);
     declOrOffset = opaqueDecl;
 
     auto namingDecl = cast<ValueDecl>(MF.getDecl(namingDeclID));
@@ -3492,7 +3493,8 @@ public:
     if (genericSig) {
       subs = genericSig->getIdentitySubstitutionMap();
     }
-    auto opaqueTy = OpaqueTypeArchetypeType::get(opaqueDecl, subs);
+    // TODO [OPAQUE SUPPORT]: multiple opaque types
+    auto opaqueTy = OpaqueTypeArchetypeType::get(opaqueDecl, 0, subs);
     auto metatype = MetatypeType::get(opaqueTy);
     opaqueDecl->setInterfaceType(metatype);
     return opaqueDecl;
@@ -3632,27 +3634,16 @@ public:
                                             StringRef blobData) {
     IdentifierID nameID;
     DeclContextID contextID;
-    ArrayRef<uint64_t> designatedNominalTypeDeclIDs;
 
-    OperatorLayout::readRecord(scratch, nameID, contextID,
-                               designatedNominalTypeDeclIDs);
+    OperatorLayout::readRecord(scratch, nameID, contextID);
 
     Identifier name = MF.getIdentifier(nameID);
     PrettySupplementalDeclNameTrace trace(name);
 
     auto DC = MF.getDeclContext(contextID);
 
-    SmallVector<NominalTypeDecl *, 1> designatedNominalTypes;
-    for (auto id : designatedNominalTypeDeclIDs) {
-      Expected<Decl *> nominal = MF.getDeclChecked(id);
-      if (!nominal)
-        return nominal.takeError();
-      designatedNominalTypes.push_back(cast<NominalTypeDecl>(nominal.get()));
-    }
-
     auto result = MF.createDecl<OperatorDecl>(
-        DC, SourceLoc(), name, SourceLoc(),
-        ctx.AllocateCopy(designatedNominalTypes));
+        DC, SourceLoc(), name, SourceLoc());
 
     declOrOffset = result;
     return result;
@@ -3675,11 +3666,9 @@ public:
     IdentifierID nameID;
     DeclContextID contextID;
     DeclID precedenceGroupID;
-    ArrayRef<uint64_t> designatedNominalTypeDeclIDs;
 
     decls_block::InfixOperatorLayout::readRecord(scratch, nameID, contextID,
-                                                 precedenceGroupID,
-                                                 designatedNominalTypeDeclIDs);
+                                                 precedenceGroupID);
     Identifier name = MF.getIdentifier(nameID);
     PrettySupplementalDeclNameTrace trace(name);
 
@@ -3689,18 +3678,9 @@ public:
 
     auto DC = MF.getDeclContext(contextID);
 
-    SmallVector<NominalTypeDecl *, 1> designatedNominalTypes;
-    for (auto id : designatedNominalTypeDeclIDs) {
-      Expected<Decl *> nominal = MF.getDeclChecked(id);
-      if (!nominal)
-        return nominal.takeError();
-      designatedNominalTypes.push_back(cast<NominalTypeDecl>(nominal.get()));
-    }
-
     auto result = MF.createDecl<InfixOperatorDecl>(
-        DC, SourceLoc(), name, SourceLoc(), SourceLoc(),
-        ArrayRef<Located<Identifier>>{});
-    result->setDesignatedNominalTypes(ctx.AllocateCopy(designatedNominalTypes));
+        DC, SourceLoc(), name, SourceLoc(), SourceLoc(), Identifier(),
+        SourceLoc());
     ctx.evaluator.cacheOutput(
         OperatorPrecedenceGroupRequest{result},
         std::move(cast_or_null<PrecedenceGroupDecl>(precedenceGroup.get())));
@@ -5494,7 +5474,9 @@ public:
     if (!subsOrError)
       return subsOrError.takeError();
 
-    return OpaqueTypeArchetypeType::get(opaqueDecl, subsOrError.get());
+    // TODO [OPAQUE SUPPORT]: to support multiple opaque types we will probably
+    // have to serialize the ordinal, which is always 0 for now
+    return OpaqueTypeArchetypeType::get(opaqueDecl, 0, subsOrError.get());
   }
       
   Expected<Type> deserializeNestedArchetypeType(ArrayRef<uint64_t> scratch,
@@ -5919,6 +5901,18 @@ public:
     return OptionalType::get(baseTy.get());
   }
 
+  Expected<Type> deserializeVariadicSequenceType(ArrayRef<uint64_t> scratch,
+                                                 StringRef blobData) {
+    TypeID baseID;
+    decls_block::VariadicSequenceTypeLayout::readRecord(scratch, baseID);
+
+    auto baseTy = MF.getTypeChecked(baseID);
+    if (!baseTy)
+      return baseTy.takeError();
+
+    return VariadicSequenceType::get(baseTy.get());
+  }
+
   Expected<Type> deserializeUnboundGenericType(ArrayRef<uint64_t> scratch,
                                                StringRef blobData) {
     DeclID genericID;
@@ -6042,6 +6036,7 @@ Expected<Type> TypeDeserializer::getTypeCheckedImpl() {
   CASE(ArraySlice)
   CASE(Dictionary)
   CASE(Optional)
+  CASE(VariadicSequence)
   CASE(UnboundGeneric)
   CASE(Error)
 
@@ -6561,8 +6556,8 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
     } else {
       fatal(deserializedWitness.takeError());
     }
-    
-    assert(!req || isOpaque || witness ||
+
+    assert(allowCompilerErrors() || !req || isOpaque || witness ||
            req->getAttrs().hasAttribute<OptionalAttr>() ||
            req->getAttrs().isUnavailable(getContext()));
     if (!witness && !isOpaque) {

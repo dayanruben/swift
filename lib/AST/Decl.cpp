@@ -2809,7 +2809,7 @@ void ValueDecl::setOverriddenDecls(ArrayRef<ValueDecl *> overridden) {
   request.cacheResult(overriddenVec);
 }
 
-OpaqueReturnTypeRepr *ValueDecl::getOpaqueResultTypeRepr() const {
+TypeRepr *ValueDecl::getOpaqueResultTypeRepr() const {
   TypeRepr *returnRepr = nullptr;
   if (auto *VD = dyn_cast<VarDecl>(this)) {
     if (auto *P = VD->getParentPattern()) {
@@ -2834,7 +2834,11 @@ OpaqueReturnTypeRepr *ValueDecl::getOpaqueResultTypeRepr() const {
     returnRepr = SD->getElementTypeRepr();
   }
 
-  return dyn_cast_or_null<OpaqueReturnTypeRepr>(returnRepr);
+  if (returnRepr && returnRepr->hasOpaque()) {
+    return returnRepr;
+  } else {
+    return nullptr;
+  }
 }
 
 OpaqueTypeDecl *ValueDecl::getOpaqueResultTypeDecl() const {
@@ -3129,7 +3133,7 @@ bool ValueDecl::canInferObjCFromRequirement(ValueDecl *requirement) {
   // If the nominal type doesn't conform to the protocol at all, we
   // cannot infer @objc no matter what we do.
   SmallVector<ProtocolConformance *, 1> conformances;
-  if (!nominal->lookupConformance(getModuleContext(), proto, conformances))
+  if (!nominal->lookupConformance(proto, conformances))
     return false;
 
   // If any of the conformances is attributed to the context in which
@@ -4204,13 +4208,6 @@ ConstructorDecl *NominalTypeDecl::getDefaultInitializer() const {
                            SynthesizeDefaultInitRequest{mutableThis}, nullptr);
 }
 
-bool NominalTypeDecl::hasDistributedActorLocalInitializer() const {
-  auto &ctx = getASTContext();
-  auto *mutableThis = const_cast<NominalTypeDecl *>(this);
-  return evaluateOrDefault(ctx.evaluator, HasDistributedActorLocalInitRequest{mutableThis},
-                           false);
-}
-
 void NominalTypeDecl::synthesizeSemanticMembersIfNeeded(DeclName member) {
   // Silently break cycles here because we can't be sure when and where a
   // request to synthesize will come from yet.
@@ -4238,7 +4235,7 @@ void NominalTypeDecl::synthesizeSemanticMembersIfNeeded(DeclName member) {
         if ((member.isSimpleName() || argumentNames.front() == Context.Id_from)) {
           action.emplace(ImplicitMemberAction::ResolveDecodable);
         } else if (argumentNames.front() == Context.Id_transport) {
-          action.emplace(ImplicitMemberAction::ResolveDistributedActor);
+          action.emplace(ImplicitMemberAction::ResolveDistributedActorTransport);
         }
       } else if (!baseName.isSpecial() &&
            baseName.getIdentifier() == Context.Id_encode &&
@@ -6524,7 +6521,7 @@ void ParamDecl::setNonEphemeralIfPossible() {
 
 Type ParamDecl::getVarargBaseTy(Type VarArgT) {
   TypeBase *T = VarArgT.getPointer();
-  if (auto *AT = dyn_cast<ArraySliceType>(T))
+  if (auto *AT = dyn_cast<VariadicSequenceType>(T))
     return AT->getBaseType();
   if (auto *BGT = dyn_cast<BoundGenericType>(T)) {
     // It's the stdlib Array<T>.
@@ -7301,7 +7298,7 @@ void AbstractFunctionDecl::setBodyToBeReparsed(SourceRange bodyRange) {
 SourceRange AbstractFunctionDecl::getBodySourceRange() const {
   switch (getBodyKind()) {
   case BodyKind::None:
-  case BodyKind::MemberwiseInitializer:
+  case BodyKind::SILSynthesize:
   case BodyKind::Deserialized:
   case BodyKind::Synthesize:
     return SourceRange();
@@ -7547,16 +7544,16 @@ void AbstractFunctionDecl::setParameters(ParameterList *BodyParams) {
 }
 
 OpaqueTypeDecl::OpaqueTypeDecl(ValueDecl *NamingDecl,
-                               GenericParamList *GenericParams,
-                               DeclContext *DC,
+                               GenericParamList *GenericParams, DeclContext *DC,
                                GenericSignature OpaqueInterfaceGenericSignature,
+                               OpaqueReturnTypeRepr *UnderlyingInterfaceRepr,
                                GenericTypeParamType *UnderlyingInterfaceType)
-  : GenericTypeDecl(DeclKind::OpaqueType, DC, Identifier(), SourceLoc(), {},
-                    GenericParams),
-    NamingDecl(NamingDecl),
-    OpaqueInterfaceGenericSignature(OpaqueInterfaceGenericSignature),
-    UnderlyingInterfaceType(UnderlyingInterfaceType)
-{
+    : GenericTypeDecl(DeclKind::OpaqueType, DC, Identifier(), SourceLoc(), {},
+                      GenericParams),
+      NamingDecl(NamingDecl),
+      OpaqueInterfaceGenericSignature(OpaqueInterfaceGenericSignature),
+      UnderlyingInterfaceRepr(UnderlyingInterfaceRepr),
+      UnderlyingInterfaceType(UnderlyingInterfaceType) {
   // Always implicit.
   setImplicit();
 }
@@ -7574,6 +7571,15 @@ bool OpaqueTypeDecl::isOpaqueReturnTypeOfFunction(
   }
 
   return false;
+}
+
+unsigned OpaqueTypeDecl::getAnonymousOpaqueParamOrdinal(
+    OpaqueReturnTypeRepr *repr) const {
+  // TODO [OPAQUE SUPPORT]: we will need to generalize here when we allow
+  // multiple "some" types.
+  assert(UnderlyingInterfaceRepr &&
+         "can't do opaque param lookup without underlying interface repr");
+  return repr == UnderlyingInterfaceRepr ? 0 : -1;
 }
 
 Identifier OpaqueTypeDecl::getOpaqueReturnTypeIdentifier() const {
@@ -7607,7 +7613,7 @@ bool AbstractFunctionDecl::hasInlinableBodyText() const {
   case BodyKind::None:
   case BodyKind::Synthesize:
   case BodyKind::Skipped:
-  case BodyKind::MemberwiseInitializer:
+  case BodyKind::SILSynthesize:
     return false;
   }
   llvm_unreachable("covered switch");
@@ -8042,45 +8048,6 @@ bool ConstructorDecl::isObjCZeroParameterWithLongSelector() const {
   return params->get(0)->getInterfaceType()->isVoid();
 }
 
-bool ConstructorDecl::isDistributedActorLocalInit() const {
-  auto name = getName();
-  auto argumentNames = name.getArgumentNames();
-
-  if (argumentNames.size() != 1)
-    return false;
-
-  auto &C = getASTContext();
-  if (argumentNames[0] != C.Id_transport)
-    return false;
-
-  auto *params = getParameters();
-  assert(params->size() == 1);
-
-  auto transportType = C.getActorTransportDecl()->getDeclaredInterfaceType();
-  return params->get(0)->getInterfaceType()->isEqual(transportType);
-}
-
-// TODO: remove resolve init in favor of resolve function?
-bool ConstructorDecl::isDistributedActorResolveInit() const {
-  auto name = getName();
-  auto argumentNames = name.getArgumentNames();
-
-  if (argumentNames.size() != 2)
-    return false;
-
-  auto &C = getASTContext();
-  if (argumentNames[0] != C.Id_resolve ||
-      argumentNames[1] != C.Id_using)
-    return false;
-
-  auto *params = getParameters();
-  auto identityType = C.getAnyActorIdentityDecl()->getDeclaredInterfaceType();
-  auto transportType = C.getActorTransportDecl()->getDeclaredInterfaceType();
-
-  return params->get(0)->getInterfaceType()->isEqual(identityType) &&
-         params->get(1)->getInterfaceType()->isEqual(transportType);
-}
-
 
 DestructorDecl::DestructorDecl(SourceLoc DestructorLoc, DeclContext *Parent)
   : AbstractFunctionDecl(DeclKind::Destructor, Parent,
@@ -8478,8 +8445,13 @@ bool ClassDecl::isRootDefaultActor(ModuleDecl *M,
 
 bool ClassDecl::isNativeNSObjectSubclass() const {
   // @objc actors implicitly inherit from NSObject.
-  if (isActor() && getAttrs().hasAttribute<ObjCAttr>())
-    return true;
+  if (isActor()) {
+    if (getAttrs().hasAttribute<ObjCAttr>()) {
+      return true;
+    }
+    ClassDecl *superclass = getSuperclassDecl();
+    return superclass && superclass->isNSObject();
+  }
 
   // For now, non-actor classes cannot use the native NSObject subclass.
   // Eventually we should roll this out to more classes that directly
@@ -8702,7 +8674,7 @@ ParseAbstractFunctionBodyRequest::getCachedResult() const {
   auto afd = std::get<0>(getStorage());
   switch (afd->getBodyKind()) {
   case BodyKind::Deserialized:
-  case BodyKind::MemberwiseInitializer:
+  case BodyKind::SILSynthesize:
   case BodyKind::None:
   case BodyKind::Skipped:
     return nullptr;
@@ -8723,7 +8695,7 @@ void ParseAbstractFunctionBodyRequest::cacheResult(BraceStmt *value) const {
   auto afd = std::get<0>(getStorage());
   switch (afd->getBodyKind()) {
   case BodyKind::Deserialized:
-  case BodyKind::MemberwiseInitializer:
+  case BodyKind::SILSynthesize:
   case BodyKind::None:
   case BodyKind::Skipped:
     // The body is always empty, so don't cache anything.
