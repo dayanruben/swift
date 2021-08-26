@@ -2079,7 +2079,9 @@ namespace {
         extInfo = extInfo.withGlobalActor(getExplicitGlobalActor(closure));
       }
 
-      return FunctionType::get(closureParams, resultTy, extInfo);
+      auto *fnTy = FunctionType::get(closureParams, resultTy, extInfo);
+      return CS.replaceInferableTypesWithTypeVars(
+          fnTy, CS.getConstraintLocator(closure))->castTo<FunctionType>();
     }
 
     /// Produces a type for the given pattern, filling in any missing
@@ -3918,20 +3920,35 @@ bool ConstraintSystem::generateConstraints(
 
     /// Generate constraints for each pattern binding entry
     for (unsigned index : range(patternBinding->getNumPatternEntries())) {
-      // Type check the pattern.
-      auto pattern = patternBinding->getPattern(index);
+      auto *pattern = TypeChecker::resolvePattern(
+          patternBinding->getPattern(index), dc, /*isStmtCondition=*/true);
+
+      if (!pattern)
+        return true;
+
+      // Type check the pattern. Note use of `forRawPattern` here instead
+      // of `forPatternBindingDecl` because resolved `pattern` is not
+      // associated with `patternBinding`.
       auto contextualPattern = ContextualPattern::forRawPattern(pattern, dc);
       Type patternType = TypeChecker::typeCheckPattern(contextualPattern);
 
-      auto init = patternBinding->getInit(index);
-      if (!init) {
-        llvm_unreachable("Unsupported pattern binding entry");
+      // Fail early if pattern couldn't be type-checked.
+      if (!patternType || patternType->hasError())
+        return true;
+
+      if (!patternBinding->isInitialized(index) &&
+          patternBinding->isDefaultInitializable(index) &&
+          pattern->hasStorage()) {
+        llvm_unreachable("default initialization is unsupported");
       }
 
-      // Generate constraints for the initialization.
-      auto target = SolutionApplicationTarget::forInitialization(
-          init, dc, patternType, pattern,
-          /*bindPatternVarsOneWay=*/true);
+      auto init = patternBinding->getInit(index);
+      auto target = init ? SolutionApplicationTarget::forInitialization(
+                               init, dc, patternType, pattern,
+                               /*bindPatternVarsOneWay=*/true)
+                         : SolutionApplicationTarget::forUninitializedVar(
+                               patternBinding, index, pattern, patternType);
+
       if (generateConstraints(target, FreeTypeVariableBinding::Disallow)) {
         hadError = true;
         continue;
@@ -3944,14 +3961,28 @@ bool ConstraintSystem::generateConstraints(
     return hadError;
   }
 
-  case SolutionApplicationTarget::Kind::uninitializedWrappedVar: {
-    auto *wrappedVar = target.getAsUninitializedWrappedVar();
-    auto propertyType = getVarType(wrappedVar);
-    if (propertyType->hasError())
-      return true;
+  case SolutionApplicationTarget::Kind::uninitializedVar: {
+    if (auto *wrappedVar = target.getAsUninitializedWrappedVar()) {
+      auto propertyType = getVarType(wrappedVar);
+      if (propertyType->hasError())
+        return true;
 
-    return generateWrappedPropertyTypeConstraints(
+      return generateWrappedPropertyTypeConstraints(
         *this, /*initializerType=*/Type(), wrappedVar, propertyType);
+    } else {
+      auto pattern = target.getAsUninitializedVar();
+      auto locator = getConstraintLocator(
+          pattern, LocatorPathElt::ContextualType(CTP_Initialization));
+
+      // Generate constraints to bind all of the internal declarations
+      // and verify the pattern.
+      Type patternType = generateConstraints(
+          pattern, locator, /*shouldBindPatternVarsOneWay*/ true,
+          target.getPatternBindingOfUninitializedVar(),
+          target.getIndexOfUninitializedVar());
+
+      return !patternType;
+    }
   }
   }
 }

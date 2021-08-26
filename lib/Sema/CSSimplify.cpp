@@ -446,11 +446,11 @@ static bool matchCallArgumentsImpl(
       }
 
       // If this parameter does not require an argument, consider applying a
-      // "fuzzy" match rule that skips this parameter if doing so is the only
+      // backward-match rule that skips this parameter if doing so is the only
       // way to successfully match arguments to parameters.
       if (!parameterRequiresArgument(params, paramInfo, paramIdx) &&
-          param.getPlainType()->getASTContext().LangOpts
-              .EnableFuzzyForwardScanTrailingClosureMatching &&
+          !param.getPlainType()->getASTContext().LangOpts
+              .isSwiftVersionAtLeast(6) &&
           anyParameterRequiresArgument(
               params, paramInfo, paramIdx + 1,
               nextArgIdx + 1 < numArgs
@@ -900,9 +900,9 @@ static bool requiresBothTrailingClosureDirections(
   if (params.empty())
     return false;
 
-  // If "fuzzy" matching is disabled, only scan forward.
+  // If backward matching is disabled, only scan forward.
   ASTContext &ctx = params.front().getPlainType()->getASTContext();
-  if (!ctx.LangOpts.EnableFuzzyForwardScanTrailingClosureMatching)
+  if (ctx.LangOpts.isSwiftVersionAtLeast(6))
     return false;
 
   // If there are at least two parameters that meet the backward scan's
@@ -2714,14 +2714,25 @@ ConstraintSystem::matchDeepEqualityTypes(Type type1, Type type2,
       }
     }
 
+    unsigned impact = 1;
+
+    if (type1->getAnyPointerElementType() &&
+        type2->getAnyPointerElementType()) {
+      // If this is a pointer <-> pointer conversion of different kind,
+      // there is a dedicated restriction/fix for that in some cases.
+      // To accommodate that, let's increase the impact of this fix.
+      impact += 2;
+    } else {
+      // Increase the solution's score for each mismtach this fixes.
+      impact += mismatches.size() - 1;
+    }
+
     auto *fix = GenericArgumentsMismatch::create(
         *this, type1, type2, mismatches, getConstraintLocator(locator));
 
-    if (!recordFix(fix)) {
-      // Increase the solution's score for each mismtach this fixes.
-      increaseScore(SK_Fix, mismatches.size() - 1);
+    if (!recordFix(fix, impact))
       return getTypeMatchSuccess();
-    }
+
     return result;
   }
   return matchDeepTypeArguments(*this, subflags, args1, args2, locator);
@@ -6600,7 +6611,8 @@ static ConstraintFix *maybeWarnAboutExtraneousCast(
     SmallVector<Type, 4> toOptionals, ConstraintSystem::TypeMatchOptions flags,
     ConstraintLocatorBuilder locator) {
 
-  if (flags.contains(ConstraintSystem::TypeMatchFlags::TMF_ApplyingFix))
+  auto last = locator.last();
+  if (last && last->is<LocatorPathElt::GenericArgument>())
     return nullptr;
 
   // Both types have to be fixed.
@@ -6777,9 +6789,11 @@ ConstraintSystem::simplifyCheckedCastConstraint(
   case CheckedCastKind::ArrayDowncast: {
     auto fromBaseType = *isArrayType(fromType);
     auto toBaseType = *isArrayType(toType);
-
-    auto result = simplifyCheckedCastConstraint(
-        fromBaseType, toBaseType, subflags | TMF_ApplyingFix, locator);
+    
+    auto elementLocator =
+        locator.withPathElement(LocatorPathElt::GenericArgument(0));
+    auto result = simplifyCheckedCastConstraint(fromBaseType, toBaseType,
+                                                subflags, elementLocator);
     attemptRecordCastFixIfSolved(result);
     return result;
   }
@@ -6791,13 +6805,16 @@ ConstraintSystem::simplifyCheckedCastConstraint(
     Type toKeyType, toValueType;
     std::tie(toKeyType, toValueType) = *isDictionaryType(toType);
 
-    if (simplifyCheckedCastConstraint(fromKeyType, toKeyType,
-                                      subflags | TMF_ApplyingFix,
-                                      locator) == SolutionKind::Error)
+    auto keyLocator =
+        locator.withPathElement(LocatorPathElt::GenericArgument(0));
+    if (simplifyCheckedCastConstraint(fromKeyType, toKeyType, subflags,
+                                      keyLocator) == SolutionKind::Error)
       return SolutionKind::Error;
 
-    auto result = simplifyCheckedCastConstraint(
-        fromValueType, toValueType, subflags | TMF_ApplyingFix, locator);
+    auto valueLocator =
+        locator.withPathElement(LocatorPathElt::GenericArgument(1));
+    auto result = simplifyCheckedCastConstraint(fromValueType, toValueType,
+                                                subflags, valueLocator);
     attemptRecordCastFixIfSolved(result);
     return result;
   }
@@ -6805,8 +6822,11 @@ ConstraintSystem::simplifyCheckedCastConstraint(
   case CheckedCastKind::SetDowncast: {
     auto fromBaseType = *isSetType(fromType);
     auto toBaseType = *isSetType(toType);
-    auto result = simplifyCheckedCastConstraint(
-        fromBaseType, toBaseType, subflags | TMF_ApplyingFix, locator);
+    
+    auto elementLocator =
+        locator.withPathElement(LocatorPathElt::GenericArgument(0));
+    auto result = simplifyCheckedCastConstraint(fromBaseType, toBaseType,
+                                                subflags, elementLocator);
     attemptRecordCastFixIfSolved(result);
     return result;
   }
@@ -8822,11 +8842,16 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
     auto param = inferredClosureType->getParams()[i];
     auto *paramDecl = paramList->get(i);
 
-    // In case of anonymous parameters let's infer flags from context
-    // that helps to infer variadic and inout earlier.
-    if (closure->hasAnonymousClosureVars()) {
-      if (auto contextualParam = getContextualParamAt(i))
-        param = param.withFlags(contextualParam->getParameterFlags());
+    // In case of anonymous or name-only parameters, let's infer inout/variadic
+    // flags from context, that helps to propagate type information into the
+    // internal type of the parameter and reduces inference solver has to make.
+    if (!paramDecl->getTypeRepr()) {
+      if (auto contextualParam = getContextualParamAt(i)) {
+        auto flags = param.getParameterFlags();
+        param =
+            param.withFlags(flags.withInOut(contextualParam->isInOut())
+                                 .withVariadic(contextualParam->isVariadic()));
+      }
     }
 
     if (paramDecl->hasAttachedPropertyWrapper()) {
@@ -10730,12 +10755,13 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
     auto *fix = GenericArgumentsMismatch::create(*this, ptr1, ptr2, {0},
                                                  getConstraintLocator(locator));
 
+    // Treat this as a contextual type mismatch.
+    unsigned baseImpact = 2;
     // It's possible to implicitly promote pointer into an optional
     // before matching base types if other side is an optional, so
     // score needs to account for number of such promotions.
     int optionalWraps = baseType2.getInt() - baseType1.getInt();
-    return recordFix(fix,
-                     /*impact=*/1 + abs(optionalWraps))
+    return recordFix(fix, baseImpact + abs(optionalWraps))
                ? SolutionKind::Error
                : SolutionKind::Solved;
   };
@@ -11475,7 +11501,8 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::AllowAlwaysSucceedCheckedCast:
   case FixKind::AllowInvalidStaticMemberRefOnProtocolMetatype:
   case FixKind::AllowWrappedValueMismatch:
-  case FixKind::RemoveExtraneousArguments: {
+  case FixKind::RemoveExtraneousArguments:
+  case FixKind::SpecifyTypeForPlaceholder: {
     return recordFix(fix) ? SolutionKind::Error : SolutionKind::Solved;
   }
 
@@ -11536,6 +11563,23 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
       if (isExpr<ClosureExpr>(argument)) {
         impact += 2;
       }
+    }
+
+    // De-prioritize `Builtin.RawPointer` and `OpaquePointer` parameters
+    // because they usually clash with generic parameter mismatches e.g.
+    //
+    // let ptr: UnsafePointer<String> = ...
+    // _ = UnsafePointer<Int>(ups)
+    //
+    // Here initializer overloads have both `Builtin.RawPointer` and
+    // `OpaquePointer` variants, but the actual issue is that generic argument
+    // `String` doesn't match `Int`.
+    {
+      if (type2->is<BuiltinRawPointerType>())
+        impact += 1;
+
+      if (type2->getAnyNominal() == getASTContext().getOpaquePointerDecl())
+        impact += 1;
     }
 
     return recordFix(fix, impact) ? SolutionKind::Error : SolutionKind::Solved;

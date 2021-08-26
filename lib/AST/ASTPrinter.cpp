@@ -1588,17 +1588,34 @@ void PrintAST::printSingleDepthOfGenericSignature(
   bool swapSelfAndDependentMemberType =
     (flags & SwapSelfAndDependentMemberType);
 
+  unsigned typeContextDepth = 0;
   SubstitutionMap subMap;
+  ModuleDecl *M = nullptr;
   if (CurrentType && Current) {
     if (!CurrentType->isExistentialType()) {
       auto *DC = Current->getInnermostDeclContext()->getInnermostTypeContext();
-      auto *M = DC->getParentModule();
+      M = DC->getParentModule();
       subMap = CurrentType->getContextSubstitutionMap(M, DC);
+      if (!subMap.empty()) {
+        typeContextDepth = subMap.getGenericSignature()
+            .getGenericParams().back()->getDepth() + 1;
+      }
     }
   }
 
   auto substParam = [&](Type param) -> Type {
-    return param.subst(subMap);
+    if (subMap.empty())
+      return param;
+
+    return param.subst(
+      [&](SubstitutableType *type) -> Type {
+        if (cast<GenericTypeParamType>(type)->getDepth() < typeContextDepth)
+          return Type(type).subst(subMap);
+        return type;
+      },
+      [&](CanType depType, Type substType, ProtocolDecl *proto) {
+        return M->lookupConformance(substType, proto);
+      });
   };
 
   if (printParams) {
@@ -1608,10 +1625,7 @@ void PrintAST::printSingleDepthOfGenericSignature(
         genericParams,
         [&](GenericTypeParamType *param) {
           if (!subMap.empty()) {
-            if (auto argTy = substParam(param))
-              printType(argTy);
-            else
-              printType(param);
+            printType(substParam(param));
           } else if (auto *GP = param->getDecl()) {
             Printer.callPrintStructurePre(PrintStructureKind::GenericParameter,
                                           GP);
@@ -5747,10 +5761,9 @@ swift::getInheritedForPrinting(
 
   // Collect synthesized conformances.
   auto &ctx = decl->getASTContext();
+  llvm::SetVector<ProtocolDecl *> protocols;
   for (auto attr : decl->getAttrs().getAttributes<SynthesizedProtocolAttr>()) {
     if (auto *proto = ctx.getProtocol(attr->getProtocolKind())) {
-      if (!options.shouldPrint(proto))
-        continue;
       // The SerialExecutor conformance is only synthesized on the root
       // actor class, so we can just test resilience immediately.
       if (proto->isSpecificProtocol(KnownProtocolKind::SerialExecutor) &&
@@ -5760,9 +5773,28 @@ swift::getInheritedForPrinting(
           isa<EnumDecl>(decl) &&
           cast<EnumDecl>(decl)->hasRawType())
         continue;
-      Results.push_back({TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
-                      /*isUnchecked=*/false});
+      protocols.insert(proto);
     }
+  }
+
+  for (size_t i = 0; i < protocols.size(); i++) {
+    auto proto = protocols[i];
+
+    if (!options.shouldPrint(proto)) {
+      // If private stdlib protocols are skipped and this is a private stdlib
+      // protocol, see if any of its inherited protocols are public. Those
+      // protocols can affect the user-visible behavior of the declaration, and
+      // should be printed.
+      if (options.SkipPrivateStdlibDecls &&
+          proto->isPrivateStdlibDecl(!options.SkipUnderscoredStdlibProtocols)) {
+        auto inheritedProtocols = proto->getInheritedProtocols();
+        protocols.insert(inheritedProtocols.begin(), inheritedProtocols.end());
+      }
+      continue;
+    }
+
+    Results.push_back({TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
+                       /*isUnchecked=*/false});
   }
 }
 

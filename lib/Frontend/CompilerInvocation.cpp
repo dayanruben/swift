@@ -422,6 +422,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableExperimentalConcurrency |=
     Args.hasArg(OPT_enable_experimental_concurrency);
 
+  Opts.EnableExperimentalBackDeployConcurrency |=
+    Args.hasArg(OPT_enable_experimental_back_deploy_concurrency);
+
   Opts.EnableExperimentalNamedOpaqueTypes |=
       Args.hasArg(OPT_enable_experimental_named_opaque_types);
 
@@ -467,6 +470,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.WarnOnPotentiallyUnavailableEnumCase |=
       Args.hasArg(OPT_warn_on_potentially_unavailable_enum_case);
+  Opts.WarnOnEditorPlaceholder |= Args.hasArg(OPT_warn_on_editor_placeholder);
+
   if (auto A = Args.getLastArg(OPT_enable_access_control,
                                OPT_disable_access_control)) {
     Opts.EnableAccessControl
@@ -657,11 +662,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   }
 
   Opts.EnableConcisePoundFile =
-      Args.hasArg(OPT_enable_experimental_concise_pound_file);
-  Opts.EnableFuzzyForwardScanTrailingClosureMatching =
-      Args.hasFlag(OPT_enable_fuzzy_forward_scan_trailing_closure_matching,
-                   OPT_disable_fuzzy_forward_scan_trailing_closure_matching,
-                   true);
+      Args.hasArg(OPT_enable_experimental_concise_pound_file) ||
+      Opts.EffectiveLanguageVersion.isVersionAtLeast(6);
 
   Opts.EnableCrossImportOverlays =
       Args.hasFlag(OPT_enable_cross_import_overlays,
@@ -830,10 +832,13 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                      A->getAsString(Args), A->getValue());
   }
 
-  Opts.DebugRequirementMachine = Args.hasArg(
-      OPT_debug_requirement_machine);
+  Opts.DumpRequirementMachine = Args.hasArg(
+      OPT_dump_requirement_machine);
   Opts.AnalyzeRequirementMachine = Args.hasArg(
       OPT_analyze_requirement_machine);
+
+  if (const Arg *A = Args.getLastArg(OPT_debug_requirement_machine))
+    Opts.DebugRequirementMachine = A->getValue();
 
   if (const Arg *A = Args.getLastArg(OPT_requirement_machine_step_limit)) {
     unsigned limit;
@@ -1871,6 +1876,12 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
       Diags.diagnose(SourceLoc(), diag::remark_max_determinism_overriding,
                      "-num-threads");
     }
+  }
+
+  if (SWIFT_ENABLE_GLOBAL_ISEL_ARM64 &&
+      (Triple.getArch() == llvm::Triple::aarch64 ||
+       Triple.getArch() == llvm::Triple::aarch64_32)) {
+    Opts.EnableGlobalISel = true;
   }
 
   return false;

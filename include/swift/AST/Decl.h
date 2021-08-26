@@ -292,7 +292,7 @@ enum class ArtificialMainKind : uint8_t {
 };
 
 /// Decl - Base class for all declarations in Swift.
-class alignas(1 << DeclAlignInBits) Decl {
+class alignas(1 << DeclAlignInBits) Decl : public ASTAllocated<Decl> {
 protected:
   union { uint64_t OpaqueBits;
 
@@ -598,7 +598,7 @@ protected:
     HasAnyUnavailableValues : 1
   );
 
-  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1+1,
     /// If the module is compiled as static library.
     StaticLibrary : 1,
 
@@ -633,7 +633,11 @@ protected:
     IsMainModule : 1,
 
     /// Whether this module has incremental dependency information available.
-    HasIncrementalInfo : 1
+    HasIncrementalInfo : 1,
+
+    /// Whether this module has been compiled with comprehensive checking for
+    /// concurrency, e.g., Sendable checking.
+    IsConcurrencyChecked : 1
   );
 
   SWIFT_INLINE_BITFIELD(PrecedenceGroupDecl, Decl, 1+2,
@@ -1018,19 +1022,6 @@ public:
   /// Retrieve the diagnostic engine for diagnostics emission.
   LLVM_READONLY
   DiagnosticEngine &getDiags() const;
-
-  // Make vanilla new/delete illegal for Decls.
-  void *operator new(size_t Bytes) = delete;
-  void operator delete(void *Data) = delete;
-
-  // Only allow allocation of Decls using the allocator in ASTContext
-  // or by doing a placement new.
-  void *operator new(size_t Bytes, const ASTContext &C,
-                     unsigned Alignment = alignof(Decl));
-  void *operator new(size_t Bytes, void *Mem) { 
-    assert(Mem); 
-    return Mem; 
-  }
 };
 
 /// Allocates memory for a Decl with the given \p baseSize. If necessary,
@@ -1413,6 +1404,7 @@ public:
   }
 
   using DeclContext::operator new;
+  using DeclContext::operator delete;
 };
 
 /// Iterator that walks the extensions of a particular type.
@@ -1967,6 +1959,7 @@ public:
   }
   
   using DeclContext::operator new;
+  using DeclContext::operator delete;
 };
 
 /// SerializedTopLevelCodeDeclContext - This represents what was originally a
@@ -2617,6 +2610,7 @@ public:
   // Resolve ambiguity due to multiple base classes.
   using TypeDecl::getASTContext;
   using DeclContext::operator new;
+  using DeclContext::operator delete;
   using TypeDecl::getDeclaredInterfaceType;
 
   static bool classof(const DeclContext *C) {
@@ -5730,6 +5724,7 @@ public:
   }
 
   using DeclContext::operator new;
+  using DeclContext::operator delete;
   using Decl::getASTContext;
 };
 
@@ -6278,6 +6273,7 @@ public:
   bool hasKnownUnsafeSendableFunctionParams() const;
 
   using DeclContext::operator new;
+  using DeclContext::operator delete;
   using Decl::getASTContext;
 };
 
@@ -6809,6 +6805,7 @@ public:
   }
 
   using DeclContext::operator new;
+  using DeclContext::operator delete;
   using Decl::getASTContext;
 };
   

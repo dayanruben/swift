@@ -64,6 +64,10 @@ def emit_fixits_path
   : Separate<["-"], "emit-fixits-path">, MetaVarName<"<path>">,
     HelpText<"Output compiler fixits as source edits to <path>">;
 
+def emit_abi_descriptor_path
+  : Separate<["-"], "emit-abi-descriptor-path">, MetaVarName<"<path>">,
+    HelpText<"Output the ABI descriptor of current module to <path>">;
+
 def serialize_module_interface_dependency_hashes
   : Flag<["-"], "serialize-module-interface-dependency-hashes">,
     Flags<[HelpHidden]>;
@@ -243,6 +247,10 @@ def enable_experimental_concurrency :
   Flag<["-"], "enable-experimental-concurrency">,
   HelpText<"Enable experimental concurrency model">;
 
+def enable_experimental_back_deploy_concurrency :
+  Flag<["-"], "enable-experimental-back-deploy-concurrency">,
+  HelpText<"Enable experimental back-deployment of the concurrency model">;
+
 def enable_experimental_distributed :
   Flag<["-"], "enable-experimental-distributed">,
   HelpText<"Enable experimental 'distributed' actors and functions">;
@@ -273,8 +281,11 @@ def debug_constraints_on_line_EQ : Joined<["-"], "debug-constraints-on-line=">,
 def disable_named_lazy_member_loading : Flag<["-"], "disable-named-lazy-member-loading">,
   HelpText<"Disable per-name lazy member loading">;
 
-def debug_requirement_machine : Flag<["-"], "debug-requirement-machine">,
-  HelpText<"Enables debugging output from the generics implementation">;
+def dump_requirement_machine : Flag<["-"], "dump-requirement-machine">,
+  HelpText<"Enables dumping rewrite systems from the generics implementation">;
+
+def debug_requirement_machine : Joined<["-"], "debug-requirement-machine=">,
+  HelpText<"Fine-grained debug output from the generics implementation">;
 
 def analyze_requirement_machine : Flag<["-"], "analyze-requirement-machine">,
   Flags<[FrontendOption, HelpHidden, DoesNotAffectIncrementalBuild]>,
@@ -461,6 +472,10 @@ def disable_conformance_availability_errors : Flag<["-"],
 def warn_on_potentially_unavailable_enum_case : Flag<["-"],
   "warn-on-potentially-unavailable-enum-case">,
   HelpText<"Downgrade potential unavailability of enum case to a warning">;
+
+def warn_on_editor_placeholder : Flag<["-"],
+  "warn-on-editor-placeholder">,
+  HelpText<"Downgrade the editor placeholder error to a warning">;
 
 def report_errors_to_debugger : Flag<["-"], "report-errors-to-debugger">,
   HelpText<"Deprecated, will be removed in future versions.">;

@@ -541,8 +541,9 @@ computeDesignatedInitOverrideSignature(ASTContext &ctx,
       auto lookupConformanceFn =
           [&](CanType depTy, Type substTy,
               ProtocolDecl *proto) -> ProtocolConformanceRef {
-        if (auto conf = subMap.lookupConformance(depTy, proto))
-          return conf;
+        if (depTy->getRootGenericParam()->getDepth() < superclassDepth)
+          if (auto conf = subMap.lookupConformance(depTy, proto))
+            return conf;
 
         return ProtocolConformanceRef(proto);
       };
@@ -989,10 +990,16 @@ HasUserDefinedDesignatedInitRequest::evaluate(Evaluator &evaluator,
                                               NominalTypeDecl *decl) const {
   assert(!decl->hasClangNode());
 
-  for (auto *member : decl->getMembers())
-    if (auto *ctor = dyn_cast<ConstructorDecl>(member))
-      if (ctor->isDesignatedInit() && !ctor->isSynthesized())
-        return true;
+  auto results = decl->lookupDirect(DeclBaseName::createConstructor());
+  for (auto *member : results) {
+    if (isa<ExtensionDecl>(member->getDeclContext()))
+      continue;
+
+    auto *ctor = cast<ConstructorDecl>(member);
+    if (ctor->isDesignatedInit() && !ctor->isSynthesized())
+      return true;
+  }
+
   return false;
 }
 
@@ -1023,11 +1030,17 @@ static void collectNonOveriddenSuperclassInits(
   // overrides, which we don't want to consider as viable delegates for
   // convenience inits.
   llvm::SmallPtrSet<ConstructorDecl *, 4> overriddenInits;
-  for (auto member : subclass->getMembers())
-    if (auto ctor = dyn_cast<ConstructorDecl>(member))
-      if (!ctor->hasStubImplementation())
-        if (auto overridden = ctor->getOverriddenDecl())
-          overriddenInits.insert(overridden);
+
+  auto ctors = subclass->lookupDirect(DeclBaseName::createConstructor());
+  for (auto *member : ctors) {
+    if (isa<ExtensionDecl>(member->getDeclContext()))
+      continue;
+
+    auto *ctor = cast<ConstructorDecl>(member);
+    if (!ctor->hasStubImplementation())
+      if (auto overridden = ctor->getOverriddenDecl())
+        overriddenInits.insert(overridden);
+  }
 
   superclassDecl->synthesizeSemanticMembersIfNeeded(
     DeclBaseName::createConstructor());
@@ -1059,11 +1072,13 @@ static void collectNonOveriddenSuperclassInits(
 static void addImplicitInheritedConstructorsToClass(ClassDecl *decl) {
   // Bail out if we're validating one of our constructors already;
   // we'll revisit the issue later.
-  for (auto member : decl->getMembers()) {
-    if (auto ctor = dyn_cast<ConstructorDecl>(member)) {
-      if (ctor->isRecursiveValidation())
-        return;
-    }
+  auto results = decl->lookupDirect(DeclBaseName::createConstructor());
+  for (auto *member : results) {
+    if (isa<ExtensionDecl>(member->getDeclContext()))
+      continue;
+
+    if (member->isRecursiveValidation())
+      return;
   }
 
   decl->setAddedImplicitInitializers();
@@ -1118,19 +1133,22 @@ static void addImplicitInheritedConstructorsToClass(ClassDecl *decl) {
     // A designated or required initializer has not been overridden.
 
     bool alreadyDeclared = false;
-    for (auto *member : decl->getMembers()) {
-      if (auto ctor = dyn_cast<ConstructorDecl>(member)) {
-        // Skip any invalid constructors.
-        if (ctor->isInvalid())
-          continue;
 
-        auto type = swift::getMemberTypeForComparison(ctor, nullptr);
-        auto parentType = swift::getMemberTypeForComparison(superclassCtor, ctor);
+    auto results = decl->lookupDirect(DeclBaseName::createConstructor());
+    for (auto *member : results) {
+      if (isa<ExtensionDecl>(member->getDeclContext()))
+        continue;
 
-        if (isOverrideBasedOnType(ctor, type, superclassCtor, parentType)) {
-          alreadyDeclared = true;
-          break;
-        }
+      auto *ctor = cast<ConstructorDecl>(member);
+
+      // Skip any invalid constructors.
+      if (ctor->isInvalid())
+        continue;
+
+      auto type = swift::getMemberTypeForComparison(ctor, nullptr);
+      if (isOverrideBasedOnType(ctor, type, superclassCtor)) {
+        alreadyDeclared = true;
+        break;
       }
     }
 

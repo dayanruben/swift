@@ -1164,6 +1164,19 @@ bool typeSupportsBuilderOp(Type builderType, DeclContext *dc, Identifier fnName,
 /// once.
 void applyAccessNote(ValueDecl *VD);
 
+/// Returns true if the given type conforms to `Differentiable` in the
+/// module of `dc`. If `tangentVectorEqualsSelf` is true, returns true iff
+/// the given type additionally satisfies `Self == Self.TangentVector`.
+bool isDifferentiable(Type type, bool tangentVectorEqualsSelf, DeclContext *dc,
+                      Optional<TypeResolutionStage> stage);
+
+/// Emits diagnostics if the given function type's parameter/result types are
+/// not compatible with the ext info. Returns whether an error was diagnosed.
+bool diagnoseInvalidFunctionType(FunctionType *fnTy, SourceLoc loc,
+                                 Optional<FunctionTypeRepr *>repr,
+                                 DeclContext *dc,
+                                 Optional<TypeResolutionStage> stage);
+
 }; // namespace TypeChecker
 
 /// Returns the protocol requirement kind of the given declaration.
@@ -1248,7 +1261,7 @@ Type getMemberTypeForComparison(const ValueDecl *member,
 /// Determine whether the given declaration is an override by comparing type
 /// information.
 bool isOverrideBasedOnType(const ValueDecl *decl, Type declTy,
-                           const ValueDecl *parentDecl, Type parentDeclTy);
+                           const ValueDecl *parentDecl);
 
 /// Determine whether the given declaration is an operator defined in a
 /// protocol. If \p type is not null, check specifically whether \p decl

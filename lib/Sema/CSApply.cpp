@@ -6644,6 +6644,19 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
                                  Optional<Pattern*> typeFromPattern) {
   auto &ctx = cs.getASTContext();
 
+  // Diagnose conversions to invalid function types that couldn't be performed
+  // beforehand because of placeholders.
+  if (auto *fnTy = toType->getAs<FunctionType>()) {
+    auto contextTy = cs.getContextualType(expr);
+    if (cs.getConstraintLocator(locator)->isForContextualType() && contextTy &&
+        contextTy->hasPlaceholder()) {
+      bool hadError = TypeChecker::diagnoseInvalidFunctionType(
+          fnTy, expr->getLoc(), None, dc, None);
+      if (hadError)
+        return nullptr;
+    }
+  }
+
   // The type we're converting from.
   Type fromType = cs.getType(expr);
 
@@ -8795,7 +8808,10 @@ ExprWalker::rewriteTarget(SolutionApplicationTarget target) {
       patternBinding->setPattern(
           index, resultTarget->getInitializationPattern(),
           resultTarget->getDeclContext());
-      patternBinding->setInit(index, resultTarget->getAsExpr());
+
+      if (patternBinding->getInit(index)) {
+        patternBinding->setInit(index, resultTarget->getAsExpr());
+      }
     }
 
     return target;
@@ -8810,6 +8826,21 @@ ExprWalker::rewriteTarget(SolutionApplicationTarget target) {
         wrappedVar, backingType->mapTypeOutOfContext());
 
     return target;
+  } else if (auto *pattern = target.getAsUninitializedVar()) {
+    auto contextualPattern = target.getContextualPattern();
+    auto patternType = target.getTypeOfUninitializedVar();
+
+    TypeResolutionOptions options = TypeResolverContext::PatternBindingDecl;
+    options |= TypeResolutionFlags::OverrideType;
+
+    if (auto coercedPattern = TypeChecker::coercePatternToType(
+            contextualPattern, patternType, options)) {
+      auto resultTarget = target;
+      resultTarget.setPattern(coercedPattern);
+      return resultTarget;
+    }
+
+    return None;
   } else {
     auto fn = *target.getAsFunction();
     if (rewriteFunction(fn))
@@ -9086,7 +9117,7 @@ SolutionApplicationTarget SolutionApplicationTarget::walk(ASTWalker &walker) {
   case Kind::patternBinding:
     return *this;
 
-  case Kind::uninitializedWrappedVar:
+  case Kind::uninitializedVar:
     return *this;
   }
 

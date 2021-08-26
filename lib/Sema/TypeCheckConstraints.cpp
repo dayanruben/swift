@@ -295,7 +295,7 @@ void constraints::performSyntacticDiagnosticsForTarget(
   case SolutionApplicationTarget::Kind::stmtCondition:
   case SolutionApplicationTarget::Kind::caseLabelItem:
   case SolutionApplicationTarget::Kind::patternBinding:
-  case SolutionApplicationTarget::Kind::uninitializedWrappedVar:
+  case SolutionApplicationTarget::Kind::uninitializedVar:
     // Nothing to do for these.
     return;
   }
@@ -446,6 +446,7 @@ bool TypeChecker::typeCheckBinding(
   // Assign error types to the pattern and its variables, to prevent it from
   // being referenced by the constraint system.
   if (patternType->hasUnresolvedType() ||
+      patternType->hasPlaceholder() ||
       patternType->hasUnboundGenericType()) {
     pattern->setType(ErrorType::get(Context));
   }

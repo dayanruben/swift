@@ -138,7 +138,7 @@ enum class AccessSemantics : uint8_t {
 };
 
 /// Expr - Base class for all expressions in swift.
-class alignas(8) Expr {
+class alignas(8) Expr : public ASTAllocated<Expr> {
   Expr(const Expr&) = delete;
   void operator=(const Expr&) = delete;
 
@@ -558,6 +558,9 @@ public:
   /// the parent map.
   llvm::DenseMap<Expr *, Expr *> getParentMap();
 
+  /// Whether this expression is a valid parent for a TypeExpr.
+  bool isValidTypeExprParent() const;
+
   SWIFT_DEBUG_DUMP;
   void dump(raw_ostream &OS, unsigned Indent = 0) const;
   void dump(raw_ostream &OS, llvm::function_ref<Type(Expr *)> getType,
@@ -567,20 +570,6 @@ public:
             unsigned Indent = 0) const;
 
   void print(ASTPrinter &Printer, const PrintOptions &Opts) const;
-
-  // Only allow allocation of Exprs using the allocator in ASTContext
-  // or by doing a placement new.
-  void *operator new(size_t Bytes, ASTContext &C,
-                     unsigned Alignment = alignof(Expr));
-
-  // Make placement new and vanilla new/delete illegal for Exprs.
-  void *operator new(size_t Bytes) throw() = delete;
-  void operator delete(void *Data) throw() = delete;
-
-  void *operator new(size_t Bytes, void *Mem) { 
-    assert(Mem); 
-    return Mem; 
-  }
 };
 
 /// ErrorExpr - Represents a semantically erroneous subexpression in the AST,
@@ -3864,6 +3853,7 @@ public:
   }
 
   using DeclContext::operator new;
+  using DeclContext::operator delete;
   using Expr::dump;
 };
 

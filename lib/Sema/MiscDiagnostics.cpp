@@ -620,25 +620,9 @@ static void diagSyntacticUseRestrictions(const Expr *E, const DeclContext *DC,
       // literal since it used to be accepted.
       DiagnosticBehavior behavior = DiagnosticBehavior::Error;
 
-      // Allow references to types as a part of:
-      // - member references T.foo, T.Type, T.self, etc.
-      // - constructor calls T()
-      // - Subscripts T[]
       if (auto *ParentExpr = Parent.getAsExpr()) {
-        // This is an exhaustive list of the accepted syntactic forms.
-        if (isa<ErrorExpr>(ParentExpr) ||
-            isa<DotSelfExpr>(ParentExpr) ||               // T.self
-            isa<CallExpr>(ParentExpr) ||                  // T()
-            isa<MemberRefExpr>(ParentExpr) ||             // T.foo
-            isa<UnresolvedMemberExpr>(ParentExpr) ||
-            isa<SelfApplyExpr>(ParentExpr) ||             // T.foo()  T()
-            isa<UnresolvedDotExpr>(ParentExpr) ||
-            isa<DotSyntaxBaseIgnoredExpr>(ParentExpr) ||
-            isa<UnresolvedSpecializeExpr>(ParentExpr) ||
-            isa<OpenExistentialExpr>(ParentExpr) ||
-            isa<SubscriptExpr>(ParentExpr)) {
+        if (ParentExpr->isValidTypeExprParent())
           return;
-        }
 
         if (!Ctx.LangOpts.isSwiftVersionAtLeast(6)) {
           auto argument = CallArgs.find(ParentExpr);
@@ -1639,7 +1623,8 @@ static void diagnoseImplicitSelfUseInClosure(const Expr *E,
           memberLoc = MRE->getLoc();
           Diags.diagnose(memberLoc,
                          diag::property_use_in_closure_without_explicit_self,
-                         baseName.getIdentifier());
+                         baseName.getIdentifier())
+               .warnUntilSwiftVersionIf(Closures.size() > 1, 6);
         }
 
       // Handle method calls with a specific diagnostic + fixit.
@@ -1650,7 +1635,8 @@ static void diagnoseImplicitSelfUseInClosure(const Expr *E,
           memberLoc = DSCE->getLoc();
           Diags.diagnose(DSCE->getLoc(),
                          diag::method_call_in_closure_without_explicit_self,
-                         MethodExpr->getDecl()->getBaseIdentifier());
+                         MethodExpr->getDecl()->getBaseIdentifier())
+               .warnUntilSwiftVersionIf(Closures.size() > 1, 6);
         }
 
       if (memberLoc.isValid()) {
@@ -1660,7 +1646,8 @@ static void diagnoseImplicitSelfUseInClosure(const Expr *E,
       
       // Catch any other implicit uses of self with a generic diagnostic.
       if (isImplicitSelfParamUseLikelyToCauseCycle(E, ACE))
-        Diags.diagnose(E->getLoc(), diag::implicit_use_of_self_in_closure);
+        Diags.diagnose(E->getLoc(), diag::implicit_use_of_self_in_closure)
+             .warnUntilSwiftVersionIf(Closures.size() > 1, 6);
 
       return { true, E };
     }
