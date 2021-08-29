@@ -248,7 +248,7 @@ static void diagSyntacticUseRestrictions(const Expr *E, const DeclContext *DC,
         // Void to _ then warn, because that is redundant.
         if (auto DAE = dyn_cast<DiscardAssignmentExpr>(destExpr)) {
           if (auto CE = dyn_cast<CallExpr>(AE->getSrc())) {
-            if (CE->getCalledValue() && isa<FuncDecl>(CE->getCalledValue()) &&
+            if (isa_and_nonnull<FuncDecl>(CE->getCalledValue()) &&
                 CE->getType()->isVoid()) {
               Ctx.Diags
                   .diagnose(DAE->getLoc(),
@@ -621,7 +621,7 @@ static void diagSyntacticUseRestrictions(const Expr *E, const DeclContext *DC,
       DiagnosticBehavior behavior = DiagnosticBehavior::Error;
 
       if (auto *ParentExpr = Parent.getAsExpr()) {
-        if (ParentExpr->isValidTypeExprParent())
+        if (ParentExpr->isValidParentOfTypeExpr(E))
           return;
 
         if (!Ctx.LangOpts.isSwiftVersionAtLeast(6)) {
@@ -1427,7 +1427,7 @@ static void diagRecursivePropertyAccess(const Expr *E, const DeclContext *DC) {
 
             // But silence the warning if the base was explicitly qualified.
             auto parentAsExpr = Parent.getAsExpr();
-            if (parentAsExpr && isa<DotSyntaxBaseIgnoredExpr>(parentAsExpr))
+            if (isa_and_nonnull<DotSyntaxBaseIgnoredExpr>(parentAsExpr))
               shouldDiagnose = false;
 
             if (shouldDiagnose) {
@@ -4078,7 +4078,7 @@ static void diagnoseUnintendedOptionalBehavior(const Expr *E,
 
       if (auto *apply = dyn_cast<ApplyExpr>(E)) {
         auto *decl = apply->getCalledValue();
-        if (decl && isa<AbstractFunctionDecl>(decl))
+        if (isa_and_nonnull<AbstractFunctionDecl>(decl))
           return decl;
       }
       return nullptr;

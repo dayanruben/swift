@@ -2777,7 +2777,7 @@ public:
     if (FD->getDeclContext()->isTypeContext()) {
       if (FD->isOperator() && !isMemberOperator(FD, nullptr)) {
         auto selfNominal = FD->getDeclContext()->getSelfNominalTypeDecl();
-        auto isProtocol = selfNominal && isa<ProtocolDecl>(selfNominal);
+        auto isProtocol = isa_and_nonnull<ProtocolDecl>(selfNominal);
         // We did not find 'Self'. Complain.
         FD->diagnose(diag::operator_in_unrelated_type,
                      FD->getDeclContext()->getDeclaredInterfaceType(), isProtocol,
@@ -2929,6 +2929,11 @@ public:
     checkGenericParams(ED);
 
     TypeChecker::checkDeclAttributes(ED);
+
+    if (nominal->isDistributedActor()) {
+      auto decl = dyn_cast<ClassDecl>(nominal);
+      TypeChecker::checkDistributedActor(decl);
+    }
 
     for (Decl *Member : ED->getMembers())
       visit(Member);

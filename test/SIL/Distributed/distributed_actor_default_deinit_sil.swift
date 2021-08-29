@@ -1,4 +1,5 @@
 // RUN: %target-swift-frontend -O -primary-file %s -emit-sil -enable-experimental-distributed | %FileCheck %s --dump-input=fail
+// REQUIRES: concurrency
 
 import _Distributed
 
@@ -36,8 +37,8 @@ distributed actor SimpleEmptyDistributedActor {
 
 // Finish up the destroying...
 // CHECK: bb3:
-// CHECK:  destroy_addr [[ID_ADDR]] : $*AnyActorIdentity
 // CHECK:  destroy_addr [[TRANSPORT_ADDR]] : $*ActorTransport
+// CHECK:  destroy_addr [[ID_ADDR]] : $*AnyActorIdentity
 // CHECK:  [[_:%[0-9]+]] = builtin "destroyDefaultActor"(%0 : $SimpleEmptyDistributedActor) : $()
 // CHECK:  [[SELF:%[0-9]+]] = unchecked_ref_cast %0 : $SimpleEmptyDistributedActor to $Builtin.NativeObject
 // CHECK:  return [[SELF]] : $Builtin.NativeObject
