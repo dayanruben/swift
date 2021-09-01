@@ -419,7 +419,6 @@ void addImplicitDynamicAttribute(Decl *D);
 void checkDeclAttributes(Decl *D);
 void checkClosureAttributes(ClosureExpr *closure);
 void checkParameterList(ParameterList *params, DeclContext *owner);
-void checkResultType(Type resultType, DeclContext *owner);
 
 void diagnoseDuplicateBoundVars(Pattern *pattern);
 
@@ -515,6 +514,14 @@ bool checkContextualRequirements(GenericTypeDecl *decl,
 /// Add any implicitly-defined constructors required for the given
 /// struct, class or actor.
 void addImplicitConstructors(NominalTypeDecl *typeDecl);
+
+/// Synthesize and add a '_remote' counterpart of the passed in `func` to `decl`.
+///
+/// \param decl the actor type to add the '_remote' definition to
+/// \param func the 'distributed func' that the '_remote' func should mirror
+/// \return the synthesized function
+AbstractFunctionDecl *addImplicitDistributedActorRemoteFunction(
+    ClassDecl* decl, AbstractFunctionDecl *func);
 
 /// Fold the given sequence expression into an (unchecked) expression
 /// tree.
@@ -1042,10 +1049,8 @@ void diagnosePotentialAccessorUnavailability(
 const AvailableAttr *getDeprecated(const Decl *D);
 
 /// Emits a diagnostic for a reference to a declaration that is deprecated.
-void diagnoseIfDeprecated(SourceRange SourceRange,
-                          const ExportContext &Where,
-                          const ValueDecl *DeprecatedDecl,
-                          const ApplyExpr *Call);
+void diagnoseIfDeprecated(SourceRange SourceRange, const ExportContext &Where,
+                          const ValueDecl *DeprecatedDecl, const Expr *Call);
 
 /// Emits a diagnostic for a reference to a conformnace that is deprecated.
 bool diagnoseIfDeprecated(SourceLoc loc,
