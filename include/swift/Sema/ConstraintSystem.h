@@ -583,7 +583,7 @@ struct SelectedOverload {
 /// Provides information about the application of a function argument to a
 /// parameter.
 class FunctionArgApplyInfo {
-  Expr *ArgListExpr;
+  ArgumentList *ArgList;
   Expr *ArgExpr;
   unsigned ArgIdx;
   Type ArgType;
@@ -595,15 +595,15 @@ class FunctionArgApplyInfo {
   const ValueDecl *Callee;
 
 public:
-  FunctionArgApplyInfo(Expr *argListExpr, Expr *argExpr, unsigned argIdx,
+  FunctionArgApplyInfo(ArgumentList *argList, Expr *argExpr, unsigned argIdx,
                        Type argType, unsigned paramIdx, Type fnInterfaceType,
                        FunctionType *fnType, const ValueDecl *callee)
-      : ArgListExpr(argListExpr), ArgExpr(argExpr), ArgIdx(argIdx),
-        ArgType(argType), ParamIdx(paramIdx), FnInterfaceType(fnInterfaceType),
-        FnType(fnType), Callee(callee) {}
+      : ArgList(argList), ArgExpr(argExpr), ArgIdx(argIdx), ArgType(argType),
+        ParamIdx(paramIdx), FnInterfaceType(fnInterfaceType), FnType(fnType),
+        Callee(callee) {}
 
   /// \returns The list of the arguments used for this application.
-  Expr *getArgListExpr() const { return ArgListExpr; }
+  ArgumentList *getArgList() const { return ArgList; }
 
   /// \returns The argument being applied.
   Expr *getArgExpr() const { return ArgExpr; }
@@ -625,11 +625,7 @@ public:
 
   /// \returns The label for the argument being applied.
   Identifier getArgLabel() const {
-    if (auto *te = dyn_cast<TupleExpr>(ArgListExpr))
-      return te->getElementName(ArgIdx);
-
-    assert(isa<ParenExpr>(ArgListExpr));
-    return Identifier();
+    return ArgList->getLabel(ArgIdx);
   }
 
   Identifier getParamLabel() const {
@@ -649,10 +645,8 @@ public:
       if (argLabel.empty())
         return false;
 
-      if (auto *te = dyn_cast<TupleExpr>(ArgListExpr))
-        return llvm::count(te->getElementNames(), argLabel) == 1;
-
-      return false;
+      SmallVector<Identifier, 4> scratch;
+      return llvm::count(ArgList->getArgumentLabels(scratch), argLabel) == 1;
     };
 
     if (useArgLabel()) {
@@ -668,11 +662,7 @@ public:
 
   /// Whether the argument is a trailing closure.
   bool isTrailingClosure() const {
-    if (auto trailingClosureArg =
-            ArgListExpr->getUnlabeledTrailingClosureIndexOfPackedArgument())
-      return ArgIdx >= *trailingClosureArg;
-
-    return false;
+    return ArgList->isTrailingClosureIndex(ArgIdx);
   }
 
   /// \returns The interface type for the function being applied. Note that this
@@ -1735,9 +1725,9 @@ public:
   }
 
   static SolutionApplicationTarget
-  forUninitializedVar(PatternBindingDecl *binding, unsigned index, Pattern *var,
+  forUninitializedVar(PatternBindingDecl *binding, unsigned index,
                       Type patternTy) {
-    return {binding, index, var, patternTy};
+    return {binding, index, binding->getPattern(index), patternTy};
   }
 
   /// Form a target for a synthesized property wrapper initializer.
@@ -2794,25 +2784,19 @@ public:
   /// we're exploring.
   SolverState *solverState = nullptr;
 
-  struct ArgumentInfo {
-    ArrayRef<Identifier> Labels;
-    Optional<unsigned> UnlabeledTrailingClosureIndex;
-  };
-
   /// A mapping from the constraint locators for references to various
   /// names (e.g., member references, normal name references, possible
-  /// constructions) to the argument labels provided in the call to
-  /// that locator.
-  llvm::DenseMap<ConstraintLocator *, ArgumentInfo> ArgumentInfos;
+  /// constructions) to the argument lists for the call to that locator.
+  llvm::DenseMap<ConstraintLocator *, ArgumentList *> ArgumentLists;
 
   /// Form a locator that can be used to retrieve argument information cached in
   /// the constraint system for the callee described by the anchor of the
   /// passed locator.
   ConstraintLocator *getArgumentInfoLocator(ConstraintLocator *locator);
 
-  /// Retrieve the argument info that is associated with a member
+  /// Retrieve the argument list that is associated with a member
   /// reference at the given locator.
-  Optional<ArgumentInfo> getArgumentInfo(ConstraintLocator *locator);
+  ArgumentList *getArgumentList(ConstraintLocator *locator);
 
   Optional<SelectedOverload>
   findSelectedOverloadFor(ConstraintLocator *locator) const {
@@ -4329,6 +4313,19 @@ public:
       llvm::function_ref<ConstraintFix *(unsigned, const OverloadChoice &)>
           getFix = [](unsigned, const OverloadChoice &) { return nullptr; });
 
+  /// Generate constraints for the given property that has an
+  /// attached property wrapper.
+  ///
+  /// \param wrappedVar The property that has a property wrapper.
+  /// \param initializerType The type of the initializer for the
+  ///        backing storage variable.
+  /// \param propertyType The type of the wrapped property.
+  ///
+  /// \returns true if there is an error.
+  bool generateWrappedPropertyTypeConstraints(VarDecl *wrappedVar,
+                                              Type initializerType,
+                                              Type propertyType);
+
   /// Propagate constraints in an effort to enforce local
   /// consistency to reduce the time to solve the system.
   ///
@@ -5197,10 +5194,10 @@ public:
 
   /// Check whether given AST node represents an argument of an application
   /// of some sort (call, operator invocation, subscript etc.)
-  /// and return AST node representing and argument index. E.g. for regular
-  /// calls `test(42)` passing `42` should return node representing
-  /// entire call and index `0`.
-  Optional<std::pair<Expr *, unsigned>> isArgumentExpr(Expr *expr);
+  /// and returns a locator for the argument application. E.g. for regular
+  /// calls `test(42)` passing `42` should return a locator with the entire call
+  /// as the anchor, and a path to the argument at index `0`.
+  ConstraintLocator *getArgumentLocator(Expr *expr);
 
   SWIFT_DEBUG_DUMP;
   SWIFT_DEBUG_DUMPER(dump(Expr *));

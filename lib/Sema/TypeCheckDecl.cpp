@@ -482,14 +482,16 @@ BodyInitKindRequest::evaluate(Evaluator &evaluator,
       if (!apply)
         return { true, E };
 
+      auto *argList = apply->getArgs();
       auto Callee = apply->getSemanticFn();
       
       Expr *arg;
 
       if (isa<OtherConstructorDeclRefExpr>(Callee)) {
-        arg = apply->getArg();
+        arg = argList->getUnaryExpr();
+        assert(arg);
       } else if (auto *CRE = dyn_cast<ConstructorRefCallExpr>(Callee)) {
-        arg = CRE->getArg();
+        arg = CRE->getBase();
       } else if (auto *dotExpr = dyn_cast<UnresolvedDotExpr>(Callee)) {
         if (dotExpr->getName().getBaseName() != DeclBaseName::createConstructor())
           return { true, E };
@@ -666,34 +668,6 @@ ExistentialConformsToSelfRequest::evaluate(Evaluator &evaluator,
   // Check whether any of the inherited protocols fail to conform to themselves.
   for (auto proto : decl->getInheritedProtocols()) {
     if (!proto->existentialConformsToSelf())
-      return false;
-  }
-
-  return true;
-}
-
-bool
-ExistentialTypeSupportedRequest::evaluate(Evaluator &evaluator,
-                                          ProtocolDecl *decl) const {
-  // ObjC protocols can always be existential.
-  if (decl->isObjC())
-    return true;
-
-  for (auto member : decl->getMembers()) {
-    // Existential types cannot be used if the protocol has an associated type.
-    if (isa<AssociatedTypeDecl>(member))
-      return false;
-
-    // For value members, look at their type signatures.
-    if (auto valueMember = dyn_cast<ValueDecl>(member)) {
-      if (!decl->isAvailableInExistential(valueMember))
-        return false;
-    }
-  }
-
-  // Check whether all of the inherited protocols support existential types.
-  for (auto proto : decl->getInheritedProtocols()) {
-    if (!proto->existentialTypeSupported())
       return false;
   }
 

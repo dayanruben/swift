@@ -633,11 +633,9 @@ bool TypeChecker::typeCheckExprPattern(ExprPattern *EP, DeclContext *DC,
   PrettyStackTracePattern stackTrace(Context, "type-checking", EP);
 
   // Create a 'let' binding to stand in for the RHS value.
-  auto *matchVar = new (Context) VarDecl(/*IsStatic*/false,
-                                         VarDecl::Introducer::Let,
-                                         EP->getLoc(),
-                                         Context.getIdentifier("$match"),
-                                         DC);
+  auto *matchVar =
+      new (Context) VarDecl(/*IsStatic*/ false, VarDecl::Introducer::Let,
+                            EP->getLoc(), Context.Id_PatternMatchVar, DC);
   matchVar->setInterfaceType(rhsType->mapTypeOutOfContext());
 
   matchVar->setImplicit();
@@ -1880,7 +1878,7 @@ static Expr *lookThroughBridgeFromObjCCall(ASTContext &ctx, Expr *expr) {
 
   if (callee == ctx.getForceBridgeFromObjectiveC() ||
       callee == ctx.getConditionallyBridgeFromObjectiveC())
-    return cast<TupleExpr>(call->getArg())->getElement(0);
+    return call->getArgs()->getExpr(0);
 
   return nullptr;
 }

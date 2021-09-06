@@ -982,10 +982,47 @@ bool GenericContext::isComputingGenericSignature() const {
                  GenericSignatureRequest{const_cast<GenericContext*>(this)});
 }
 
+/// If we hit a cycle while building the generic signature, we can't return
+/// nullptr, since this breaks invariants elsewhere. Instead, build a dummy
+/// signature with no requirements.
+static GenericSignature getPlaceholderGenericSignature(
+    const DeclContext *DC) {
+  SmallVector<GenericParamList *, 2> gpLists;
+  DC->forEachGenericContext([&](GenericParamList *genericParams) {
+    gpLists.push_back(genericParams);
+  });
+
+  if (gpLists.empty())
+    return nullptr;
+
+  std::reverse(gpLists.begin(), gpLists.end());
+  for (unsigned i : indices(gpLists))
+    gpLists[i]->setDepth(i);
+
+  SmallVector<GenericTypeParamType *, 2> result;
+  for (auto *genericParams : gpLists) {
+    for (auto *genericParam : *genericParams) {
+      result.push_back(genericParam->getDeclaredInterfaceType()
+                                   ->castTo<GenericTypeParamType>());
+    }
+  }
+
+  return GenericSignature::get(result, {});
+}
+
 GenericSignature GenericContext::getGenericSignature() const {
-  return evaluateOrDefault(
-      getASTContext().evaluator,
-      GenericSignatureRequest{const_cast<GenericContext *>(this)}, nullptr);
+  // Don't use evaluateOrDefault() here, because getting the 'default value'
+  // is slightly expensive here so we don't want to do it eagerly.
+  auto result = getASTContext().evaluator(
+      GenericSignatureRequest{const_cast<GenericContext *>(this)});
+  if (auto err = result.takeError()) {
+    llvm::handleAllErrors(std::move(err),
+      [](const CyclicalRequestError<GenericSignatureRequest> &E) {
+        // cycle detected
+      });
+    return getPlaceholderGenericSignature(this);
+  }
+  return *result;
 }
 
 GenericEnvironment *GenericContext::getGenericEnvironment() const {
@@ -1493,7 +1530,7 @@ bool PatternBindingEntry::isInitialized(bool onlyExplicit) const {
   // Initialized via a property wrapper.
   if (auto var = getPattern()->getSingleVar()) {
     auto customAttrs = var->getAttachedPropertyWrappers();
-    if (customAttrs.size() > 0 && customAttrs[0]->getArg() != nullptr)
+    if (customAttrs.size() > 0 && customAttrs[0]->hasArgs())
       return true;
   }
 
@@ -5008,24 +5045,31 @@ findProtocolSelfReferences(const ProtocolDecl *proto, Type type,
     return findProtocolSelfReferences(proto, selfType->getSelfType(), position);
   }
 
-  // Most bound generic types are invariant.
-  if (auto *const bgt = type->getAs<BoundGenericType>()) {
+  if (auto *const nominal = type->getAs<NominalOrBoundGenericNominalType>()) {
     auto info = SelfReferenceInfo();
 
-    if (bgt->isArray()) {
-      // Swift.Array preserves variance in its Value type.
-      info |= findProtocolSelfReferences(proto, bgt->getGenericArgs().front(),
-                                         position);
-    } else if (bgt->isDictionary()) {
-      // Swift.Dictionary preserves variance in its Element type.
-      info |= findProtocolSelfReferences(proto, bgt->getGenericArgs().front(),
-                                         SelfReferencePosition::Invariant);
-      info |= findProtocolSelfReferences(proto, bgt->getGenericArgs().back(),
-                                         position);
-    } else {
-      for (auto paramType : bgt->getGenericArgs()) {
-        info |= findProtocolSelfReferences(proto, paramType,
+    // Don't forget to look in the parent.
+    if (const auto parent = nominal->getParent()) {
+      info |= findProtocolSelfReferences(proto, parent, position);
+    }
+
+    // Most bound generic types are invariant.
+    if (auto *const bgt = type->getAs<BoundGenericType>()) {
+      if (bgt->isArray()) {
+        // Swift.Array preserves variance in its Value type.
+        info |= findProtocolSelfReferences(proto, bgt->getGenericArgs().front(),
+                                           position);
+      } else if (bgt->isDictionary()) {
+        // Swift.Dictionary preserves variance in its Element type.
+        info |= findProtocolSelfReferences(proto, bgt->getGenericArgs().front(),
                                            SelfReferencePosition::Invariant);
+        info |= findProtocolSelfReferences(proto, bgt->getGenericArgs().back(),
+                                           position);
+      } else {
+        for (auto paramType : bgt->getGenericArgs()) {
+          info |= findProtocolSelfReferences(proto, paramType,
+                                             SelfReferencePosition::Invariant);
+        }
       }
     }
 
@@ -5036,6 +5080,16 @@ findProtocolSelfReferences(const ProtocolDecl *proto, Type type,
   // reference to 'Self'.
   if (type->is<OpaqueTypeArchetypeType>())
     return SelfReferenceInfo::forSelfRef(SelfReferencePosition::Invariant);
+
+  // Protocol compositions preserve variance.
+  if (auto *comp = type->getAs<ProtocolCompositionType>()) {
+    // 'Self' may be referenced only in a superclass component.
+    if (const auto superclass = comp->getSuperclass()) {
+      return findProtocolSelfReferences(proto, superclass, position);
+    }
+
+    return SelfReferenceInfo();
+  }
 
   // A direct reference to 'Self'.
   if (proto->getSelfInterfaceType()->isEqual(type))
@@ -5134,11 +5188,6 @@ bool ProtocolDecl::isAvailableInExistential(const ValueDecl *decl) const {
   }
 
   return true;
-}
-
-bool ProtocolDecl::existentialTypeSupported() const {
-  return evaluateOrDefault(getASTContext().evaluator,
-    ExistentialTypeSupportedRequest{const_cast<ProtocolDecl *>(this)}, true);
 }
 
 StringRef ProtocolDecl::getObjCRuntimeName(
@@ -6107,7 +6156,7 @@ bool VarDecl::hasExternalPropertyWrapper() const {
     return true;
 
   // Wrappers with attribute arguments are always implementation-detail.
-  if (getAttachedPropertyWrappers().front()->getArg())
+  if (getAttachedPropertyWrappers().front()->hasArgs())
     return false;
 
   auto wrapperInfo = getAttachedPropertyWrapperTypeInfo(0);
@@ -6265,7 +6314,7 @@ bool VarDecl::isPropertyMemberwiseInitializedWithWrappedType() const {
 
   // If there was an initializer on the outermost wrapper, initialize
   // via the full wrapper.
-  if (customAttrs[0]->getArg() != nullptr)
+  if (customAttrs[0]->hasArgs())
     return false;
 
   // Default initialization does not use a value.
@@ -6773,9 +6822,9 @@ ParamDecl::getDefaultValueStringRepresentation(
       auto wrapperAttrs = original->getAttachedPropertyWrappers();
       if (wrapperAttrs.size() > 0) {
         auto attr = wrapperAttrs.front();
-        if (auto arg = attr->getArg()) {
+        if (auto *args = attr->getArgs()) {
           SourceRange fullRange(attr->getTypeRepr()->getSourceRange().Start,
-                                arg->getEndLoc());
+                                args->getEndLoc());
           auto charRange = Lexer::getCharSourceRangeFromSourceRange(
               getASTContext().SourceMgr, fullRange);
           return getASTContext().SourceMgr.extractText(charRange);

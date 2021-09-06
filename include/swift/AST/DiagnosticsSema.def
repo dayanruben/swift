@@ -920,9 +920,6 @@ NOTE(object_literal_resolve_import,none,
 
 ERROR(use_local_before_declaration,none,
       "use of local variable %0 before its declaration", (DeclNameRef))
-ERROR(unsupported_existential_type,none,
-      "protocol %0 can only be used as a generic constraint because it has "
-      "Self or associated type requirements", (Identifier))
 
 ERROR(decl_does_not_exist_in_module,none,
       "%select{%error|type|struct|class|enum|protocol|variable|function}0 "
@@ -2433,6 +2430,10 @@ ERROR(requires_generic_param_made_equal_to_concrete,none,
       (Type))
 ERROR(recursive_decl_reference,none,
       "%0 %1 references itself", (DescriptiveDeclKind, DeclBaseName))
+ERROR(recursive_generic_signature,none,
+      "%0 %1 has self-referential generic requirements", (DescriptiveDeclKind, DeclBaseName))
+ERROR(recursive_generic_signature_extension,none,
+      "extension of %0 %1 has self-referential generic requirements", (DescriptiveDeclKind, DeclBaseName))
 ERROR(recursive_same_type_constraint,none,
       "same-type constraint %0 == %1 is recursive", (Type, Type))
 ERROR(recursive_superclass_constraint,none,
@@ -3759,8 +3760,13 @@ NOTE(add_self_to_type,none,
 WARNING(warn_unqualified_access,none,
         "use of %0 treated as a reference to %1 in %2 %3",
         (Identifier, DescriptiveDeclKind, DescriptiveDeclKind, DeclName))
+WARNING(self_refers_to_method,none,
+       "'self' refers to the method '%0.self', which may be unexpected",
+       (StringRef))
 NOTE(fix_unqualified_access_member,none,
      "use 'self.' to silence this warning", ())
+NOTE(fix_unqualified_access_member_named_self,none,
+     "use '%0.self' to silence this warning", (StringRef))
 NOTE(fix_unqualified_access_top_level,none,
      "use '%0' to reference the %1",
      (StringRef, DescriptiveDeclKind, Identifier))

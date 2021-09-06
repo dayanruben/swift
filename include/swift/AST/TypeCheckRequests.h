@@ -287,32 +287,6 @@ public:
   void cacheResult(bool value) const;
 };
 
-/// Determine whether we are allowed to refer to an existential type conforming
-/// to this protocol.
-class ExistentialTypeSupportedRequest :
-    public SimpleRequest<ExistentialTypeSupportedRequest,
-                         bool(ProtocolDecl *),
-                         RequestFlags::SeparatelyCached> {
-public:
-  using SimpleRequest::SimpleRequest;
-
-private:
-  friend SimpleRequest;
-
-  // Evaluation.
-  bool evaluate(Evaluator &evaluator, ProtocolDecl *decl) const;
-
-public:
-  // Cycle handling.
-  void diagnoseCycle(DiagnosticEngine &diags) const;
-  void noteCycleStep(DiagnosticEngine &diags) const;
-
-  // Separate caching.
-  bool isCached() const { return true; }
-  Optional<bool> getCachedResult() const;
-  void cacheResult(bool value) const;
-};
-
 class PolymorphicEffectRequirementsRequest :
     public SimpleRequest<PolymorphicEffectRequirementsRequest,
                          PolymorphicEffectRequirementList(EffectKind, ProtocolDecl *),
@@ -1517,6 +1491,8 @@ public:
   bool isCached() const { return true; }
   Optional<GenericSignature> getCachedResult() const;
   void cacheResult(GenericSignature value) const;
+
+  void diagnoseCycle(DiagnosticEngine &diags) const;
 };
 
 /// Compute the underlying interface type of a typealias.
