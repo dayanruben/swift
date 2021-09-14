@@ -737,8 +737,25 @@ void AttributeChecker::visitAccessControlAttr(AccessControlAttr *attr) {
 
   if (auto extension = dyn_cast<ExtensionDecl>(D)) {
     if (attr->getAccess() == AccessLevel::Open) {
-      diagnose(attr->getLocation(), diag::access_control_extension_open)
-        .fixItReplace(attr->getRange(), "public");
+      auto diag =
+          diagnose(attr->getLocation(), diag::access_control_extension_open);
+      diag.fixItRemove(attr->getRange());
+      for (auto Member : extension->getMembers()) {
+        if (auto *VD = dyn_cast<ValueDecl>(Member)) {
+          if (VD->getAttrs().hasAttribute<AccessControlAttr>())
+            continue;
+
+          StringRef accessLevel = VD->isObjC() ? "open " : "public ";
+
+          if (auto *FD = dyn_cast<FuncDecl>(VD))
+            diag.fixItInsert(FD->getFuncLoc(), accessLevel);
+
+          if (auto *VAD = dyn_cast<VarDecl>(VD))
+            diag.fixItInsert(VAD->getParentPatternBinding()->getLoc(),
+                             accessLevel);
+        }
+      }
+
       attr->setInvalid();
       return;
     }
@@ -2955,7 +2972,30 @@ void AttributeChecker::visitCustomAttr(CustomAttr *attr) {
   auto nominal = evaluateOrDefault(
     Ctx.evaluator, CustomAttrNominalRequest{attr, dc}, nullptr);
 
+  // Diagnose errors.
   if (!nominal) {
+    auto typeRepr = attr->getTypeRepr();
+
+    auto type = TypeResolution::forInterface(dc, TypeResolverContext::CustomAttr,
+                                             // Unbound generics and placeholders
+                                             // are not allowed within this
+                                             // attribute.
+                                             /*unboundTyOpener*/ nullptr,
+                                             /*placeholderHandler*/ nullptr)
+        .resolveType(typeRepr);
+
+    if (type->is<ErrorType>()) {
+      // Type resolution has failed, and we should have diagnosed something already.
+      assert(Ctx.hadError());
+    } else {
+      // Otherwise, something odd happened.
+      std::string typeName;
+      llvm::raw_string_ostream out(typeName);
+      typeRepr->print(out);
+
+      Ctx.Diags.diagnose(attr->getLocation(), diag::unknown_attribute, typeName);
+    }
+
     attr->setInvalid();
     return;
   }

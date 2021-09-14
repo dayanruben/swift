@@ -4,7 +4,7 @@
 // REQUIRES: concurrency
 
 // rdar://76038845
-// UNSUPPORTED: use_os_stdlib
+// REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 
 struct Boom: Error {}
@@ -45,7 +45,7 @@ func test_taskGroup_throws() async {
         return third
 
       case .failure(let error):
-        fatalError("got an erroneous third result")
+        fatalError("got an erroneous third result: \(error)")
 
       case .none:
         print("task group failed to get 3")

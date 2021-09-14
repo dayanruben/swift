@@ -2002,8 +2002,7 @@ static bool fixMissingArguments(ConstraintSystem &cs, ASTNode anchor,
   // synthesized arguments to it.
   if (argumentTuple) {
     cs.addConstraint(ConstraintKind::Bind, *argumentTuple,
-                     FunctionType::composeTuple(ctx, args,
-                                                /*canonicalVararg=*/false),
+                     FunctionType::composeTuple(ctx, args),
                      cs.getConstraintLocator(anchor));
   }
 
@@ -2206,21 +2205,39 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
   // take multiple arguments to be passed as an argument in places
   // that expect a function that takes a single tuple (of the same
   // arity);
-  auto canImplodeParams = [&](ArrayRef<AnyFunctionType::Param> params) {
+  auto canImplodeParams = [&](ArrayRef<AnyFunctionType::Param> params,
+                              const FunctionType *destFn) {
     if (params.size() == 1)
       return false;
 
-    for (auto param : params)
-      if (param.isVariadic() || param.isInOut() || param.isAutoClosure())
-        return false;
+    // We do not support imploding into a @differentiable function.
+    if (destFn->isDifferentiable())
+      return false;
 
+    for (auto &param : params) {
+      // We generally cannot handle parameter flags, though we can carve out an
+      // exception for ownership flags such as __owned, which we can thunk, and
+      // flags that can freely dropped from a function type such as
+      // @_nonEphemeral. Note that @noDerivative can also be freely dropped, as
+      // we've already ensured that the destination function is not
+      // @differentiable.
+      auto flags = param.getParameterFlags();
+      flags = flags.withValueOwnership(
+          param.isInOut() ? ValueOwnership::InOut : ValueOwnership::Default);
+      flags = flags.withNonEphemeral(false)
+                   .withNoDerivative(false);
+      if (!flags.isNone())
+        return false;
+    }
     return true;
   };
 
   auto implodeParams = [&](SmallVectorImpl<AnyFunctionType::Param> &params) {
+    // Form an imploded tuple type, dropping the parameter flags as although
+    // canImplodeParams makes sure we're not dealing with vargs, inout, etc,
+    // we may still have e.g ownership flags left over, which we can drop.
     auto input = AnyFunctionType::composeTuple(getASTContext(), params,
-                                               /*canonicalVararg=*/false);
-
+                                               /*wantParamFlags*/ false);
     params.clear();
     // If fixes are disabled let's do an easy thing and implode
     // tuple directly into parameters list.
@@ -2255,12 +2272,12 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
     if (last != path.rend()) {
       if (last->getKind() == ConstraintLocator::ApplyArgToParam) {
         if (isSingleTupleParam(ctx, func2Params) &&
-            canImplodeParams(func1Params)) {
+            canImplodeParams(func1Params, /*destFn*/ func2)) {
           implodeParams(func1Params);
           increaseScore(SK_FunctionConversion);
         } else if (!ctx.isSwiftVersionAtLeast(5) &&
                    isSingleTupleParam(ctx, func1Params) &&
-                   canImplodeParams(func2Params)) {
+                   canImplodeParams(func2Params,  /*destFn*/ func1)) {
           auto *simplified = locator.trySimplifyToExpr();
           // We somehow let tuple unsplatting function conversions
           // through in some cases in Swift 4, so let's let that
@@ -2296,11 +2313,11 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
         // 2. `case .bar(let tuple) = e` allows to match multiple
         //    parameters with a single tuple argument.
         if (isSingleTupleParam(ctx, func1Params) &&
-            canImplodeParams(func2Params)) {
+            canImplodeParams(func2Params, /*destFn*/ func1)) {
           implodeParams(func2Params);
           increaseScore(SK_FunctionConversion);
         } else if (isSingleTupleParam(ctx, func2Params) &&
-                   canImplodeParams(func1Params)) {
+                   canImplodeParams(func1Params, /*destFn*/ func2)) {
           implodeParams(func1Params);
           increaseScore(SK_FunctionConversion);
         }
@@ -2311,7 +2328,7 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
       auto *anchor = locator.trySimplifyToExpr();
       if (isa_and_nonnull<ClosureExpr>(anchor) &&
           isSingleTupleParam(ctx, func2Params) &&
-          canImplodeParams(func1Params)) {
+          canImplodeParams(func1Params, /*destFn*/ func2)) {
         auto *fix = AllowClosureParamDestructuring::create(
             *this, func2, getConstraintLocator(anchor));
         if (recordFix(fix))
@@ -3657,15 +3674,27 @@ bool ConstraintSystem::repairFailures(
     if (!fnType)
       return false;
 
+    // If the locator isn't anchored at an expression, or the expression is
+    // implicit, don't try to insert an explicit call into the source code.
+    auto *loc = getConstraintLocator(locator);
+    auto *anchor = getAsExpr(simplifyLocatorToAnchor(loc));
+    if (!anchor || anchor->isImplicit())
+      return false;
+
+    if (isArgumentOfPatternMatchingOperator(loc))
+      return false;
+
+    // Don't attempt this fix for trailing closures.
+    if (auto elt = loc->getLastElementAs<LocatorPathElt::ApplyArgToParam>()) {
+      auto argumentList = getArgumentList(loc);
+      if (argumentList->isTrailingClosureIndex(elt->getArgIdx()))
+        return false;
+    }
+
     // If argument is a function type and all of its parameters have
     // default values, let's see whether error is related to missing
     // explicit call.
     if (fnType->getNumParams() > 0) {
-      auto *loc = getConstraintLocator(locator);
-      auto *anchor = getAsExpr(simplifyLocatorToAnchor(loc));
-      if (!anchor)
-        return false;
-
       auto overload = findSelectedOverloadFor(anchor);
       if (!(overload && overload->choice.isDecl()))
         return false;
@@ -3701,7 +3730,14 @@ bool ConstraintSystem::repairFailures(
         convertTo->isAny())
       return false;
 
-    auto result = matchTypes(resultType, dstType, ConstraintKind::Conversion,
+    ConstraintKind matchKind;
+    if (resultType->is<TypeVariableType>()) {
+      matchKind = ConstraintKind::Equal;
+    } else {
+      matchKind = ConstraintKind::Conversion;
+    }
+
+    auto result = matchTypes(resultType, dstType, matchKind,
                              TypeMatchFlags::TMF_ApplyingFix, locator);
 
     if (result.isSuccess()) {
@@ -4374,6 +4410,11 @@ bool ConstraintSystem::repairFailures(
                                                   loc))
       return true;
 
+    // There is already a remove extraneous arguments fix recorded for this
+    // apply arg to param locator, so let's skip the default argument mismatch.
+    if (hasFixFor(loc, FixKind::RemoveExtraneousArguments))
+      return true;
+
     conversionsOrFixes.push_back(
         AllowArgumentMismatch::create(*this, lhs, rhs, loc));
     break;
@@ -4461,8 +4502,18 @@ bool ConstraintSystem::repairFailures(
       break;
     }
 
+    auto *parentLoc = getConstraintLocator(anchor, path);
+
     if ((lhs->is<InOutType>() && !rhs->is<InOutType>()) ||
         (!lhs->is<InOutType>() && rhs->is<InOutType>())) {
+      // Since `FunctionArgument` as a last locator element represents
+      // a single parameter of the function type involved in a conversion
+      // to another function type, see `matchFunctionTypes`. If there is already
+      // a fix for the this convertion, we can just ignore individual function
+      // argument in-out mismatch failure by considered this fixed.
+      if (hasFixFor(parentLoc))
+        return true;
+
       // We want to call matchTypes with the default decomposition options
       // in case there are type variables that we couldn't bind due to the
       // inout attribute mismatch.
@@ -4478,7 +4529,6 @@ bool ConstraintSystem::repairFailures(
       }
     }
 
-    auto *parentLoc = getConstraintLocator(anchor, path);
     // In cases like this `FunctionArgument` as a last locator element
     // represents a single parameter of the function type involved in
     // a conversion to another function type, see `matchFunctionTypes`.
@@ -4538,6 +4588,9 @@ bool ConstraintSystem::repairFailures(
 
   case ConstraintLocator::ClosureBody:
   case ConstraintLocator::ClosureResult: {
+    if (repairByInsertingExplicitCall(lhs, rhs))
+      break;
+
     if (repairViaOptionalUnwrap(*this, lhs, rhs, matchKind, conversionsOrFixes,
                                 locator))
       return true;
@@ -4932,6 +4985,25 @@ bool ConstraintSystem::repairFailures(
 
       conversionsOrFixes.push_back(ContextualMismatch::create(
           *this, lhs, rhs, getConstraintLocator(locator)));
+    }
+
+    // `weak` declaration with an explicit non-optional type e.g.
+    // `weak x: X = ...` where `X` is a class.
+    if (auto *TP = dyn_cast<TypedPattern>(pattern)) {
+      if (auto *NP = dyn_cast<NamedPattern>(TP->getSubPattern())) {
+        auto *var = NP->getDecl();
+
+        auto ROK = ReferenceOwnership::Strong;
+        if (auto *OA = var->getAttrs().getAttribute<ReferenceOwnershipAttr>())
+          ROK = OA->get();
+
+        if (!rhs->getOptionalObjectType() &&
+            optionalityOf(ROK) == ReferenceOwnershipOptionality::Required) {
+          conversionsOrFixes.push_back(
+              AllowNonOptionalWeak::create(*this, getConstraintLocator(NP)));
+          break;
+        }
+      }
     }
 
     break;
@@ -6032,8 +6104,7 @@ ConstraintSystem::simplifyConstructionConstraint(
 
     // Tuple construction is simply tuple conversion.
     Type argType = AnyFunctionType::composeTuple(getASTContext(),
-                                                 fnType->getParams(),
-                                                 /*canonicalVararg=*/false);
+                                                 fnType->getParams());
     Type resultType = fnType->getResult();
 
     ConstraintLocatorBuilder builder(locator);
@@ -6663,6 +6734,13 @@ static ConstraintFix *maybeWarnAboutExtraneousCast(
     return fix;
   }
   if (extraOptionals > 0) {
+    // Conditional cast in this case can be an attempt to just unwrap a nil
+    // value.
+    if (isExpr<ConditionalCheckedCastExpr>(anchor) &&
+        castKind == CheckedCastKind::BridgingCoercion) {
+      return nullptr;
+    }
+
     return AllowCheckedCastCoercibleOptionalType::create(
         cs, origFromType, origToType, castKind,
         cs.getConstraintLocator(locator));
@@ -6958,8 +7036,7 @@ ConstraintSystem::simplifyFunctionComponentConstraint(
 
     if (kind == ConstraintKind::FunctionInput) {
       type = AnyFunctionType::composeTuple(getASTContext(),
-                                           funcTy->getParams(),
-                                           /*canonicalVararg=*/false);
+                                           funcTy->getParams());
       locKind = ConstraintLocator::FunctionArgument;
     } else if (kind == ConstraintKind::FunctionResult) {
       type = funcTy->getResult();
@@ -11676,6 +11753,17 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
           increaseScore(SK_Fix);
       }
     }
+
+    return SolutionKind::Solved;
+  }
+
+  case FixKind::AllowNonOptionalWeak: {
+    if (recordFix(fix))
+      return SolutionKind::Error;
+
+    (void)matchTypes(type1, OptionalType::get(type2),
+                     ConstraintKind::Conversion,
+                     TypeMatchFlags::TMF_ApplyingFix, locator);
 
     return SolutionKind::Solved;
   }

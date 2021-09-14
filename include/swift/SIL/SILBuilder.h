@@ -1064,12 +1064,12 @@ public:
         getSILDebugLocation(Loc), Op, Ty));
   }
 
-  PointerToAddressInst *createPointerToAddress(SILLocation Loc, SILValue Op,
-                                               SILType Ty,
-                                               bool isStrict,
-                                               bool isInvariant = false){
+  PointerToAddressInst *
+  createPointerToAddress(SILLocation Loc, SILValue Op, SILType Ty,
+                         bool isStrict, bool isInvariant = false,
+                         llvm::MaybeAlign alignment = llvm::MaybeAlign()) {
     return insert(new (getModule()) PointerToAddressInst(
-                    getSILDebugLocation(Loc), Op, Ty, isStrict, isInvariant));
+        getSILDebugLocation(Loc), Op, Ty, isStrict, isInvariant, alignment));
   }
 
   UncheckedRefCastInst *createUncheckedRefCast(SILLocation Loc, SILValue Op,
@@ -1230,6 +1230,14 @@ public:
            "emitDestroyValueOperation");
     return insert(new (getModule()) DestroyValueInst(getSILDebugLocation(Loc),
                                                      operand, poisonRefs));
+  }
+
+  MoveValueInst *createMoveValue(SILLocation loc, SILValue operand) {
+    assert(!operand->getType().isTrivial(getFunction()) &&
+           "Should not be passing trivial values to this api. Use instead "
+           "emitMoveValueOperation");
+    return insert(new (getModule())
+                  MoveValueInst(getSILDebugLocation(loc), operand));
   }
 
   UnconditionalCheckedCastInst *
@@ -2221,6 +2229,11 @@ public:
   BranchInst *createBranch(SILLocation Loc, SILBasicBlock *TargetBlock,
                            OperandValueArrayRef Args);
 
+  // This only creates the terminator, not the results. Create the results with
+  // OwnershipForwardingTermInst::createResult() and
+  // SwitchEnumInst::createDefaultResult() to ensure that the result ownership
+  // is correct (it must be consistent with the switch_enum's forwarding
+  // ownership, which may differ from \p Operand's ownership).
   SwitchValueInst *
   createSwitchValue(SILLocation Loc, SILValue Operand, SILBasicBlock *DefaultBB,
                     ArrayRef<std::pair<SILValue, SILBasicBlock *>> CaseBBs) {
@@ -2232,16 +2245,14 @@ public:
       SILLocation Loc, SILValue Operand, SILBasicBlock *DefaultBB,
       ArrayRef<std::pair<EnumElementDecl *, SILBasicBlock *>> CaseBBs,
       Optional<ArrayRef<ProfileCounter>> CaseCounts = None,
-      ProfileCounter DefaultCount = ProfileCounter()) {
-    return createSwitchEnum(Loc, Operand, DefaultBB, CaseBBs, CaseCounts,
-                            DefaultCount, Operand.getOwnershipKind());
-  }
+      ProfileCounter DefaultCount = ProfileCounter());
 
   SwitchEnumInst *createSwitchEnum(
       SILLocation Loc, SILValue Operand, SILBasicBlock *DefaultBB,
       ArrayRef<std::pair<EnumElementDecl *, SILBasicBlock *>> CaseBBs,
       Optional<ArrayRef<ProfileCounter>> CaseCounts,
-      ProfileCounter DefaultCount, ValueOwnershipKind forwardingOwnershipKind) {
+      ProfileCounter DefaultCount,
+      ValueOwnershipKind forwardingOwnershipKind) {
     return insertTerminator(SwitchEnumInst::create(
         getSILDebugLocation(Loc), Operand, DefaultBB, CaseBBs, getFunction(),
         CaseCounts, DefaultCount, forwardingOwnershipKind));
@@ -2461,6 +2472,17 @@ public:
     if (v->getType().isObject())
       return emitDestroyValueOperation(loc, v);
     createDestroyAddr(loc, v);
+  }
+
+  /// Convenience function that is a no-op for trivial values and inserts a
+  /// move_value on non-trivial instructions.
+  SILValue emitMoveValueOperation(SILLocation Loc, SILValue v) {
+    assert(!v->getType().isAddress());
+    if (v->getType().isTrivial(*getInsertionBB()->getParent()))
+      return v;
+    assert(v.getOwnershipKind() == OwnershipKind::Owned &&
+           "move_value consumes its argument");
+    return createMoveValue(Loc, v);
   }
 
   SILValue emitTupleExtract(SILLocation Loc, SILValue Operand, unsigned FieldNo,

@@ -35,6 +35,10 @@
 #include <dlfcn.h>
 #endif
 
+#if defined(SWIFT_CONCURRENCY_BACK_DEPLOYMENT)
+asm("\n .globl _swift_async_extendedFramePointerFlags" \
+    "\n _swift_async_extendedFramePointerFlags = 0x0");
+#else
 #ifdef __APPLE__
 #if __POINTER_WIDTH__ == 64
 asm("\n .globl _swift_async_extendedFramePointerFlags" \
@@ -47,6 +51,7 @@ asm("\n .globl _swift_async_extendedFramePointerFlags" \
     "\n _swift_async_extendedFramePointerFlags = 0x0");
 #endif
 #endif // __APPLE__
+#endif // !defined(SWIFT_CONCURRENCY_BACK_DEPLOYMENT)
 
 using namespace swift;
 using FutureFragment = AsyncTask::FutureFragment;
@@ -144,7 +149,7 @@ void NullaryContinuationJob::process(Job *_job) {
 void AsyncTask::completeFuture(AsyncContext *context) {
   using Status = FutureFragment::Status;
   using WaitQueueItem = FutureFragment::WaitQueueItem;
-
+  SWIFT_TASK_DEBUG_LOG("complete future = %p", this);
   assert(isFuture());
   auto fragment = futureFragment();
 
@@ -230,7 +235,6 @@ AsyncTask::~AsyncTask() {
 SWIFT_CC(swift)
 static void destroyTask(SWIFT_CONTEXT HeapObject *obj) {
   auto task = static_cast<AsyncTask*>(obj);
-
   task->~AsyncTask();
 
   // The task execution itself should always hold a reference to it, so

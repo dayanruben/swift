@@ -870,6 +870,7 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(sil_block, SIL_ONE_OPERAND);
   BLOCK_RECORD(sil_block, SIL_ONE_TYPE_ONE_OPERAND);
   BLOCK_RECORD(sil_block, SIL_ONE_TYPE_VALUES);
+  BLOCK_RECORD(sil_block, SIL_ONE_TYPE_OWNERSHIP_VALUES);
   BLOCK_RECORD(sil_block, SIL_TWO_OPERANDS);
   BLOCK_RECORD(sil_block, SIL_TAIL_ADDR);
   BLOCK_RECORD(sil_block, SIL_INST_APPLY);
@@ -889,6 +890,7 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(sil_block, SIL_INST_WITNESS_METHOD);
   BLOCK_RECORD(sil_block, SIL_SPECIALIZE_ATTR);
   BLOCK_RECORD(sil_block, SIL_ONE_OPERAND_EXTRA_ATTR);
+  BLOCK_RECORD(sil_block, SIL_ONE_TYPE_ONE_OPERAND_EXTRA_ATTR);
   BLOCK_RECORD(sil_block, SIL_TWO_OPERANDS_EXTRA_ATTR);
 
   // These layouts can exist in both decl blocks and sil blocks.
@@ -1489,9 +1491,6 @@ void Serializer::writeASTBlockEntity(
       ++numValueWitnesses;
       data.push_back(addDeclRef(req));
       data.push_back(addDeclRef(witness.getDecl()));
-      assert(witness.getDecl() || req->getAttrs().hasAttribute<OptionalAttr>()
-             || req->getAttrs().isUnavailable(req->getASTContext())
-             || allowCompilerErrors());
 
       // If there is no witness, we're done.
       if (!witness.getDecl()) return;

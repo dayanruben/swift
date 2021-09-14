@@ -315,6 +315,10 @@ function(_add_target_variant_c_compile_flags)
     list(APPEND result "-DSWIFT_RUNTIME_NO_COMPATIBILITY_OVERRIDES")
   endif()
 
+  if(SWIFT_ENABLE_REFLECTION)
+    list(APPEND result "-DSWIFT_ENABLE_REFLECTION")
+  endif()
+
   if(SWIFT_RUNTIME_MACHO_NO_DYLD)
     list(APPEND result "-DSWIFT_RUNTIME_MACHO_NO_DYLD")
   endif()
@@ -1216,6 +1220,7 @@ function(_add_swift_target_library_single target name)
         "${PLIST_INFO_PLIST_OUT}"
         @ONLY
         NEWLINE_STYLE UNIX)
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${PLIST_INFO_PLIST_OUT}")
 
     # If Application Extensions are enabled, pass the linker flag marking
     # the dylib as safe.

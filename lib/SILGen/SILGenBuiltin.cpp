@@ -1533,8 +1533,8 @@ static ManagedValue emitBuiltinWithUnsafeContinuation(
 
     auto errorTy = SGF.getASTContext().getErrorDecl()->getDeclaredType()
       ->getCanonicalType();
-    auto errorVal
-      = SGF.B.createOwnedPhiArgument(SILType::getPrimitiveObjectType(errorTy));
+    auto errorVal = SGF.B.createTermResult(
+        SILType::getPrimitiveObjectType(errorTy), OwnershipKind::Owned);
 
     SGF.emitThrow(loc, errorVal, true);
   }
@@ -1575,6 +1575,15 @@ static ManagedValue emitBuiltinHopToActor(SILGenFunction &SGF, SILLocation loc,
                                           SGFContext C) {
   SGF.emitHopToActorValue(loc, args[0]);
   return ManagedValue::forUnmanaged(SGF.emitEmptyTuple(loc));
+}
+
+static ManagedValue emitBuiltinMove(SILGenFunction &SGF, SILLocation loc,
+                                    SubstitutionMap subs,
+                                    ArrayRef<ManagedValue> args, SGFContext C) {
+  assert(args.size() == 1 && "Move has a single argument");
+  auto firstArg = args[0].ensurePlusOne(SGF, loc);
+  CleanupCloner cloner(SGF, firstArg);
+  return cloner.clone(SGF.B.createMoveValue(loc, firstArg.forward(SGF)));
 }
 
 static ManagedValue emitBuiltinAutoDiffCreateLinearMapContext(

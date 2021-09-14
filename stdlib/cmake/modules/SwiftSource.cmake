@@ -432,6 +432,12 @@ function(_compile_swift_files
     list(APPEND swift_flags "-Xfrontend" "-emit-sorted-sil")
   endif()
 
+  if(NOT SWIFT_ENABLE_REFLECTION)
+    list(APPEND swift_flags "-Xfrontend" "-disable-reflection-metadata")
+  else()
+    list(APPEND swift_flags "-D" "SWIFT_ENABLE_REFLECTION")
+  endif()
+
   # FIXME: Cleaner way to do this?
   if(SWIFTFILE_IS_STDLIB_CORE)
     list(APPEND swift_flags
@@ -782,6 +788,8 @@ function(_compile_swift_files
       ${command_touch_standard_outputs}
       OUTPUT ${standard_outputs}
       DEPENDS
+        "${line_directive_tool}"
+        "${file_path}"
         ${swift_compiler_tool_dep}
         ${source_files} ${SWIFTFILE_DEPENDS}
         ${swift_ide_test_dependency}
@@ -821,6 +829,8 @@ function(_compile_swift_files
         ${command_touch_module_outputs}
         OUTPUT ${module_outputs}
         DEPENDS
+          "${line_directive_tool}"
+          "${file_path}"
           ${swift_compiler_tool_dep}
           ${source_files} ${SWIFTFILE_DEPENDS}
           ${swift_ide_test_dependency}
@@ -877,6 +887,8 @@ function(_compile_swift_files
         OUTPUT
           ${maccatalyst_module_outputs}
         DEPENDS
+          "${line_directive_tool}"
+          "${file_path}"
           ${swift_compiler_tool_dep}
           ${source_files}
           ${SWIFTFILE_DEPENDS}
@@ -903,6 +915,8 @@ function(_compile_swift_files
         ${command_touch_sib_outputs}
         OUTPUT ${sib_outputs}
         DEPENDS
+          "${line_directive_tool}"
+          "${file_path}"
           ${swift_compiler_tool_dep}
           ${source_files} ${SWIFTFILE_DEPENDS}
           ${create_dirs_dependency_target}
@@ -920,6 +934,8 @@ function(_compile_swift_files
         ${command_touch_sibopt_outputs}
         OUTPUT ${sibopt_outputs}
         DEPENDS
+          "${line_directive_tool}"
+          "${file_path}"
           ${swift_compiler_tool_dep}
           ${source_files} ${SWIFTFILE_DEPENDS}
           ${create_dirs_dependency_target}
@@ -938,6 +954,8 @@ function(_compile_swift_files
         ${command_touch_sibgen_outputs}
         OUTPUT ${sibgen_outputs}
         DEPENDS
+          "${line_directive_tool}"
+          "${file_path}"
           ${swift_compiler_tool_dep}
           ${source_files} ${SWIFTFILE_DEPENDS}
           ${create_dirs_dependency_target}

@@ -1,7 +1,7 @@
 // RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking -parse-as-library) | %FileCheck %s --dump-input=always
 // REQUIRES: executable_test
 // REQUIRES: concurrency
-// UNSUPPORTED: use_os_stdlib
+// REQUIRES: concurrency_runtime
 // UNSUPPORTED: back_deployment_runtime
 // UNSUPPORTED: linux
 
@@ -26,9 +26,11 @@ func test_taskGroup_next() async {
       do {
         while let r = try await group.next() {
           sum += r
+          print("add \(r) -> sum: \(sum)")
         }
       } catch {
         catches += 1
+        print("catch: \(catches)")
       }
     }
 
