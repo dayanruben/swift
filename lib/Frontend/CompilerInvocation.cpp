@@ -1528,6 +1528,8 @@ static bool ParseTBDGenArgs(TBDGenOptions &Opts, ArgList &Args,
 
   Opts.IsInstallAPI = Args.hasArg(OPT_tbd_is_installapi);
 
+  Opts.VirtualFunctionElimination = Args.hasArg(OPT_enable_llvm_vfe);
+
   if (const Arg *A = Args.getLastArg(OPT_tbd_compatibility_version)) {
     Opts.CompatibilityVersion = A->getValue();
   }
@@ -1722,6 +1724,9 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Opts.UseTypeLayoutValueHandling = false;
   }
 
+  Opts.ForceStructTypeLayouts = Args.hasArg(OPT_force_struct_type_layouts) &&
+                                Opts.UseTypeLayoutValueHandling;
+
   // This is set to true by default.
   Opts.UseIncrementalLLVMCodeGen &=
     !Args.hasArg(OPT_disable_incremental_llvm_codegeneration);
@@ -1910,6 +1915,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
 
   if (Args.hasArg(OPT_enable_llvm_wme)) {
     Opts.WitnessMethodElimination = true;
+  }
+
+  if (Args.hasArg(OPT_internalize_at_link)) {
+    Opts.InternalizeAtLink = true;
   }
 
   // Default to disabling swift async extended frame info on anything but
