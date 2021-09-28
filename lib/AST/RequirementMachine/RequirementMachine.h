@@ -45,6 +45,7 @@ class RewriteContext;
 /// generic signatures and interface types.
 class RequirementMachine final {
   friend class swift::ASTContext;
+  friend class swift::rewriting::RewriteContext;
 
   CanGenericSignature Sig;
 
@@ -77,10 +78,11 @@ class RequirementMachine final {
   RequirementMachine &operator=(const RequirementMachine &) = delete;
   RequirementMachine &operator=(RequirementMachine &&) = delete;
 
-  void addGenericSignature(CanGenericSignature sig);
+  void initWithGenericSignature(CanGenericSignature sig);
 
   bool isComplete() const;
-  void computeCompletion();
+
+  void computeCompletion(RewriteSystem::ValidityPolicy policy);
 
   MutableTerm getLongestValidPrefix(const MutableTerm &term) const;
 
@@ -106,6 +108,8 @@ public:
   ConformanceAccessPath getConformanceAccessPath(Type type,
                                                  ProtocolDecl *protocol);
   TypeDecl *lookupNestedType(Type depType, Identifier name) const;
+
+  void computeMinimalRequirements(const ProtocolDecl *proto);
 
   void verify(const MutableTerm &term) const;
   void dump(llvm::raw_ostream &out) const;

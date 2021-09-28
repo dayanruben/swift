@@ -13,6 +13,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/Types.h"
 #include "ProtocolGraph.h"
+#include "RequirementMachine.h"
 #include "RewriteSystem.h"
 #include "RewriteContext.h"
 
@@ -33,6 +34,8 @@ static DebugOptions parseDebugFlags(StringRef debugFlags) {
       .Case("completion", DebugFlags::Completion)
       .Case("concrete-unification", DebugFlags::ConcreteUnification)
       .Case("concretize-nested-types", DebugFlags::ConcretizeNestedTypes)
+      .Case("homotopy-reduction", DebugFlags::HomotopyReduction)
+      .Case("generating-conformances", DebugFlags::GeneratingConformances)
       .Default(None);
     if (!flag) {
       llvm::errs() << "Unknown debug flag in -debug-requirement-machine "
@@ -293,6 +296,23 @@ Type getTypeForSymbolRange(Iter begin, Iter end, Type root,
       continue;
     }
 
+    // We can end up with an unsimplified term like this:
+    //
+    // X.[P].[P:X]
+    //
+    // Simplification will rewrite X.[P] to X, so just ignore a protocol symbol
+    // in the middle of a term.
+    if (symbol.getKind() == Symbol::Kind::Protocol) {
+#ifndef NDEBUG
+      // Ensure that the domain of the suffix contains P.
+      if (begin + 1 < end) {
+        auto protos = (begin + 1)->getProtocols();
+        assert(std::find(protos.begin(), protos.end(), symbol.getProtocol()));
+      }
+#endif
+      continue;
+    }
+
     // We should have a resolved type at this point.
     auto *assocType =
         const_cast<RewriteContext &>(ctx)
@@ -326,6 +346,37 @@ Type RewriteContext::getRelativeTypeForTerm(
   return getTypeForSymbolRange(
       term.begin() + prefix.size(), term.end(), genericParam,
       { }, protos, *this);
+}
+
+RequirementMachine *RewriteContext::getRequirementMachine(
+    CanGenericSignature sig) {
+  auto &machine = Machines[sig];
+  if (machine) {
+    if (!machine->isComplete()) {
+      llvm::errs() << "Re-entrant construction of requirement "
+                   << "machine for " << sig << "\n";
+      abort();
+    }
+
+    return machine;
+  }
+
+  // Store this requirement machine before adding the signature,
+  // to catch re-entrant construction via initWithGenericSignature()
+  // below.
+  machine = new rewriting::RequirementMachine(*this);
+  machine->initWithGenericSignature(sig);
+
+  return machine;
+}
+
+bool RewriteContext::isRecursivelyConstructingRequirementMachine(
+    CanGenericSignature sig) {
+  auto found = Machines.find(sig);
+  if (found == Machines.end())
+    return false;
+
+  return !found->second->isComplete();
 }
 
 /// We print stats in the destructor, which should get executed at the end of

@@ -375,27 +375,27 @@ swift::getSwiftRuntimeCompatibilityVersionForTarget(
   if (Triple.isMacOSX()) {
     Triple.getMacOSXVersion(Major, Minor, Micro);
 
-    auto floorFor64e = [&Triple](llvm::VersionTuple v) {
-      if (Triple.getArchName() != "arm64e") return v;
-      // macOS got first arm64e support in 11.0, i.e. VersionTuple(5, 3)
+    auto floorFor64 = [&Triple](llvm::VersionTuple v) {
+      if (!Triple.isAArch64()) return v;
+      // macOS got first arm64(e) support in 11.0, i.e. VersionTuple(5, 3)
       return MAX(v, llvm::VersionTuple(5, 3));
     };
 
     if (Major == 10) {
       if (Triple.isAArch64() && Minor <= 16)
-        return floorFor64e(llvm::VersionTuple(5, 3));
+        return floorFor64(llvm::VersionTuple(5, 3));
 
       if (Minor <= 14) {
-        return floorFor64e(llvm::VersionTuple(5, 0));
+        return floorFor64(llvm::VersionTuple(5, 0));
       } else if (Minor <= 15) {
         if (Micro <= 3) {
-          return floorFor64e(llvm::VersionTuple(5, 1));
+          return floorFor64(llvm::VersionTuple(5, 1));
         } else {
-          return floorFor64e(llvm::VersionTuple(5, 2));
+          return floorFor64(llvm::VersionTuple(5, 2));
         }
       }
     } else if (Major == 11) {
-      return floorFor64e(llvm::VersionTuple(5, 3));
+      return floorFor64(llvm::VersionTuple(5, 3));
     }
   } else if (Triple.isiOS()) { // includes tvOS
     Triple.getiOSVersion(Major, Minor, Micro);
@@ -423,14 +423,20 @@ swift::getSwiftRuntimeCompatibilityVersionForTarget(
       }
     }
   } else if (Triple.isWatchOS()) {
+    auto floorFor64bits = [&Triple](llvm::VersionTuple v) {
+      if (!Triple.isArch64Bit()) return v;
+      // 64-bit watchOS was introduced with Swift 5.3
+      return MAX(v, llvm::VersionTuple(5, 3));
+    };
+
     Triple.getWatchOSVersion(Major, Minor, Micro);
     if (Major <= 5) {
-      return llvm::VersionTuple(5, 0);
+      return floorFor64bits(llvm::VersionTuple(5, 0));
     } else if (Major <= 6) {
       if (Minor <= 1) {
-        return llvm::VersionTuple(5, 1);
+        return floorFor64bits(llvm::VersionTuple(5, 1));
       } else {
-        return llvm::VersionTuple(5, 2);
+        return floorFor64bits(llvm::VersionTuple(5, 2));
       }
     }
   }
