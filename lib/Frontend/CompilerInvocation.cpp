@@ -506,12 +506,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     }
   }
 
-  Opts.CodeCompleteInitsInPostfixExpr |=
-      Args.hasArg(OPT_code_complete_inits_in_postfix_expr);
-
-  Opts.CodeCompleteCallPatternHeuristics |=
-      Args.hasArg(OPT_code_complete_call_pattern_heuristics);
-
   if (auto A = Args.getLastArg(OPT_enable_target_os_checking,
                                OPT_disable_target_os_checking)) {
     Opts.EnableTargetOSChecking
@@ -1052,6 +1046,8 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts,
 
   Opts.DisableOverlayModules |= Args.hasArg(OPT_emit_imported_modules);
 
+  Opts.EnableClangSPI |= Args.hasArg(OPT_enable_clang_spi);
+
   Opts.ExtraArgsOnly |= Args.hasArg(OPT_extra_clang_options_only);
 
   if (const Arg *A = Args.getLastArg(OPT_pch_output_dir)) {
@@ -1546,6 +1542,7 @@ static bool ParseTBDGenArgs(TBDGenOptions &Opts, ArgList &Args,
   Opts.IsInstallAPI = Args.hasArg(OPT_tbd_is_installapi);
 
   Opts.VirtualFunctionElimination = Args.hasArg(OPT_enable_llvm_vfe);
+  Opts.WitnessMethodElimination = Args.hasArg(OPT_enable_llvm_wme);
 
   if (const Arg *A = Args.getLastArg(OPT_tbd_compatibility_version)) {
     Opts.CompatibilityVersion = A->getValue();
@@ -1932,6 +1929,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
 
   if (Args.hasArg(OPT_enable_llvm_wme)) {
     Opts.WitnessMethodElimination = true;
+  }
+
+  if (Args.hasArg(OPT_conditional_runtime_records)) {
+    Opts.ConditionalRuntimeRecords = true;
   }
 
   if (Args.hasArg(OPT_internalize_at_link)) {
