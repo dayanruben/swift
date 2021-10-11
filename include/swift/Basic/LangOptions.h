@@ -147,6 +147,9 @@ namespace swift {
     /// Disable API availability checking.
     bool DisableAvailabilityChecking = false;
 
+    /// Only check the availability of the API, ignore function bodies.
+    bool CheckAPIAvailabilityOnly = false;
+
     /// Should conformance availability violations be diagnosed as errors?
     bool EnableConformanceAvailabilityErrors = false;
 
@@ -175,6 +178,9 @@ namespace swift {
 
     // Availability macros definitions to be expanded at parsing.
     SmallVector<std::string, 4> AvailabilityMacros;
+
+    /// Require public declarations to declare that they are Sendable (or not).
+    bool RequireExplicitSendable = false;
 
     /// If false, '#file' evaluates to the full path rather than a
     /// human-readable string.
@@ -475,6 +481,11 @@ namespace swift {
     /// algorithm.
     unsigned RequirementMachineDepthLimit = 10;
 
+    /// Enable the new experimental protocol requirement signature minimization
+    /// algorithm.
+    RequirementMachineMode RequirementMachineProtocolSignatures =
+        RequirementMachineMode::Disabled;
+
     /// Sets the target we are building for and updates platform conditions
     /// to match.
     ///
@@ -661,6 +672,10 @@ namespace swift {
     /// Enable experimental support for one-way constraints for the
     /// parameters of closures.
     bool EnableOneWayClosureParameters = false;
+
+    /// Enable experimental support for type inference through multi-statement
+    /// closures.
+    bool EnableMultiStatementClosureInference = false;
 
     /// See \ref FrontendOptions.PrintFullConvention
     bool PrintFullConvention = false;

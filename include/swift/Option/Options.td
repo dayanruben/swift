@@ -413,6 +413,10 @@ def require_explicit_availability_target : Separate<["-"], "require-explicit-ava
   HelpText<"Suggest fix-its adding @available(<target>, *) to public declarations without availability">,
   MetaVarName<"<target>">;
 
+def require_explicit_sendable : Flag<["-"], "require-explicit-sendable">,
+  Flags<[FrontendOption, NoInteractiveOption]>,
+  HelpText<"Require explicit Sendable annotations on public declarations">;
+
 def define_availability : Separate<["-"], "define-availability">,
   Flags<[FrontendOption, NoInteractiveOption]>,
   HelpText<"Define an availability macro in the format 'macroName : iOS 13.0, macOS 10.15'">,
@@ -611,6 +615,10 @@ def no_emit_module_separately:
 def requirement_machine_EQ : Joined<["-"], "requirement-machine=">,
   Flags<[FrontendOption, ModuleInterfaceOption]>,
   HelpText<"Control usage of experimental generics implementation: 'on', 'off', or 'verify'">;
+
+def requirement_machine_protocol_signatures_EQ : Joined<["-"], "requirement-machine-protocol-signatures=">,
+  Flags<[FrontendOption]>,
+  HelpText<"Control usage of experimental protocol requirement signature minimization: 'on', 'off', or 'verify'">;
 
 // Diagnostic control options
 def suppress_warnings : Flag<["-"], "suppress-warnings">,

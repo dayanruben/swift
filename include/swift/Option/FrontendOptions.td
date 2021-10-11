@@ -465,6 +465,10 @@ def disable_availability_checking : Flag<["-"],
   "disable-availability-checking">,
   HelpText<"Disable checking for potentially unavailable APIs">;
 
+def check_api_availability_only : Flag<["-"],
+  "check-api-availability-only">,
+  HelpText<"Only check the availability of the APIs, ignore function bodies">;
+
 def enable_conformance_availability_errors : Flag<["-"],
   "enable-conformance-availability-errors">,
   HelpText<"Diagnose conformance availability violations as errors">;
@@ -766,6 +770,10 @@ def experimental_print_full_convention :
 def experimental_one_way_closure_params :
   Flag<["-"], "experimental-one-way-closure-params">,
   HelpText<"Enable experimental support for one-way closure parameters">;
+
+def experimental_multi_statement_closures :
+  Flag<["-"], "experimental-multi-statement-closures">,
+  HelpText<"Enable experimental support for type inference in multi-statement closures">;
 
 def prebuilt_module_cache_path :
   Separate<["-"], "prebuilt-module-cache-path">,

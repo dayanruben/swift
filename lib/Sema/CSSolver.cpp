@@ -231,9 +231,10 @@ void ConstraintSystem::applySolution(const Solution &solution) {
   // Register constraint restrictions.
   // FIXME: Copy these directly into some kind of partial solution?
   for (auto restriction : solution.ConstraintRestrictions) {
-    ConstraintRestrictions.push_back(
-        std::make_tuple(restriction.first.first, restriction.first.second,
-                        restriction.second));
+    auto &types = restriction.first;
+    ConstraintRestrictions.push_back(std::make_tuple(types.first.getPointer(),
+                                                     types.second.getPointer(),
+                                                     restriction.second));
   }
 
   // Register the solution's disjunction choices.
@@ -2195,6 +2196,18 @@ Constraint *ConstraintSystem::selectDisjunction() {
   return nullptr;
 }
 
+Constraint *ConstraintSystem::selectConjunction() {
+  for (auto &constraint : InactiveConstraints) {
+    if (constraint.isDisabled())
+      continue;
+
+    if (constraint.getKind() == ConstraintKind::Conjunction)
+      return &constraint;
+  }
+
+  return nullptr;
+}
+
 bool DisjunctionChoice::attempt(ConstraintSystem &cs) const {
   cs.simplifyDisjunctionChoice(Choice);
 
@@ -2298,4 +2311,18 @@ void DisjunctionChoice::propagateConversionInfo(ConstraintSystem &cs) const {
   if (constraints.empty())
     cs.addConstraint(ConstraintKind::Bind, typeVar, conversionType,
                      Choice->getLocator());
+}
+
+bool ConjunctionElement::attempt(ConstraintSystem &cs) const {
+  // First, let's bring all referenced variables into scope.
+  {
+    llvm::SmallPtrSet<TypeVariableType *, 4> referencedVars;
+    findReferencedVariables(cs, referencedVars);
+
+    for (auto *typeVar : referencedVars)
+      cs.addTypeVariable(typeVar);
+  }
+
+  auto result = cs.simplifyConstraint(*Element);
+  return result != ConstraintSystem::SolutionKind::Error;
 }

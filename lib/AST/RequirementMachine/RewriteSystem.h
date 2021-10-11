@@ -78,7 +78,9 @@ public:
 
   Optional<Symbol> isPropertyRule() const;
 
-  bool isProtocolConformanceRule() const;
+  const ProtocolDecl *isProtocolConformanceRule() const;
+
+  bool isProtocolRefinementRule() const;
 
   /// See above for an explanation.
   bool isPermanent() const {
@@ -119,8 +121,6 @@ public:
   unsigned getDepth() const {
     return LHS.size();
   }
-
-  bool containsUnresolvedSymbols() const;
 
   void dump(llvm::raw_ostream &out) const;
 
@@ -367,6 +367,21 @@ class RewriteSystem final {
 
   DebugOptions Debug;
 
+  /// Whether we've initialized the rewrite system with a call to initialize().
+  unsigned Initialized : 1;
+
+  /// Whether we've computed the confluent completion at least once.
+  ///
+  /// It might be computed multiple times if the property map's concrete type
+  /// unification procedure adds new rewrite rules.
+  unsigned Complete : 1;
+
+  /// Whether we've minimized the rewrite system.
+  unsigned Minimized : 1;
+
+  /// If set, record homotopy generators in the completion procedure.
+  unsigned RecordHomotopyGenerators : 1;
+
 public:
   explicit RewriteSystem(RewriteContext &ctx);
   ~RewriteSystem();
@@ -382,7 +397,8 @@ public:
   /// Return the object recording information about known protocols.
   const ProtocolGraph &getProtocols() const { return Protos; }
 
-  void initialize(std::vector<std::pair<MutableTerm, MutableTerm>> &&assocaitedTypeRules,
+  void initialize(bool recordHomotopyGenerators,
+                  std::vector<std::pair<MutableTerm, MutableTerm>> &&assocaitedTypeRules,
                   std::vector<std::pair<MutableTerm, MutableTerm>> &&requirementRules,
                   ProtocolGraph &&protos);
 
@@ -440,6 +456,21 @@ public:
   void verifyRewriteRules(ValidityPolicy policy) const;
 
 private:
+  void recordHomotopyGenerator(HomotopyGenerator loop) {
+    if (!RecordHomotopyGenerators)
+      return;
+
+    HomotopyGenerators.push_back(loop);
+  }
+
+  void recordHomotopyGenerator(MutableTerm basepoint,
+                               RewritePath path) {
+    if (!RecordHomotopyGenerators)
+      return;
+
+    HomotopyGenerators.emplace_back(basepoint, path);
+  }
+
   bool
   computeCriticalPair(
       ArrayRef<Symbol>::const_iterator from,
@@ -473,6 +504,9 @@ public:
 
   void minimizeRewriteSystem();
 
+  llvm::DenseMap<const ProtocolDecl *, std::vector<unsigned>>
+  getMinimizedRules(ArrayRef<const ProtocolDecl *> protos);
+
   void verifyHomotopyGenerators() const;
 
   //////////////////////////////////////////////////////////////////////////////
@@ -497,9 +531,17 @@ public:
       llvm::SmallDenseSet<unsigned, 4> &visited,
       llvm::DenseSet<unsigned> &redundantConformances,
       const llvm::SmallVectorImpl<unsigned> &path,
+      const llvm::MapVector<unsigned, SmallVector<unsigned, 2>> &parentPaths,
       const llvm::MapVector<unsigned,
                             std::vector<SmallVector<unsigned, 2>>>
           &conformancePaths) const;
+
+  bool isValidRefinementPath(
+      const llvm::SmallVectorImpl<unsigned> &path) const;
+
+  void dumpConformancePath(
+      llvm::raw_ostream &out,
+      const SmallVectorImpl<unsigned> &path) const;
 
   void dumpGeneratingConformanceEquation(
       llvm::raw_ostream &out,

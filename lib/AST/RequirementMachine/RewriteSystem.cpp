@@ -52,21 +52,25 @@ Optional<Symbol> Rule::isPropertyRule() const {
 }
 
 /// If this is a rule of the form T.[p] => T where [p] is a protocol symbol,
-/// return true, otherwise return false.
-bool Rule::isProtocolConformanceRule() const {
-  if (auto property = isPropertyRule())
-    return property->getKind() == Symbol::Kind::Protocol;
-
-  return false;
-}
-
-bool Rule::containsUnresolvedSymbols() const {
-  for (auto symbol : LHS) {
-    if (symbol.getKind() == Symbol::Kind::Name)
-      return true;
+/// return the protocol, otherwise return nullptr.
+const ProtocolDecl *Rule::isProtocolConformanceRule() const {
+  if (auto property = isPropertyRule()) {
+    if (property->getKind() == Symbol::Kind::Protocol)
+      return property->getProtocol();
   }
 
-  return false;
+  return nullptr;
+}
+
+/// If this is a rule of the form [P].[Q] => [P] where [P] and [Q] are
+/// protocol symbols, return true, otherwise return false.
+bool Rule::isProtocolRefinementRule() const {
+  return (LHS.size() == 2 &&
+          RHS.size() == 1 &&
+          LHS[0] == RHS[0] &&
+          LHS[0].getKind() == Symbol::Kind::Protocol &&
+          LHS[1].getKind() == Symbol::Kind::Protocol &&
+          LHS[0] != LHS[1]);
 }
 
 void Rule::dump(llvm::raw_ostream &out) const {
@@ -80,7 +84,12 @@ void Rule::dump(llvm::raw_ostream &out) const {
 }
 
 RewriteSystem::RewriteSystem(RewriteContext &ctx)
-    : Context(ctx), Debug(ctx.getDebugOptions()) {}
+    : Context(ctx), Debug(ctx.getDebugOptions()) {
+  Initialized = 0;
+  Complete = 0;
+  Minimized = 0;
+  RecordHomotopyGenerators = 0;
+}
 
 RewriteSystem::~RewriteSystem() {
   Trie.updateHistograms(Context.RuleTrieHistogram,
@@ -88,9 +97,14 @@ RewriteSystem::~RewriteSystem() {
 }
 
 void RewriteSystem::initialize(
+    bool recordHomotopyGenerators,
     std::vector<std::pair<MutableTerm, MutableTerm>> &&associatedTypeRules,
     std::vector<std::pair<MutableTerm, MutableTerm>> &&requirementRules,
     ProtocolGraph &&graph) {
+  assert(!Initialized);
+  Initialized = 1;
+
+  RecordHomotopyGenerators = recordHomotopyGenerators;
   Protos = graph;
 
   for (const auto &rule : associatedTypeRules) {
@@ -113,6 +127,10 @@ void RewriteSystem::initialize(
 /// \p lhs to \p rhs.
 bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
                             const RewritePath *path) {
+  // FIXME:
+  // assert(!Complete || path != nullptr &&
+  //        "Rules added by completion must have a path");
+
   assert(!lhs.empty());
   assert(!rhs.empty());
 
@@ -155,7 +173,7 @@ bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
     if (path) {
       // We already have a loop, since the simplified lhs is identical to the
       // simplified rhs.
-      HomotopyGenerators.emplace_back(lhs, loop);
+      recordHomotopyGenerator(lhs, loop);
 
       if (Debug.contains(DebugFlags::Add)) {
         llvm::dbgs() << "## Recorded trivial loop at " << lhs << ": ";
@@ -191,7 +209,7 @@ bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
     // add a rewrite step applying the new rule in reverse to close the loop.
     loop.add(RewriteStep::forRewriteRule(/*startOffset=*/0, /*endOffset=*/0,
                                          newRuleID, /*inverse=*/true));
-    HomotopyGenerators.emplace_back(lhs, loop);
+    recordHomotopyGenerator(lhs, loop);
 
     if (Debug.contains(DebugFlags::Add)) {
       llvm::dbgs() << "## Recorded non-trivial loop at " << lhs << ": ";
@@ -292,6 +310,8 @@ bool RewriteSystem::simplify(MutableTerm &term, RewritePath *path) const {
 /// Must be run after the completion procedure, since the deletion of
 /// rules is only valid to perform if the rewrite system is confluent.
 void RewriteSystem::simplifyRewriteSystem() {
+  assert(Complete);
+
   for (unsigned ruleID = 0, e = Rules.size(); ruleID < e; ++ruleID) {
     auto &rule = getRule(ruleID);
     if (rule.isSimplified())
@@ -359,7 +379,7 @@ void RewriteSystem::simplifyRewriteSystem() {
     loop.add(RewriteStep::forRewriteRule(/*startOffset=*/0, /*endOffset=*/0,
                                          newRuleID, /*inverse=*/true));
 
-    HomotopyGenerators.emplace_back(MutableTerm(lhs), loop);
+    recordHomotopyGenerator(MutableTerm(lhs), loop);
 
     if (Debug.contains(DebugFlags::Completion)) {
       llvm::dbgs() << "$ Right hand side simplification recorded a loop: ";
@@ -440,6 +460,9 @@ void RewriteSystem::dump(llvm::raw_ostream &out) const {
   out << "}\n";
   out << "Homotopy generators: {\n";
   for (const auto &loop : HomotopyGenerators) {
+    if (loop.isDeleted())
+      continue;
+
     out << "- ";
     loop.dump(out, *this);
     out << "\n";

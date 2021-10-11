@@ -243,8 +243,20 @@ void RewriteSystemBuilder::processProtocolDependencies() {
     for (auto *assocType : info.InheritedAssociatedTypes)
       addAssociatedType(assocType, proto);
 
-    for (auto req : info.Requirements)
-      addRequirement(req.getCanonical(), proto);
+    // If this protocol is part of the initial connected component, we're
+    // building requirement signatures for all protocols in this component,
+    // and so we must start with the structural requirements.
+    //
+    // Otherwise, we should either already have a requirement signature, or
+    // we can trigger the computation of the requirement signatures of the
+    // next component recursively.
+    if (info.InitialComponent) {
+      for (auto req : proto->getStructuralRequirements())
+        addRequirement(req.req.getCanonical(), proto);
+    } else {
+      for (auto req : proto->getRequirementSignature())
+        addRequirement(req.getCanonical(), proto);
+    }
 
     if (Dump) {
       llvm::dbgs() << "}\n";
@@ -359,7 +371,7 @@ void RequirementMachine::dump(llvm::raw_ostream &out) const {
 }
 
 RequirementMachine::RequirementMachine(RewriteContext &ctx)
-    : Context(ctx), System(ctx), Map(ctx, System.getProtocols()) {
+    : Context(ctx), System(ctx), Map(System) {
   auto &langOpts = ctx.getASTContext().LangOpts;
   Dump = langOpts.DumpRequirementMachine;
   RequirementMachineStepLimit = langOpts.RequirementMachineStepLimit;
@@ -397,7 +409,8 @@ void RequirementMachine::initWithGenericSignature(CanGenericSignature sig) {
 
   // Add the initial set of rewrite rules to the rewrite system, also
   // providing the protocol graph to use for the linear order on terms.
-  System.initialize(std::move(builder.AssociatedTypeRules),
+  System.initialize(/*recordHomotopyGenerators=*/false,
+                    std::move(builder.AssociatedTypeRules),
                     std::move(builder.RequirementRules),
                     std::move(builder.Protocols));
 
@@ -438,7 +451,8 @@ void RequirementMachine::initWithProtocols(ArrayRef<const ProtocolDecl *> protos
 
   // Add the initial set of rewrite rules to the rewrite system, also
   // providing the protocol graph to use for the linear order on terms.
-  System.initialize(std::move(builder.AssociatedTypeRules),
+  System.initialize(/*recordHomotopyGenerators=*/true,
+                    std::move(builder.AssociatedTypeRules),
                     std::move(builder.RequirementRules),
                     std::move(builder.Protocols));
 
@@ -521,76 +535,4 @@ void RequirementMachine::computeCompletion(RewriteSystem::ValidityPolicy policy)
 
 bool RequirementMachine::isComplete() const {
   return Complete;
-}
-
-void RequirementMachine::computeMinimalRequirements() {
-  System.minimizeRewriteSystem();
-
-  llvm::DenseMap<const ProtocolDecl *, llvm::SmallVector<Requirement, 2>> reqs;
-
-  auto createRequirementFromRule = [&](
-      const Rule &rule,
-      TypeArrayView<GenericTypeParamType> genericParams)
-        -> Optional<Requirement> {
-    if (auto prop = rule.isPropertyRule()) {
-      auto subjectType = Context.getTypeForTerm(rule.getRHS(), genericParams,
-                                                System.getProtocols());
-
-      switch (prop->getKind()) {
-      case Symbol::Kind::Protocol:
-        return Requirement(RequirementKind::Conformance,
-                           subjectType,
-                           prop->getProtocol()->getDeclaredInterfaceType());
-
-      case Symbol::Kind::Layout:
-      case Symbol::Kind::ConcreteType:
-      case Symbol::Kind::Superclass:
-        return None;
-
-      case Symbol::Kind::Name:
-      case Symbol::Kind::AssociatedType:
-      case Symbol::Kind::GenericParam:
-        break;
-      }
-      llvm_unreachable("Invalid symbol kind");
-    } else if (rule.getLHS().back().getKind() != Symbol::Kind::Protocol) {
-      auto constraintType = Context.getTypeForTerm(rule.getLHS(), genericParams,
-                                                   System.getProtocols());
-      auto subjectType = Context.getTypeForTerm(rule.getRHS(), genericParams,
-                                                System.getProtocols());
-
-      return Requirement(RequirementKind::SameType, constraintType, subjectType);
-    }
-
-    return None;
-  };
-
-  for (const auto &rule : System.getRules()) {
-    if (rule.isPermanent())
-      continue;
-
-    if (rule.isRedundant())
-      continue;
-
-    auto domain = rule.getLHS()[0].getProtocols();
-    assert(domain.size() == 1);
-
-    const auto *proto = domain[0];
-    if (std::find(Protos.begin(), Protos.end(), proto) != Protos.end()) {
-      auto genericParams = proto->getGenericSignature().getGenericParams();
-      if (auto req = createRequirementFromRule(rule, genericParams))
-        reqs[proto].push_back(*req);
-    }
-  }
-
-  if (Context.getDebugOptions().contains(DebugFlags::Minimization)) {
-    for (const auto &pair : reqs) {
-      llvm::dbgs() << "Protocol " << pair.first->getName() << ":\n";
-      for (const auto &req : pair.second) {
-        llvm::dbgs() << "- ";
-        req.dump(llvm::dbgs());
-        llvm::dbgs() << "\n";
-      }
-    }
-  }
 }

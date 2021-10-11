@@ -291,6 +291,10 @@ void RewriteSystem::processMergedAssociatedTypes() {
 /// If so, record this rule for later. We'll try to merge the associated
 /// types in RewriteSystem::processMergedAssociatedTypes().
 void RewriteSystem::checkMergedAssociatedType(Term lhs, Term rhs) {
+  // FIXME: Figure out 3-cell representation for merged associated types
+  if (RecordHomotopyGenerators)
+    return;
+
   if (lhs.size() == rhs.size() &&
       std::equal(lhs.begin(), lhs.end() - 1, rhs.begin()) &&
       lhs.back().getKind() == Symbol::Kind::AssociatedType &&
@@ -488,6 +492,13 @@ RewriteSystem::computeCriticalPair(ArrayRef<Symbol>::const_iterator from,
 std::pair<RewriteSystem::CompletionResult, unsigned>
 RewriteSystem::computeConfluentCompletion(unsigned maxIterations,
                                           unsigned maxDepth) {
+  assert(Initialized);
+  assert(!Minimized);
+
+  // Complete might already be set, if we're re-running completion after
+  // adding new rules in the property map's concrete type unification procedure.
+  Complete = 1;
+
   unsigned steps = 0;
 
   bool again = false;
@@ -572,9 +583,6 @@ RewriteSystem::computeConfluentCompletion(unsigned maxIterations,
               llvm::dbgs() << "$$ Loop: ";
               loop.dump(llvm::dbgs(), *this);
               llvm::dbgs() << "\n\n";
-
-              // Record the trivial loop.
-              HomotopyGenerators.push_back(loop);
             }
           }
         });
