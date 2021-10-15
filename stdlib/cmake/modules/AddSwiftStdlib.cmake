@@ -303,7 +303,7 @@ function(_add_target_variant_c_compile_flags)
     list(APPEND result "-D_WASI_EMULATED_MMAN")
   endif()
 
-  if(SWIFT_DISABLE_OBJC_INTEROP)
+  if(NOT SWIFT_STDLIB_ENABLE_OBJC_INTEROP)
     list(APPEND result "-DSWIFT_OBJC_INTEROP=0")
   endif()
 
@@ -357,6 +357,10 @@ function(_add_target_variant_c_compile_flags)
 
   if(SWIFT_STDLIB_PASSTHROUGH_METADATA_ALLOCATOR)
     list(APPEND result "-DSWIFT_STDLIB_PASSTHROUGH_METADATA_ALLOCATOR")
+  endif()
+
+  if(SWIFT_STDLIB_SHORT_MANGLING_LOOKUPS)
+    list(APPEND result "-DSWIFT_STDLIB_SHORT_MANGLING_LOOKUPS")
   endif()
 
   if(SWIFT_STDLIB_SUPPORTS_BACKTRACE_REPORTING)
