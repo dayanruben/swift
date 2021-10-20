@@ -3102,26 +3102,6 @@ public:
   }
 };
 
-/// Perform a function conversion from a function returning an
-/// Optional<T> to a function returning T.
-///
-/// This is generated during expression type checking in places where
-/// we need to force the result type of a function being called. When
-/// we go to rewrite the call, we remove this node and force the
-/// result of the call to the underlying function. It should never
-/// exist outside of this final stage of expression type checking.
-class ImplicitlyUnwrappedFunctionConversionExpr
-    : public ImplicitConversionExpr {
-public:
-  ImplicitlyUnwrappedFunctionConversionExpr(Expr *subExpr, Type type)
-      : ImplicitConversionExpr(ExprKind::ImplicitlyUnwrappedFunctionConversion,
-                               subExpr, type) {}
-
-  static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::ImplicitlyUnwrappedFunctionConversion;
-  }
-};
-
 /// MetatypeConversionExpr - Convert a metatype to another metatype
 /// using essentially a derived-to-base conversion.
 class MetatypeConversionExpr : public ImplicitConversionExpr {
@@ -3703,12 +3683,6 @@ public:
     SeparatelyTypeChecked,
   };
 
-  /// Bits used to indicate contextual information that is concurrency-specific.
-  enum UnsafeConcurrencyBits {
-    Sendable = 1 << 0,
-    MainActor = 1 << 1
-  };
-
 private:
   /// The attributes attached to the closure.
   DeclAttributes Attributes;
@@ -3723,10 +3697,7 @@ private:
   /// the CaptureListExpr which would normally maintain this sort of
   /// information about captured variables), we need to have some way to access
   /// this information directly on the ClosureExpr.
-  ///
-  /// The integer indicates how the closure is contextually concurrent.
-  llvm::PointerIntPair<VarDecl *, 2, uint8_t>
-      CapturedSelfDeclAndUnsafeConcurrent;
+  VarDecl *CapturedSelfDecl;
 
   /// The location of the "async", if present.
   SourceLoc AsyncLoc;
@@ -3756,7 +3727,7 @@ public:
     : AbstractClosureExpr(ExprKind::Closure, Type(), /*Implicit=*/false,
                           discriminator, parent),
       Attributes(attributes), BracketRange(bracketRange),
-      CapturedSelfDeclAndUnsafeConcurrent(capturedSelfDecl, 0),
+      CapturedSelfDecl(capturedSelfDecl),
       AsyncLoc(asyncLoc), ThrowsLoc(throwsLoc), ArrowLoc(arrowLoc),
       InLoc(inLoc),
       ExplicitResultTypeAndBodyState(explicitResultType, BodyState::Parsed),
@@ -3884,27 +3855,7 @@ public:
 
   /// VarDecl captured by this closure under the literal name \c self , if any.
   VarDecl *getCapturedSelfDecl() const {
-    return CapturedSelfDeclAndUnsafeConcurrent.getPointer();
-  }
-
-  bool isUnsafeSendable() const {
-    return CapturedSelfDeclAndUnsafeConcurrent.getInt() &
-        UnsafeConcurrencyBits::Sendable;
-  }
-
-  bool isUnsafeMainActor() const {
-    return CapturedSelfDeclAndUnsafeConcurrent.getInt() &
-        UnsafeConcurrencyBits::MainActor;
-  }
-
-  void setUnsafeConcurrent(bool sendable, bool forMainActor) {
-    uint8_t bits = 0;
-    if (sendable)
-      bits |= UnsafeConcurrencyBits::Sendable;
-    if (forMainActor)
-      bits |= UnsafeConcurrencyBits::MainActor;
-
-    CapturedSelfDeclAndUnsafeConcurrent.setInt(bits);
+    return CapturedSelfDecl;
   }
 
   /// Get the type checking state of this closure's body.

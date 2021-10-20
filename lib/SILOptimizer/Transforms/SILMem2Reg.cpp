@@ -21,7 +21,7 @@
 #define DEBUG_TYPE "sil-mem2reg"
 
 #include "swift/AST/DiagnosticsSIL.h"
-#include "swift/Basic/DAGNodeWorklist.h"
+#include "swift/Basic/GraphNodeWorklist.h"
 #include "swift/SIL/BasicBlockDatastructures.h"
 #include "swift/SIL/Dominance.h"
 #include "swift/SIL/Projection.h"
@@ -927,7 +927,7 @@ void StackAllocationPromoter::propagateLiveness(
   // If liveness has not been propagated, go over the incoming operands and mark
   // any operand values that are proactivePhis as live
   livePhis.insert(proactivePhi);
-  SmallVector<SILValue, 16> incomingPhiVals;
+  SmallVector<SILValue, 4> incomingPhiVals;
   proactivePhi->getIncomingPhiValues(incomingPhiVals);
   for (auto &inVal : incomingPhiVals) {
     auto *inPhi = dyn_cast<SILPhiArgument>(inVal);
@@ -1132,7 +1132,7 @@ void StackAllocationPromoter::endLexicalLifetime(BlockSetVector &phiBlocks) {
   using ScopeEndPosition =
       llvm::PointerIntPair<SILBasicBlock *, 1, AvailableValuesKind>;
 
-  DAGNodeWorklist<ScopeEndPosition, 16> worklist;
+  GraphNodeWorklist<ScopeEndPosition, 16> worklist;
   for (auto pair : initializationPoints) {
     worklist.insert({pair.getFirst(), AvailableValuesKind::Out});
   }

@@ -3291,9 +3291,9 @@ void AttributeChecker::checkOriginalDefinedInAttrs(Decl *D,
                AttrName);
       return;
     }
-    if (IntroVer.getValue() >= Attr->MovedVersion) {
+    if (IntroVer.getValue() > Attr->MovedVersion) {
       diagnose(AtLoc,
-               diag::originally_definedin_must_after_available_version,
+               diag::originally_definedin_must_not_before_available_version,
                AttrName);
       return;
     }
@@ -5573,6 +5573,12 @@ void AttributeChecker::visitMarkerAttr(MarkerAttr *attr) {
       inheritedProto->diagnose(
           diag::decl_declared_here, inheritedProto->getName());
     }
+  }
+
+  if (Type superclass = proto->getSuperclass()) {
+    proto->diagnose(
+        diag::marker_protocol_inherit_class,
+        proto->getName(), superclass);
   }
 
   // A marker protocol cannot have any requirements.

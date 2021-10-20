@@ -499,14 +499,6 @@ bool checkContextualRequirements(GenericTypeDecl *decl,
 /// struct, class or actor.
 void addImplicitConstructors(NominalTypeDecl *typeDecl);
 
-/// Synthesize and add a '_remote' counterpart of the passed in `func` to `decl`.
-///
-/// \param decl the actor type to add the '_remote' definition to
-/// \param func the 'distributed func' that the '_remote' func should mirror
-/// \return the synthesized function
-AbstractFunctionDecl *addImplicitDistributedActorRemoteFunction(
-    ClassDecl* decl, AbstractFunctionDecl *func);
-
 /// Fold the given sequence expression into an (unchecked) expression
 /// tree.
 Expr *foldSequence(SequenceExpr *expr, DeclContext *dc);
@@ -1327,12 +1319,6 @@ void checkUnknownAttrRestrictions(
 /// let vs. var. This function does not perform any of that validation, leaving
 /// it to later stages.
 void bindSwitchCasePatternVars(DeclContext *dc, CaseStmt *stmt);
-
-/// If the given function has a global actor that should be reflected in
-/// references to its function type from the given declaration context,
-/// update the given function type to include the global actor.
-AnyFunctionType *applyGlobalActorType(
-    AnyFunctionType *fnType, ValueDecl *funcOrEnum, DeclContext *dc);
 
 /// If \p attr was added by an access note, wraps the error in
 /// \c diag::wrap_invalid_attr_added_by_access_note and limits it as an access

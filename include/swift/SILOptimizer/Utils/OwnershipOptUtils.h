@@ -22,6 +22,7 @@
 #include "swift/Basic/Defer.h"
 #include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/OwnershipUtils.h"
+#include "swift/SIL/PrunedLiveness.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 
@@ -33,6 +34,31 @@ inline bool requiresOSSACleanup(SILValue v) {
     && v.getOwnershipKind() != OwnershipKind::None
     && v.getOwnershipKind() != OwnershipKind::Unowned;
 }
+
+/// Rewrite the lifetime of \p ownedValue to match \p lifetimeBoundary. This may
+/// insert copies at forwarding consumes, including phis.
+///
+/// Precondition: lifetimeBoundary is dominated by ownedValue.
+///
+/// Precondition: lifetimeBoundary is a superset of ownedValue's current
+/// lifetime (therefore, none of the safety checks done during
+/// CanonicalizeOSSALifetime are needed here).
+void extendOwnedLifetime(SILValue ownedValue,
+                         PrunedLivenessBoundary &lifetimeBoundary,
+                         InstructionDeleter &deleter);
+
+/// Rewrite the local borrow scope introduced by \p beginBorrow to match \p
+/// guaranteedBoundary.
+///
+/// Precondition: guaranteedBoundary is dominated by beginBorrow which has no
+/// reborrows.
+///
+/// Precondition: guaranteedBoundary is a superset of beginBorrow's current
+/// scope (therefore, none of the safety checks done during
+/// CanonicalizeBorrowScope are needed here).
+void extendLocalBorrow(BeginBorrowInst *beginBorrow,
+                       PrunedLivenessBoundary &guaranteedBoundary,
+                       InstructionDeleter &deleter);
 
 /// Given a new phi that may use a guaranteed value, create nested borrow scopes
 /// for its incoming operands and end_borrows that cover the phi's extended
@@ -47,6 +73,73 @@ inline bool requiresOSSACleanup(SILValue v) {
 /// newly created phis do not yet have a borrow scope.
 bool createBorrowScopeForPhiOperands(SILPhiArgument *newPhi);
 
+//===----------------------------------------------------------------------===//
+//                        GuaranteedOwnershipExtension
+//===----------------------------------------------------------------------===//
+
+/// Extend existing guaranteed ownership to cover new guaranteeed uses that are
+/// dominated by the borrow introducer.
+class GuaranteedOwnershipExtension {
+  // --- context
+  InstructionDeleter &deleter;
+  DeadEndBlocks &deBlocks;
+
+  // --- analysis state
+  PrunedLiveness guaranteedLiveness;
+  PrunedLiveness ownedLifetime;
+  SmallVector<SILBasicBlock *, 4> ownedConsumeBlocks;
+  BeginBorrowInst *beginBorrow = nullptr;
+
+public:
+  GuaranteedOwnershipExtension(InstructionDeleter &deleter,
+                               DeadEndBlocks &deBlocks)
+      : deleter(deleter), deBlocks(deBlocks) {}
+
+  void clear() {
+    guaranteedLiveness.clear();
+    ownedLifetime.clear();
+    ownedConsumeBlocks.clear();
+    beginBorrow = nullptr;
+  }
+
+  /// Invalid indicates that the current guaranteed scope is insufficient, and
+  /// it does not meet the precondition for scope extension.
+  ///
+  /// Valid indicates that the current guaranteed scope is sufficient with no
+  /// transformation required.
+  ///
+  /// ExtendBorrow indicates that the local borrow scope can be extended without
+  /// affecting the owned lifetime or introducing copies.
+  ///
+  /// ExtendLifetime indicates that the owned lifetime can be extended possibly
+  /// requiring additional copies.
+  enum Status { Invalid, Valid, ExtendBorrow, ExtendLifetime };
+
+  /// Can the OSSA ownership of the \p parentAddress cover all uses of the \p
+  /// childAddress?
+  ///
+  /// Precondition: \p parentAddress dominates \p childAddress
+  Status checkAddressOwnership(SILValue parentAddress, SILValue childAddress);
+
+  /// Can the OSSA scope of \p borrow cover all \p newUses?
+  ///
+  /// Precondition: \p borrow dominates \p newUses
+  Status checkBorrowExtension(BorrowedValue borrow,
+                              ArrayRef<Operand *> newUses);
+
+  /// Can the OSSA scope of \p ownedValue cover all the guaranteed \p newUses?
+  ///
+  /// Precondition: \p ownedValue dominates \p newUses
+  Status checkLifetimeExtension(SILValue ownedValue,
+                                ArrayRef<Operand *> newUses);
+
+  void transform(Status status);
+};
+
+//===----------------------------------------------------------------------===//
+//                      RAUW - Replace All Uses With...
+//===----------------------------------------------------------------------===//
+
 /// A struct that contains context shared in between different operation +
 /// "ownership fixup" utilities. Please do not put actual methods on this, it is
 /// meant to be composed with.
@@ -55,11 +148,10 @@ struct OwnershipFixupContext {
   InstModCallbacks &callbacks;
   DeadEndBlocks &deBlocks;
 
-
-  // FIXME: remove these two vectors once BorrowedLifetimeExtender is used
-  // everywhere.
-  SmallVector<Operand *, 8> transitiveBorrowedUses;
-  SmallVector<PhiOperand, 8> recursiveReborrows;
+  // Cache the use-points for the lifetime of an inner guaranteed value (which
+  // does not introduce a borrow scope) after checking validity. These will be
+  // used again to extend the lifetime of the replacement value.
+  SmallVector<Operand *, 8> guaranteedUsePoints;
 
   /// Extra state initialized by OwnershipRAUWFixupHelper::get() that we use
   /// when RAUWing addresses. This ensures we do not need to recompute this
@@ -69,6 +161,8 @@ struct OwnershipFixupContext {
     /// compute all transitive address uses of oldValue. If we find that we do
     /// need this fixed up, then we will copy our interior pointer base value
     /// and use this to seed that new lifetime.
+    ///
+    /// FIXME: shouldn't these already be covered by guaranteedUsePoints?
     SmallVector<Operand *, 8> allAddressUsesFromOldValue;
 
     /// This is the interior pointer (e.g. ref_element_addr)
@@ -91,8 +185,7 @@ struct OwnershipFixupContext {
       : callbacks(callbacks), deBlocks(deBlocks) {}
 
   void clear() {
-    transitiveBorrowedUses.clear();
-    recursiveReborrows.clear();
+    guaranteedUsePoints.clear();
     extraAddressFixupInfo.allAddressUsesFromOldValue.clear();
     extraAddressFixupInfo.base = AccessBase();
   }
@@ -119,6 +212,8 @@ public:
 private:
   OwnershipFixupContext *ctx;
   SILValue oldValue;
+  // newValue is the aspirational replacement. It might not be the actual
+  // replacement after SILCombine fixups (like type casting) and OSSA fixups.
   SILValue newValue;
 
 public:
@@ -160,21 +255,27 @@ public:
   /// Perform OSSA fixup on newValue and return a fixed-up value based that can
   /// be used to replace all uses of oldValue.
   ///
-  /// This is so that we can avoid creating "forwarding" transformation
-  /// instructions before we know if we can perform the RAUW. Any such
-  /// "forwarding" transformation must be performed upon \p newValue at \p
-  /// oldValue's insertion point so that we can then here RAUW the transformed
-  /// \p newValue.
+  /// This is only used by clients that must transform \p newValue, such as
+  /// adding type casts, before it can be used to replace \p oldValue.
+  ///
+  /// \p rewrittenNewValue is only passed when the client needs to regenerate
+  /// newValue after checking its RAUW validity, but before performing OSSA
+  /// fixup on it.
+  SILValue prepareReplacement(SILValue rewrittenNewValue = SILValue());
+
+  /// Perform the actual RAUW--replace all uses if \p oldValue.
+  ///
+  /// Precondition: \p replacementValue is either invalid or has the same type
+  /// as \p oldValue and is a valid OSSA replacement.
   SILBasicBlock::iterator
-  perform(SingleValueInstruction *maybeTransformedNewValue = nullptr);
+  perform(SILValue replacementValue = SILValue());
 
 private:
-  SILBasicBlock::iterator replaceAddressUses(SingleValueInstruction *oldValue,
-                                             SILValue newValue);
-
   void invalidate() {
     ctx = nullptr;
   }
+
+  SILValue getReplacementAddress();
 };
 
 /// A utility composed ontop of OwnershipFixupContext that knows how to replace
