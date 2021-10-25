@@ -1451,6 +1451,11 @@ public:
                                                      bool isDestroyer,
                                                      bool isForeign,
                                                      ForDefinition_t forDefinition);
+
+  void setVCallVisibility(llvm::GlobalVariable *var,
+                          llvm::GlobalObject::VCallVisibility visibility,
+                          std::pair<uint64_t, uint64_t> range);
+
   void addVTableTypeMetadata(
       ClassDecl *decl, llvm::GlobalVariable *var,
       SmallVector<std::pair<Size, SILDeclRef>, 8> vtableEntries);
@@ -1461,6 +1466,11 @@ public:
       SmallVector<std::pair<Size, SILDeclRef>, 8> vtableEntries = {});
 
   TypeEntityReference getTypeEntityReference(GenericTypeDecl *D);
+
+  void appendLLVMUsedConditionalEntry(llvm::GlobalVariable *var,
+                                      llvm::Constant *dependsOn);
+  void appendLLVMUsedConditionalEntry(llvm::GlobalVariable *var,
+                                      const ProtocolConformance *conformance);
 
   llvm::Constant *
   getAddrOfTypeMetadata(CanType concreteType,
