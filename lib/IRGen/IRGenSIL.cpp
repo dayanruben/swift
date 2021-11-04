@@ -1147,6 +1147,9 @@ public:
   void visitRetainValueInst(RetainValueInst *i);
   void visitRetainValueAddrInst(RetainValueAddrInst *i);
   void visitCopyValueInst(CopyValueInst *i);
+  void visitExplicitCopyValueInst(ExplicitCopyValueInst *i) {
+    llvm_unreachable("Valid only when ownership is enabled");
+  }
   void visitMoveValueInst(MoveValueInst *i) {
     auto e = getLoweredExplosion(i->getOperand());
     setLoweredExplosion(i, e);
@@ -2387,7 +2390,30 @@ void IRGenSILFunction::visitSILBasicBlock(SILBasicBlock *BB) {
       if (isa<TermInst>(&I))
         emitDebugVariableRangeExtension(BB);
     }
+    
+#ifdef CHECK_RUNTIME_EFFECT_ANALYSIS
+    IGM.effectOfRuntimeFuncs = RuntimeEffect::NoEffect;
+    IGM.emittedRuntimeFuncs.clear();
+#endif
+
     visit(&I);
+
+#ifdef CHECK_RUNTIME_EFFECT_ANALYSIS
+    if (!isa<DebugValueInst>(&I)) {
+      SILType impactType;
+      RuntimeEffect silImpact = getRuntimeEffect(&I, impactType);
+      if ((unsigned)IGM.effectOfRuntimeFuncs & ~(unsigned)silImpact) {
+        llvm::errs() << "Missing runtime impact " << (unsigned)silImpact
+                     << ", expected: " << (unsigned)IGM.effectOfRuntimeFuncs
+                     << "\n in " << I
+                     << "emitted runtime functions:\n";
+        for (const char *funcName : IGM.emittedRuntimeFuncs) {
+          llvm::errs() << "  " << funcName << "()\n";
+        }
+        llvm_unreachable("wrong runtime impact definition");
+      }
+    }
+#endif
   }
 
   assert(Builder.hasPostTerminatorIP() && "SIL bb did not terminate block?!");
@@ -3003,6 +3029,14 @@ static llvm::Value *getStackAllocationSize(IRGenSILFunction &IGF,
     auto overflow = llvm::MulOverflow(*capacityValue, *strideValue, byteCount);
     if (overflow) {
       Diags.diagnose(loc, diag::temporary_allocation_size_overflow);
+    } else {
+      // For architectures narrower than 64 bits, check if the byte count fits
+      // in a (signed) size value.
+      auto maxByteCount = llvm::APInt::getSignedMaxValue(
+        IGF.IGM.SizeTy->getBitWidth()).getSExtValue();
+      if (byteCount > maxByteCount) {
+        Diags.diagnose(loc, diag::temporary_allocation_size_overflow);
+      }
     }
     result = llvm::ConstantInt::get(IGF.IGM.SizeTy, byteCount);
 

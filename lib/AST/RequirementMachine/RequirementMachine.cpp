@@ -275,6 +275,15 @@ void RewriteSystemBuilder::processProtocolDependencies() {
       llvm::dbgs() << "protocol " << proto->getName() << " {\n";
     }
 
+    MutableTerm lhs;
+    lhs.add(Symbol::forProtocol(proto, Context));
+    lhs.add(Symbol::forProtocol(proto, Context));
+
+    MutableTerm rhs;
+    rhs.add(Symbol::forProtocol(proto, Context));
+
+    AssociatedTypeRules.emplace_back(lhs, rhs);
+
     for (auto *assocType : proto->getAssociatedTypeMembers())
       addAssociatedType(assocType, proto);
 
@@ -449,7 +458,7 @@ void RequirementMachine::initWithGenericSignature(CanGenericSignature sig) {
 
   // Add the initial set of rewrite rules to the rewrite system, also
   // providing the protocol graph to use for the linear order on terms.
-  System.initialize(/*recordHomotopyGenerators=*/false,
+  System.initialize(/*recordLoops=*/false,
                     std::move(builder.AssociatedTypeRules),
                     std::move(builder.RequirementRules));
 
@@ -490,7 +499,7 @@ void RequirementMachine::initWithProtocols(ArrayRef<const ProtocolDecl *> protos
 
   // Add the initial set of rewrite rules to the rewrite system, also
   // providing the protocol graph to use for the linear order on terms.
-  System.initialize(/*recordHomotopyGenerators=*/true,
+  System.initialize(/*recordLoops=*/true,
                     std::move(builder.AssociatedTypeRules),
                     std::move(builder.RequirementRules));
 
@@ -519,16 +528,16 @@ void RequirementMachine::computeCompletion(RewriteSystem::ValidityPolicy policy)
     // Check for failure.
     auto checkCompletionResult = [&]() {
       switch (result.first) {
-      case RewriteSystem::CompletionResult::Success:
+      case CompletionResult::Success:
         break;
 
-      case RewriteSystem::CompletionResult::MaxIterations:
+      case CompletionResult::MaxIterations:
         llvm::errs() << "Generic signature " << Sig
                      << " exceeds maximum completion step count\n";
         System.dump(llvm::errs());
         abort();
 
-      case RewriteSystem::CompletionResult::MaxDepth:
+      case CompletionResult::MaxDepth:
         llvm::errs() << "Generic signature " << Sig
                      << " exceeds maximum completion depth\n";
         System.dump(llvm::errs());
@@ -544,8 +553,7 @@ void RequirementMachine::computeCompletion(RewriteSystem::ValidityPolicy policy)
     // Build the property map, which also performs concrete term
     // unification; if this added any new rules, run the completion
     // procedure again.
-    result = System.buildPropertyMap(
-        Map,
+    result = Map.buildPropertyMap(
         RequirementMachineStepLimit,
         RequirementMachineDepthLimit);
 

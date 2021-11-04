@@ -1308,5 +1308,27 @@ if (Builtin.ID == BuiltinValueKind::id) { \
     return;
   }
 
+  if (Builtin.ID == BuiltinValueKind::Move) {
+    auto input = args.claimNext();
+    auto result = args.claimNext();
+    SILType addrTy = argTypes[0];
+    const TypeInfo &addrTI = IGF.getTypeInfo(addrTy);
+    Address inputAttr = addrTI.getAddressForPointer(input);
+    Address resultAttr = addrTI.getAddressForPointer(result);
+    addrTI.initializeWithTake(IGF, resultAttr, inputAttr, addrTy, false);
+    return;
+  }
+
+  if (Builtin.ID == BuiltinValueKind::Copy) {
+    auto input = args.claimNext();
+    auto result = args.claimNext();
+    SILType addrTy = argTypes[0];
+    const TypeInfo &addrTI = IGF.getTypeInfo(addrTy);
+    Address inputAttr = addrTI.getAddressForPointer(input);
+    Address resultAttr = addrTI.getAddressForPointer(result);
+    addrTI.initializeWithCopy(IGF, resultAttr, inputAttr, addrTy, false);
+    return;
+  }
+
   llvm_unreachable("IRGen unimplemented for this builtin!");
 }

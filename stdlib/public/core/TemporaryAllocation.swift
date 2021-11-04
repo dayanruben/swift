@@ -38,7 +38,7 @@ internal func _byteCountForTemporaryAllocation<T>(
   // emitting equivalent compile-time diagnostics because the call to
   // Builtin.stackAlloc() becomes unreachable.
   if _isComputed(capacity) {
-    _precondition(capacity > 0, "Allocation capacity must be greater than or equal to zero")
+    _precondition(capacity >= 0, "Allocation capacity must be greater than or equal to zero")
   }
   let stride = MemoryLayout<T>.stride
   let (byteCount, overflow) = capacity.multipliedReportingOverflow(by: stride)
@@ -89,7 +89,8 @@ internal func _isStackAllocationSafe(byteCount: Int, alignment: Int) -> Bool {
 
   // Finally, take a slow path through the standard library to see if the
   // current environment can accept a larger stack allocation.
-  guard #available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *) else {
+  guard #available(macOS 9999, iOS 9999, watchOS 9999, tvOS 9999, *) //SwiftStdlib 5.6
+  else {
     return false
   }
   return swift_stdlib_isStackAllocationSafe(byteCount, alignment)

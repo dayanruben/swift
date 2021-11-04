@@ -406,6 +406,26 @@ public:
   bool isCached() const { return true; }
 };
 
+/// Compute the requirements that describe a protocol using the
+/// RequirementMachine.
+class RequirementSignatureRequestRQM :
+    public SimpleRequest<RequirementSignatureRequestRQM,
+                         ArrayRef<Requirement>(ProtocolDecl *),
+                         RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  // Evaluation.
+  ArrayRef<Requirement>
+  evaluate(Evaluator &evaluator, ProtocolDecl *proto) const;
+
+public:
+  bool isCached() const { return true; }
+};
+
 /// Compute the requirements that describe a protocol.
 class RequirementSignatureRequest :
     public SimpleRequest<RequirementSignatureRequest,
@@ -1411,11 +1431,17 @@ public:
 
 void simple_display(llvm::raw_ostream &out, AncestryFlags value);
 
+/// AbstractGenericSignatureRequest and InferredGenericSignatureRequest
+/// return this type, which stores a GenericSignature together with a bit
+/// indicating if there were any errors detected in the original
+/// requirements.
+using GenericSignatureWithError = llvm::PointerIntPair<GenericSignature, 1>;
+
 class AbstractGenericSignatureRequest :
     public SimpleRequest<AbstractGenericSignatureRequest,
-                         GenericSignature (const GenericSignatureImpl *,
-                                           SmallVector<GenericTypeParamType *, 2>,
-                                           SmallVector<Requirement, 2>),
+                         GenericSignatureWithError (const GenericSignatureImpl *,
+                                                    SmallVector<GenericTypeParamType *, 2>,
+                                                    SmallVector<Requirement, 2>),
                          RequestFlags::Cached> {
 public:
   using SimpleRequest::SimpleRequest;
@@ -1424,7 +1450,7 @@ private:
   friend SimpleRequest;
 
   // Evaluation.
-  GenericSignature
+  GenericSignatureWithError
   evaluate(Evaluator &evaluator,
            const GenericSignatureImpl *baseSignature,
            SmallVector<GenericTypeParamType *, 2> addedParameters,
@@ -1442,13 +1468,13 @@ public:
 
 class InferredGenericSignatureRequest :
     public SimpleRequest<InferredGenericSignatureRequest,
-                         GenericSignature (ModuleDecl *,
-                                           const GenericSignatureImpl *,
-                                           GenericParamList *,
-                                           WhereClauseOwner,
-                                           SmallVector<Requirement, 2>,
-                                           SmallVector<TypeLoc, 2>,
-                                           bool),
+                         GenericSignatureWithError (ModuleDecl *,
+                                                    const GenericSignatureImpl *,
+                                                    GenericParamList *,
+                                                    WhereClauseOwner,
+                                                    SmallVector<Requirement, 2>,
+                                                    SmallVector<TypeLoc, 2>,
+                                                    bool),
                          RequestFlags::Cached> {
 public:
   using SimpleRequest::SimpleRequest;
@@ -1457,7 +1483,7 @@ private:
   friend SimpleRequest;
 
   // Evaluation.
-  GenericSignature
+  GenericSignatureWithError
   evaluate(Evaluator &evaluator,
            ModuleDecl *parentModule,
            const GenericSignatureImpl *baseSignature,

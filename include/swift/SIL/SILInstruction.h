@@ -349,7 +349,9 @@ class SILInstruction : public llvm::ilist_node<SILInstruction> {
   void setDebugScope(const SILDebugScope *DS);
 
   /// Total number of created and deleted SILInstructions.
-  /// It is used only for collecting the compiler statistics.
+  ///
+  /// Ideally, those counters would be inside SILModules to allow mutiple
+  /// SILModules (e.g. in different threads).
   static int NumCreatedInstructions;
   static int NumDeletedInstructions;
 
@@ -758,6 +760,11 @@ public:
   /// Get the number of deleted SILInstructions.
   static int getNumDeletedInstructions() {
     return NumDeletedInstructions;
+  }
+  
+  static void resetInstructionCounts() {
+    NumCreatedInstructions = 0;
+    NumDeletedInstructions = 0;
   }
 
   /// Pretty-print the value.
@@ -7264,6 +7271,15 @@ class CopyValueInst
   friend class SILBuilder;
 
   CopyValueInst(SILDebugLocation DebugLoc, SILValue operand)
+      : UnaryInstructionBase(DebugLoc, operand, operand->getType()) {}
+};
+
+class ExplicitCopyValueInst
+    : public UnaryInstructionBase<SILInstructionKind::ExplicitCopyValueInst,
+                                  SingleValueInstruction> {
+  friend class SILBuilder;
+
+  ExplicitCopyValueInst(SILDebugLocation DebugLoc, SILValue operand)
       : UnaryInstructionBase(DebugLoc, operand, operand->getType()) {}
 };
 

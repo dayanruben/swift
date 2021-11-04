@@ -506,7 +506,12 @@ __swift_bool swift_stdlib_isStackAllocationSafe(__swift_size_t byteCount,
 
 __swift_bool _swift_stdlib_getCurrentStackBounds(__swift_uintptr_t *outBegin,
                                                  __swift_uintptr_t *outEnd) {
-#if defined(__APPLE__)
+#if defined(SWIFT_STDLIB_SINGLE_THREADED_RUNTIME)
+  // This platform does not support threads, so the API we'd call to get stack
+  // bounds (i.e. libpthread) is not going to be usable.
+  return false;
+  
+#elif defined(__APPLE__)
   pthread_t thread = pthread_self();
   // On Apple platforms, the stack grows down, so that the end of the stack
   // comes before the beginning on the number line, and an address on the stack
@@ -527,10 +532,19 @@ __swift_bool _swift_stdlib_getCurrentStackBounds(__swift_uintptr_t *outBegin,
   *outEnd = highLimit;
   return true;
 
-#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__ANDROID__) || defined(__linux__)
+#elif defined(__OpenBSD__)
+  stack_t sinfo;
+  if (pthread_stackseg_np(pthread_self(), &sinfo) != 0) {
+    return false;
+  }
+
+  *outBegin = (uintptr_t)sinfo.ss_sp - sinfo.ss_size;
+  *outEnd = (uintptr_t)sinfo.ss_sp;
+  return true;
+#elif defined(__FreeBSD__) || defined(__ANDROID__) || defined(__linux__)
   pthread_attr_t attr;
 
-#if defined(__FreeBSD__) || defined(__OpenBSD__)
+#if defined(__FreeBSD__)
   if (0 != pthread_attr_init(&attr) || 0 != pthread_attr_get_np(pthread_self(), &attr)) {
     return false;
   }

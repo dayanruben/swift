@@ -242,6 +242,7 @@ void ToolChain::addCommonFrontendArgs(const OutputInfo &OI,
   inputArgs.AddLastArg(arguments, options::OPT_require_explicit_availability);
   inputArgs.AddLastArg(arguments, options::OPT_require_explicit_availability_target);
   inputArgs.AddLastArg(arguments, options::OPT_require_explicit_sendable);
+  inputArgs.AddLastArg(arguments, options::OPT_check_api_availability_only);
   inputArgs.AddLastArg(arguments, options::OPT_enable_testing);
   inputArgs.AddLastArg(arguments, options::OPT_enable_private_imports);
   inputArgs.AddLastArg(arguments, options::OPT_g_Group);
@@ -476,6 +477,9 @@ ToolChain::constructInvocation(const CompileJobAction &job,
     Arguments.push_back("-cross-module-optimization");
   }
                                  
+  if (context.Args.hasArg(options::OPT_ExperimentalPerformanceAnnotations)) {
+    Arguments.push_back("-experimental-performance-annotations");
+  }
 
   file_types::ID remarksFileType = file_types::TY_YAMLOptRecord;
   // If a specific format is specified for the remarks, forward that as is.
@@ -598,6 +602,7 @@ ToolChain::constructInvocation(const CompileJobAction &job,
     context.Args.AddLastArg(Arguments, options::OPT_emit_symbol_graph_dir);
   }
   context.Args.AddLastArg(Arguments, options::OPT_include_spi_symbols);
+  context.Args.AddLastArg(Arguments, options::OPT_symbol_graph_minimum_access_level);
 
   return II;
 }
@@ -1089,6 +1094,7 @@ ToolChain::constructInvocation(const MergeModuleJobAction &job,
   context.Args.AddLastArg(Arguments, options::OPT_emit_symbol_graph);
   context.Args.AddLastArg(Arguments, options::OPT_emit_symbol_graph_dir);
   context.Args.AddLastArg(Arguments, options::OPT_include_spi_symbols);
+  context.Args.AddLastArg(Arguments, options::OPT_symbol_graph_minimum_access_level);
 
   context.Args.AddLastArg(Arguments, options::OPT_import_objc_header);
 

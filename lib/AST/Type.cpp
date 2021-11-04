@@ -826,7 +826,8 @@ bool TypeBase::isCGFloatType() {
   // On macOS `CGFloat` is part of a `CoreGraphics` module,
   // but on Linux it could be found in `Foundation`.
   return (module->getName().is("CoreGraphics") ||
-          module->getName().is("Foundation")) &&
+          module->getName().is("Foundation")   ||
+          module->getName().is("CoreFoundation")) &&
          NTD->getName().is("CGFloat");
 }
 
@@ -1890,13 +1891,11 @@ public:
       
       // Build the generic signature with the additional collected requirements.
       if (!addedRequirements.empty()) {
-        upperBoundGenericSig = evaluateOrDefault(
-                                           decl->getASTContext().evaluator,
-                                           AbstractGenericSignatureRequest{
-                                             upperBoundGenericSig.getPointer(),
-                                             /*genericParams=*/{ },
-                                             std::move(addedRequirements)},
-                                           nullptr);
+        upperBoundGenericSig = buildGenericSignature(decl->getASTContext(),
+                                                     upperBoundGenericSig,
+                                                     /*genericParams=*/{ },
+                                                     std::move(addedRequirements));
+
         upperBoundSubstMap = SubstitutionMap::get(upperBoundGenericSig,
           [&](SubstitutableType *t) -> Type {
             // Type substitutions remain the same as the original substitution
@@ -3988,10 +3987,8 @@ static Type substGenericFunctionType(GenericFunctionType *genericFnType,
     // If there were semantic changes, we need to build a new generic
     // signature.
     ASTContext &ctx = genericFnType->getASTContext();
-    genericSig = evaluateOrDefault(
-        ctx.evaluator,
-        AbstractGenericSignatureRequest{nullptr, genericParams, requirements},
-        GenericSignature());
+    genericSig = buildGenericSignature(ctx, GenericSignature(),
+                                       genericParams, requirements);
   } else {
     // Use the mapped generic signature.
     genericSig = GenericSignature::get(genericParams, requirements);

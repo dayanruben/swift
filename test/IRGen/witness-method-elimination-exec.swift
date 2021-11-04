@@ -3,7 +3,7 @@
 // the program).
 
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift -Xfrontend -enable-llvm-wme %s -emit-ir -o %t/main.ll
+// RUN: %target-build-swift -Xfrontend -enable-llvm-wme %s -Onone -emit-ir -o %t/main.ll
 // RUN: %target-clang %t/main.ll -isysroot %sdk -L%swift_obj_root/lib/swift/%target-sdk-name -flto -o %t/main
 // RUN: %target-run %t/main | %FileCheck %s
 
@@ -14,8 +14,10 @@
 // FIXME(mracek): More work needed to get this to work on non-Apple platforms.
 // REQUIRES: VENDOR=apple
 
-// Disable to unblock CI
-// REQUIRES: rdar84643923
+// For LTO, the linker dlopen()'s the libLTO library, which is a scenario that
+// ASan cannot work in ("Interceptors are not working, AddressSanitizer is
+// loaded too late").
+// REQUIRES: no_asan
 
 protocol TheProtocol {
   func func1_live()

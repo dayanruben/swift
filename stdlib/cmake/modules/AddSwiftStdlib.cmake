@@ -1263,7 +1263,9 @@ function(add_swift_target_library_single target name)
   set(PLIST_INFO_PLIST "Info.plist" CACHE STRING "Plist name")
   if("${SWIFTLIB_SINGLE_SDK}" IN_LIST SWIFT_DARWIN_PLATFORMS AND SWIFTLIB_SINGLE_IS_STDLIB)
     set(PLIST_INFO_NAME ${name})
-    set(PLIST_INFO_UTI "com.apple.dt.runtime.${name}")
+
+    # Underscores aren't permitted in the bundle identifier.
+    string(REPLACE "_" "" PLIST_INFO_UTI "com.apple.dt.runtime.${name}")
     set(PLIST_INFO_VERSION "${SWIFT_VERSION}")
     if (SWIFT_COMPILER_VERSION)
       set(PLIST_INFO_BUILD_VERSION
@@ -1720,6 +1722,11 @@ function(add_swift_target_library name)
         "Either SHARED, STATIC, or OBJECT_LIBRARY must be specified")
   endif()
 
+  # Define availability macros.
+  foreach(def ${SWIFT_STDLIB_AVAILABILITY_DEFINITIONS})
+    list(APPEND SWIFTLIB_SWIFT_COMPILE_FLAGS "-Xfrontend" "-define-availability" "-Xfrontend" "${def}") 
+  endforeach()
+  
   # In the standard library and overlays, warn about implicit overrides
   # as a reminder to consider when inherited protocols need different
   # behavior for their requirements.
