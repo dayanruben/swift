@@ -26,6 +26,8 @@
 #include "swift/AST/Requirement.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/Statistic.h"
+#include "RequirementLowering.h"
+#include <memory>
 #include <vector>
 
 using namespace swift;
@@ -88,16 +90,15 @@ void ConnectedComponent::buildRequirements(Type subjectType,
 
 }  // end namespace
 
-/// Convert a list of non-permanent, non-redundant rewrite rules into a minimal
-/// protocol requirement signature for \p proto. The requirements are sorted in
-/// canonical order, and same-type requirements are canonicalized.
+/// Convert a list of non-permanent, non-redundant rewrite rules into a list of
+/// requirements sorted in canonical order. The \p genericParams are used to
+/// produce sugared types.
 std::vector<Requirement>
-RequirementMachine::buildRequirementSignature(ArrayRef<unsigned> rules,
-                                              const ProtocolDecl *proto) const {
+RequirementMachine::buildRequirementsFromRules(
+    ArrayRef<unsigned> rules,
+    TypeArrayView<GenericTypeParamType> genericParams) const {
   std::vector<Requirement> reqs;
   llvm::SmallDenseMap<TypeBase *, ConnectedComponent> sameTypeReqs;
-
-  auto genericParams = proto->getGenericSignature().getGenericParams();
 
   // Convert a rewrite rule into a requirement.
   auto createRequirementFromRule = [&](const Rule &rule) {
@@ -196,18 +197,29 @@ RequirementMachine::buildRequirementSignature(ArrayRef<unsigned> rules,
 /// Builds the requirement signatures for each protocol in this strongly
 /// connected component.
 llvm::DenseMap<const ProtocolDecl *, std::vector<Requirement>>
-RequirementMachine::computeMinimalRequirements() {
-  assert(Protos.size() > 0);
+RequirementMachine::computeMinimalProtocolRequirements() {
+  assert(Protos.size() > 0 &&
+         "Not a protocol connected component rewrite system");
+  assert(Params.empty() &&
+         "Not a protocol connected component rewrite system");
+
   System.minimizeRewriteSystem();
 
-  auto rules = System.getMinimizedRules(Protos);
+  if (Dump) {
+    llvm::dbgs() << "Minimized rewrite system:\n";
+    dump(llvm::dbgs());
+  }
+
+  auto rules = System.getMinimizedProtocolRules(Protos);
 
   // Note that we build 'result' by iterating over 'Protos' rather than
   // 'rules'; this is intentional, so that even if a protocol has no
   // rules, we still end up creating an entry for it in 'result'.
   llvm::DenseMap<const ProtocolDecl *, std::vector<Requirement>> result;
-  for (const auto *proto : Protos)
-    result[proto] = buildRequirementSignature(rules[proto], proto);
+  for (const auto *proto : Protos) {
+    auto genericParams = proto->getGenericSignature().getGenericParams();
+    result[proto] = buildRequirementsFromRules(rules[proto], genericParams);
+  }
 
   return result;
 }
@@ -223,8 +235,8 @@ RequirementSignatureRequestRQM::evaluate(Evaluator &evaluator,
 
   // We build requirement signatures for all protocols in a strongly connected
   // component at the same time.
-  auto *machine = ctx.getOrCreateRequirementMachine(proto);
-  auto requirements = machine->computeMinimalRequirements();
+  auto *machine = ctx.getRewriteContext().getRequirementMachine(proto);
+  auto requirements = machine->computeMinimalProtocolRequirements();
 
   bool debug = machine->getDebugOptions().contains(DebugFlags::Minimization);
 
@@ -263,4 +275,87 @@ RequirementSignatureRequestRQM::evaluate(Evaluator &evaluator,
 
   // Return the result for the specific protocol this request was kicked off on.
   return result;
+}
+
+/// Builds the top-level generic signature requirements for this rewrite system.
+std::vector<Requirement>
+RequirementMachine::computeMinimalGenericSignatureRequirements() {
+  assert(Protos.empty() &&
+         "Not a top-level generic signature rewrite system");
+  assert(!Params.empty() &&
+         "Not a from-source top-level generic signature rewrite system");
+
+  System.minimizeRewriteSystem();
+
+  if (Dump) {
+    llvm::dbgs() << "Minimized rewrite system:\n";
+    dump(llvm::dbgs());
+  }
+
+  auto rules = System.getMinimizedGenericSignatureRules();
+  return buildRequirementsFromRules(rules, getGenericParams());
+}
+
+GenericSignatureWithError
+AbstractGenericSignatureRequestRQM::evaluate(
+         Evaluator &evaluator,
+         const GenericSignatureImpl *baseSignatureImpl,
+         SmallVector<GenericTypeParamType *, 2> addedParameters,
+         SmallVector<Requirement, 2> addedRequirements) const {
+  GenericSignature baseSignature = GenericSignature{baseSignatureImpl};
+  // If nothing is added to the base signature, just return the base
+  // signature.
+  if (addedParameters.empty() && addedRequirements.empty())
+    return GenericSignatureWithError(baseSignature, /*hadError=*/false);
+
+  ASTContext &ctx = addedParameters.empty()
+      ? addedRequirements.front().getFirstType()->getASTContext()
+      : addedParameters.front()->getASTContext();
+
+  SmallVector<GenericTypeParamType *, 4> genericParams(
+      baseSignature.getGenericParams().begin(),
+      baseSignature.getGenericParams().end());
+  genericParams.append(
+      addedParameters.begin(),
+      addedParameters.end());
+
+  // If there are no added requirements, we can form the signature directly
+  // with the added parameters.
+  if (addedRequirements.empty()) {
+    auto result = GenericSignature::get(genericParams,
+                                        baseSignature.getRequirements());
+    return GenericSignatureWithError(result, /*hadError=*/false);
+  }
+
+  SmallVector<Requirement, 4> requirements(
+      baseSignature.getRequirements().begin(),
+      baseSignature.getRequirements().end());
+
+  // The requirements passed to this request may have been substituted,
+  // meaning the subject type might be a concrete type and not a type
+  // parameter.
+  //
+  // Also, the right hand side of conformance requirements here might be
+  // a protocol composition.
+  //
+  // Desugaring converts these kinds of requirements into "proper"
+  // requirements where the subject type is always a type parameter,
+  // which is what the RuleBuilder expects.
+  for (auto req : addedRequirements)
+    desugarRequirement(req, requirements);
+
+  // Heap-allocate the requirement machine to save stack space.
+  std::unique_ptr<RequirementMachine> machine(new RequirementMachine(
+      ctx.getRewriteContext()));
+
+  machine->initWithAbstractRequirements(genericParams, requirements);
+
+  auto minimalRequirements =
+    machine->computeMinimalGenericSignatureRequirements();
+
+  // FIXME: Implement this
+  bool hadError = false;
+
+  auto result = GenericSignature::get(genericParams, minimalRequirements);
+  return GenericSignatureWithError(result, hadError);
 }

@@ -466,8 +466,7 @@ function(add_swift_host_library name)
         SHARED
         STATIC
         OBJECT
-        PURE_SWIFT
-        HAS_LIBSWIFT)
+        PURE_SWIFT)
   set(single_parameter_options)
   set(multiple_parameter_options
         LLVM_LINK_COMPONENTS)
@@ -519,12 +518,6 @@ function(add_swift_host_library name)
   endif()
 
   add_library(${name} ${libkind} ${ASHL_SOURCES})
-
-  if (ASHL_HAS_LIBSWIFT AND LIBSWIFT_BUILD_MODE)
-    # Workaround for a linker crash related to autolinking: rdar://77839981
-    set_property(TARGET ${name} APPEND_STRING PROPERTY
-                 LINK_FLAGS " -lobjc ")
-  endif()
 
   # Respect LLVM_COMMON_DEPENDS if it is set.
   #
@@ -674,8 +667,8 @@ endfunction()
 function(add_libswift_module module)
   cmake_parse_arguments(ALSM
                         ""
-                        "DEPENDS"
                         ""
+                        "DEPENDS"
                         ${ARGN})
   set(sources ${ALSM_UNPARSED_ARGUMENTS})
   list(TRANSFORM sources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
@@ -724,8 +717,8 @@ endfunction()
 function(add_libswift name)
   cmake_parse_arguments(ALS
                         ""
-                        "BOOTSTRAPPING;SWIFT_EXEC;DEPENDS"
-                        ""
+                        "BOOTSTRAPPING;SWIFT_EXEC"
+                        "DEPENDS"
                         ${ARGN})
 
   set(libswift_compile_options
@@ -793,7 +786,7 @@ function(add_libswift name)
               "-emit-module-path" "${build_dir}/${module}.swiftmodule"
               "-parse-as-library" ${sources}
               "-wmo" ${libswift_compile_options}
-              "-I" "${CMAKE_SOURCE_DIR}/include/swift"
+              "-I" "${SWIFT_SOURCE_DIR}/include/swift"
               "-I" "${build_dir}"
       COMMENT "Building libswift module ${module}")
 
@@ -803,6 +796,7 @@ function(add_libswift name)
   # Create a static libswift library containing all module object files.
   add_library(${name} STATIC ${all_obj_files})
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE CXX)
+  set_property(GLOBAL APPEND PROPERTY SWIFT_BUILDTREE_EXPORTS ${name})
 endfunction()
 
 macro(add_swift_tool_subdirectory name)

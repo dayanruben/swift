@@ -258,7 +258,11 @@ DescriptiveDeclKind Decl::getDescriptiveKind() const {
      // We have a method.
      switch (func->getCorrectStaticSpelling()) {
      case StaticSpellingKind::None:
-       return DescriptiveDeclKind::Method;
+       if (func->isDistributed()) {
+         return DescriptiveDeclKind::DistributedMethod;
+       } else {
+         return DescriptiveDeclKind::Method;
+       }
      case StaticSpellingKind::KeywordStatic:
        return DescriptiveDeclKind::StaticMethod;
      case StaticSpellingKind::KeywordClass:
@@ -320,6 +324,7 @@ StringRef Decl::getDescriptiveKindName(DescriptiveDeclKind K) {
   ENTRY(Method, "instance method");
   ENTRY(StaticMethod, "static method");
   ENTRY(ClassMethod, "class method");
+  ENTRY(DistributedMethod, "distributed instance method");
   ENTRY(Getter, "getter");
   ENTRY(Setter, "setter");
   ENTRY(WillSet, "willSet observer");
@@ -1066,6 +1071,11 @@ ImportDecl *ImportDecl::create(ASTContext &Ctx, DeclContext *DC,
   auto D = new (ptr) ImportDecl(DC, ImportLoc, Kind, KindLoc, Path);
   if (ClangN)
     D->setClangNode(ClangN);
+  auto realNameIfExists = Ctx.getRealModuleName(Path.front().Item,
+                                                ASTContext::ModuleAliasLookupOption::realNameFromAlias);
+  if (!realNameIfExists.empty()) {
+    D->RealModuleName = realNameIfExists;
+  }
   return D;
 }
 
@@ -1156,6 +1166,24 @@ ImportDecl::findBestImportKind(ArrayRef<ValueDecl *> Decls) {
   }
 
   return FirstKind;
+}
+
+ImportPath ImportDecl::getRealImportPath(ImportPath::Builder &scratch) const {
+  assert(scratch.empty() && "scratch ImportPath::Builder must be initially empty");
+  auto path = getImportPath();
+  if (RealModuleName.empty())
+    return path;
+
+  for (auto elem : path) {
+    if (scratch.empty()) {
+      // Add the real module name instead of its alias
+      scratch.push_back(RealModuleName);
+    } else {
+      // Add the rest if any (access path elements)
+      scratch.push_back(elem.Item);
+    }
+  }
+  return scratch.get();
 }
 
 ArrayRef<ValueDecl *> ImportDecl::getDecls() const {
@@ -1255,9 +1283,14 @@ ExtensionDecl::takeConformanceLoaderSlow() {
 }
 
 NominalTypeDecl *ExtensionDecl::getExtendedNominal() const {
-  assert((hasBeenBound() || canNeverBeBound()) &&
-         "Extension must have already been bound (by bindExtensions)");
-  return ExtendedNominal.getPointer();
+  if (hasBeenBound()) {
+    return ExtendedNominal.getPointer();
+  } else if (canNeverBeBound()) {
+    return computeExtendedNominal();
+  }
+
+  llvm_unreachable(
+      "Extension must have already been bound (by bindExtensions)");
 }
 
 NominalTypeDecl *ExtensionDecl::computeExtendedNominal() const {
@@ -4038,12 +4071,14 @@ AbstractTypeParamDecl::getConformingProtocols() const {
 
 GenericTypeParamDecl::GenericTypeParamDecl(DeclContext *dc, Identifier name,
                                            SourceLoc nameLoc,
-                                           unsigned depth, unsigned index)
-  : AbstractTypeParamDecl(DeclKind::GenericTypeParam, dc, name, nameLoc) {
+                                           bool isTypeSequence, unsigned depth,
+                                           unsigned index)
+    : AbstractTypeParamDecl(DeclKind::GenericTypeParam, dc, name, nameLoc) {
   Bits.GenericTypeParamDecl.Depth = depth;
   assert(Bits.GenericTypeParamDecl.Depth == depth && "Truncation");
   Bits.GenericTypeParamDecl.Index = index;
   assert(Bits.GenericTypeParamDecl.Index == index && "Truncation");
+  Bits.GenericTypeParamDecl.TypeSequence = isTypeSequence;
   auto &ctx = dc->getASTContext();
   auto type = new (ctx, AllocationArena::Permanent) GenericTypeParamType(this);
   setInterfaceType(MetatypeType::get(type, ctx));
@@ -6010,6 +6045,20 @@ bool VarDecl::isSelfParameter() const {
   }
 
   return false;
+}
+
+bool VarDecl::isActorSelf() const {
+  if (!isSelfParameter() && !isSelfParamCapture())
+    return false;
+
+  auto *dc = getDeclContext();
+  while (!dc->isTypeContext() && !dc->isModuleScopeContext())
+    dc = dc->getParent();
+
+  // Check if this `self` parameter belogs to an actor declaration or
+  // extension.
+  auto nominal = dc->getSelfNominalTypeDecl();
+  return nominal && nominal->isActor();
 }
 
 /// Whether the given variable is the backing storage property for

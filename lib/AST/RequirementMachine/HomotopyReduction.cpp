@@ -10,14 +10,23 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// A confluent rewrite system together with a set of rewrite loops that generate
-// the homotopy relation on rewrite paths is known as a 'coherent presentation'.
+// This file implements the algorithm for computing a minimal set of rules from
+// a confluent rewrite system. A minimal set of rules is:
+//
+// 1) Large enough that computing the confluent completion produces the original
+//    rewrite system;
+//
+// 2) Small enough that no further rules can be deleted without changing the
+//    resulting confluent rewrite system.
+//
+// Redundant rules that are not part of the minimal set are redundant are
+// detected by analyzing the set of rewrite loops computed by the completion
+// procedure.
 //
 // If a rewrite rule appears exactly once in a loop and without context, the
 // loop witnesses a redundancy; the rewrite rule is equivalent to traveling
 // around the loop "in the other direction". This rewrite rule and the
-// corresponding loop can be deleted from the coherent presentation via a
-// Tietze transformation.
+// corresponding rewrite loop can be deleted.
 //
 // Any occurrence of the rule in the remaining loops is replaced with the
 // alternate definition obtained by splitting the loop that witnessed the
@@ -25,7 +34,7 @@
 // reduced left-canonical form. The loop witnessing the redundancy normalizes
 // to the empty loop and is deleted.
 //
-// Iterating this process eventually produces a minimal presentation.
+// Iterating this process eventually produces a minimal set of rewrite rules.
 //
 // For a description of the general algorithm, see "A Homotopical Completion
 // Procedure with Applications to Coherence of Monoids",
@@ -66,7 +75,10 @@ using namespace rewriting;
 llvm::SmallVector<unsigned, 1>
 RewriteLoop::findRulesAppearingOnceInEmptyContext(
     const RewriteSystem &system) const {
+  // Rules appearing in empty context (possibly more than once).
   llvm::SmallDenseSet<unsigned, 2> rulesInEmptyContext;
+
+  // The number of times each rule appears (with or without context).
   llvm::SmallDenseMap<unsigned, unsigned, 2> ruleMultiplicity;
 
   RewritePathEvaluator evaluator(Basepoint);
@@ -90,6 +102,7 @@ RewriteLoop::findRulesAppearingOnceInEmptyContext(
     step.apply(evaluator, system);
   }
 
+  // Collect all rules that we saw exactly once in empty context.
   SmallVector<unsigned, 1> result;
   for (auto rule : rulesInEmptyContext) {
     auto found = ruleMultiplicity.find(rule);
@@ -100,6 +113,58 @@ RewriteLoop::findRulesAppearingOnceInEmptyContext(
   }
 
   return result;
+}
+
+/// If a rewrite loop contains an explicit rule in empty context, propagate the
+/// explicit bit to all other rules appearing in empty context within the same
+/// loop.
+///
+/// When computing generating conformances we prefer to eliminate non-explicit
+/// rules, as a heuristic to ensure that minimized conformance requirements
+/// remain in the same protocol as originally written, in cases where they can
+/// be moved between protocols.
+///
+/// However, conformance rules can also be written in a non-canonical way.
+///
+/// Most conformance requirements are non-canonical, since the original
+/// requirements use unresolved types. For example, a requirement 'Self.X.Y : Q'
+/// inside a protocol P will lower to a rewrite rule
+///
+///    [P].X.Y.[Q] => [P].X.Y
+///
+/// Completion will then add a new rule that looks something like this, using
+/// associated type symbols:
+///
+///    [P:X].[P2:Y].[Q] => [P:X].[P2:Y]
+///
+/// Furthermore, if [P:X].[P2:Y] simplies to some other term, such as [P:Z],
+/// there will be yet another rule added by completion:
+///
+///    [P:Z].[Q] => [P:Z]
+///
+/// The new rules are related to the original rule via rewrite loops where
+/// both rules appear in empty context. This algorithm will propagate the
+/// explicit bit from the original rule to the canonical rule.
+void RewriteSystem::propagateExplicitBits() {
+  for (const auto &loop : Loops) {
+    SmallVector<unsigned, 1> rulesInEmptyContext =
+      loop.findRulesAppearingOnceInEmptyContext(*this);
+
+    bool sawExplicitRule = false;
+
+    for (unsigned ruleID : rulesInEmptyContext) {
+      const auto &rule = getRule(ruleID);
+      if (rule.isExplicit())
+        sawExplicitRule = true;
+    }
+    if (sawExplicitRule) {
+      for (unsigned ruleID : rulesInEmptyContext) {
+        auto &rule = getRule(ruleID);
+        if (!rule.isPermanent() && !rule.isExplicit())
+          rule.markExplicit();
+      }
+    }
+  }
 }
 
 /// Given a rewrite rule which appears exactly once in a loop
@@ -474,7 +539,6 @@ bool RewriteLoop::isInContext(const RewriteSystem &system) const {
 /// minimization algorithm.
 bool RewriteSystem::
 isCandidateForDeletion(unsigned ruleID,
-                       bool firstPass,
                        const llvm::DenseSet<unsigned> *redundantConformances) const {
   const auto &rule = getRule(ruleID);
 
@@ -493,22 +557,15 @@ isCandidateForDeletion(unsigned ruleID,
   // Other rules involving unresolved name symbols are derived from an
   // associated type introduction rule together with a conformance rule.
   // They are eliminated in the first pass.
-  if (firstPass)
-    return rule.getLHS().containsUnresolvedSymbols();
-
-  // In the second and third pass we should not have any rules involving
-  // unresolved name symbols, except for permanent rules which were
-  // already skipped above.
-  //
-  // FIXME: This isn't true with invalid code.
-  assert(!rule.getLHS().containsUnresolvedSymbols());
+  if (rule.getLHS().containsUnresolvedSymbols())
+    return true;
 
   // Protocol conformance rules are eliminated via a different
   // algorithm which computes "generating conformances".
   //
-  // The first and second passes skip protocol conformance rules.
+  // The first pass skips protocol conformance rules.
   //
-  // The third pass eliminates any protocol conformance rule which is
+  // The second pass eliminates any protocol conformance rule which is
   // redundant according to both homotopy reduction and the generating
   // conformances algorithm.
   //
@@ -532,25 +589,19 @@ isCandidateForDeletion(unsigned ruleID,
 /// once in empty context. Returns a redundant rule to delete if one was found,
 /// otherwise returns None.
 ///
-/// Minimization performs three passes over the rewrite system, with the
-/// \p firstPass and \p redundantConformances parameters as follows:
+/// Minimization performs three passes over the rewrite system.
 ///
-/// 1) First, rules involving unresolved name symbols are deleted, with
-///    \p firstPass equal to true and \p redundantConformances equal to nullptr.
+/// 1) First, rules that are not conformance rules are deleted, with
+///    \p redundantConformances equal to nullptr.
 ///
-/// 2) Second, rules that are not conformance rules are deleted, with
-///    \p firstPass equal to false and \p redundantConformances equal to nullptr.
+/// 2) Second, generating conformances are computed.
 ///
-/// 3) Finally, conformance rules are deleted after computing a minimal set of
-///    generating conformances, with \p firstPass equal to false and
-///    \p redundantConformances equal to the set of conformance rules that are
+/// 3) Finally, redundant conformance rules are deleted, with
+/// \p redundantConformances equal to the set of conformance rules that are
 ///    not generating conformances.
 Optional<unsigned> RewriteSystem::
-findRuleToDelete(bool firstPass,
-                 const llvm::DenseSet<unsigned> *redundantConformances,
+findRuleToDelete(const llvm::DenseSet<unsigned> *redundantConformances,
                  RewritePath &replacementPath) {
-  assert(!firstPass || redundantConformances == nullptr);
-
   SmallVector<std::pair<unsigned, unsigned>, 2> redundancyCandidates;
   for (unsigned loopID : indices(Loops)) {
     const auto &loop = Loops[loopID];
@@ -566,7 +617,7 @@ findRuleToDelete(bool firstPass,
 
   for (const auto &pair : redundancyCandidates) {
     unsigned ruleID = pair.second;
-    if (!isCandidateForDeletion(ruleID, firstPass, redundantConformances))
+    if (!isCandidateForDeletion(ruleID, redundantConformances))
       continue;
 
     if (!found) {
@@ -593,7 +644,9 @@ findRuleToDelete(bool firstPass,
   replacementPath = loop.Path.splitCycleAtRule(ruleID);
 
   loop.markDeleted();
-  getRule(ruleID).markRedundant();
+
+  auto &rule = getRule(ruleID);
+  rule.markRedundant();
 
   return ruleID;
 }
@@ -665,12 +718,10 @@ void RewriteSystem::deleteRule(unsigned ruleID,
 }
 
 void RewriteSystem::performHomotopyReduction(
-    bool firstPass,
     const llvm::DenseSet<unsigned> *redundantConformances) {
   while (true) {
     RewritePath replacementPath;
-    auto optRuleID = findRuleToDelete(firstPass,
-                                      redundantConformances,
+    auto optRuleID = findRuleToDelete(redundantConformances,
                                       replacementPath);
 
     // If no redundant rules remain which can be eliminated by this pass, stop.
@@ -703,25 +754,23 @@ void RewriteSystem::minimizeRewriteSystem() {
   // Check invariants before homotopy reduction.
   verifyRewriteLoops();
 
-  // First pass: Eliminate all redundant rules involving unresolved types.
-  performHomotopyReduction(/*firstPass=*/true,
-                           /*redundantConformances=*/nullptr);
+  propagateExplicitBits();
 
-  // Second pass: Eliminate all redundant rules that are not conformance rules.
-  performHomotopyReduction(/*firstPass=*/false,
-                           /*redundantConformances=*/nullptr);
+  // First pass: Eliminate all redundant rules that are not conformance rules.
+  performHomotopyReduction(/*redundantConformances=*/nullptr);
 
   // Now find a minimal set of generating conformances.
   //
   // FIXME: For now this just produces a set of redundant conformances, but
-  // it should actually compute the full generating conformance basis, since
-  // we want to use the same information for finding conformance access paths.
+  // it should actually output the canonical generating conformance equation
+  // for each non-generating conformance. We can then use information to
+  // compute conformance access paths, instead of the current "brute force"
+  // algorithm used for that purpose.
   llvm::DenseSet<unsigned> redundantConformances;
   computeGeneratingConformances(redundantConformances);
 
-  // Third pass: Eliminate all redundant conformance rules.
-  performHomotopyReduction(/*firstPass=*/false,
-                           /*redundantConformances=*/&redundantConformances);
+  // Second pass: Eliminate all redundant conformance rules.
+  performHomotopyReduction(/*redundantConformances=*/&redundantConformances);
 
   // Check invariants after homotopy reduction.
   verifyRewriteLoops();
@@ -730,10 +779,14 @@ void RewriteSystem::minimizeRewriteSystem() {
 }
 
 /// Collect all non-permanent, non-redundant rules whose domain is equal to
-/// one of the protocols in \p proto. These rules form the requirement
-/// signatures of these protocols.
+/// one of the protocols in \p proto. In other words, the first symbol of the
+/// left hand side term is either a protocol symbol or associated type symbol
+/// whose protocol is in \p proto.
+///
+/// These rules form the requirement signatures of these protocols.
 llvm::DenseMap<const ProtocolDecl *, std::vector<unsigned>>
-RewriteSystem::getMinimizedRules(ArrayRef<const ProtocolDecl *> protos) {
+RewriteSystem::getMinimizedProtocolRules(
+    ArrayRef<const ProtocolDecl *> protos) const {
   assert(Minimized);
 
   llvm::DenseMap<const ProtocolDecl *, std::vector<unsigned>> rules;
@@ -752,6 +805,33 @@ RewriteSystem::getMinimizedRules(ArrayRef<const ProtocolDecl *> protos) {
     const auto *proto = domain[0];
     if (std::find(protos.begin(), protos.end(), proto) != protos.end())
       rules[proto].push_back(ruleID);
+  }
+
+  return rules;
+}
+
+/// Collect all non-permanent, non-redundant rules whose left hand side
+/// begins with a generic parameter symbol.
+///
+/// These rules form the top-level generic signature for this rewrite system.
+std::vector<unsigned>
+RewriteSystem::getMinimizedGenericSignatureRules() const {
+  assert(Minimized);
+
+  std::vector<unsigned> rules;
+  for (unsigned ruleID : indices(Rules)) {
+    const auto &rule = getRule(ruleID);
+
+    if (rule.isPermanent())
+      continue;
+
+    if (rule.isRedundant())
+      continue;
+
+    if (rule.getLHS()[0].getKind() != Symbol::Kind::GenericParam)
+      continue;
+
+    rules.push_back(ruleID);
   }
 
   return rules;
@@ -787,6 +867,7 @@ void RewriteSystem::verifyRewriteLoops() const {
 /// since this suggests a misunderstanding on my part.
 void RewriteSystem::verifyRedundantConformances(
     llvm::DenseSet<unsigned> redundantConformances) const {
+#ifndef NDEBUG
   for (unsigned ruleID : redundantConformances) {
     const auto &rule = getRule(ruleID);
     assert(!rule.isPermanent() &&
@@ -804,11 +885,13 @@ void RewriteSystem::verifyRedundantConformances(
       abort();
     }
   }
+#endif
 }
 
 // Assert if homotopy reduction failed to eliminate a rewrite rule it was
 // supposed to delete.
 void RewriteSystem::verifyMinimizedRules() const {
+#ifndef NDEBUG
   for (const auto &rule : Rules) {
     // Note that sometimes permanent rules can be simplified, but they can never
     // be redundant.
@@ -825,8 +908,11 @@ void RewriteSystem::verifyMinimizedRules() const {
     if (rule.isRedundant())
       continue;
 
-    // Simplified rules should be redundant.
-    if (rule.isSimplified()) {
+    // Simplified rules should be redundant, unless they're protocol conformance
+    // rules, which unfortunately might no be redundant, because we try to keep
+    // them in the original protocol definition for compatibility with the
+    // GenericSignatureBuilder's minimization algorithm.
+    if (rule.isSimplified() && !rule.isProtocolConformanceRule()) {
       llvm::errs() << "Simplified rule is not redundant: " << rule << "\n\n";
       dump(llvm::errs());
       abort();
@@ -843,4 +929,5 @@ void RewriteSystem::verifyMinimizedRules() const {
       abort();
     }
   }
+#endif
 }

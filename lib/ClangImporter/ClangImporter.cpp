@@ -2527,6 +2527,10 @@ static bool isVisibleFromModule(const ClangModuleUnit *ModuleFilter,
   auto *Importer = static_cast<ClangImporter *>(Ctx.getClangModuleLoader());
   auto ClangNode = Importer->getEffectiveClangNode(VD);
 
+  // Decls in the __ObjC bridging header is always visible.
+  if (VD->getModuleContext() == Importer->getImportedHeaderModule())
+    return true;
+
   // Macros can be "redeclared" by putting an equivalent definition in two
   // different modules. (We don't actually check the equivalence.)
   // FIXME: We're also not checking if the redeclaration is in /this/ module.
@@ -4041,6 +4045,20 @@ lookupInClassTemplateSpecialization(
   return found;
 }
 
+static bool isDirectLookupMemberContext(const clang::Decl *memberContext,
+                                        const clang::Decl *parent) {
+  if (memberContext->getCanonicalDecl() == parent->getCanonicalDecl())
+    return true;
+  if (auto namespaceDecl = dyn_cast<clang::NamespaceDecl>(memberContext)) {
+    if (namespaceDecl->isInline()) {
+      if (auto memberCtxParent =
+              dyn_cast<clang::Decl>(namespaceDecl->getParent()))
+        return isDirectLookupMemberContext(memberCtxParent, parent);
+    }
+  }
+  return false;
+}
+
 SmallVector<SwiftLookupTable::SingleEntry, 4>
 ClangDirectLookupRequest::evaluate(Evaluator &evaluator,
                                    ClangDirectLookupDescriptor desc) const {
@@ -4054,28 +4072,25 @@ ClangDirectLookupRequest::evaluate(Evaluator &evaluator,
       getClangOwningModule(clangDecl, clangDecl->getASTContext());
   auto *lookupTable = ctx.getClangModuleLoader()->findLookupTable(clangModule);
 
-  auto *swiftDeclContext = desc.decl->getInnermostDeclContext();
-  auto *declContextTypeDecl = swiftDeclContext->getSelfNominalTypeDecl();
-  auto effectiveClangContext =
-      ctx.getClangModuleLoader()->getEffectiveClangContext(declContextTypeDecl);
-
   auto foundDecls = lookupTable->lookup(
-      SerializedSwiftName(desc.name.getBaseName()), effectiveClangContext);
+      SerializedSwiftName(desc.name.getBaseName()), EffectiveClangContext());
   // Make sure that `clangDecl` is the parent of all the members we found.
   SmallVector<SwiftLookupTable::SingleEntry, 4> filteredDecls;
-  llvm::copy_if(
-      foundDecls, std::back_inserter(filteredDecls),
-      [clangDecl](SwiftLookupTable::SingleEntry decl) {
-            auto first = decl.get<clang::NamedDecl *>()->getDeclContext();
-            auto second = cast<clang::DeclContext>(clangDecl);
-            if (auto firstDecl = dyn_cast<clang::Decl>(first)) {
-              if (auto secondDecl = dyn_cast<clang::Decl>(second))
-                return firstDecl->getCanonicalDecl() == secondDecl->getCanonicalDecl();
-              else
-                return false;
-            }
-            return first == second;
-      });
+  llvm::copy_if(foundDecls, std::back_inserter(filteredDecls),
+                [clangDecl](SwiftLookupTable::SingleEntry decl) {
+                  auto foundClangDecl = decl.dyn_cast<clang::NamedDecl *>();
+                  if (!foundClangDecl)
+                    return false;
+                  auto first = foundClangDecl->getDeclContext();
+                  auto second = cast<clang::DeclContext>(clangDecl);
+                  if (auto firstDecl = dyn_cast<clang::Decl>(first)) {
+                    if (auto secondDecl = dyn_cast<clang::Decl>(second))
+                      return isDirectLookupMemberContext(firstDecl, secondDecl);
+                    else
+                      return false;
+                  }
+                  return first == second;
+                });
   return filteredDecls;
 }
 

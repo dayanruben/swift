@@ -1506,9 +1506,7 @@ TypeExpr *PreCheckExpression::simplifyNestedTypeExpr(UnresolvedDotExpr *UDE) {
         },
         // FIXME: Don't let placeholder types escape type resolution.
         // For now, just return the placeholder type.
-        [](auto &ctx, auto *originator) {
-          return Type();
-        });
+        PlaceholderType::get);
     const auto BaseTy = resolution.resolveType(InnerTypeRepr);
 
     if (BaseTy->mayHaveMembers()) {
@@ -2010,7 +2008,7 @@ void PreCheckExpression::resolveKeyPathExpr(KeyPathExpr *KPE) {
   std::reverse(components.begin(), components.end());
 
   KPE->setRootType(rootType);
-  KPE->resolveComponents(getASTContext(), components);
+  KPE->setComponents(getASTContext(), components);
 }
 
 Expr *PreCheckExpression::simplifyTypeConstructionWithLiteralArg(Expr *E) {
@@ -2061,9 +2059,7 @@ Expr *PreCheckExpression::simplifyTypeConstructionWithLiteralArg(Expr *E) {
         },
         // FIXME: Don't let placeholder types escape type resolution.
         // For now, just return the placeholder type.
-        [](auto &ctx, auto *originator) {
-          return Type();
-        });
+        PlaceholderType::get);
     const auto result = resolution.resolveType(typeExpr->getTypeRepr());
     if (result->hasError())
       return nullptr;

@@ -255,9 +255,15 @@ def enable_experimental_concurrency :
   Flag<["-"], "enable-experimental-concurrency">,
   HelpText<"Enable experimental concurrency model">;
 
+def disable_lexical_lifetimes :
+  Flag<["-"], "disable-lexical-lifetimes">,
+  HelpText<"Disables early lexical lifetimes. Mutually exclusive with "
+           "-enable-experimental-lexical-lifetimes">;
+
 def enable_experimental_lexical_lifetimes :
   Flag<["-"], "enable-experimental-lexical-lifetimes">,
-  HelpText<"Enable experimental lexical lifetimes">;
+  HelpText<"Enable experimental lexical lifetimes. Mutually exclusive with "
+           "-disable-early-lexical-lifetimes">;
 
 def enable_experimental_move_only :
   Flag<["-"], "enable-experimental-move-only">,
@@ -469,6 +475,10 @@ def disable_deserialization_recovery :
   Flag<["-"], "disable-deserialization-recovery">,
   HelpText<"Don't attempt to recover from missing xrefs (etc) in swiftmodules">;
 
+def enable_experimental_regex :
+  Flag<["-"], "enable-experimental-regex">,
+  HelpText<"Enable experimental string processing">;
+
 def disable_availability_checking : Flag<["-"],
   "disable-availability-checking">,
   HelpText<"Disable checking for potentially unavailable APIs">;
@@ -562,6 +572,9 @@ def warn_long_expression_type_checking_EQ : Joined<["-"], "warn-long-expression-
 def Rmodule_interface_rebuild : Flag<["-"], "Rmodule-interface-rebuild">,
   HelpText<"Emits a remark if an imported module needs to be re-compiled from its module interface">;
 
+def downgrade_typecheck_interface_error : Flag<["-"], "downgrade-typecheck-interface-error">,
+  HelpText<"Downgrade error to warning when typechecking emitted module interfaces">;
+
 def enable_volatile_modules : Flag<["-"], "enable-volatile-modules">,
   HelpText<"Load Swift modules in memory">;
 
@@ -626,6 +639,10 @@ def disable_debugger_shadow_copies : Flag<["-"], "disable-debugger-shadow-copies
 
 def disable_concrete_type_metadata_mangled_name_accessors : Flag<["-"], "disable-concrete-type-metadata-mangled-name-accessors">,
   HelpText<"Disable concrete type metadata access by mangled name">,
+  Flags<[FrontendOption, HelpHidden]>;
+
+def disable_standard_substitutions_in_reflection_mangling : Flag<["-"], "disable-standard-substitutions-in-reflection-mangling">,
+  HelpText<"Disable referencing stdlib symbols via mangled names in reflection mangling">,
   Flags<[FrontendOption, HelpHidden]>;
   
 def playground : Flag<["-"], "playground">,

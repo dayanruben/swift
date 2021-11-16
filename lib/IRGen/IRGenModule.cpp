@@ -698,6 +698,7 @@ namespace RuntimeConstants {
   const auto NoUnwind = llvm::Attribute::NoUnwind;
   const auto ZExt = llvm::Attribute::ZExt;
   const auto FirstParamReturned = llvm::Attribute::Returned;
+  const auto WillReturn = llvm::Attribute::WillReturn;
 
 #ifdef CHECK_RUNTIME_EFFECT_ANALYSIS
   const auto NoEffect = RuntimeEffect::NoEffect;
@@ -1834,6 +1835,19 @@ void IRGenModule::emitSwiftAsyncExtendedFrameInfoWeakRef() {
   extendedFramePointerFlagsWeakRef = new llvm::GlobalVariable(Module, Int8PtrTy, false,
                                          llvm::GlobalValue::ExternalWeakLinkage, nullptr,
                                          symbolName);
+
+  // The weak imported extendedFramePointerFlagsWeakRef gets optimized out
+  // before being added back as a strong import.
+  // Declarations can't be added to the used list, so we create a little
+  // global that can't be used from the program, but can be in the used list to
+  // avoid optimizations.
+  llvm::GlobalVariable *usage = new llvm::GlobalVariable(
+      Module, extendedFramePointerFlagsWeakRef->getType(), false,
+      llvm::GlobalValue::LinkOnceODRLinkage,
+      static_cast<llvm::GlobalVariable *>(extendedFramePointerFlagsWeakRef),
+      "_swift_async_extendedFramePointerFlagsUser");
+  usage->setVisibility(llvm::GlobalValue::HiddenVisibility);
+  addUsedGlobal(usage);
 }
 
 bool IRGenModule::isConcurrencyAvailable() {

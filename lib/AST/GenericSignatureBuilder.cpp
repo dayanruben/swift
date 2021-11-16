@@ -2816,9 +2816,9 @@ static Type formDependentType(GenericTypeParamType *base,
 /// parameter key, then following the path of associated types.
 static Type formDependentType(ASTContext &ctx, GenericParamKey genericParam,
                               RelativeRewritePath path) {
-  return formDependentType(GenericTypeParamType::get(genericParam.Depth,
-                                                     genericParam.Index,
-                                                     ctx),
+  return formDependentType(GenericTypeParamType::get(genericParam.TypeSequence,
+                                                     genericParam.Depth,
+                                                     genericParam.Index, ctx),
                            path);
 }
 
@@ -3306,9 +3306,9 @@ bool GenericSignatureBuilder::addSameTypeRewriteRule(CanType type1,
   }
 
   // Add the rewrite rule.
-  Type firstBase =
-    GenericTypeParamType::get(path1.getBase()->Depth, path1.getBase()->Index,
-                              getASTContext());
+  Type firstBase = GenericTypeParamType::get(
+      path1.getBase()->TypeSequence, path1.getBase()->Depth,
+      path1.getBase()->Index, getASTContext());
   CanType baseAnchor =
     getCanonicalTypeParameter(firstBase)->getCanonicalType();
   auto root = Impl->getOrCreateRewriteTreeRoot(baseAnchor);
@@ -3317,10 +3317,9 @@ bool GenericSignatureBuilder::addSameTypeRewriteRule(CanType type1,
 
 Type GenericSignatureBuilder::getCanonicalTypeParameter(Type type) {
   auto initialPath = RewritePath::createPath(type);
-  auto genericParamType =
-    GenericTypeParamType::get(initialPath.getBase()->Depth,
-                              initialPath.getBase()->Index,
-                              getASTContext());
+  auto genericParamType = GenericTypeParamType::get(
+      initialPath.getBase()->TypeSequence, initialPath.getBase()->Depth,
+      initialPath.getBase()->Index, getASTContext());
 
   unsigned startIndex = 0;
   Type currentType = genericParamType;
@@ -3357,8 +3356,8 @@ Type GenericSignatureBuilder::getCanonicalTypeParameter(Type type) {
         // If this is an absolute path, use the new base.
         if (auto newBase = match->second.getBase()) {
           genericParamType =
-            GenericTypeParamType::get(newBase->Depth, newBase->Index,
-                                      getASTContext());
+              GenericTypeParamType::get(newBase->TypeSequence, newBase->Depth,
+                                        newBase->Index, getASTContext());
         }
 
         // Move back to the beginning; we may have opened up other rewrites.
@@ -8560,24 +8559,62 @@ AbstractGenericSignatureRequest::evaluate(
         canSignatureResult.getInt());
   }
 
-  // Create a generic signature that will form the signature.
-  GenericSignatureBuilder builder(ctx);
-  if (baseSignature)
-    builder.addGenericSignature(baseSignature);
+  auto buildViaGSB = [&]() {
+    // Create a generic signature that will form the signature.
+    GenericSignatureBuilder builder(ctx);
+    if (baseSignature)
+      builder.addGenericSignature(baseSignature);
 
-  auto source =
-    GenericSignatureBuilder::FloatingRequirementSource::forAbstract();
+    auto source =
+      GenericSignatureBuilder::FloatingRequirementSource::forAbstract();
 
-  for (auto param : addedParameters)
-    builder.addGenericParameter(param);
+    for (auto param : addedParameters)
+      builder.addGenericParameter(param);
 
-  for (const auto &req : addedRequirements)
-    builder.addRequirement(req, source, nullptr);
+    for (const auto &req : addedRequirements)
+      builder.addRequirement(req, source, nullptr);
 
-  bool hadError = builder.hadAnyError();
-  auto result = std::move(builder).computeGenericSignature(
-      /*allowConcreteGenericParams=*/true);
-  return GenericSignatureWithError(result, hadError);
+    bool hadError = builder.hadAnyError();
+    auto result = std::move(builder).computeGenericSignature(
+        /*allowConcreteGenericParams=*/true);
+    return GenericSignatureWithError(result, hadError);
+  };
+
+  auto buildViaRQM = [&]() {
+    return evaluateOrDefault(
+        ctx.evaluator,
+        AbstractGenericSignatureRequestRQM{
+          baseSignature.getPointer(),
+          std::move(addedParameters),
+          std::move(addedRequirements)},
+        GenericSignatureWithError());
+  };
+
+  switch (ctx.LangOpts.RequirementMachineGenericSignatures) {
+  case RequirementMachineMode::Disabled:
+    return buildViaGSB();
+
+  case RequirementMachineMode::Enabled:
+    return buildViaRQM();
+
+  case RequirementMachineMode::Verify: {
+    auto rqmResult = buildViaRQM();
+    auto gsbResult = buildViaGSB();
+
+    if (!rqmResult.getPointer() && !gsbResult.getPointer())
+      return gsbResult;
+
+    if (!rqmResult.getPointer()->isEqual(gsbResult.getPointer())) {
+      llvm::errs() << "RequirementMachine generic signature minimization is broken:\n";
+      llvm::errs() << "RequirementMachine says:      " << rqmResult.getPointer() << "\n";
+      llvm::errs() << "GenericSignatureBuilder says: " << gsbResult.getPointer() << "\n";
+
+      abort();
+    }
+
+    return gsbResult;
+  }
+  }
 }
 
 GenericSignatureWithError
