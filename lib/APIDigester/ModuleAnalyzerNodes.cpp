@@ -1,7 +1,8 @@
 #include "llvm/ADT/STLExtras.h"
-#include "swift/Basic/Defer.h"
-#include "swift/SIL/SILDeclRef.h"
 #include "swift/AST/ASTMangler.h"
+#include "swift/Basic/Defer.h"
+#include "swift/Sema/IDETypeChecking.h"
+#include "swift/SIL/SILDeclRef.h"
 #include <swift/APIDigester/ModuleAnalyzerNodes.h>
 #include <algorithm>
 
@@ -178,7 +179,7 @@ SDKNodeDeclImport::SDKNodeDeclImport(SDKNodeInitInfo Info):
   SDKNodeDecl(Info, SDKNodeKind::DeclImport) {}
 
 SDKNodeDeclAssociatedType::SDKNodeDeclAssociatedType(SDKNodeInitInfo Info):
-  SDKNodeDecl(Info, SDKNodeKind::DeclAssociatedType) {};
+  SDKNodeDecl(Info, SDKNodeKind::DeclAssociatedType) {}
 
 SDKNodeDeclSubscript::SDKNodeDeclSubscript(SDKNodeInitInfo Info):
   SDKNodeDeclAbstractFunc(Info, SDKNodeKind::DeclSubscript),
@@ -1872,7 +1873,7 @@ void SwiftDeclCollector::printTopLevelNames() {
 void SwiftDeclCollector::lookupVisibleDecls(ArrayRef<ModuleDecl *> Modules) {
   for (auto M: Modules) {
     llvm::SmallVector<Decl*, 512> Decls;
-    M->getDisplayDecls(Decls);
+    swift::getTopLevelDeclsForDisplay(M, Decls);
     for (auto D : Decls) {
       if (Ctx.shouldIgnore(D))
         continue;

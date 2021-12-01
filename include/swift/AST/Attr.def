@@ -605,7 +605,7 @@ CONTEXTUAL_SIMPLE_DECL_ATTR(async, Async,
   106)
 
 SIMPLE_DECL_ATTR(Sendable, Sendable,
-  OnFunc | OnConstructor | OnAccessor |
+  OnFunc | OnConstructor | OnAccessor | OnAnyClangDecl |
   ABIBreakingToAdd | ABIBreakingToRemove |
   APIBreakingToAdd | APIBreakingToRemove,
   107)
@@ -693,6 +693,11 @@ SIMPLE_DECL_ATTR(_predatesConcurrency, PredatesConcurrency,
   OnEnumElement | UserInaccessible |
   ABIBreakingToAdd | ABIBreakingToRemove | APIBreakingToAdd | APIBreakingToRemove,
   125)
+
+CONTEXTUAL_SIMPLE_DECL_ATTR(_const, CompileTimeConst,
+  DeclModifier | OnParam | OnVar |
+  ABIStableToAdd | ABIStableToRemove | APIBreakingToAdd | APIStableToRemove,
+  126)
 
 // If you're adding a new underscored attribute here, please document it in
 // docs/ReferenceGuides/UnderscoredAttributes.md.

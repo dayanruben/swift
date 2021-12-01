@@ -47,8 +47,7 @@ namespace swift {
   struct PrintOptions;
 
   /// Typecheck binding initializer at \p bindingIndex.
-  void typeCheckPatternBinding(PatternBindingDecl *PBD, unsigned bindingIndex,
-                               bool leaveClosureBodiesUnchecked);
+  void typeCheckPatternBinding(PatternBindingDecl *PBD, unsigned bindingIndex);
 
   /// Check if T1 is convertible to T2.
   ///
@@ -139,6 +138,13 @@ namespace swift {
 
   LookupResult
   lookupSemanticMember(DeclContext *DC, Type ty, DeclName name);
+
+  /// Get all of the top-level declarations that should be printed as part of
+  /// this module. This may force synthesis of top-level declarations that
+  /// \c ModuleDecl::getDisplayDecls() would only return if previous
+  /// work happened to have synthesized them.
+  void
+  getTopLevelDeclsForDisplay(ModuleDecl *M, SmallVectorImpl<Decl*> &Results);
 
   struct ExtensionInfo {
     // The extension with the declarations to apply.

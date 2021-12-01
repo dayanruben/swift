@@ -1726,7 +1726,7 @@ Type ClangImporter::Implementation::applyParamAttributes(
       continue;
 
     // Map the main-actor attribute.
-    if (isMainActorAttr(SwiftContext, swiftAttr)) {
+    if (isMainActorAttr(swiftAttr)) {
       if (Type mainActor = SwiftContext.getMainActorType()) {
         type = applyToFunctionType(type, [&](ASTExtInfo extInfo) {
           return extInfo.withGlobalActor(mainActor);
@@ -1907,11 +1907,9 @@ ParameterList *ClangImporter::Implementation::importFunctionParameterList(
     Type swiftParamTy;
     bool isParamTypeImplicitlyUnwrapped = false;
     bool isInOut = false;
-
-    auto referenceType = dyn_cast<clang::ReferenceType>(paramTy);
-    if (referenceType &&
-        isa<clang::TemplateTypeParmType>(referenceType->getPointeeType())) {
-      auto pointeeType = referenceType->getPointeeType();
+    if ((isa<clang::ReferenceType>(paramTy) || isa<clang::PointerType>(paramTy)) &&
+        isa<clang::TemplateTypeParmType>(paramTy->getPointeeType())) {
+      auto pointeeType = paramTy->getPointeeType();
       auto templateParamType = cast<clang::TemplateTypeParmType>(pointeeType);
       PointerTypeKind pointerKind = pointeeType.getQualifiers().hasConst()
                                         ? PTK_UnsafePointer
@@ -2579,20 +2577,15 @@ ImportedType ClangImporter::Implementation::importMethodParamsAndReturnType(
 
   if (importedName.hasCustomName() && argNames.size() != swiftParams.size()) {
     // Note carefully: we're emitting a warning in the /Clang/ buffer.
-    auto &srcMgr = getClangASTContext().getSourceManager();
-    ClangSourceBufferImporter &bufferImporter =
-        getBufferImporterForDiagnostics();
-    SourceLoc methodLoc =
-        bufferImporter.resolveSourceLocation(srcMgr, clangDecl->getLocation());
-    if (methodLoc.isValid()) {
+    if (clangDecl->getLocation().isValid()) {
+      HeaderLoc methodLoc(clangDecl->getLocation());
       diagnose(methodLoc, diag::invalid_swift_name_method,
-                                  swiftParams.size() < argNames.size(),
-                                  swiftParams.size(), argNames.size());
+               swiftParams.size() < argNames.size(),
+               swiftParams.size(), argNames.size());
       ModuleDecl *parentModule = dc->getParentModule();
       if (parentModule != ImportedHeaderUnit->getParentModule()) {
-        diagnose(
-            methodLoc, diag::unresolvable_clang_decl_is_a_framework_bug,
-            parentModule->getName().str());
+        diagnose(methodLoc, diag::unresolvable_clang_decl_is_a_framework_bug,
+                 parentModule->getName().str());
       }
     }
     return {Type(), false};

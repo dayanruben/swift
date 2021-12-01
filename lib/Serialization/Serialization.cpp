@@ -1031,6 +1031,11 @@ void Serializer::writeHeader(const SerializationOptions &options) {
         IsStaticLibrary.emit(ScratchRecord);
       }
 
+      if (options.HermeticSealAtLink) {
+        options_block::HasHermeticSealAtLinkLayout HasHermeticSealAtLink(Out);
+        HasHermeticSealAtLink.emit(ScratchRecord);
+      }
+
       if (M->isTestingEnabled()) {
         options_block::IsTestableLayout IsTestable(Out);
         IsTestable.emit(ScratchRecord);
@@ -3720,6 +3725,7 @@ public:
         param->isVariadic(),
         param->isAutoClosure(),
         param->isIsolated(),
+        param->isCompileTimeConst(),
         getRawStableDefaultArgumentKind(argKind),
         defaultArgumentText);
 
@@ -4519,7 +4525,8 @@ public:
           S.addDeclBaseNameRef(param.getInternalLabel()),
           S.addTypeRef(param.getPlainType()), paramFlags.isVariadic(),
           paramFlags.isAutoClosure(), paramFlags.isNonEphemeral(), rawOwnership,
-          paramFlags.isIsolated(), paramFlags.isNoDerivative());
+          paramFlags.isIsolated(), paramFlags.isNoDerivative(),
+          paramFlags.isCompileTimeConst());
     }
   }
 
@@ -5340,7 +5347,7 @@ static void recordDerivativeFunctionConfig(
         {ctx.getIdentifier(attr->getParameterIndices()->getString()),
          AFD->getGenericSignature()});
   }
-};
+}
 
 /// Recursively walks the members and derived global decls of any nominal types
 /// to build up global tables.

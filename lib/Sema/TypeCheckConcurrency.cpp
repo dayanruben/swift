@@ -3932,6 +3932,8 @@ NormalProtocolConformance *GetImplicitSendableRequest::evaluate(
       auto inherits = ctx.AllocateCopy(makeArrayRef(
           InheritedEntry(TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
                          /*isUnchecked*/true)));
+      // If you change the use of AtLoc in the ExtensionDecl, make sure you
+      // update isNonSendableExtension() in ASTPrinter.
       auto extension = ExtensionDecl::create(ctx, attrMakingUnavailable->AtLoc,
                                              nullptr, inherits,
                                              nominal->getModuleScopeContext(),
@@ -3946,8 +3948,8 @@ NormalProtocolConformance *GetImplicitSendableRequest::evaluate(
       nominal->addExtension(extension);
 
       // Make it accessible to getTopLevelDecls()
-      if (auto sf = dyn_cast<SourceFile>(nominal->getModuleScopeContext()))
-        sf->getOrCreateSynthesizedFile().addTopLevelDecl(extension);
+      if (auto file = dyn_cast<FileUnit>(nominal->getModuleScopeContext()))
+        file->getOrCreateSynthesizedFile().addTopLevelDecl(extension);
 
       conformanceDC = extension;
     }
@@ -3962,9 +3964,6 @@ NormalProtocolConformance *GetImplicitSendableRequest::evaluate(
     nominal->registerProtocolConformance(conformance, /*synthesized=*/true);
     return conformance;
   };
-
-  if (auto nonSendable = nominal->getAttrs().getAttribute<NonSendableAttr>())
-    return formConformance(nonSendable);
 
   // A non-protocol type with a global actor is implicitly Sendable.
   if (nominal->getGlobalActorAttr()) {
@@ -3984,6 +3983,12 @@ NormalProtocolConformance *GetImplicitSendableRequest::evaluate(
 
     // Form the implicit conformance to Sendable.
     return formConformance(nullptr);
+  }
+
+  if (auto attr = nominal->getAttrs().getEffectiveSendableAttr()) {
+    assert(!isa<SendableAttr>(attr) &&
+           "Conformance should have been added by SynthesizedProtocolAttr!");
+    return formConformance(cast<NonSendableAttr>(attr));
   }
 
   // Only structs and enums can get implicit Sendable conformances by
@@ -4030,34 +4035,6 @@ static Type applyUnsafeConcurrencyToParameterType(
   return fnType->withExtInfo(fnType->getExtInfo()
                                .withConcurrent(sendable)
                                .withGlobalActor(globalActor));
-}
-
-/// Strip concurrency from the given type.
-static Type stripConcurrencyFromType(Type type, bool dropGlobalActor) {
-  // Look through optionals.
-  if (Type optionalObject = type->getOptionalObjectType()) {
-    Type newOptionalObject =
-        stripConcurrencyFromType(optionalObject, dropGlobalActor);
-    if (optionalObject->isEqual(newOptionalObject))
-      return type;
-
-    return OptionalType::get(newOptionalObject);
-  }
-
-  // For function types, strip off Sendable and possibly the global actor.
-  if (auto fnType = type->getAs<FunctionType>()) {
-    auto extInfo = fnType->getExtInfo().withConcurrent(false);
-    if (dropGlobalActor)
-      extInfo = extInfo.withGlobalActor(Type());
-    auto newFnType = FunctionType::get(
-        fnType->getParams(), fnType->getResult(), extInfo);
-    if (newFnType->isEqual(type))
-      return type;
-
-    return newFnType;
-  }
-
-  return type;
 }
 
 /// Determine whether the given name is that of a DispatchQueue operation that
@@ -4107,7 +4084,7 @@ Type swift::adjustVarTypeForConcurrency(
     isLValue = true;
   }
 
-  type = stripConcurrencyFromType(type, /*dropGlobalActor=*/true);
+  type = type->stripConcurrency(/*recurse=*/false, /*dropGlobalActor=*/true);
 
   if (isLValue)
     type = LValueType::get(type);
@@ -4159,8 +4136,8 @@ static AnyFunctionType *applyUnsafeConcurrencyToFunctionType(
       newParamType = applyUnsafeConcurrencyToParameterType(
         param.getPlainType(), addSendable, addMainActor);
     } else if (stripConcurrency) {
-      newParamType = stripConcurrencyFromType(
-          param.getPlainType(), numApplies == 0);
+      newParamType = param.getPlainType()->stripConcurrency(
+          /*recurse=*/false, /*dropGlobalActor=*/numApplies == 0);
     }
 
     if (!newParamType || newParamType->isEqual(param.getPlainType())) {
@@ -4184,8 +4161,8 @@ static AnyFunctionType *applyUnsafeConcurrencyToFunctionType(
   // Compute the new result type.
   Type newResultType = fnType->getResult();
   if (stripConcurrency) {
-    newResultType = stripConcurrencyFromType(
-        newResultType, /*dropGlobalActor=*/true);
+    newResultType = newResultType->stripConcurrency(
+        /*recurse=*/false, /*dropGlobalActor=*/true);
 
     if (!newResultType->isEqual(fnType->getResult()) && newTypeParams.empty()) {
       newTypeParams.append(typeParams.begin(), typeParams.end());
