@@ -43,12 +43,39 @@ Optional<Symbol> Rule::isPropertyRule() const {
   return property;
 }
 
-/// If this is a rule of the form T.[p] => T where [p] is a protocol symbol,
-/// return the protocol, otherwise return nullptr.
+/// If this is a rule of the form T.[P] => T where [P] is a protocol symbol,
+/// return the protocol P, otherwise return nullptr.
 const ProtocolDecl *Rule::isProtocolConformanceRule() const {
   if (auto property = isPropertyRule()) {
     if (property->getKind() == Symbol::Kind::Protocol)
       return property->getProtocol();
+  }
+
+  return nullptr;
+}
+
+/// If this is a rule of the form T.[concrete: C : P] => T where
+/// [concrete: C : P] is a concrete conformance symbol, return the protocol P,
+/// otherwise return nullptr.
+const ProtocolDecl *Rule::isAnyConformanceRule() const {
+  if (auto property = isPropertyRule()) {
+    switch (property->getKind()) {
+    case Symbol::Kind::ConcreteConformance:
+    case Symbol::Kind::Protocol:
+      return property->getProtocol();
+
+    case Symbol::Kind::Layout:
+    case Symbol::Kind::Superclass:
+    case Symbol::Kind::ConcreteType:
+      return nullptr;
+
+    case Symbol::Kind::Name:
+    case Symbol::Kind::AssociatedType:
+    case Symbol::Kind::GenericParam:
+      break;
+    }
+
+    llvm_unreachable("Bad symbol kind");
   }
 
   return nullptr;
@@ -95,7 +122,7 @@ bool Rule::isProtocolRefinementRule() const {
 unsigned Rule::getDepth() const {
   auto result = LHS.size();
 
-  if (LHS.back().isSuperclassOrConcreteType()) {
+  if (LHS.back().hasSubstitutions()) {
     for (auto substitution : LHS.back().getSubstitutions()) {
       result = std::max(result, substitution.size());
     }
@@ -228,7 +255,7 @@ bool RewriteSystem::simplify(MutableTerm &term, RewritePath *path) const {
 void RewriteSystem::simplifySubstitutions(MutableTerm &term,
                                           RewritePath &path) const {
   auto symbol = term.back();
-  assert(symbol.isSuperclassOrConcreteType());
+  assert(symbol.hasSubstitutions());
 
   auto substitutions = symbol.getSubstitutions();
   if (substitutions.empty())
@@ -285,13 +312,7 @@ void RewriteSystem::simplifySubstitutions(MutableTerm &term,
   }
 
   // Build the new symbol with simplified substitutions.
-  auto newSymbol = (symbol.getKind() == Symbol::Kind::Superclass
-                    ? Symbol::forSuperclass(symbol.getSuperclass(),
-                                            newSubstitutions, Context)
-                    : Symbol::forConcreteType(symbol.getConcreteType(),
-                                              newSubstitutions, Context));
-
-  term.back() = newSymbol;
+  term.back() = symbol.withConcreteSubstitutions(newSubstitutions, Context);
 }
 
 /// Adds a rewrite rule, returning true if the new rule was non-trivial.
@@ -321,10 +342,10 @@ bool RewriteSystem::addRule(MutableTerm lhs, MutableTerm rhs,
   RewritePath lhsPath;
   RewritePath rhsPath;
 
-  if (lhs.back().isSuperclassOrConcreteType())
+  if (lhs.back().hasSubstitutions())
     simplifySubstitutions(lhs, lhsPath);
 
-  if (rhs.back().isSuperclassOrConcreteType())
+  if (rhs.back().hasSubstitutions())
     simplifySubstitutions(rhs, rhsPath);
 
   simplify(lhs, &lhsPath);
@@ -548,7 +569,7 @@ void RewriteSystem::verifyRewriteRules(ValidityPolicy policy) const {
 
       if (index != lhs.size() - 1) {
         ASSERT_RULE(symbol.getKind() != Symbol::Kind::Layout);
-        ASSERT_RULE(!symbol.isSuperclassOrConcreteType());
+        ASSERT_RULE(!symbol.hasSubstitutions());
       }
 
       if (index != 0) {
@@ -571,7 +592,7 @@ void RewriteSystem::verifyRewriteRules(ValidityPolicy policy) const {
       }
 
       ASSERT_RULE(symbol.getKind() != Symbol::Kind::Layout);
-      ASSERT_RULE(!symbol.isSuperclassOrConcreteType());
+      ASSERT_RULE(!symbol.hasSubstitutions());
 
       if (index != 0) {
         ASSERT_RULE(symbol.getKind() != Symbol::Kind::GenericParam);

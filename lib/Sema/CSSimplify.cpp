@@ -2040,7 +2040,7 @@ static bool fixMissingArguments(ConstraintSystem &cs, ASTNode anchor,
 
       // Something like `foo { x in }` or `foo { $0 }`
       if (auto *closure = getAsExpr<ClosureExpr>(anchor)) {
-        forEachExprInConstraintSystem(closure, [&](Expr *expr) -> Expr * {
+        cs.forEachExpr(closure, [&](Expr *expr) -> Expr * {
           if (auto *UDE = dyn_cast<UnresolvedDotExpr>(expr)) {
             if (!isParam(UDE->getBase()))
               return expr;
@@ -5859,6 +5859,10 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
                                   type1, type2, locator);
           return getTypeMatchSuccess();
         };
+
+      // Foreign reference types do *not* conform to AnyObject.
+      if (type1->isForeignReferenceType() && type2->isAnyObject())
+        return getTypeMatchFailure(locator);
       
       if (auto meta1 = type1->getAs<MetatypeType>()) {
         if (meta1->getInstanceType()->mayHaveSuperclass()
@@ -11662,7 +11666,7 @@ bool ConstraintSystem::recordFix(ConstraintFix *fix, unsigned impact) {
 
   bool found = false;
   if (auto *expr = getAsExpr(anchor)) {
-    forEachExprInConstraintSystem(expr, [&](Expr *subExpr) -> Expr * {
+    forEachExpr(expr, [&](Expr *subExpr) -> Expr * {
       found |= anchors.count(subExpr);
       return subExpr;
     });
@@ -12709,6 +12713,7 @@ ConstraintSystem::simplifyConstraint(const Constraint &constraint) {
   case ConstraintKind::ClosureBodyElement:
     return simplifyClosureBodyElementConstraint(
         constraint.getClosureElement(), constraint.getElementContext(),
+        constraint.isDiscardedElement(),
         /*flags=*/None, constraint.getLocator());
 
   case ConstraintKind::BindTupleOfFunctionParams:

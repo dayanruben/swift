@@ -451,10 +451,11 @@ RewriteSystem::computeCriticalPair(ArrayRef<Symbol>::const_iterator from,
     // perform the concrete type adjustment:
     //
     //     (σ - T)
-    if (xv.back().isSuperclassOrConcreteType() &&
+    if (xv.back().hasSubstitutions() &&
         !xv.back().getSubstitutions().empty() &&
         t.size() > 0) {
-      path.add(RewriteStep::forAdjustment(t.size(), /*inverse=*/true));
+      path.add(RewriteStep::forAdjustment(t.size(), /*endOffset=*/0,
+                                          /*inverse=*/true));
 
       xv.back() = xv.back().prependPrefixToConcreteSubstitutions(
           t, Context);

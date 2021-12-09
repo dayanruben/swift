@@ -130,22 +130,18 @@ static void desugarConformanceRequirement(Type subjectType, Type constraintType,
     return;
   }
 
-  auto layout = constraintType->getExistentialLayout();
+  auto *compositionType = constraintType->castTo<ProtocolCompositionType>();
+  if (compositionType->hasExplicitAnyObject()) {
+    desugarLayoutRequirement(subjectType,
+                             LayoutConstraint::getLayoutConstraint(
+                                 LayoutConstraintKind::Class), result);
+  }
 
-  if (auto layoutConstraint = layout.getLayoutConstraint())
-    desugarLayoutRequirement(subjectType, layoutConstraint, result);
-
-  if (auto superclass = layout.explicitSuperclass)
-    desugarSuperclassRequirement(subjectType, superclass, result);
-
-  for (auto *proto : layout.getProtocols()) {
-    if (!subjectType->isTypeParameter()) {
-      // FIXME: Check conformance, diagnose redundancy or conflict upstream
-      return;
-    }
-
-    result.emplace_back(RequirementKind::Conformance, subjectType,
-                        proto);
+  for (auto memberType : compositionType->getMembers()) {
+    if (memberType->isExistentialType())
+      desugarConformanceRequirement(subjectType, memberType, result);
+    else
+      desugarSuperclassRequirement(subjectType, memberType, result);
   }
 }
 
@@ -924,9 +920,7 @@ void RuleBuilder::addRequirement(const Requirement &req,
       // Build the symbol [layout: L].
       auto layout =
         LayoutConstraint::getLayoutConstraint(
-          otherType->getClassOrBoundGenericClass()->usesObjCObjectModel()
-            ? LayoutConstraintKind::Class
-            : LayoutConstraintKind::NativeClass,
+          otherType->getClassOrBoundGenericClass()->getLayoutConstraintKind(),
           Context.getASTContext());
       auto layoutSymbol = Symbol::forLayout(layout, Context);
 

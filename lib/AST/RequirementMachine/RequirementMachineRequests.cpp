@@ -140,6 +140,11 @@ RequirementMachine::buildRequirementsFromRules(
         return;
       }
 
+      case Symbol::Kind::ConcreteConformance:
+        // "Concrete conformance requirements" are not recorded in the generic
+        // signature.
+        return;
+
       case Symbol::Kind::Name:
       case Symbol::Kind::AssociatedType:
       case Symbol::Kind::GenericParam:
@@ -354,10 +359,9 @@ AbstractGenericSignatureRequestRQM::evaluate(
   auto minimalRequirements =
     machine->computeMinimalGenericSignatureRequirements();
 
-  // FIXME: Implement this
-  bool hadError = false;
-
   auto result = GenericSignature::get(genericParams, minimalRequirements);
+  bool hadError = machine->hadError();
+
   return GenericSignatureWithError(result, hadError);
 }
 
@@ -458,10 +462,8 @@ InferredGenericSignatureRequestRQM::evaluate(
   auto minimalRequirements =
     machine->computeMinimalGenericSignatureRequirements();
 
-  // FIXME: Implement this
-  bool hadError = false;
-
   auto result = GenericSignature::get(genericParams, minimalRequirements);
+  bool hadError = machine->hadError();
 
   // FIXME: Handle allowConcreteGenericParams
 
