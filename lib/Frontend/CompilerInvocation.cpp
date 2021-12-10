@@ -438,6 +438,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableExperimentalNamedOpaqueTypes |=
       Args.hasArg(OPT_enable_experimental_named_opaque_types);
 
+  Opts.EnableExplicitExistentialTypes |=
+      Args.hasArg(OPT_enable_explicit_existential_types);
+
   Opts.EnableExperimentalDistributed |=
     Args.hasArg(OPT_enable_experimental_distributed);
 
@@ -889,6 +892,12 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     else
       Diags.diagnose(SourceLoc(), diag::error_invalid_arg_value,
                      A->getAsString(Args), A->getValue());
+  }
+
+  if (auto A = Args.getLastArg(OPT_enable_requirement_machine_merged_associated_types,
+                               OPT_disable_requirement_machine_merged_associated_types)) {
+    Opts.RequirementMachineMergedAssociatedTypes
+      = A->getOption().matches(OPT_enable_requirement_machine_merged_associated_types);
   }
 
   Opts.DumpRequirementMachine = Args.hasArg(
