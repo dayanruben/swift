@@ -1217,6 +1217,9 @@ private:
   void emitLazyObjCProtocolDefinitions();
   void emitLazyObjCProtocolDefinition(ProtocolDecl *proto);
 
+  llvm::SmallVector<llvm::MDNode *> UsedConditionals;
+  void emitUsedConditionals();
+
   void emitGlobalLists();
   void emitAutolinkInfo();
   void cleanupClangCodeGenMetadata();
@@ -1643,10 +1646,10 @@ public:
   Address getAddrOfObjCISAMask();
 
   llvm::Function *
-  getAddrOfDistributedMethodAccessor(SILFunction *F,
+  getAddrOfDistributedTargetAccessor(SILFunction *F,
                                      ForDefinition_t forDefinition);
 
-  void emitDistributedMethodAccessor(SILFunction *method);
+  void emitDistributedTargetAccessor(SILFunction *method);
 
   /// Retrieve the generic signature for the current generic context, or null if no
   /// generic environment is active.

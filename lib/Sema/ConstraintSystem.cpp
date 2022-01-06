@@ -542,6 +542,14 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
   return getConstraintLocator(anchor);
 }
 
+ConstraintLocator *ConstraintSystem::getOpenOpaqueLocator(
+    ConstraintLocatorBuilder locator, OpaqueTypeDecl *opaqueDecl) {
+  // Use only the opaque type declaration.
+  return getConstraintLocator(
+      ASTNode(opaqueDecl),
+      { LocatorPathElt::OpenedOpaqueArchetype(opaqueDecl) }, 0);
+}
+
 /// Extend the given depth map by adding depths for all of the subexpressions
 /// of the given expression.
 static void extendDepthMap(
@@ -829,25 +837,48 @@ Type ConstraintSystem::openType(Type type, OpenedTypeMap &replacements) {
 
 Type ConstraintSystem::openOpaqueType(OpaqueTypeArchetypeType *opaque,
                                       ConstraintLocatorBuilder locator) {
-  auto opaqueLocator = locator.withPathElement(
-      LocatorPathElt::OpenedOpaqueArchetype(opaque->getDecl()));
+  auto opaqueDecl = opaque->getDecl();
+  auto opaqueLocatorKey = getOpenOpaqueLocator(locator, opaqueDecl);
+
+  // If we have already opened this opaque type, look in the known set of
+  // replacements.
+  auto knownReplacements = OpenedTypes.find(
+      getConstraintLocator(opaqueLocatorKey));
+  if (knownReplacements != OpenedTypes.end()) {
+    auto param = opaque->getInterfaceType()->castTo<GenericTypeParamType>();
+    for (const auto &replacement : knownReplacements->second) {
+      if (replacement.first->isEqual(param))
+        return replacement.second;
+    }
+
+    llvm_unreachable("Missing opaque type replacement");
+  }
 
   // Open the generic signature of the opaque decl, and bind the "outer" generic
   // params to our context. The remaining axes of freedom on the type variable
   // corresponding to the underlying type should be the constraints on the
   // underlying return type.
+  auto opaqueLocator = locator.withPathElement(
+      LocatorPathElt::OpenedOpaqueArchetype(opaqueDecl));
   OpenedTypeMap replacements;
-  openGeneric(DC, opaque->getBoundSignature(), opaqueLocator, replacements);
+  openGeneric(DC, opaqueDecl->getOpaqueInterfaceGenericSignature(),
+              opaqueLocator, replacements);
 
-  auto underlyingTyVar = openType(opaque->getInterfaceType(), replacements);
-  assert(underlyingTyVar);
-
-  for (auto param : DC->getGenericSignatureOfContext().getGenericParams()) {
-    addConstraint(ConstraintKind::Bind, openType(param, replacements),
-                  DC->mapTypeIntoContext(param), opaqueLocator);
+  // If there is an outer generic signature, bind the outer parameters based
+  // on the substitutions in the opaque type.
+  auto subs = opaque->getSubstitutions();
+  if (auto genericSig = subs.getGenericSignature()) {
+    for (auto *genericParamPtr : genericSig.getGenericParams()) {
+      Type genericParam(genericParamPtr);
+      addConstraint(
+          ConstraintKind::Bind, openType(genericParam, replacements),
+          genericParam.subst(subs), opaqueLocator);
+    }
   }
 
-  return underlyingTyVar;
+  recordOpenedTypes(opaqueLocatorKey, replacements);
+
+  return openType(opaque->getInterfaceType(), replacements);
 }
 
 Type ConstraintSystem::openOpaqueType(Type type, ContextualTypePurpose context,
@@ -5913,8 +5944,13 @@ bool ConstraintSystem::participatesInInference(ClosureExpr *closure) const {
     return false;
 
   auto &ctx = closure->getASTContext();
-  return !closure->hasEmptyBody() &&
-         ctx.TypeCheckerOpts.EnableMultiStatementClosureInference;
+  if (closure->hasEmptyBody() ||
+      !ctx.TypeCheckerOpts.EnableMultiStatementClosureInference)
+    return false;
+
+  // If body is nested in a parent that has a function builder applied,
+  // let's prevent inference until result builders.
+  return !isInResultBuilderContext(closure);
 }
 
 TypeVarBindingProducer::TypeVarBindingProducer(BindingSet &bindings)

@@ -3316,6 +3316,11 @@ public:
                        ArrayRef<ConstraintLocator::PathElement> path,
                        unsigned summaryFlags);
 
+  /// Retrieve a locator for opening the opaque archetype for the given
+  /// opaque type.
+  ConstraintLocator *getOpenOpaqueLocator(
+      ConstraintLocatorBuilder locator, OpaqueTypeDecl *opaqueDecl);
+
   /// Retrive the constraint locator for the given anchor and
   /// path, uniqued and automatically infer the summary flags
   ConstraintLocator *
@@ -5286,6 +5291,10 @@ public:
   /// of the given expression, including those in closure bodies that will be
   /// part of the constraint system.
   void forEachExpr(Expr *expr, llvm::function_ref<Expr *(Expr *)> callback);
+
+  /// Determine whether one of the parent closures the given one is nested
+  /// in (if any) has a result builder applied to its body.
+  bool isInResultBuilderContext(ClosureExpr *closure) const;
 
   SWIFT_DEBUG_DUMP;
   SWIFT_DEBUG_DUMPER(dump(Expr *));
