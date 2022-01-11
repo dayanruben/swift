@@ -1407,6 +1407,9 @@ Remangler::mangleFunctionSignatureSpecializationParam(Node *node,
     case FunctionSigSpecializationParamKind::BoxToStack:
       Buffer << 's';
       break;
+    case FunctionSigSpecializationParamKind::InOutToOut:
+      Buffer << 'r';
+      break;
     case FunctionSigSpecializationParamKind::SROA:
       Buffer << 'x';
       break;
@@ -3278,6 +3281,11 @@ ManglingError Remangler::mangleSugaredParen(Node *node, unsigned depth) {
 
 ManglingError Remangler::mangleOpaqueReturnType(Node *node, unsigned depth) {
   Buffer << "Qr";
+  return ManglingError::Success;
+}
+ManglingError Remangler::mangleOpaqueReturnTypeIndexed(Node *node, unsigned depth) {
+  Buffer << "QR";
+  mangleIndex(node->getIndex());
   return ManglingError::Success;
 }
 ManglingError Remangler::mangleOpaqueReturnTypeOf(Node *node, unsigned depth) {

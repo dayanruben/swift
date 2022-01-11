@@ -21,16 +21,16 @@ public typealias BridgedInstructionPassCtxt =
 struct PassContext {
 
   fileprivate let passContext: BridgedPassContext
-  
+
   var isSwift51RuntimeAvailable: Bool {
     PassContext_isSwift51RuntimeAvailable(passContext) != 0
   }
-  
+
   var aliasAnalysis: AliasAnalysis {
     let bridgedAA = PassContext_getAliasAnalysis(passContext)
     return AliasAnalysis(bridged: bridgedAA)
   }
-  
+
   var calleeAnalysis: CalleeAnalysis {
     let bridgeCA = PassContext_getCalleeAnalysis(passContext)
     return CalleeAnalysis(bridged: bridgeCA)
@@ -52,7 +52,7 @@ struct PassContext {
           }
         }
     }
-  
+
     if instruction is FullApplySite {
       PassContext_notifyChanges(passContext, callsChanged)
     }
@@ -77,6 +77,12 @@ struct PassContext {
     PassContext_notifyChanges(passContext, instructionsChanged)
 
     SILInstruction_setOperand(instruction.bridged, index, value.bridged)
+  }
+
+  func setAtomicity(of instruction: RefCountingInst, isAtomic: Bool) {
+    PassContext_notifyChanges(passContext, instructionsChanged)
+
+    RefCountingInst_setIsAtomic(instruction.bridged, isAtomic)
   }
 }
 

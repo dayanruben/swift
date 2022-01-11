@@ -831,9 +831,11 @@ std::string ASTMangler::mangleOpaqueTypeDecl(const OpaqueTypeDecl *decl) {
 }
 
 std::string ASTMangler::mangleOpaqueTypeDecl(const ValueDecl *decl) {
-  DWARFMangling = true;
   OptimizeProtocolNames = false;
-  return mangleDeclAsUSR(decl, MANGLING_PREFIX_STR);
+
+  beginMangling();
+  appendEntity(decl);
+  return finalize();
 }
 
 std::string ASTMangler::mangleGenericSignature(const GenericSignature sig) {
@@ -1318,7 +1320,10 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
       auto opaqueDecl = opaqueType->getDecl();
       if (opaqueDecl->getNamingDecl() == forDecl) {
         assert(opaqueType->getSubstitutions().isIdentity());
-        return appendOperator("Qr");
+        if (opaqueType->getOrdinal() == 0)
+          return appendOperator("Qr");
+
+        return appendOperator("QR", Index(opaqueType->getOrdinal() - 1));
       }
       
       // Otherwise, try to substitute it.
@@ -1358,7 +1363,8 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
         addTypeSubstitution(nestedType, sig);
         return;
       }
-      
+
+      // FIXME: Never actually used.
       appendType(nestedType->getParent(), sig, forDecl);
       appendIdentifier(nestedType->getName().str());
       appendOperator("Qa");
@@ -1845,6 +1851,7 @@ void ASTMangler::appendImplFunctionType(SILFunctionType *fn,
       OpArgs.push_back('B');
       appendClangTypeToVec(OpArgs);
       break;
+    case SILFunctionTypeRepresentation::CXXMethod:
     case SILFunctionTypeRepresentation::CFunctionPointer:
       if (!mangleClangType) {
         OpArgs.push_back('C');
@@ -3314,7 +3321,8 @@ void ASTMangler::appendAnyProtocolConformance(
                                                      conformance.getAbstract());
     appendDependentProtocolConformance(path, genericSig);
   } else if (auto opaqueType = conformingType->getAs<OpaqueTypeArchetypeType>()) {
-    GenericSignature opaqueSignature = opaqueType->getBoundSignature();
+    GenericSignature opaqueSignature =
+        opaqueType->getDecl()->getOpaqueInterfaceGenericSignature();
     ConformanceAccessPath conformanceAccessPath =
         opaqueSignature->getConformanceAccessPath(
           opaqueType->getInterfaceType(),

@@ -56,7 +56,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 654; // opaque result type orinal
+const uint16_t SWIFTMODULE_VERSION_MINOR = 655; // dealloc_stack_ref
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -269,12 +269,13 @@ enum class SILFunctionTypeRepresentation : uint8_t {
   Block,
   Thin,
   CFunctionPointer,
-  
+
   FirstSIL = 8,
   Method = FirstSIL,
   ObjCMethod,
   WitnessMethod,
   Closure,
+  CXXMethod,
 };
 using SILFunctionTypeRepresentationField = BCFixed<4>;
 
