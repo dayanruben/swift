@@ -2630,7 +2630,7 @@ getObjCObjectRepresentable(Type type, const DeclContext *dc) {
 ///
 /// This function determines when and how a particular type is mapped
 /// into a foreign language. Any changes to the logic here also need
-/// to be reflected in PrintAsObjC, so that the Swift type will be
+/// to be reflected in PrintAsClang, so that the Swift type will be
 /// properly printed for (Objective-)C and in SIL's bridging logic.
 static std::pair<ForeignRepresentableKind, ProtocolConformance *>
 getForeignRepresentable(Type type, ForeignLanguage language,
@@ -5613,13 +5613,14 @@ SILBoxType::SILBoxType(ASTContext &C,
 Type TypeBase::openAnyExistentialType(OpenedArchetypeType *&opened) {
   assert(isAnyExistentialType());
   if (auto metaty = getAs<ExistentialMetatypeType>()) {
-    opened = OpenedArchetypeType::get(metaty->getExistentialInstanceType());
+    opened = OpenedArchetypeType::get(
+        metaty->getExistentialInstanceType()->getCanonicalType());
     if (metaty->hasRepresentation())
       return MetatypeType::get(opened, metaty->getRepresentation());
     else
       return MetatypeType::get(opened);
   }
-  opened = OpenedArchetypeType::get(this);
+  opened = OpenedArchetypeType::get(getCanonicalType());
   return opened;
 }
 

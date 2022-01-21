@@ -62,7 +62,7 @@
 #include "swift/Option/Options.h"
 #include "swift/Migrator/FixitFilter.h"
 #include "swift/Migrator/Migrator.h"
-#include "swift/PrintAsObjC/PrintAsObjC.h"
+#include "swift/PrintAsClang/PrintAsClang.h"
 #include "swift/Serialization/SerializationOptions.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
@@ -184,6 +184,22 @@ static bool printAsObjCIfNeeded(StringRef outputPath, ModuleDecl *M,
                         [&](raw_ostream &out) -> bool {
     return printAsObjC(out, M, bridgingHeader);
   });
+}
+
+/// Prints the C++  "generated header" interface for \p M to \p
+/// outputPath.
+///
+/// ...unless \p outputPath is empty, in which case it does nothing.
+///
+/// \returns true if there were any errors
+///
+/// \see swift::printAsCXX
+static bool printAsCxxIfNeeded(StringRef outputPath, ModuleDecl *M) {
+  if (outputPath.empty())
+    return false;
+  return withOutputFile(
+      M->getDiags(), outputPath,
+      [&](raw_ostream &os) -> bool { return printAsCXX(os, M); });
 }
 
 /// Prints the stable module interface for \p M to \p outputPath.
@@ -825,6 +841,12 @@ static bool emitAnyWholeModulePostTypeCheckSupplementaryOutputs(
     hadAnyError |= printAsObjCIfNeeded(
         Invocation.getObjCHeaderOutputPathForAtMostOnePrimary(),
         Instance.getMainModule(), BridgingHeaderPathForPrint);
+  }
+  if ((!Context.hadError() || opts.AllowModuleWithCompilerErrors) &&
+      opts.InputsAndOutputs.hasCxxHeaderOutputPath()) {
+    hadAnyError |= printAsCxxIfNeeded(
+        Invocation.getCxxHeaderOutputPathForAtMostOnePrimary(),
+        Instance.getMainModule());
   }
 
   // Only want the header if there's been any errors, ie. there's not much
@@ -1880,15 +1902,15 @@ int swift::performFrontend(ArrayRef<const char *> Args,
   //
   // Unfortunately it's not really safe to do anything else, since very
   // low-level operations in LLVM can trigger fatal errors.
-  auto diagnoseFatalError = [&PDC](const std::string &reason, bool shouldCrash){
-    static const std::string *recursiveFatalError = nullptr;
+  auto diagnoseFatalError = [&PDC](const char *reason, bool shouldCrash) {
+    static const char *recursiveFatalError = nullptr;
     if (recursiveFatalError) {
       // Report the /original/ error through LLVM's default handler, not
       // whatever we encountered.
       llvm::remove_fatal_error_handler();
-      llvm::report_fatal_error(*recursiveFatalError, shouldCrash);
+      llvm::report_fatal_error(recursiveFatalError, shouldCrash);
     }
-    recursiveFatalError = &reason;
+    recursiveFatalError = reason;
 
     SourceManager dummyMgr;
 
@@ -1904,12 +1926,13 @@ int swift::performFrontend(ArrayRef<const char *> Args,
     if (shouldCrash)
       abort();
   };
-  llvm::ScopedFatalErrorHandler handler([](void *rawCallback,
-                                           const std::string &reason,
-                                           bool shouldCrash) {
-    auto *callback = static_cast<decltype(&diagnoseFatalError)>(rawCallback);
-    (*callback)(reason, shouldCrash);
-  }, &diagnoseFatalError);
+  llvm::ScopedFatalErrorHandler handler(
+      [](void *rawCallback, const char *reason, bool shouldCrash) {
+        auto *callback =
+            static_cast<decltype(&diagnoseFatalError)>(rawCallback);
+        (*callback)(reason, shouldCrash);
+      },
+      &diagnoseFatalError);
 
   std::unique_ptr<CompilerInstance> Instance =
     std::make_unique<CompilerInstance>();
