@@ -264,9 +264,21 @@ struct ASTContext::Implementation {
   FuncDecl *ArrayReserveCapacityDecl = nullptr;
 
   /// func _stdlib_isOSVersionAtLeast(Builtin.Word,Builtin.Word, Builtin.word)
-  //    -> Builtin.Int1
+  ///    -> Builtin.Int1
   FuncDecl *IsOSVersionAtLeastDecl = nullptr;
-  
+
+  /// func recordArgument(_:) throws
+  FuncDecl *RecordArgumentDistributedInvocationEncoderDecl = nullptr;
+
+  /// func recordErrorType(_:) throws
+  FuncDecl *RecordErrorTypeDistributedInvocationEncoderDecl = nullptr;
+
+  /// func recordReturnType(_:) throws
+  FuncDecl *RecordReturnTypeDistributedInvocationEncoderDecl = nullptr;
+
+  /// func doneRecording() throws
+  FuncDecl *DoneRecordingDistributedInvocationEncoderDecl = nullptr;
+
   /// The set of known protocols, lazily populated as needed.
   ProtocolDecl *KnownProtocols[NumKnownProtocols] = { };
 
@@ -405,6 +417,7 @@ struct ASTContext::Implementation {
     llvm::FoldingSet<UnboundGenericType> UnboundGenericTypes;
     llvm::FoldingSet<BoundGenericType> BoundGenericTypes;
     llvm::FoldingSet<ProtocolCompositionType> ProtocolCompositionTypes;
+    llvm::FoldingSet<ParametrizedProtocolType> ParametrizedProtocolTypes;
     llvm::FoldingSet<LayoutConstraintInfo> LayoutConstraints;
     llvm::DenseMap<std::pair<OpaqueTypeDecl *, SubstitutionMap>,
                    GenericEnvironment *> OpaqueArchetypeEnvironments;
@@ -1023,7 +1036,9 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
     break;
   case KnownProtocolKind::DistributedActor:
   case KnownProtocolKind::DistributedActorSystem:
-  case KnownProtocolKind::ActorIdentity:
+  case KnownProtocolKind::DistributedTargetInvocationEncoder:
+  case KnownProtocolKind::DistributedTargetInvocationDecoder:
+  case KnownProtocolKind::DistributedTargetInvocationResultHandler:
     M = getLoadedModule(Id_Distributed);
     break;
   default:
@@ -1275,6 +1290,150 @@ FuncDecl *ASTContext::getLessThanIntDecl() const {
 }
 FuncDecl *ASTContext::getEqualIntDecl() const {
   return getBinaryComparisonOperatorIntDecl(*this, "==", getImpl().EqualIntDecl);
+}
+
+AbstractFunctionDecl *ASTContext::getRemoteCallOnDistributedActorSystem(
+    NominalTypeDecl *actorOrSystem, bool isVoidReturn) const {
+  assert(actorOrSystem && "distributed actor (or system) decl must be provided");
+  const NominalTypeDecl *system = actorOrSystem;
+  if (actorOrSystem && actorOrSystem->isDistributedActor()) {
+    auto var = actorOrSystem->getDistributedActorSystemProperty();
+    system = var->getInterfaceType()->getAnyNominal();
+  }
+
+  if (!system)
+    system = getProtocol(KnownProtocolKind::DistributedActorSystem);
+
+  auto mutableSystem = const_cast<NominalTypeDecl *>(system);
+  return evaluateOrDefault(
+      system->getASTContext().evaluator,
+      GetDistributedActorSystemRemoteCallFunctionRequest{mutableSystem, /*isVoidReturn=*/isVoidReturn},
+      nullptr);
+}
+
+FuncDecl *ASTContext::getRecordArgumentOnDistributedInvocationEncoder(
+    NominalTypeDecl *nominal) const {
+  if (getImpl().RecordArgumentDistributedInvocationEncoderDecl) {
+    return getImpl().RecordArgumentDistributedInvocationEncoderDecl;
+  }
+
+  NominalTypeDecl *encoderProto = nominal ?
+      nominal :
+      getProtocol(KnownProtocolKind::DistributedTargetInvocationEncoder);
+  assert(encoderProto && "Missing DistributedTargetInvocationEncoder protocol");
+  for (auto result : encoderProto->lookupDirect(Id_recordArgument)) {
+    auto *fd = dyn_cast<FuncDecl>(result);
+    if (!fd)
+      continue;
+
+    if (fd->getParameters()->size() != 1)
+      continue;
+
+    // TODO(distributed): more checks
+
+    if (fd->getResultInterfaceType()->isVoid() &&
+        fd->hasThrows() &&
+        !fd->hasAsync()) {
+      getImpl().RecordArgumentDistributedInvocationEncoderDecl = fd;
+      return fd;
+    }
+  }
+
+  return nullptr;
+}
+
+FuncDecl *ASTContext::getRecordErrorTypeOnDistributedInvocationEncoder(
+    NominalTypeDecl *nominal) const {
+  if (getImpl().RecordErrorTypeDistributedInvocationEncoderDecl) {
+    return getImpl().RecordErrorTypeDistributedInvocationEncoderDecl;
+  }
+
+  NominalTypeDecl *encoderProto =
+      nominal
+          ? nominal
+          : getProtocol(KnownProtocolKind::DistributedTargetInvocationEncoder);
+  assert(encoderProto && "Missing DistributedTargetInvocationEncoder protocol");
+  for (auto result : encoderProto->lookupDirect(Id_recordErrorType)) {
+    auto *fd = dyn_cast<FuncDecl>(result);
+    if (!fd)
+      continue;
+
+    if (fd->getParameters()->size() != 1)
+      continue;
+
+    // TODO(distributed): more checks that the arg type matches (!!!)
+
+    if (fd->getResultInterfaceType()->isVoid() &&
+        fd->hasThrows() &&
+        !fd->hasAsync()) {
+      getImpl().RecordErrorTypeDistributedInvocationEncoderDecl = fd;
+      return fd;
+    }
+  }
+
+  return nullptr;
+}
+
+FuncDecl *ASTContext::getRecordReturnTypeOnDistributedInvocationEncoder(
+    NominalTypeDecl *nominal) const {
+  if (getImpl().RecordReturnTypeDistributedInvocationEncoderDecl) {
+    return getImpl().RecordReturnTypeDistributedInvocationEncoderDecl;
+  }
+
+  NominalTypeDecl *encoderProto =
+      nominal
+          ? nominal
+          : getProtocol(KnownProtocolKind::DistributedTargetInvocationEncoder);
+  assert(encoderProto && "Missing DistributedTargetInvocationEncoder protocol");
+  for (auto result : encoderProto->lookupDirect(Id_recordReturnType)) {
+    auto *fd = dyn_cast<FuncDecl>(result);
+    if (!fd)
+      continue;
+
+    if (fd->getParameters()->size() != 1)
+      continue;
+
+    // TODO(distributed): more checks that the arg type matches (!!!)
+
+    if (fd->getResultInterfaceType()->isVoid() &&
+        fd->hasThrows() &&
+        !fd->hasAsync()) {
+      getImpl().RecordReturnTypeDistributedInvocationEncoderDecl = fd;
+      return fd;
+    }
+  }
+
+  return nullptr;
+}
+
+FuncDecl *ASTContext::getDoneRecordingOnDistributedInvocationEncoder(
+    NominalTypeDecl *nominal) const {
+  if (getImpl().DoneRecordingDistributedInvocationEncoderDecl) {
+    return getImpl().DoneRecordingDistributedInvocationEncoderDecl;
+  }
+
+  NominalTypeDecl *encoderProto =
+      nominal
+          ? nominal
+          : getProtocol(KnownProtocolKind::DistributedTargetInvocationEncoder);
+  assert(encoderProto && "Missing DistributedTargetInvocationEncoder protocol");
+  for (auto result : encoderProto->lookupDirect(Id_doneRecording)) {
+    auto *fd = dyn_cast<FuncDecl>(result);
+    if (!fd)
+      continue;
+
+    if (fd->getParameters()->size() != 0)
+      continue;
+
+    if (fd->getResultInterfaceType()->isVoid() &&
+        fd->hasThrows() &&
+        !fd->hasAsync()) {
+      getImpl().DoneRecordingDistributedInvocationEncoderDecl = fd;
+      return fd;
+    }
+  }
+
+  return nullptr;
 }
 
 FuncDecl *ASTContext::getHashValueForDecl() const {
@@ -3240,8 +3399,35 @@ ProtocolCompositionType::build(const ASTContext &C, ArrayRef<Type> Members,
                                                   Members,
                                                   HasExplicitAnyObject,
                                                   properties);
-  C.getImpl().getArena(arena).ProtocolCompositionTypes.InsertNode(compTy, InsertPos);
+  C.getImpl().getArena(arena).ProtocolCompositionTypes.InsertNode(
+      compTy, InsertPos);
   return compTy;
+}
+
+Type ParametrizedProtocolType::get(const ASTContext &C,
+                                   ProtocolType *baseTy,
+                                   Type argTy) {
+  bool isCanonical = baseTy->isCanonical();
+  RecursiveTypeProperties properties = baseTy->getRecursiveProperties();
+  properties |= argTy->getRecursiveProperties();
+  isCanonical &= argTy->isCanonical();
+
+  auto arena = getArena(properties);
+
+  void *InsertPos = nullptr;
+  llvm::FoldingSetNodeID ID;
+  ParametrizedProtocolType::Profile(ID, baseTy, argTy);
+
+  if (auto paramTy
+      = C.getImpl().getArena(arena).ParametrizedProtocolTypes
+          .FindNodeOrInsertPos(ID, InsertPos))
+    return paramTy;
+
+  auto paramTy = new (C, arena) ParametrizedProtocolType(
+        isCanonical ? &C : nullptr, baseTy, argTy, properties);
+  C.getImpl().getArena(arena).ParametrizedProtocolTypes.InsertNode(
+      paramTy, InsertPos);
+  return paramTy;
 }
 
 ReferenceStorageType *ReferenceStorageType::get(Type T,

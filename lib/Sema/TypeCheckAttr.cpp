@@ -117,7 +117,7 @@ public:
   IGNORED_ATTR(ImplicitSelfCapture)
   IGNORED_ATTR(InheritActorContext)
   IGNORED_ATTR(Isolated)
-  IGNORED_ATTR(PredatesConcurrency)
+  IGNORED_ATTR(Preconcurrency)
 #undef IGNORED_ATTR
 
   void visitAlignmentAttr(AlignmentAttr *attr) {
@@ -273,6 +273,8 @@ public:
   void visitNoImplicitCopyAttr(NoImplicitCopyAttr *attr);
 
   void visitUnavailableFromAsyncAttr(UnavailableFromAsyncAttr *attr);
+
+  void visitPrimaryAssociatedTypeAttr(PrimaryAssociatedTypeAttr *attr);
 };
 
 } // end anonymous namespace
@@ -5775,6 +5777,10 @@ void AttributeChecker::visitUnavailableFromAsyncAttr(
       }
     }
   }
+}
+
+void AttributeChecker::visitPrimaryAssociatedTypeAttr(
+    PrimaryAssociatedTypeAttr *attr) {
 }
 
 namespace {

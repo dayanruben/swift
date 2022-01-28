@@ -56,7 +56,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 663; // escape argument effects
+const uint16_t SWIFTMODULE_VERSION_MINOR = 665; // opaque type param bits
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -1105,6 +1105,12 @@ namespace decls_block {
     BCArray<TypeIDField> // protocols
   >;
 
+  using ParametrizedProtocolTypeLayout = BCRecordLayout<
+    PARAMETRIZED_PROTOCOL_TYPE,
+    TypeIDField,         // base
+    TypeIDWithBitField   // argument
+  >;
+
   using BoundGenericTypeLayout = BCRecordLayout<
     BOUND_GENERIC_TYPE,
     DeclIDField, // generic decl
@@ -1217,7 +1223,8 @@ namespace decls_block {
     BCFixed<1>,        // implicit flag
     BCFixed<1>,        // type sequence?
     BCVBR<4>,          // depth
-    BCVBR<4>           // index
+    BCVBR<4>,          // index
+    BCFixed<1>         // opaque type?
   >;
 
   using AssociatedTypeDeclLayout = BCRecordLayout<

@@ -1266,6 +1266,11 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
       return appendExistentialLayout(layout, sig, forDecl);
     }
 
+    case TypeKind::ParametrizedProtocol: {
+      llvm::errs() << "Not implemented\n";
+      abort();
+    }
+
     case TypeKind::Existential: {
       auto constraint = cast<ExistentialType>(tybase)->getConstraintType();
       return appendType(constraint, sig, forDecl);
@@ -3011,7 +3016,7 @@ CanType ASTMangler::getDeclTypeForMangling(
   // If this declaration predates concurrency, adjust its type to not
   // contain type features that were not available pre-concurrency. This
   // cannot alter the ABI in any way.
-  if (decl->predatesConcurrency()) {
+  if (decl->preconcurrency()) {
     ty = ty->stripConcurrency(/*recurse=*/true, /*dropGlobalActor=*/true);
   }
 

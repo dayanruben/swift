@@ -657,7 +657,10 @@ CONTEXTUAL_SIMPLE_DECL_ATTR(distributed, DistributedActor,
   APIBreakingToAdd | APIBreakingToRemove,
   118)
 
-// 119 is unused
+SIMPLE_DECL_ATTR(_primaryAssociatedType,
+  PrimaryAssociatedType, OnAssociatedType | UserInaccessible |
+  APIStableToAdd | ABIStableToAdd | APIBreakingToRemove | ABIStableToRemove,
+  119)
 
 SIMPLE_DECL_ATTR(_assemblyVision, EmitAssemblyVisionRemarks,
   OnFunc | UserInaccessible | NotSerialized | OnNominalType |
@@ -688,9 +691,9 @@ SIMPLE_DECL_ATTR(_noAllocation, NoAllocation,
   ABIStableToAdd | ABIStableToRemove | APIStableToAdd | APIStableToRemove,
   124)
 
-SIMPLE_DECL_ATTR(_predatesConcurrency, PredatesConcurrency,
+SIMPLE_DECL_ATTR(preconcurrency, Preconcurrency,
   OnFunc | OnConstructor | OnProtocol | OnGenericType | OnVar | OnSubscript |
-  OnEnumElement | OnImport | UserInaccessible |
+  OnEnumElement | OnImport |
   ABIBreakingToAdd | ABIBreakingToRemove | APIBreakingToAdd | APIBreakingToRemove,
   125)
 
