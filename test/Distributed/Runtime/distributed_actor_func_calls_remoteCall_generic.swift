@@ -15,8 +15,14 @@
 // FIXME(distributed): remote calls seem to hang on linux - rdar://87240034
 // UNSUPPORTED: linux
 
+// rdar://87568630 - segmentation fault on 32-bit WatchOS simulator
+// UNSUPPORTED: OS=watchos && CPU=i386
+
 // XFAIL: *
 // FIXME(distributed): generics will come very shortly
+
+// rdar://88228867 - remoteCall_* tests have been disabled due to random failures
+// REQUIRES: rdar88228867
 
 import _Distributed
 
@@ -71,7 +77,7 @@ struct FakeActorSystem: DistributedActorSystem {
   func remoteCall<Act, Err, Res>(
     on actor: Act,
     target: RemoteCallTarget,
-    invocationDecoder: inout InvocationDecoder,
+    invocation invocationEncoder: inout InvocationEncoder,
     throwing errorType: Err.Type,
     returning returnType: Res.Type
   ) async throws -> Res
@@ -86,7 +92,7 @@ struct FakeActorSystem: DistributedActorSystem {
   func remoteCallVoid<Act, Err>(
     on actor: Act,
     target: RemoteCallTarget,
-    invocationDecoder: inout InvocationDecoder,
+    invocation invocationEncoder: inout InvocationEncoder,
     throwing: Err.Type
   ) async throws
     where Act: DistributedActor,
@@ -170,17 +176,8 @@ struct FakeResultHandler: DistributedTargetInvocationResultHandler {
 @available(SwiftStdlib 5.5, *)
 typealias DefaultDistributedActorSystem = FakeActorSystem
 
-// actual mangled name:
-let emptyName = "$s4main7GreeterC5emptyyyFTE"
-let helloName = "$s4main7GreeterC5helloSSyFTE"
-let answerName = "$s4main7GreeterC6answerSiyFTE"
-let largeResultName = "$s4main7GreeterC11largeResultAA11LargeStructVyFTE"
-let enumResultName = "$s4main7GreeterC10enumResultAA1EOyFTE"
-
-let echoName = "$s4main7GreeterC4echo4nameS2S_tFTE"
-
 func test() async throws {
-  let system = FakeActorSystem()
+  let system = DefaultDistributedActorSystem()
 
   let local = Greeter(system: system)
   let ref = try Greeter.resolve(id: local.id, using: system)

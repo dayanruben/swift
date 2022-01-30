@@ -139,10 +139,6 @@ public struct FakeInvocation: DistributedTargetInvocationEncoder, DistributedTar
   ) throws { /* ... */ }
   public func decodeReturnType() throws -> Any.Type? { nil }
   public func decodeErrorType() throws -> Any.Type? { nil }
-
-  public struct FakeArgumentDecoder: DistributedTargetInvocationArgumentDecoder {
-    public typealias SerializationRequirement = Codable
-  }
 }
 
 typealias DefaultDistributedActorSystem = FakeActorSystem
@@ -150,7 +146,7 @@ typealias DefaultDistributedActorSystem = FakeActorSystem
 // ==== Execute ----------------------------------------------------------------
 
 func test() async {
-  let system = FakeActorSystem()
+  let system = DefaultDistributedActorSystem()
 
   // NOTE: All allocated distributed actors should be saved in this array, so
   // that they will be deallocated together at the end of this test!

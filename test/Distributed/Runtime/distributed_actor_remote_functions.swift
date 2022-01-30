@@ -142,8 +142,8 @@ struct ActorAddress: Sendable, Hashable, Codable {
 
 struct FakeActorSystem: DistributedActorSystem {
   typealias ActorID = ActorAddress
-  typealias InvocationDecoder = FakeInvocation
-  typealias InvocationEncoder = FakeInvocation
+  typealias InvocationDecoder = FakeInvocationDecoder
+  typealias InvocationEncoder = FakeInvocationEncoder
   typealias SerializationRequirement = Codable
 
   func resolve<Act>(id: ActorID, as actorType: Act.Type) throws -> Act?
@@ -172,7 +172,7 @@ struct FakeActorSystem: DistributedActorSystem {
   func remoteCall<Act, Err, Res>(
     on actor: Act,
     target: RemoteCallTarget,
-    invocationDecoder: inout InvocationDecoder,
+    invocation invocationEncoder: inout InvocationEncoder,
     throwing: Err.Type,
     returning: Res.Type
   ) async throws -> Res
@@ -190,7 +190,7 @@ struct FakeActorSystem: DistributedActorSystem {
   func remoteCallVoid<Act, Err>(
     on actor: Act,
     target: RemoteCallTarget,
-    invocationDecoder: inout InvocationDecoder,
+    invocation invocationEncoder: inout InvocationEncoder,
     throwing: Err.Type
   ) async throws
     where Act: DistributedActor,
@@ -201,7 +201,8 @@ struct FakeActorSystem: DistributedActorSystem {
   }
 }
 
-struct FakeInvocation: DistributedTargetInvocationEncoder, DistributedTargetInvocationDecoder {
+// === Sending / encoding -------------------------------------------------
+struct FakeInvocationEncoder: DistributedTargetInvocationEncoder {
   typealias SerializationRequirement = Codable
 
   mutating func recordGenericSubstitution<T>(_ type: T.Type) throws {}
@@ -209,20 +210,16 @@ struct FakeInvocation: DistributedTargetInvocationEncoder, DistributedTargetInvo
   mutating func recordReturnType<R: SerializationRequirement>(_ type: R.Type) throws {}
   mutating func recordErrorType<E: Error>(_ type: E.Type) throws {}
   mutating func doneRecording() throws {}
+}
 
-  // === Receiving / decoding -------------------------------------------------
+// === Receiving / decoding -------------------------------------------------
+class FakeInvocationDecoder : DistributedTargetInvocationDecoder {
+  typealias SerializationRequirement = Codable
 
   func decodeGenericSubstitutions() throws -> [Any.Type] { [] }
-  mutating func decodeNextArgument<Argument>(
-    _ argumentType: Argument.Type,
-    into pointer: UnsafeMutablePointer<Argument> // pointer to our hbuffer
-  ) throws { /* ... */ }
+  func decodeNextArgument<Argument>() throws -> Argument { fatalError() }
   func decodeReturnType() throws -> Any.Type? { nil }
   func decodeErrorType() throws -> Any.Type? { nil }
-
-  struct FakeArgumentDecoder: DistributedTargetInvocationArgumentDecoder {
-    typealias SerializationRequirement = Codable
-  }
 }
 
 @available(SwiftStdlib 5.5, *)
@@ -311,7 +308,7 @@ func test_remote_invoke(address: ActorAddress, system: FakeActorSystem) async {
 @main struct Main {
   static func main() async {
     let address = ActorAddress(address: "")
-    let system = FakeActorSystem()
+    let system = DefaultDistributedActorSystem()
 
     await test_remote_invoke(address: address, system: system)
   }
