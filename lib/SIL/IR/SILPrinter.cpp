@@ -791,6 +791,12 @@ public:
     // the block header.
     printBlockArgumentUses(BB);
 
+    // If the basic block has a name available, print it as well
+    auto debugName = BB->getDebugName();
+    if (debugName.hasValue()) {
+      *this << "// " << debugName.getValue() << '\n';
+    }
+
     // Then print the name of our block, the arguments, and the block colon.
     *this << Ctx.getID(BB);
     printBlockArguments(BB);
@@ -3853,6 +3859,11 @@ void SILSpecializeAttr::print(llvm::raw_ostream &OS) const {
                },
                [&] { OS << ", "; });
   }
+}
+
+void KeyPathPatternComponent::print(SILPrintContext &ctxt) const {
+  SILPrinter printer(ctxt);
+  printer.printKeyPathPatternComponent(*this);
 }
 
 //===----------------------------------------------------------------------===//

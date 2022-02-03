@@ -78,6 +78,7 @@ class StringLiteralExpr;
 class ValueDecl;
 class VarDecl;
 class FunctionRefBaseInst;
+class SILPrintContext;
 
 template <typename ImplClass> class SILClonerWithScopes;
 
@@ -1018,9 +1019,9 @@ public:
            node->getKind() <= SILNodeKind::Last_SingleValueInstruction;
   }
 
-  /// If this is an instruction which "defines" an opened archetype, it is
+  /// If this is an instruction which "defines" a root opened archetype, it is
   /// returned.
-  CanArchetypeType getOpenedArchetype() const;
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const;
 
   SILInstruction *getPreviousInstruction() {
     return SILInstruction::getPreviousInstruction();
@@ -3489,7 +3490,9 @@ public:
     
   void incrementRefCounts() const;
   void decrementRefCounts() const;
-  
+
+  void print(SILPrintContext &ctxt) const;
+
   void Profile(llvm::FoldingSetNodeID &ID);
 };
 

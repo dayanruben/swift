@@ -1,4 +1,3 @@
-// XXX: %target-swift-frontend -primary-file %s -emit-sil -parse-as-library -enable-experimental-distributed -disable-availability-checking | %FileCheck %s --enable-var-scope --dump-input=always
 // RUN: %target-run-simple-swift( -Xfrontend -module-name=main -Xfrontend -disable-availability-checking -Xfrontend -enable-experimental-distributed -parse-as-library) | %FileCheck %s --dump-input=always
 
 // REQUIRES: executable_test
@@ -7,6 +6,8 @@
 
 // rdar://87568630 - segmentation fault on 32-bit WatchOS simulator
 // UNSUPPORTED: OS=watchos && CPU=i386
+// rdar://88340451 - segmentation fault on arm64_32 WatchOS simulator
+// UNSUPPORTED: OS=watchos && CPU=arm64_32
 
 // rdar://76038845
 // UNSUPPORTED: use_os_stdlib
@@ -147,8 +148,8 @@ struct FakeActorSystem: DistributedActorSystem {
     returning: Res.Type
   ) async throws -> Res
     where Act: DistributedActor,
+          Act.ID == ActorID,
           Err: Error,
-//          Act.ID == ActorID,
           Res: SerializationRequirement {
     fatalError("INVOKED REMOTE CALL")
   }
