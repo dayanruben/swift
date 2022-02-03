@@ -2061,15 +2061,9 @@ ParamSpecifierRequest::evaluate(Evaluator &evaluator,
   assert(typeRepr != nullptr && "Should call setSpecifier() on "
          "synthesized parameter declarations");
 
-  auto *nestedRepr = typeRepr;
-
   // Look through parens here; other than parens, specifiers
   // must appear at the top level of a parameter type.
-  while (auto *tupleRepr = dyn_cast<TupleTypeRepr>(nestedRepr)) {
-    if (!tupleRepr->isParenType())
-      break;
-    nestedRepr = tupleRepr->getElementType(0);
-  }
+  auto *nestedRepr = typeRepr->getWithoutParens();
 
   if (auto isolated = dyn_cast<IsolatedTypeRepr>(nestedRepr))
     nestedRepr = isolated->getBase();
@@ -2798,9 +2792,17 @@ ExtendedTypeRequest::evaluate(Evaluator &eval, ExtensionDecl *ext) const {
     return error();
   }
 
-  // Cannot extend a bound generic type, unless it's referenced via a
-  // non-generic typealias type.
-  if (extendedType->isSpecialized() &&
+  // Cannot extend types who contain placeholders.
+  if (extendedType->hasPlaceholder()) {
+    diags.diagnose(ext->getLoc(), diag::extension_placeholder)
+      .highlight(extendedRepr->getSourceRange());
+    return error();
+  }
+
+  // By default, the user cannot extend a bound generic type, unless it's
+  // referenced via a non-generic typealias type.
+  if (!ext->getASTContext().LangOpts.EnableExperimentalBoundGenericExtensions &&
+      extendedType->isSpecialized() &&
       !isNonGenericTypeAliasType(extendedType)) {
     diags.diagnose(ext->getLoc(), diag::extension_specialization,
                    extendedType->getAnyNominal()->getName())

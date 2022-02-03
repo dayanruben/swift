@@ -1904,6 +1904,8 @@ ERROR(extension_metatype,none,
 ERROR(extension_specialization,none,
       "constrained extension must be declared on the unspecialized generic "
       "type %0 with constraints specified by a 'where' clause", (Identifier))
+ERROR(extension_placeholder,none,
+      "cannot extend a type that contains placeholders", ())
 ERROR(extension_stored_property,none,
       "extensions must not contain stored properties", ())
 NOTE(extension_stored_property_fixit,none,
@@ -3746,6 +3748,8 @@ ERROR(placeholder_type_not_allowed_in_return_type,none,
       "type placeholder may not appear in function return type", ())
 ERROR(placeholder_type_not_allowed_in_parameter,none,
       "type placeholder may not appear in top-level parameter", ())
+ERROR(placeholder_type_not_allowed_in_pattern,none,
+      "placeholder type may not appear as type of a variable", ())
 NOTE(replace_placeholder_with_inferred_type,none,
      "replace the placeholder with the inferred type %0", (Type))
 
@@ -4705,9 +4709,6 @@ ERROR(nonisolated_local_var,none,
       ())
 ERROR(nonisolated_actor_sync_init,none,
       "'nonisolated' on an actor's synchronous initializer is invalid",
-      ())
-ERROR(nonisolated_actor_convenience_init,none,
-      "'nonisolated' on an actor's convenience initializer is redundant",
       ())
 
 ERROR(actor_instance_property_wrapper,none,
