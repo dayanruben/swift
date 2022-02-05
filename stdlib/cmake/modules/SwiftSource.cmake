@@ -457,6 +457,11 @@ function(_compile_swift_files
     list(APPEND swift_flags "-Xfrontend" "-sil-verify-all")
   endif()
 
+  # The standard library and overlays are built with -requirement-machine-protocol-signatures=verify.
+  if(SWIFTFILE_IS_STDLIB)
+    list(APPEND swift_flags "-Xfrontend" "-requirement-machine-protocol-signatures=verify")
+  endif()
+
   # The standard library and overlays are built resiliently when SWIFT_STDLIB_STABLE_ABI=On.
   if(SWIFTFILE_IS_STDLIB AND SWIFT_STDLIB_STABLE_ABI)
     list(APPEND swift_flags "-enable-library-evolution")
@@ -527,7 +532,7 @@ function(_compile_swift_files
   endif()
 
   if(SWIFT_STDLIB_DISABLE_INSTANTIATION_CACHES)
-    list(APPEND swift_flags "-Xfrontend -disable-preallocated-instantiation-caches")
+    list(APPEND swift_flags "-Xfrontend" "-disable-preallocated-instantiation-caches")
   endif()
 
   list(APPEND swift_flags ${SWIFT_STDLIB_EXTRA_SWIFT_COMPILE_FLAGS})

@@ -274,6 +274,8 @@ ERROR(cannot_infer_closure_parameter_type,none,
        (StringRef))
 ERROR(cannot_infer_closure_type,none,
       "unable to infer closure type in the current context", ())
+ERROR(cannot_infer_empty_closure_result_type,none,
+      "cannot infer return type of empty closure", ())
 ERROR(cannot_infer_closure_result_type,none,
       "cannot infer return type for closure with multiple statements; "
       "add explicit type to disambiguate", ())
@@ -4573,6 +4575,9 @@ ERROR(distributed_actor_remote_func_implemented_manually,none,
 ERROR(nonisolated_distributed_actor_storage,none,
       "'nonisolated' can not be applied to distributed actor stored properties",
       ())
+ERROR(nonisolated_storage_value_type,none,
+      "'nonisolated' is redundant on %0's stored properties",
+      (DescriptiveDeclKind))
 ERROR(distributed_actor_func_nonisolated, none,
       "cannot declare method %0 as both 'nonisolated' and 'distributed'",
       (DeclName))
@@ -4773,6 +4778,9 @@ ERROR(global_actor_on_actor_class,none,
       "actor %0 cannot have a global actor", (Identifier))
 ERROR(global_actor_on_local_variable,none,
       "local variable %0 cannot have a global actor", (DeclName))
+ERROR(global_actor_on_storage_of_value_type,none,
+      "stored property %0 within %1 cannot have a global actor",
+      (DeclName, DescriptiveDeclKind))
 ERROR(global_actor_non_unsafe_init,none,
       "global actor attribute %0 argument can only be '(unsafe)'", (Type))
 ERROR(global_actor_non_final_class,none,
