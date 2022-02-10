@@ -2724,13 +2724,11 @@ bool ConstraintSystem::isAsynchronousContext(DeclContext *dc) {
   if (auto func = dyn_cast<AbstractFunctionDecl>(dc))
     return func->isAsyncContext();
 
-  if (auto abstractClosure = dyn_cast<AbstractClosureExpr>(dc)) {
-    if (Type type = GetClosureType{*this}(abstractClosure)) {
-      if (auto fnType = type->getAs<AnyFunctionType>())
-        return fnType->isAsync();
-    }
-
-    return abstractClosure->isBodyAsync();
+  if (auto closure = dyn_cast<ClosureExpr>(dc)) {
+    return evaluateOrDefault(
+        getASTContext().evaluator,
+        ClosureEffectsRequest{const_cast<ClosureExpr *>(closure)},
+        FunctionType::ExtInfo()).isAsync();
   }
 
   return false;
@@ -2828,6 +2826,7 @@ void ConstraintSystem::bindOverloadType(
     if (!argList) {
       argList = ArgumentList::createImplicit(
           ctx, {Argument(SourceLoc(), ctx.Id_dynamicMember, /*expr*/ nullptr)},
+          /*firstTrailingClosureIndex=*/None,
           AllocationArena::ConstraintSolver);
     }
 
@@ -3353,7 +3352,8 @@ size_t Solution::getTotalMemory() const {
          ConstraintRestrictions.getMemorySize() +
          llvm::capacity_in_bytes(Fixes) + DisjunctionChoices.getMemorySize() +
          OpenedTypes.getMemorySize() + OpenedExistentialTypes.getMemorySize() +
-         (DefaultedConstraints.size() * sizeof(void *));
+         (DefaultedConstraints.size() * sizeof(void *)) +
+         ImplicitCallAsFunctionRoots.getMemorySize();
 }
 
 DeclContext *Solution::getDC() const { return constraintSystem->DC; }

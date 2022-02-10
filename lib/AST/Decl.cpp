@@ -191,8 +191,13 @@ DescriptiveDeclKind Decl::getDescriptiveKind() const {
      auto var = cast<VarDecl>(this);
      switch (var->getCorrectStaticSpelling()) {
      case StaticSpellingKind::None:
-       if (var->getDeclContext()->isTypeContext())
+       if (var->getDeclContext()->isTypeContext()) {
+         if (var->isDistributed() && !var->isLet()) {
+           return DescriptiveDeclKind::DistributedProperty;
+         }
+
          return DescriptiveDeclKind::Property;
+       }
        return var->isLet() ? DescriptiveDeclKind::Let
                            : DescriptiveDeclKind::Var;
      case StaticSpellingKind::KeywordStatic:
@@ -299,6 +304,7 @@ StringRef Decl::getDescriptiveKindName(DescriptiveDeclKind K) {
   ENTRY(Property, "property");
   ENTRY(StaticProperty, "static property");
   ENTRY(ClassProperty, "class property");
+  ENTRY(DistributedProperty, "distributed property");
   ENTRY(PrecedenceGroup, "precedence group");
   ENTRY(InfixOperator, "infix operator");
   ENTRY(PrefixOperator, "prefix operator");
@@ -2007,14 +2013,13 @@ static bool deferMatchesEnclosingAccess(const FuncDecl *defer) {
           return true;
 
         switch (getActorIsolation(type)) {
-          case swift::ActorIsolation::Unspecified:
-          case swift::ActorIsolation::GlobalActorUnsafe:
+          case ActorIsolation::Unspecified:
+          case ActorIsolation::GlobalActorUnsafe:
             break;
 
-          case swift::ActorIsolation::ActorInstance:
-          case swift::ActorIsolation::DistributedActorInstance:
-          case swift::ActorIsolation::Independent:
-          case swift::ActorIsolation::GlobalActor:
+          case ActorIsolation::ActorInstance:
+          case ActorIsolation::Independent:
+          case ActorIsolation::GlobalActor:
             return true;
         }
       }
@@ -6302,6 +6307,10 @@ bool VarDecl::isMemberwiseInitialized(bool preferDeclaredProperties) const {
 
 bool VarDecl::isAsyncLet() const {
   return getAttrs().hasAttribute<AsyncAttr>();
+}
+
+bool VarDecl::isDistributed() const {
+  return getAttrs().hasAttribute<DistributedActorAttr>();
 }
 
 bool VarDecl::isOrdinaryStoredProperty() const {
