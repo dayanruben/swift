@@ -3164,6 +3164,9 @@ ERROR(override_reasync_with_non_reasync,none,
 ERROR(reasync_without_async_parameter,none,
       "'reasync' function must take an 'async' function argument", ())
 
+ERROR(inherits_executor_without_async,none,
+      "non-async functions cannot inherit an executor", ())
+
 ERROR(autoclosure_function_type,none,
       "@autoclosure attribute only applies to function types",
       ())
@@ -4834,9 +4837,6 @@ ERROR(string_processing_lib_missing,none,
 ERROR(regex_capture_types_failed_to_decode,none,
       "failed to decode capture types for regular expression literal; this may "
       "be a compiler bug", ())
-ERROR(regex_too_many_captures,none,
-      "too many captures in regular expression literal; the current limit is "
-      "%0", (unsigned))
 
 //------------------------------------------------------------------------------
 // MARK: Type Check Types
