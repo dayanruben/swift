@@ -374,8 +374,15 @@ MutableTerm PropertyMap::computeConstraintTermForTypeWitness(
 
   // Simplify the substitution terms in the type witness symbol.
   RewritePath substPath;
-  System.simplifySubstitutions(typeWitnessSymbol, &substPath);
-  substPath.invert();
+  auto differenceID = System.simplifySubstitutions(
+      key, typeWitnessSymbol, /*map=*/this,
+      &substPath);
+  if (differenceID) {
+    const auto &difference = System.getTypeDifference(*differenceID);
+    assert(difference.LHS == typeWitnessSymbol);
+    typeWitnessSymbol = difference.RHS;
+    substPath.invert();
+  }
 
   // If it is equal to the parent type, introduce a same-type requirement
   // between the two parameters.
@@ -520,6 +527,9 @@ void PropertyMap::inferConditionalRequirements(
     return;
 
   SmallVector<Requirement, 2> desugaredRequirements;
+  // FIXME: Store errors in the rewrite system to be diagnosed
+  // from the top-level generic signature requests.
+  SmallVector<RequirementError, 2> errors;
 
   // First, desugar all conditional requirements.
   for (auto req : conditionalRequirements) {
@@ -529,7 +539,7 @@ void PropertyMap::inferConditionalRequirements(
       llvm::dbgs() << "\n";
     }
 
-    desugarRequirement(req, desugaredRequirements);
+    desugarRequirement(req, desugaredRequirements, errors);
   }
 
   // Now, convert desugared conditional requirements to rules.

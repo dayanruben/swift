@@ -316,7 +316,9 @@ public:
 
   bool simplify(MutableTerm &term, RewritePath *path=nullptr) const;
 
-  bool simplifySubstitutions(Symbol &symbol, RewritePath *path=nullptr) const;
+  Optional<unsigned>
+  simplifySubstitutions(Term baseTerm, Symbol symbol, const PropertyMap *map,
+                        RewritePath *path=nullptr);
 
   //////////////////////////////////////////////////////////////////////////////
   ///
@@ -335,7 +337,7 @@ public:
 
   void simplifyRightHandSides();
 
-  void simplifyLeftHandSideSubstitutions();
+  void simplifyLeftHandSideSubstitutions(const PropertyMap *map);
 
   enum ValidityPolicy {
     AllowInvalidRequirements,
@@ -414,6 +416,20 @@ public:
 
   const TypeDifference &getTypeDifference(unsigned index) const;
 
+  void processTypeDifference(const TypeDifference &difference,
+                             unsigned differenceID,
+                             unsigned lhsRuleID,
+                             const RewritePath &rhsPath);
+
+  void buildRewritePathForJoiningTerms(MutableTerm lhsTerm,
+                                       MutableTerm rhsTerm,
+                                       RewritePath *path) const;
+
+  void buildRewritePathForUnifier(Term key,
+                                  unsigned lhsRuleID,
+                                  const RewritePath &rhsPath,
+                                  RewritePath *path) const;
+
 private:
   //////////////////////////////////////////////////////////////////////////////
   ///
@@ -436,6 +452,10 @@ private:
   /// This data is used by the homotopy reduction and minimal conformances
   /// algorithms.
   std::vector<RewriteLoop> Loops;
+
+  /// A list of pairs where the first element is a rule number and the second
+  /// element is an equivalent rewrite path in terms of non-redundant rules.
+  std::vector<std::pair<unsigned, RewritePath>> RedundantRules;
 
   void propagateExplicitBits();
 
