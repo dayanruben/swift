@@ -825,6 +825,11 @@ public:
   /// This function won't consider the parent context to get the information.
   Optional<llvm::VersionTuple> getIntroducedOSVersion(PlatformKind Kind) const;
 
+  /// Returns the OS version in which the decl became ABI as specified by the
+  /// @_backDeploy attribute.
+  Optional<llvm::VersionTuple>
+  getBackDeployBeforeOSVersion(PlatformKind Kind) const;
+
   /// Returns the starting location of the entire declaration.
   SourceLoc getStartLoc() const { return getSourceRange().Start; }
 
@@ -5927,6 +5932,14 @@ public:
                                StaticSpellingKind StaticSpelling,
                                SourceLoc SubscriptLoc, ParameterList *Indices,
                                SourceLoc ArrowLoc, TypeRepr *ElementTyR,
+                               DeclContext *Parent,
+                               GenericParamList *GenericParams);
+
+  static SubscriptDecl *create(ASTContext &Context, DeclName Name,
+                               SourceLoc StaticLoc,
+                               StaticSpellingKind StaticSpelling,
+                               SourceLoc SubscriptLoc, ParameterList *Indices,
+                               SourceLoc ArrowLoc, Type ElementTy,
                                DeclContext *Parent,
                                GenericParamList *GenericParams);
 
