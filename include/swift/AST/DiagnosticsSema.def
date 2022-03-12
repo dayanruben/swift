@@ -4495,6 +4495,13 @@ ERROR(actor_inheritance,none,
 ERROR(actor_protocol_illegal_inheritance,none,
       "non-actor type %0 cannot conform to the 'Actor' protocol",
       (DeclName))
+ERROR(distributed_actor_conformance_missing_system_type,none,
+      "distributed actor %0 does not declare ActorSystem it can be used with.",
+      (DeclName))
+NOTE(note_distributed_actor_system_can_be_defined_using_defaultdistributedactorsystem,none,
+     "you can provide a module-wide default actor system by declaring:\n"
+     "typealias DefaultDistributedActorSystem = <#ConcreteActorSystem#>\n",
+     ())
 ERROR(distributed_actor_protocol_illegal_inheritance,none,
       "non-distributed actor type %0 cannot conform to the 'DistributedActor' protocol",
       (DeclName))
@@ -6311,6 +6318,10 @@ ERROR(cannot_convert_default_value_type_to_argument_type, none,
 
 ERROR(attr_incompatible_with_back_deploy,none,
       "'%0' cannot be applied to a back deployed %1",
+      (DeclAttribute, DescriptiveDeclKind))
+
+ERROR(back_deploy_not_on_coroutine,none,
+      "'%0' is not supported on coroutine %1",
       (DeclAttribute, DescriptiveDeclKind))
 
 #define UNDEFINE_DIAGNOSTIC_MACROS
