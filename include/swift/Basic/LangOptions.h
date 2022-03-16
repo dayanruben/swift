@@ -407,9 +407,6 @@ namespace swift {
     /// cases.
     bool EnableNonFrozenEnumExhaustivityDiagnostics = false;
 
-    /// Enable making top-level code support concurrency
-    bool EnableExperimentalAsyncTopLevel = false;
-
     /// Regex for the passes that should report passed and missed optimizations.
     ///
     /// These are shared_ptrs so that this class remains copyable.
@@ -735,7 +732,7 @@ namespace swift {
 
     /// Enable experimental support for type inference through multi-statement
     /// closures.
-    bool EnableMultiStatementClosureInference = false;
+    bool EnableMultiStatementClosureInference = true;
 
     /// Enable experimental support for generic parameter inference in
     /// parameter positions from associated default expressions.
