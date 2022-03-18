@@ -456,6 +456,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                  OPT_disable_experimental_opened_existential_types,
                  false);
 
+  Opts.EnableExperimentalVariadicGenerics |=
+    Args.hasArg(OPT_enable_experimental_variadic_generics);
+
   // SwiftOnoneSupport produces different symbols when opening existentials,
   // so disable it.
   if (FrontendOpts.ModuleName == SWIFT_ONONE_SUPPORT)
@@ -1003,6 +1006,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   if (Args.hasArg(OPT_enable_requirement_machine_loop_normalization))
     Opts.EnableRequirementMachineLoopNormalization = true;
+
+  if (Args.hasArg(OPT_enable_requirement_machine_opaque_archetypes))
+    Opts.EnableRequirementMachineOpaqueArchetypes = true;
 
   Opts.DumpTypeWitnessSystems = Args.hasArg(OPT_dump_type_witness_systems);
 

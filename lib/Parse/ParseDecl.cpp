@@ -2802,8 +2802,12 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
     break;
   }
   case DAK_TypeSequence: {
-    auto range = SourceRange(Loc, Tok.getRange().getStart());
-    Attributes.add(TypeSequenceAttr::create(Context, AtLoc, range));
+    if (Context.LangOpts.EnableExperimentalVariadicGenerics) {
+      auto range = SourceRange(Loc, Tok.getRange().getStart());
+      Attributes.add(TypeSequenceAttr::create(Context, AtLoc, range));
+    } else {
+      DiscardAttribute = true;
+    }
     break;
   }
 
@@ -7905,8 +7909,30 @@ ParserResult<ClassDecl> Parser::parseDeclClass(ParseDeclOptions Flags,
 
 ParserStatus Parser::parsePrimaryAssociatedTypes(
     SmallVectorImpl<AssociatedTypeDecl *> &AssocTypes) {
+  SyntaxParsingContext GPSContext(SyntaxContext,
+                                  SyntaxKind::PrimaryAssociatedTypeClause);
+
   SourceLoc LAngleLoc = consumeStartingLess();
 
+  auto Result = parsePrimaryAssociatedTypeList(AssocTypes);
+
+  // Parse the closing '>'.
+  SourceLoc RAngleLoc;
+  if (startsWithGreater(Tok)) {
+    RAngleLoc = consumeStartingGreater();
+  } else {
+    diagnose(Tok, diag::expected_rangle_primary_associated_type_list);
+    diagnose(LAngleLoc, diag::opening_angle);
+
+    // Skip until we hit the '>'.
+    RAngleLoc = skipUntilGreaterInTypeList();
+  }
+
+  return Result;
+}
+
+ParserStatus Parser::parsePrimaryAssociatedTypeList(
+    SmallVectorImpl<AssociatedTypeDecl *> &AssocTypes) {
   ParserStatus Result;
   SyntaxParsingContext PATContext(SyntaxContext,
                                   SyntaxKind::PrimaryAssociatedTypeList);
@@ -7987,18 +8013,6 @@ ParserStatus Parser::parsePrimaryAssociatedTypes(
     // Parse the comma, if the list continues.
     HasNextParam = consumeIf(tok::comma);
   } while (HasNextParam);
-
-  // Parse the closing '>'.
-  SourceLoc RAngleLoc;
-  if (startsWithGreater(Tok)) {
-    RAngleLoc = consumeStartingGreater();
-  } else {
-    diagnose(Tok, diag::expected_rangle_primary_associated_type_list);
-    diagnose(LAngleLoc, diag::opening_angle);
-
-    // Skip until we hit the '>'.
-    RAngleLoc = skipUntilGreaterInTypeList();
-  }
 
   return Result;
 }

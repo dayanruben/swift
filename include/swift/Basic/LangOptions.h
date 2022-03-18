@@ -352,6 +352,9 @@ namespace swift {
     /// Enable experimental pairwise `buildBlock` for result builders.
     bool EnableExperimentalPairwiseBuildBlock = false;
 
+    /// Enable variadic generics.
+    bool EnableExperimentalVariadicGenerics = false;
+
     /// Disable the implicit import of the _Concurrency module.
     bool DisableImplicitConcurrencyModuleImport =
         !SWIFT_IMPLICIT_CONCURRENCY_IMPORT;
@@ -545,6 +548,11 @@ namespace swift {
     /// Enable the stronger minimization algorithm. This is just for debugging;
     /// if you have a testcase which requires this, please submit a bug report.
     bool EnableRequirementMachineLoopNormalization = false;
+
+    /// Enable experimental, more correct support for opaque result types as
+    /// concrete types. This will sometimes fail to produce a convergent
+    /// rewrite system.
+    bool EnableRequirementMachineOpaqueArchetypes = false;
 
     /// Enables dumping type witness systems from associated type inference.
     bool DumpTypeWitnessSystems = false;
