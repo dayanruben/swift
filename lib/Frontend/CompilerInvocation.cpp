@@ -804,17 +804,15 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   // First, set up default minimum inlining target versions.
   auto getDefaultMinimumInliningTargetVersion =
       [&](const llvm::Triple &triple) -> llvm::VersionTuple {
-#if SWIFT_DEFAULT_TARGET_MIN_INLINING_VERSION_TO_MIN
-    // In ABI-stable modules, default to the version when Swift first became
-    // available.
-    if (FrontendOpts.EnableLibraryEvolution)
+    // In API modules, default to the version when Swift first became available.
+    if (Opts.LibraryLevel == LibraryLevel::API)
       if (auto minTriple = minimumAvailableOSVersionForTriple(triple))
-        return minTriple;
-#endif
+        return *minTriple;
 
-    // In ABI-unstable modules, we will never have to interoperate with
-    // older versions of the module, so we should default to the minimum
-    // deployment target.
+    // In other modules, assume that availability is used less consistently
+    // and that library clients will generally raise deployment targets as the
+    // library evolves so the min inlining version should be the deployment
+    // target by default.
     unsigned major, minor, patch;
     if (triple.isMacOSX())
       triple.getMacOSXVersion(major, minor, patch);
@@ -994,6 +992,17 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
       HadError = true;
     } else {
       Opts.RequirementMachineMaxConcreteNesting = limit;
+    }
+  }
+
+  if (const Arg *A = Args.getLastArg(OPT_requirement_machine_max_split_concrete_equiv_class_attempts)) {
+    unsigned limit;
+    if (StringRef(A->getValue()).getAsInteger(10, limit)) {
+      Diags.diagnose(SourceLoc(), diag::error_invalid_arg_value,
+                     A->getAsString(Args), A->getValue());
+      HadError = true;
+    } else {
+      Opts.RequirementMachineMaxSplitConcreteEquivClassAttempts = limit;
     }
   }
 
