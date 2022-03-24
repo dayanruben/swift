@@ -4048,9 +4048,16 @@ GenericParameterReferenceInfo swift::findGenericParameterReferences(
             sig, genericParam, param.getPlainType(), TypePosition::Invariant);
         continue;
       }
+
+      // Parameters are contravariant, but if we're prior to the skipped
+      // parameter treat them as invariant because we're not allowed to
+      // reference the parameter at all.
+      TypePosition position = TypePosition::Contravariant;
+      if (skipParamIndex && paramIdx < *skipParamIndex)
+        position = TypePosition::Invariant;
+
       inputInfo |= ::findGenericParameterReferences(
-          sig, genericParam, param.getParameterType(),
-          TypePosition::Contravariant);
+          sig, genericParam, param.getParameterType(), position);
     }
 
     // A covariant Self result inside a parameter will not be bona fide.
@@ -5619,6 +5626,8 @@ Optional<KnownDerivableProtocolKind>
     return KnownDerivableProtocolKind::Actor;
   case KnownProtocolKind::DistributedActor:
     return KnownDerivableProtocolKind::DistributedActor;
+  case KnownProtocolKind::DistributedActorSystem:
+    return KnownDerivableProtocolKind::DistributedActorSystem;
   default: return None;
   }
 }
@@ -6821,6 +6830,32 @@ ParamDecl *ParamDecl::clone(const ASTContext &Ctx, ParamDecl *PD) {
   auto *Clone = ParamDecl::cloneWithoutType(Ctx, PD);
   Clone->setInterfaceType(PD->getInterfaceType());
   return Clone;
+}
+
+ParamDecl *
+ParamDecl::createImplicit(ASTContext &Context, SourceLoc specifierLoc,
+                          SourceLoc argumentNameLoc, Identifier argumentName,
+                          SourceLoc parameterNameLoc, Identifier parameterName,
+                          Type interfaceType, DeclContext *Parent,
+                          ParamSpecifier specifier) {
+  auto decl =
+      new (Context) ParamDecl(specifierLoc, argumentNameLoc, argumentName,
+                              parameterNameLoc, parameterName, Parent);
+  decl->setImplicit();
+  // implicit ParamDecls must have a specifier set
+  decl->setSpecifier(specifier);
+  decl->setInterfaceType(interfaceType);
+  return decl;
+}
+
+ParamDecl *ParamDecl::createImplicit(ASTContext &Context,
+                                     Identifier argumentName,
+                                     Identifier parameterName,
+                                     Type interfaceType, DeclContext *Parent,
+                                     ParamSpecifier specifier) {
+  return ParamDecl::createImplicit(Context, SourceLoc(), SourceLoc(),
+                                   argumentName, SourceLoc(), parameterName,
+                                   interfaceType, Parent, specifier);
 }
 
 /// Retrieve the type of 'self' for the given context.
