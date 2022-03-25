@@ -1768,15 +1768,17 @@ static ConstraintSystem::TypeMatchResult matchCallArguments(
     // If type inference from default arguments is enabled, let's
     // add a constraint from the parameter if necessary, otherwise
     // there is nothing to do but move to the next parameter.
-    if (parameterBindings[paramIdx].empty()) {
+    if (parameterBindings[paramIdx].empty() && callee) {
       auto &ctx = cs.getASTContext();
 
       if (ctx.TypeCheckerOpts.EnableTypeInferenceFromDefaultArguments) {
         auto *paramList = getParameterList(callee);
-        auto *PD = paramList->get(paramIdx);
+        if (!paramList)
+          continue;
 
         // There is nothing to infer if parameter doesn't have any
         // generic parameters in its type.
+        auto *PD = paramList->get(paramIdx);
         if (!PD->getInterfaceType()->hasTypeParameter())
           continue;
 
@@ -1961,14 +1963,8 @@ static ConstraintSystem::TypeMatchResult matchCallArguments(
         auto *locator = cs.getConstraintLocator(loc);
         SourceRange range;
         // simplify locator so the anchor is the exact argument.
-        locator = simplifyLocator(cs, locator, range);
-        if (locator->getPath().empty() &&
-            locator->getAnchor().isExpr(ExprKind::UnresolvedMemberChainResult)) {
-          locator =
-            cs.getConstraintLocator(cast<UnresolvedMemberChainResultExpr>(
-              locator->getAnchor().get<Expr*>())->getSubExpr());
-        }
-        cs.recordFix(NotCompileTimeConst::create(cs, paramTy, locator));
+        cs.recordFix(NotCompileTimeConst::create(cs, paramTy,
+          simplifyLocator(cs, locator, range)));
       }
 
       cs.addConstraint(
