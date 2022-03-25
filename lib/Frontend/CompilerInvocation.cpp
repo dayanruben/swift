@@ -459,14 +459,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableExperimentalVariadicGenerics |=
     Args.hasArg(OPT_enable_experimental_variadic_generics);
 
-  // SwiftOnoneSupport produces different symbols when opening existentials,
-  // so disable it.
-  if (FrontendOpts.ModuleName == SWIFT_ONONE_SUPPORT)
-    Opts.EnableOpenedExistentialTypes = false;
-
-  Opts.EnableExperimentalDistributed |=
-    Args.hasArg(OPT_enable_experimental_distributed);
-
   Opts.EnableExperimentalMoveOnly |=
     Args.hasArg(OPT_enable_experimental_move_only);
 
@@ -489,12 +481,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.DisableImplicitConcurrencyModuleImport |=
     Args.hasArg(OPT_disable_implicit_concurrency_module_import);
-
-  /// experimental distributed also implicitly enables experimental concurrency
-  Opts.EnableExperimentalDistributed |=
-    Args.hasArg(OPT_enable_experimental_distributed);
-  Opts.EnableExperimentalConcurrency |=
-    Args.hasArg(OPT_enable_experimental_distributed);
 
   if (Args.hasArg(OPT_enable_experimental_async_top_level))
     Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
