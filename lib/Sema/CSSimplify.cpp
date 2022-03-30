@@ -1478,9 +1478,9 @@ shouldOpenExistentialCallArgument(
   // An argument expression that explicitly coerces to an existential
   // disables the implicit opening of the existential.
   if (argExpr) {
-    if (auto argCoercion = dyn_cast<CoerceExpr>(
+    if (auto argCast = dyn_cast<ExplicitCastExpr>(
             argExpr->getSemanticsProvidingExpr())) {
-      if (auto typeRepr = argCoercion->getCastTypeRepr()) {
+      if (auto typeRepr = argCast->getCastTypeRepr()) {
         if (auto toType = cs.getType(typeRepr)) {
           if (toType->isAnyExistentialType())
             return None;
@@ -1500,25 +1500,6 @@ shouldOpenExistentialCallArgument(
   // The argument type needs to be an existential type or metatype thereof.
   if (!argTy->isAnyExistentialType())
     return None;
-
-  if (argTy->isExistentialType()) {
-    // If the existential argument type conforms to all of its protocol
-    // requirements, don't open the existential.
-    auto layout = argTy->getExistentialLayout();
-    auto module = cs.DC->getParentModule();
-    bool containsNonSelfConformance = false;
-    for (auto proto : layout.getProtocols()) {
-      auto protoDecl = proto->getDecl();
-      auto conformance = module->lookupExistentialConformance(argTy, protoDecl);
-      if (conformance.isInvalid()) {
-        containsNonSelfConformance = true;
-        break;
-      }
-    }
-
-    if (!containsNonSelfConformance)
-      return None;
-  }
 
   auto param = getParameterAt(callee, paramIdx);
   if (!param)
@@ -1560,6 +1541,31 @@ shouldOpenExistentialCallArgument(
   if (genericParam->getDepth() <
           genericSig.getGenericParams().back()->getDepth())
     return None;
+
+  // If the existential argument conforms to all of protocol requirements on
+  // the formal parameter's type, don't open.
+  // If all of the conformance requirements on the formal parameter's type
+  // are self-conforming, don't open.
+  {
+    Type existentialObjectType;
+    if (auto existentialMetaTy = argTy->getAs<ExistentialMetatypeType>())
+      existentialObjectType = existentialMetaTy->getInstanceType();
+    else
+      existentialObjectType = argTy;
+    auto module = cs.DC->getParentModule();
+    bool containsNonSelfConformance = false;
+    for (auto proto : genericSig->getRequiredProtocols(genericParam)) {
+      auto conformance = module->lookupExistentialConformance(
+          existentialObjectType, proto);
+      if (conformance.isInvalid()) {
+        containsNonSelfConformance = true;
+        break;
+      }
+    }
+
+    if (!containsNonSelfConformance)
+      return None;
+  }
 
   // Ensure that the formal parameter is only used in covariant positions,
   // because it won't match anywhere else.
