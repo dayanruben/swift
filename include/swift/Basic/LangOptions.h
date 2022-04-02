@@ -533,7 +533,7 @@ namespace swift {
     /// Enable the new experimental generic signature minimization algorithm
     /// for abstract generic signatures.
     RequirementMachineMode RequirementMachineAbstractSignatures =
-        RequirementMachineMode::Verify;
+        RequirementMachineMode::Enabled;
 
     /// Enable the new experimental generic signature minimization algorithm
     /// for user-written generic signatures.
@@ -560,6 +560,9 @@ namespace swift {
 
     /// Enables dumping type witness systems from associated type inference.
     bool DumpTypeWitnessSystems = false;
+
+    /// Enables `/.../` syntax regular-expression literals
+    bool EnableForwardSlashRegexLiterals = false;
 
     /// Sets the target we are building for and updates platform conditions
     /// to match.
@@ -828,7 +831,7 @@ namespace swift {
     bool DisableOverlayModules = false;
 
     /// When set, import SPI_AVAILABLE symbols with Swift SPI attribtues.
-    bool EnableClangSPI = false;
+    bool EnableClangSPI = true;
 
     /// When set, don't enforce warnings with -Werror.
     bool DebuggerSupport = false;

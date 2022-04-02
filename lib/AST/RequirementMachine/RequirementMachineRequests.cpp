@@ -410,9 +410,9 @@ RequirementSignatureRequestRQM::evaluate(Evaluator &evaluator,
     if (ctx.LangOpts.RequirementMachineProtocolSignatures ==
         RequirementMachineMode::Enabled) {
       SmallVector<RequirementError, 4> errors;
-      machine->System.computeRedundantRequirementDiagnostics(errors);
+      machine->computeRequirementDiagnostics(errors, proto->getLoc());
       diagnoseRequirementErrors(ctx, errors,
-                                /*allowConcreteGenericParams=*/false);
+                                AllowConcreteTypePolicy::NestedAssocTypes);
     }
 
     if (!machine->getErrors()) {
@@ -843,8 +843,11 @@ InferredGenericSignatureRequestRQM::evaluate(
     if (attempt == 0 &&
         ctx.LangOpts.RequirementMachineInferredSignatures ==
         RequirementMachineMode::Enabled) {
-      machine->System.computeRedundantRequirementDiagnostics(errors);
-      diagnoseRequirementErrors(ctx, errors, allowConcreteGenericParams);
+      machine->computeRequirementDiagnostics(errors, loc);
+      diagnoseRequirementErrors(ctx, errors,
+                                allowConcreteGenericParams
+                                ? AllowConcreteTypePolicy::All
+                                : AllowConcreteTypePolicy::AssocTypes);
     }
 
     // FIXME: Handle allowConcreteGenericParams

@@ -213,10 +213,8 @@ static void desugarSameTypeRequirement(Type lhs, Type rhs, SourceLoc loc,
         return true;
       }
 
-      errors.push_back(
-          RequirementError::forConcreteTypeMismatch(sugaredFirstType,
-                                                    secondType,
-                                                    loc));
+      errors.push_back(RequirementError::forConflictingRequirement(
+          {RequirementKind::SameType, sugaredFirstType, secondType}, loc));
       recordedErrors = true;
       return true;
     }
@@ -249,7 +247,7 @@ static void desugarSuperclassRequirement(Type subjectType,
           RequirementError::forRedundantRequirement(requirement, loc));
     } else {
       errors.push_back(
-          RequirementError::forConflictingRequirement(requirement, loc));
+          RequirementError::forInvalidRequirementSubject(requirement, loc));
     }
 
     return;
@@ -271,7 +269,7 @@ static void desugarLayoutRequirement(Type subjectType,
           RequirementError::forRedundantRequirement(requirement, loc));
     } else {
       errors.push_back(
-          RequirementError::forConflictingRequirement(requirement, loc));
+          RequirementError::forInvalidRequirementSubject(requirement, loc));
     }
 
     return;
@@ -295,7 +293,7 @@ static void desugarConformanceRequirement(Type subjectType, Type constraintType,
       auto *module = protoDecl->getParentModule();
       auto conformance = module->lookupConformance(subjectType, protoDecl);
       if (conformance.isInvalid()) {
-        errors.push_back(RequirementError::forConflictingRequirement(
+        errors.push_back(RequirementError::forInvalidRequirementSubject(
             {RequirementKind::Conformance, subjectType, constraintType}, loc));
         return;
       }
@@ -656,20 +654,35 @@ void swift::rewriting::realizeInheritedRequirements(
   }
 }
 
+static bool shouldSuggestConcreteTypeFixit(
+    Type type, AllowConcreteTypePolicy concreteTypePolicy) {
+  switch (concreteTypePolicy) {
+  case AllowConcreteTypePolicy::All:
+    return true;
+
+  case AllowConcreteTypePolicy::AssocTypes:
+    return type->is<DependentMemberType>();
+
+  case AllowConcreteTypePolicy::NestedAssocTypes:
+    if (auto *memberType = type->getAs<DependentMemberType>())
+      return memberType->getBase()->is<DependentMemberType>();
+
+    return false;
+  }
+}
+
 /// Emit diagnostics for the given \c RequirementErrors.
 ///
 /// \param ctx The AST context in which to emit diagnostics.
 /// \param errors The set of requirement diagnostics to be emitted.
-/// \param allowConcreteGenericParams Whether concrete type parameters
-/// are permitted in the generic signature. If true, diagnostics will
-/// offer fix-its to turn invalid type requirements, e.g. T: Int, into
-/// same-type requirements.
+/// \param concreteTypePolicy Whether fix-its should be offered to turn
+/// invalid type requirements, e.g. T: Int, into same-type requirements.
 ///
 /// \returns true if any errors were emitted, and false otherwise (including
 /// when only warnings were emitted).
 bool swift::rewriting::diagnoseRequirementErrors(
     ASTContext &ctx, ArrayRef<RequirementError> errors,
-    bool allowConcreteGenericParams) {
+    AllowConcreteTypePolicy concreteTypePolicy) {
   bool diagnosedError = false;
 
   for (auto error : errors) {
@@ -699,7 +712,7 @@ bool swift::rewriting::diagnoseRequirementErrors(
         return subjectTypeName;
       };
 
-      if (allowConcreteGenericParams) {
+      if (shouldSuggestConcreteTypeFixit(subjectType, concreteTypePolicy)) {
         auto options = PrintOptions::forDiagnosticArguments();
         auto subjectTypeName = subjectType.getString(options);
         auto subjectTypeNameWithoutSelf = getNameWithoutSelf(subjectTypeName);
@@ -712,20 +725,7 @@ bool swift::rewriting::diagnoseRequirementErrors(
       break;
     }
 
-    case RequirementError::Kind::ConcreteTypeMismatch: {
-      auto type1 = error.requirement.getFirstType();
-      auto type2 = error.requirement.getSecondType();
-
-      if (!type1->hasError() && !type2->hasError()) {
-        ctx.Diags.diagnose(loc, diag::requires_same_concrete_type,
-                           type1, type2);
-        diagnosedError = true;
-      }
-
-      break;
-    }
-
-    case RequirementError::Kind::ConflictingRequirement: {
+    case RequirementError::Kind::InvalidRequirementSubject: {
       auto subjectType = error.requirement.getFirstType();
       if (subjectType->hasError())
         break;
@@ -736,8 +736,55 @@ bool swift::rewriting::diagnoseRequirementErrors(
       break;
     }
 
+    case RequirementError::Kind::ConflictingRequirement: {
+      auto requirement = error.requirement;
+      auto conflict = error.conflictingRequirement;
+
+      if (requirement.getFirstType()->hasError() ||
+          (requirement.getKind() != RequirementKind::Layout &&
+           requirement.getSecondType()->hasError())) {
+        // Don't emit a cascading error.
+        break;
+      }
+
+      if (!conflict) {
+        ctx.Diags.diagnose(loc, diag::requires_same_concrete_type,
+                           requirement.getFirstType(),
+                           requirement.getSecondType());
+      } else {
+        if (conflict->getFirstType()->hasError() ||
+            (conflict->getKind() != RequirementKind::Layout &&
+             conflict->getSecondType()->hasError())) {
+          // Don't emit a cascading error.
+          break;
+        }
+
+        auto options = PrintOptions::forDiagnosticArguments();
+        std::string requirements;
+        llvm::raw_string_ostream OS(requirements);
+        OS << "'";
+        requirement.print(OS, options);
+        OS << "' and '";
+        conflict->print(OS, options);
+        OS << "'";
+
+        ctx.Diags.diagnose(loc, diag::requirement_conflict,
+                           requirement.getFirstType(), requirements);
+      }
+
+      diagnosedError = true;
+      break;
+    }
+
     case RequirementError::Kind::RedundantRequirement: {
       auto requirement = error.requirement;
+      if (requirement.getFirstType()->hasError() ||
+          (requirement.getKind() != RequirementKind::Layout &&
+           requirement.getSecondType()->hasError())) {
+        // Don't emit a cascading error.
+        break;
+      }
+
       switch (requirement.getKind()) {
       case RequirementKind::SameType:
         ctx.Diags.diagnose(loc, diag::redundant_same_type_to_concrete,
@@ -870,7 +917,8 @@ StructuralRequirementsRequest::evaluate(Evaluator &evaluator,
 
   if (ctx.LangOpts.RequirementMachineProtocolSignatures ==
       RequirementMachineMode::Enabled) {
-    diagnoseRequirementErrors(ctx, errors, /*allowConcreteGenericParams=*/false);
+    diagnoseRequirementErrors(ctx, errors,
+                              AllowConcreteTypePolicy::NestedAssocTypes);
   }
 
   return ctx.AllocateCopy(result);
@@ -1143,7 +1191,8 @@ TypeAliasRequirementsRequest::evaluate(Evaluator &evaluator,
 
   if (ctx.LangOpts.RequirementMachineProtocolSignatures ==
       RequirementMachineMode::Enabled) {
-    diagnoseRequirementErrors(ctx, errors, /*allowConcreteGenericParams=*/false);
+    diagnoseRequirementErrors(ctx, errors,
+                              AllowConcreteTypePolicy::NestedAssocTypes);
   }
 
   return ctx.AllocateCopy(result);
