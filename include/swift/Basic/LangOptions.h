@@ -209,6 +209,9 @@ namespace swift {
     /// Emit a remark after loading a module.
     bool EnableModuleLoadingRemarks = false;
 
+    /// Resolve main function as though it were called from an async context
+    bool EnableAsyncMainResolution = false;
+
     ///
     /// Support for alternate usage modes
     ///
@@ -359,6 +362,9 @@ namespace swift {
     /// Disable the implicit import of the _Concurrency module.
     bool DisableImplicitConcurrencyModuleImport =
         !SWIFT_IMPLICIT_CONCURRENCY_IMPORT;
+
+    /// Disable the implicit import of the _StringProcessing module.
+    bool DisableImplicitStringProcessingModuleImport = false;
 
     /// Should we check the target OSs of serialized modules to see that they're
     /// new enough?

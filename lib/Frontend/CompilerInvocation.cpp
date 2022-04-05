@@ -485,9 +485,14 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.DisableImplicitConcurrencyModuleImport |=
     Args.hasArg(OPT_disable_implicit_concurrency_module_import);
 
+  Opts.DisableImplicitStringProcessingModuleImport |=
+    Args.hasArg(OPT_disable_implicit_string_processing_module_import);
+
   if (Args.hasArg(OPT_enable_experimental_async_top_level))
     Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
                    "-enable-experimental-async-top-level");
+
+  Opts.EnableAsyncMainResolution = Args.hasArg(OPT_async_main);
 
   Opts.DiagnoseInvalidEphemeralnessAsError |=
       Args.hasArg(OPT_enable_invalid_ephemeralness_as_error);
