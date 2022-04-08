@@ -540,9 +540,9 @@ def enable_explicit_existential_types :
   Flag<["-"], "enable-explicit-existential-types">,
   HelpText<"Enable experimental support for explicit existential types">;
 
-def enable_parameterized_protocol_types :
-  Flag<["-"], "enable-parameterized-protocol-types">,
-  HelpText<"Enable experimental support for primary associated types and parameterized protocols">;
+def enable_parameterized_existential_types :
+  Flag<["-"], "enable-parameterized-existential-types">,
+  HelpText<"Enable experimental support for parameterized existential types">;
 
 def enable_experimental_opened_existential_types :
   Flag<["-"], "enable-experimental-opened-existential-types">,
@@ -823,8 +823,8 @@ def emit_sorted_sil : Flag<["-"], "emit-sorted-sil">,
 def emit_syntax : Flag<["-"], "emit-syntax">,
   HelpText<"Parse input file(s) and emit the Syntax tree(s) as JSON">, ModeOpt;
 
-def enable_cxx_interop :
-  Flag<["-"], "enable-cxx-interop">,
+def enable_experimental_cxx_interop :
+  Flag<["-"], "enable-experimental-cxx-interop">,
   HelpText<"Enable C++ interop code generation and config directives">,
   Flags<[FrontendOption, HelpHidden]>;
 
