@@ -150,7 +150,7 @@ public:
 
   /// Unconditionally initialize a fresh tracking state on the
   /// current state, shadowing any previous tracking state.
-  /// leave() must be called beforet the object goes out of scope.
+  /// leave() must be called before the object goes out of scope.
   void enterAndShadow(ExecutorRef currentExecutor) {
     ActiveExecutor = currentExecutor;
     SavedInfo = ActiveInfoInThread.get();
@@ -1208,8 +1208,8 @@ void DefaultActorImpl::deallocateUnconditional() {
   if (JobStorageHeapObject.metadata != nullptr)
     JobStorage.~ProcessInlineJob();
   auto metadata = cast<ClassMetadata>(this->metadata);
-  swift_deallocObject(this, metadata->getInstanceSize(),
-                      metadata->getInstanceAlignMask());
+  swift_deallocClassInstance(this, metadata->getInstanceSize(),
+                             metadata->getInstanceAlignMask());
 }
 
 void DefaultActorImpl::scheduleActorProcessJob(JobPriority priority, bool useInlineJob) {
