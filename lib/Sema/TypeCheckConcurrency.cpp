@@ -285,7 +285,7 @@ GlobalActorAttributeRequest::evaluate(
     dc = decl->getDeclContext();
     declAttrs = &decl->getAttrs();
     // HACK: `getLoc`, when querying the attr from  a serialized decl,
-    // dependning on deserialization order, may launch into arbitrary
+    // depending on deserialization order, may launch into arbitrary
     // type-checking when querying interface types of such decls. Which,
     // in turn, may do things like query (to print) USRs. This ends up being
     // prone to request evaluator cycles.
@@ -347,7 +347,7 @@ GlobalActorAttributeRequest::evaluate(
       if (var->isTopLevelGlobal() &&
           (var->getDeclContext()->isAsyncContext() ||
            var->getASTContext().LangOpts.StrictConcurrencyLevel >=
-             StrictConcurrency::On)) {
+             StrictConcurrency::Complete)) {
         var->diagnose(diag::global_actor_top_level_var)
             .highlight(globalActorAttr->getRangeWithAt());
         return None;
@@ -616,7 +616,7 @@ static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc) {
 /// Determine the default diagnostic behavior for this language mode.
 static DiagnosticBehavior defaultSendableDiagnosticBehavior(
     const LangOptions &langOpts) {
-  // Prior to Swift 6, all Sendable-related diagnostics are warnings.
+  // Prior to Swift 6, all Sendable-related diagnostics are warnings at most.
   if (!langOpts.isSwiftVersionAtLeast(6))
     return DiagnosticBehavior::Warning;
 
@@ -646,6 +646,30 @@ DiagnosticBehavior SendableCheckContext::defaultDiagnosticBehavior() const {
     return DiagnosticBehavior::Ignore;
 
   return defaultSendableDiagnosticBehavior(fromDC->getASTContext().LangOpts);
+}
+
+DiagnosticBehavior
+SendableCheckContext::implicitSendableDiagnosticBehavior() const {
+  switch (fromDC->getASTContext().LangOpts.StrictConcurrencyLevel) {
+  case StrictConcurrency::Targeted:
+    // Limited checking only diagnoses implicit Sendable within contexts that
+    // have adopted concurrency.
+    if (shouldDiagnoseExistingDataRaces(fromDC))
+      return DiagnosticBehavior::Warning;
+
+    LLVM_FALLTHROUGH;
+
+  case StrictConcurrency::Minimal:
+    // Explicit Sendable conformances always diagnose, even when strict
+    // strict checking is disabled.
+    if (isExplicitSendableConformance())
+      return DiagnosticBehavior::Warning;
+
+    return DiagnosticBehavior::Ignore;
+
+  case StrictConcurrency::Complete:
+    return defaultDiagnosticBehavior();
+  }
 }
 
 /// Determine whether the given nominal type has an explicit Sendable
@@ -742,10 +766,10 @@ DiagnosticBehavior SendableCheckContext::diagnosticBehavior(
         : DiagnosticBehavior::Ignore;
   }
 
-  auto defaultBehavior = defaultDiagnosticBehavior();
+  DiagnosticBehavior defaultBehavior = implicitSendableDiagnosticBehavior();
 
   // If we are checking an implicit Sendable conformance, don't suppress
-  // diagnostics for declarations in the same module. We want them so make
+  // diagnostics for declarations in the same module. We want them to make
   // enclosing inferred types non-Sendable.
   if (defaultBehavior == DiagnosticBehavior::Ignore &&
       nominal->getParentSourceFile() &&
@@ -763,7 +787,7 @@ bool swift::diagnoseSendabilityErrorBasedOn(
   if (nominal) {
     behavior = fromContext.diagnosticBehavior(nominal);
   } else {
-    behavior = fromContext.defaultDiagnosticBehavior();
+    behavior = fromContext.implicitSendableDiagnosticBehavior();
   }
 
   bool wasSuppressed = diagnose(behavior);
@@ -1467,7 +1491,7 @@ static void noteGlobalActorOnContext(DeclContext *dc, Type globalActor) {
   // If we are in a synchronous function on the global actor,
   // suggest annotating with the global actor itself.
   if (auto fn = findAnnotatableFunction(dc)) {
-    // Suppress this for accesssors because you can't change the
+    // Suppress this for accessories because you can't change the
     // actor isolation of an individual accessor.  Arguably we could
     // add this to the entire storage declaration, though.
     // Suppress this for async functions out of caution; but don't
@@ -2116,12 +2140,12 @@ namespace {
     /// \returns true if we diagnosed the entity, \c false otherwise.
     bool diagnoseReferenceToUnsafeGlobal(ValueDecl *value, SourceLoc loc) {
       switch (value->getASTContext().LangOpts.StrictConcurrencyLevel) {
-      case StrictConcurrency::Off:
-      case StrictConcurrency::Limited:
+      case StrictConcurrency::Minimal:
+      case StrictConcurrency::Targeted:
         // Never diagnose.
         return false;
 
-      case StrictConcurrency::On:
+      case StrictConcurrency::Complete:
         break;
       }
 
@@ -3412,7 +3436,7 @@ static bool checkClassGlobalActorIsolation(
 
   case ActorIsolation::GlobalActor:
   case ActorIsolation::GlobalActorUnsafe: {
-    // If the the global actors match, we're fine.
+    // If the global actors match, we're fine.
     Type superclassGlobalActor = superIsolation.getGlobalActor();
     auto module = classDecl->getParentModule();
     SubstitutionMap subsMap = classDecl->getDeclaredInterfaceType()
@@ -3689,7 +3713,7 @@ ActorIsolation ActorIsolationRequest::evaluate(
   if (auto var = dyn_cast<VarDecl>(value)) {
     if (var->isTopLevelGlobal() &&
         (var->getASTContext().LangOpts.StrictConcurrencyLevel >=
-             StrictConcurrency::On ||
+             StrictConcurrency::Complete ||
          var->getDeclContext()->isAsyncContext())) {
       if (Type mainActor = var->getASTContext().getMainActorType())
         return inferredIsolation(
@@ -3898,11 +3922,11 @@ bool swift::contextRequiresStrictConcurrencyChecking(
     const DeclContext *dc,
     llvm::function_ref<Type(const AbstractClosureExpr *)> getType) {
   switch (dc->getASTContext().LangOpts.StrictConcurrencyLevel) {
-  case StrictConcurrency::On:
+  case StrictConcurrency::Complete:
     return true;
 
-  case StrictConcurrency::Limited:
-  case StrictConcurrency::Off:
+  case StrictConcurrency::Targeted:
+  case StrictConcurrency::Minimal:
     // Check below to see if the context has adopted concurrency features.
     break;
   }
