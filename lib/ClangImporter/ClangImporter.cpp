@@ -4330,9 +4330,15 @@ ClangDirectLookupRequest::evaluate(Evaluator &evaluator,
   if (auto spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(clangDecl))
     return lookupInClassTemplateSpecialization(ctx, spec, desc.name);
 
-  auto *clangModule =
-      getClangOwningModule(clangDecl, clangDecl->getASTContext());
-  auto *lookupTable = ctx.getClangModuleLoader()->findLookupTable(clangModule);
+  SwiftLookupTable *lookupTable = nullptr;
+  if (isa<clang::NamespaceDecl>(clangDecl)) {
+    // DeclContext of a namespace imported into Swift is the __ObjC module.
+    lookupTable = ctx.getClangModuleLoader()->findLookupTable(nullptr);
+  } else {
+    auto *clangModule =
+        getClangOwningModule(clangDecl, clangDecl->getASTContext());
+    lookupTable = ctx.getClangModuleLoader()->findLookupTable(clangModule);
+  }
 
   auto foundDecls = lookupTable->lookup(
       SerializedSwiftName(desc.name.getBaseName()), EffectiveClangContext());
@@ -5655,10 +5661,20 @@ ClangImporter::getCXXFunctionTemplateSpecialization(SubstitutionMap subst,
 }
 
 bool ClangImporter::isCXXMethodMutating(const clang::CXXMethodDecl *method) {
-  return isa<clang::CXXConstructorDecl>(method) || !method->isConst() ||
-         (method->getParent()->hasMutableFields() &&
-          !isAnnotatedWith(method, "nonmutating")) ||
-         isAnnotatedWith(method, "mutating");
+  if (isa<clang::CXXConstructorDecl>(method) || !method->isConst())
+    return true;
+  if (isAnnotatedWith(method, "mutating"))
+    return true;
+  if (method->getParent()->hasMutableFields()) {
+    if (isAnnotatedWith(method, "nonmutating"))
+      return false;
+    // FIXME(rdar://91961524): figure out a way to handle mutable fields
+    // without breaking classes from the C++ standard library (e.g.
+    // `std::string` which has a mutable member in old libstdc++ version used on
+    // CentOS 7)
+    return false;
+  }
+  return false;
 }
 
 bool ClangImporter::isAnnotatedWith(const clang::CXXMethodDecl *method,
