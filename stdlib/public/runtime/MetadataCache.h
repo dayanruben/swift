@@ -15,10 +15,10 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "swift/Runtime/Concurrent.h"
-#include "swift/Runtime/Heap.h"
 #include "swift/Runtime/Metadata.h"
 #include "swift/Runtime/Mutex.h"
 #include "swift/Runtime/AtomicWaitQueue.h"
+#include "../SwiftShims/Visibility.h"
 #include <condition_variable>
 #include <thread>
 
@@ -40,7 +40,8 @@ public:
 
   void Reset() {}
 
-  LLVM_ATTRIBUTE_RETURNS_NONNULL void *Allocate(size_t size, size_t alignment);
+  SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
+  void *Allocate(size_t size, size_t alignment);
   using AllocatorBase<MetadataAllocator>::Allocate;
 
   void Deallocate(const void *Ptr, size_t size, size_t Alignment);
@@ -60,11 +61,12 @@ public:
 class MetadataAllocator {
 public:
   MetadataAllocator(uint16_t tag) {}
+  SWIFT_RETURNS_NONNULL SWIFT_NODISCARD
   void *Allocate(size_t size, size_t alignment) {
     if (alignment < sizeof(void*)) alignment = sizeof(void*);
     void *ptr = nullptr;
-    if (posix_memalign(&ptr, alignment, size) != 0) {
-      return nullptr;
+    if (SWIFT_UNLIKELY(posix_memalign(&ptr, alignment, size) != 0 || !ptr)) {
+      swift::crash("Could not allocate memory for type metadata.");
     }
     return ptr;
   }
@@ -621,9 +623,8 @@ const size_t PrivateMetadataTrackingAlignment = 16;
 
 /// The wait queue object that we create for metadata that are
 /// being actively initialized right now.
-struct alignas(PrivateMetadataTrackingAlignment) MetadataWaitQueue
-    : swift::aligned_alloc<PrivateMetadataTrackingAlignment>,
-      public AtomicWaitQueue<MetadataWaitQueue, ConcurrencyControl::LockType> {
+struct alignas(PrivateMetadataTrackingAlignment) MetadataWaitQueue :
+  public AtomicWaitQueue<MetadataWaitQueue, ConcurrencyControl::LockType> {
 
   /// A pointer to the completion context being used to complete this
   /// metadata.  This is only actually filled in if:
@@ -682,8 +683,7 @@ struct alignas(PrivateMetadataTrackingAlignment) MetadataWaitQueue
 
 /// A record used to store information about an attempt to
 /// complete a metadata when there's no active worker thread.
-struct alignas(PrivateMetadataTrackingAlignment) SuspendedMetadataCompletion
-    : swift::aligned_alloc<PrivateMetadataTrackingAlignment> {
+struct alignas(PrivateMetadataTrackingAlignment) SuspendedMetadataCompletion {
   MetadataDependency BlockingDependency;
   std::unique_ptr<PrivateMetadataCompletionContext> PersistentContext;
 

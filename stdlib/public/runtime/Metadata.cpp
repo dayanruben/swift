@@ -24,7 +24,6 @@
 #include "swift/Runtime/Casting.h"
 #include "swift/Runtime/EnvironmentVariables.h"
 #include "swift/Runtime/ExistentialContainer.h"
-#include "swift/Runtime/Heap.h"
 #include "swift/Runtime/HeapObject.h"
 #include "swift/Runtime/Mutex.h"
 #include "swift/Runtime/Once.h"
@@ -6158,15 +6157,9 @@ void swift::blockOnMetadataDependency(MetadataDependency root,
 #if !SWIFT_STDLIB_PASSTHROUGH_METADATA_ALLOCATOR
 
 namespace {
-  struct alignas(2 * sizeof(uintptr_t)) PoolRange
-      : swift::aligned_alloc<2 * sizeof(uintptr_t)> {
+  struct alignas(sizeof(uintptr_t) * 2) PoolRange {
     static constexpr uintptr_t PageSize = 16 * 1024;
     static constexpr uintptr_t MaxPoolAllocationSize = PageSize / 2;
-
-    constexpr PoolRange(char *Begin, size_t Remaining)
-        : Begin(Begin), Remaining(Remaining) {}
-
-    PoolRange() : Begin(nullptr), Remaining(0) {}
 
     /// The start of the allocation.
     char *Begin;
@@ -6320,7 +6313,8 @@ void *MetadataAllocator::Allocate(size_t size, size_t alignment) {
       if (SWIFT_UNLIKELY(_swift_debug_metadataAllocationIterationEnabled))
         poolSize -= sizeof(PoolTrailer);
       allocatedNewPage = true;
-      allocation = new char[PoolRange::PageSize];
+      allocation = reinterpret_cast<char *>(swift_slowAlloc(PoolRange::PageSize,
+                                                            alignof(char) - 1));
       memsetScribble(allocation, PoolRange::PageSize);
 
       if (SWIFT_UNLIKELY(_swift_debug_metadataAllocationIterationEnabled)) {
@@ -6378,7 +6372,7 @@ void *MetadataAllocator::Allocate(size_t size, size_t alignment) {
 
     // If it failed, go back to a neutral state and try again.
     if (allocatedNewPage) {
-      delete[] allocation;
+      swift_slowDealloc(allocation, PoolRange::PageSize, alignof(char) - 1);
     }
   }
 }
