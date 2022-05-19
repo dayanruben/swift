@@ -234,6 +234,20 @@ func test_local_function_capturing_vars() {
   }
 }
 
+func test_test_invalid_redeclaration() {
+  func test(_: () -> Void) {
+  }
+
+  test {
+    let foo = 0 // expected-note {{'foo' previously declared here}}
+    let foo = foo // expected-error {{invalid redeclaration of 'foo'}}
+  }
+
+  test {
+    let (foo, foo) = (5, 6) // expected-error {{invalid redeclaration of 'foo'}} expected-note {{'foo' previously declared here}}
+  }
+}
+
 func test_pattern_ambiguity_doesnot_crash_compiler() {
   enum E {
   case hello(result: Int) // expected-note 2 {{found this candidate}}
@@ -363,5 +377,30 @@ func test_diagnosing_on_missing_member_in_case() {
     case .one: break
     case .unknown: break // expected-error {{type 'E' has no member 'unknown'}}
     }
+  }
+}
+
+// Type finder shouldn't bring external closure result type
+// into the scope of an inner closure e.g. while solving
+// init of pattern binding `x`.
+func test_type_finder_doesnt_walk_into_inner_closures() {
+  func test<T>(fn: () -> T) -> T { fn() }
+
+  _ = test { // Ok
+    let x = test {
+      42
+    }
+
+    let _ = test {
+      test { "" }
+    }
+
+    // multi-statement
+    let _ = test {
+      _ = 42
+      return test { "" }
+    }
+
+    return x
   }
 }
