@@ -759,9 +759,12 @@ std::string ASTMangler::mangleTypeAsUSR(Type Ty) {
   return finalize();
 }
 
-std::string ASTMangler::mangleAnyDecl(const ValueDecl *Decl, bool prefix) {
+std::string
+ASTMangler::mangleAnyDecl(const ValueDecl *Decl,
+                          bool prefix,
+                          bool respectOriginallyDefinedIn) {
   DWARFMangling = true;
-  RespectOriginallyDefinedIn = false;
+  RespectOriginallyDefinedIn = respectOriginallyDefinedIn;
   if (prefix) {
     beginMangling();
   } else {
@@ -1448,7 +1451,9 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
 
       return;
     }
-
+    case TypeKind::SILMoveOnly:
+      // If we hit this, we just mangle the underlying name and move on.
+      llvm_unreachable("should never be mangled?");
     case TypeKind::SILBlockStorage:
       llvm_unreachable("should never be mangled");
   }
