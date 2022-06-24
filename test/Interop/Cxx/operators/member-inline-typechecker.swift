@@ -45,4 +45,7 @@ let postIncrement = HasPostIncrementOperator()
 postIncrement.successor() // expected-error {{value of type 'HasPostIncrementOperator' has no member 'successor'}}
 
 let anotherReturnType = HasPreIncrementOperatorWithAnotherReturnType()
-anotherReturnType.successor() // expected-error {{value of type 'HasPreIncrementOperatorWithAnotherReturnType' has no member 'successor'}}
+let anotherReturnTypeResult: HasPreIncrementOperatorWithAnotherReturnType = anotherReturnType.successor()
+
+let voidReturnType = HasPreIncrementOperatorWithVoidReturnType()
+let voidReturnTypeResult: HasPreIncrementOperatorWithVoidReturnType = voidReturnType.successor()

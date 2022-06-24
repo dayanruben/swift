@@ -2191,11 +2191,7 @@ namespace {
               MD->overwriteAccess(AccessLevel::Private);
             } else if (cxxOperatorKind ==
                        clang::OverloadedOperatorKind::OO_PlusPlus) {
-              auto selfTy = result->getSelfInterfaceType();
-              auto returnTy =
-                  MD->getResultInterfaceType()->getAnyPointerElementType();
-              if (cxxMethod->param_empty() &&
-                  selfTy->getCanonicalType() == returnTy->getCanonicalType()) {
+              if (cxxMethod->param_empty()) {
                 // This is a pre-increment operator. We synthesize a
                 // non-mutating function called `successor() -> Self`.
                 FuncDecl *successorFunc = synthesizer.makeSuccessorFunc(MD);
@@ -2771,6 +2767,13 @@ namespace {
           Impl.importDeclContextOf(decl, importedName.getEffectiveContext());
       if (!dc)
         return nullptr;
+
+      // We may have already imported this function decl before we imported the
+      // parent record. In such a case it's important we don't re-import.
+      auto known = Impl.ImportedDecls.find({decl, getVersion()});
+      if (known != Impl.ImportedDecls.end()) {
+        return known->second;
+      }
 
       bool isOperator = decl->getDeclName().getNameKind() ==
                         clang::DeclarationName::CXXOperatorName;
