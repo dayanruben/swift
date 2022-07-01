@@ -2276,6 +2276,9 @@ AbstractStorageDecl::getAccessStrategy(AccessSemantics semantics,
     assert(hasStorage());
     return AccessStrategy::getStorage();
 
+  case AccessSemantics::DistributedThunk:
+    return AccessStrategy::getDistributedThunkDispatchStrategy();
+
   case AccessSemantics::Ordinary:
     // Skip these checks for local variables, both because they're unnecessary
     // and because we won't necessarily have computed access.
@@ -3079,13 +3082,13 @@ void ValueDecl::setIsObjC(bool value) {
 bool ValueDecl::isSemanticallyFinal() const {
   // Actor types are semantically final.
   if (auto classDecl = dyn_cast<ClassDecl>(this)) {
-    if (classDecl->isActor())
+    if (classDecl->isAnyActor())
       return true;
   }
 
   // As are members of actor types.
   if (auto classDecl = getDeclContext()->getSelfClassDecl()) {
-    if (classDecl->isActor())
+    if (classDecl->isAnyActor())
       return true;
   }
 
@@ -6458,10 +6461,6 @@ bool VarDecl::isLet() const {
 
 bool VarDecl::isAsyncLet() const {
   return getAttrs().hasAttribute<AsyncAttr>();
-}
-
-bool VarDecl::isDistributed() const {
-  return getAttrs().hasAttribute<DistributedActorAttr>();
 }
 
 bool VarDecl::isKnownToBeLocal() const {
