@@ -188,9 +188,18 @@ bool IsDefaultActorRequest::evaluate(
   // If we synthesized the unownedExecutor property, we should've
   // added a semantics attribute to it (if it was actually a default
   // actor).
-  if (auto executorProperty = classDecl->getUnownedExecutorProperty())
-    return executorProperty->getAttrs()
-             .hasSemanticsAttr(SEMANTICS_DEFAULT_ACTOR);
+  if (auto executorProperty = classDecl->getUnownedExecutorProperty()) {
+    bool isDefaultActor =
+        executorProperty->getAttrs().hasSemanticsAttr(SEMANTICS_DEFAULT_ACTOR);
+    if (!isDefaultActor &&
+        classDecl->getASTContext().LangOpts.isConcurrencyModelTaskToThread() &&
+        !AvailableAttr::isUnavailable(classDecl)) {
+      classDecl->diagnose(
+          diag::concurrency_task_to_thread_model_custom_executor,
+          "task-to-thread concurrency model");
+    }
+    return isDefaultActor;
+  }
 
   return true;
 }
@@ -609,6 +618,9 @@ static void addSendableFixIt(const GenericTypeParamDecl *genericArgument,
 static bool shouldDiagnoseExistingDataRaces(const DeclContext *dc) {
   return contextRequiresStrictConcurrencyChecking(dc, [](const AbstractClosureExpr *) {
     return Type();
+  },
+  [](const ClosureExpr *closure) {
+    return closure->isIsolatedByPreconcurrency();
   });
 }
 
@@ -4023,7 +4035,8 @@ void swift::checkOverrideActorIsolation(ValueDecl *value) {
 
 bool swift::contextRequiresStrictConcurrencyChecking(
     const DeclContext *dc,
-    llvm::function_ref<Type(const AbstractClosureExpr *)> getType) {
+    llvm::function_ref<Type(const AbstractClosureExpr *)> getType,
+    llvm::function_ref<bool(const ClosureExpr *)> isolatedByPreconcurrency) {
   switch (dc->getASTContext().LangOpts.StrictConcurrencyLevel) {
   case StrictConcurrency::Complete:
     return true;
@@ -4044,7 +4057,7 @@ bool swift::contextRequiresStrictConcurrencyChecking(
 
         // Don't take any more cues if this only got its type information by
         // being provided to a `@preconcurrency` operation.
-        if (explicitClosure->isIsolatedByPreconcurrency()) {
+        if (isolatedByPreconcurrency(explicitClosure)) {
           dc = dc->getParent();
           continue;
         }
@@ -4602,11 +4615,13 @@ static bool hasKnownUnsafeSendableFunctionParams(AbstractFunctionDecl *func) {
 
 Type swift::adjustVarTypeForConcurrency(
     Type type, VarDecl *var, DeclContext *dc,
-    llvm::function_ref<Type(const AbstractClosureExpr *)> getType) {
+    llvm::function_ref<Type(const AbstractClosureExpr *)> getType,
+    llvm::function_ref<bool(const ClosureExpr *)> isolatedByPreconcurrency) {
   if (!var->preconcurrency())
     return type;
 
-  if (contextRequiresStrictConcurrencyChecking(dc, getType))
+  if (contextRequiresStrictConcurrencyChecking(
+          dc, getType, isolatedByPreconcurrency))
     return type;
 
   bool isLValue = false;
@@ -4727,9 +4742,11 @@ AnyFunctionType *swift::adjustFunctionTypeForConcurrency(
     AnyFunctionType *fnType, ValueDecl *decl, DeclContext *dc,
     unsigned numApplies, bool isMainDispatchQueue,
     llvm::function_ref<Type(const AbstractClosureExpr *)> getType,
+    llvm::function_ref<bool(const ClosureExpr *)> isolatedByPreconcurrency,
     llvm::function_ref<Type(Type)> openType) {
   // Apply unsafe concurrency features to the given function type.
-  bool strictChecking = contextRequiresStrictConcurrencyChecking(dc, getType);
+  bool strictChecking = contextRequiresStrictConcurrencyChecking(
+      dc, getType, isolatedByPreconcurrency);
   fnType = applyUnsafeConcurrencyToFunctionType(
       fnType, decl, strictChecking, numApplies, isMainDispatchQueue);
 
@@ -4789,7 +4806,10 @@ bool swift::completionContextUsesConcurrencyFeatures(const DeclContext *dc) {
   return contextRequiresStrictConcurrencyChecking(
       dc, [](const AbstractClosureExpr *) {
         return Type();
-      });
+      },
+    [](const ClosureExpr *closure) {
+      return closure->isIsolatedByPreconcurrency();
+    });
 }
 
 AbstractFunctionDecl const *swift::isActorInitOrDeInitContext(
@@ -4898,6 +4918,9 @@ static ActorIsolation getActorIsolationForReference(
             fromDC,
             [](const AbstractClosureExpr *closure) {
               return closure->getType();
+            },
+            [](const ClosureExpr *closure) {
+              return closure->isIsolatedByPreconcurrency();
             })) {
       declIsolation = ActorIsolation::forGlobalActor(
           declIsolation.getGlobalActor(), /*unsafe=*/false);
