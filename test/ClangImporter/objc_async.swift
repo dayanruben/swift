@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -typecheck -I %S/Inputs/custom-modules %s -verify -verify-additional-file %swift_src_root/test/Inputs/clang-importer-sdk/usr/include/ObjCConcurrency.h -strict-concurrency=targeted -parse-as-library
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -typecheck -I %S/Inputs/custom-modules %s -verify -verify-additional-file %swift_src_root/test/Inputs/clang-importer-sdk/usr/include/ObjCConcurrency.h -strict-concurrency=targeted -parse-as-library -enable-experimental-feature SendableCompletionHandlers
 
 // REQUIRES: objc_interop
 // REQUIRES: concurrency
@@ -114,7 +114,7 @@ func testSendable(fn: () -> Void) {
 func testSendableInAsync() async {
   var x = 17
   doSomethingConcurrentlyButUnsafe {
-    x = 42 // expected-error{{mutation of captured var 'x' in concurrently-executing code}}
+    x = 42 // expected-warning{{mutation of captured var 'x' in concurrently-executing code}}
   }
   print(x)
 }

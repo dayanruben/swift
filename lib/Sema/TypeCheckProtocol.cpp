@@ -379,8 +379,7 @@ matchWitnessDifferentiableAttr(DeclContext *dc, ValueDecl *req,
     bool foundExactConfig = false;
     Optional<AutoDiffConfig> supersetConfig = None;
     for (auto witnessConfig :
-           witnessAFD->getDerivativeFunctionConfigurations(
-             /*lookInNonPrimarySources*/ false)) {
+           witnessAFD->getDerivativeFunctionConfigurations()) {
       // All the witness's derivative generic requirements must be satisfied
       // by the requirement's derivative generic requirements OR by the
       // conditional conformance requirements.
@@ -3450,8 +3449,38 @@ void ConformanceChecker::recordTypeWitness(AssociatedTypeDecl *assocType,
         !overriddenConformance.isConcrete())
       continue;
 
-    auto overriddenRootConformance =
+    auto *overriddenRootConformance =
         overriddenConformance.getConcrete()->getRootNormalConformance();
+    auto *overriddenRootConformanceDC =
+        overriddenRootConformance->getDeclContext();
+
+    // Don't record a type witness for an overridden associated type if the
+    // conformance to the corresponding inherited protocol
+    // - originates in a superclass
+    // - originates in a different module
+    // - and the current conformance have mismatching conditional requirements
+    // This can turn out badly in two ways:
+    // - Foremost, we must not *alter* conformances originating in superclasses
+    //   or other modules. In other cases, we may hit an assertion in an attempt
+    //   to overwrite an already recorded type witness with a different one.
+    //   For example, the recorded type witness may be invalid, whereas the
+    //   other one---valid, and vice versa.
+    // - If the current conformance is more restrictive, this type witness may
+    //   not be a viable candidate for the overridden associated type.
+    if (overriddenRootConformanceDC->getSelfNominalTypeDecl() !=
+        DC->getSelfNominalTypeDecl())
+      continue;
+
+    if (overriddenRootConformanceDC->getParentModule() != DC->getParentModule())
+      continue;
+
+    auto currConformanceSig = DC->getGenericSignatureOfContext();
+    auto overriddenConformanceSig =
+        overriddenRootConformanceDC->getGenericSignatureOfContext();
+    if (currConformanceSig.getCanonicalSignature() !=
+        overriddenConformanceSig.getCanonicalSignature())
+      continue;
+
     ConformanceChecker(getASTContext(), overriddenRootConformance,
                        GlobalMissingWitnesses)
         .recordTypeWitness(overridden, type, typeDecl);
