@@ -567,7 +567,7 @@ ConstraintLocator *ConstraintSystem::getCalleeLocator(
     }
 
     // Handle an apply of a nominal type which supports callAsFunction.
-    if (fnTy->isCallableNominalType(DC)) {
+    if (fnTy->isCallAsFunctionType(DC)) {
       return getConstraintLocator(anchor,
                                   {LocatorPathElt::ApplyFunction(),
                                    LocatorPathElt::ImplicitCallAsFunction()});
@@ -3436,18 +3436,6 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
       }
     }
 
-    // If we're binding to an init member, the 'throws' need to line up
-    // between the bound and reference types.
-    if (auto CD = dyn_cast<ConstructorDecl>(decl)) {
-      auto boundFunctionType = boundType->getAs<AnyFunctionType>();
-
-      if (boundFunctionType &&
-          CD->hasThrows() != boundFunctionType->isThrowing()) {
-        boundType = boundFunctionType->withExtInfo(
-            boundFunctionType->getExtInfo().withThrows());
-      }
-    }
-
     if (isa<SubscriptDecl>(decl)) {
       if (locator->isResultOfKeyPathDynamicMemberLookup() ||
           locator->isKeyPathSubscriptComponent()) {
@@ -4415,19 +4403,17 @@ static bool diagnoseAmbiguity(
             type->lookThroughAllOptionalTypes()->getAs<AnyFunctionType>();
         assert(fn);
 
-        if (fn->getNumParams() == 1) {
-          auto *argList =
-              solution.getArgumentList(solution.Fixes.front()->getLocator());
-          assert(argList);
+        auto *argList =
+            solution.getArgumentList(solution.Fixes.front()->getLocator());
+        assert(argList);
 
+        if (fn->getNumParams() == 1 && argList->isUnary()) {
           const auto &param = fn->getParams()[0];
-          auto argType = argList->composeTupleOrParenType(
-              cs.getASTContext(),
-              [&](Expr *E) { return solution.getResolvedType(E); });
+          auto argTy = solution.getResolvedType(argList->getUnaryExpr());
 
           DE.diagnose(noteLoc, diag::candidate_has_invalid_argument_at_position,
                       solution.simplifyType(param.getPlainType()),
-                      /*position=*/1, param.isInOut(), argType);
+                      /*position=*/1, param.isInOut(), argTy);
         } else {
           DE.diagnose(noteLoc, diag::candidate_partial_match,
                       fn->getParamListAsString(fn->getParams()));
