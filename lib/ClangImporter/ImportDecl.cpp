@@ -1129,11 +1129,13 @@ namespace {
       for (auto redecl : decl->redecls())
         Impl.ImportedDecls[{redecl, getVersion()}] = enumDecl;
 
-      // Because a namespaces's decl context is the bridging header, make sure
-      // we add them to the bridging header lookup table.
-      addEntryToLookupTable(*Impl.BridgingHeaderLookupTable,
-                            const_cast<clang::NamespaceDecl *>(decl),
-                            Impl.getNameImporter());
+      for (auto redecl : decl->redecls()) {
+        // Because a namespaces's decl context is the bridging header, make sure
+        // we add them to the bridging header lookup table.
+        addEntryToLookupTable(*Impl.BridgingHeaderLookupTable,
+                              const_cast<clang::NamespaceDecl *>(redecl),
+                              Impl.getNameImporter());
+      }
 
       return enumDecl;
     }
@@ -2645,11 +2647,20 @@ namespace {
         return nullptr;
       }
 
-      // `Sema::isCompleteType` will try to instantiate the class template as a
-      // side-effect and we rely on this here. `decl->getDefinition()` can
-      // return nullptr before the call to sema and return its definition
-      // afterwards.
-      if (!Impl.getClangSema().isCompleteType(
+      // `decl->getDefinition()` can return nullptr before the call to sema and
+      // return its definition afterwards.
+      clang::Sema &clangSema = Impl.getClangSema();
+      if (!decl->getDefinition()) {
+        bool notInstantiated = clangSema.InstantiateClassTemplateSpecialization(
+            decl->getLocation(),
+            const_cast<clang::ClassTemplateSpecializationDecl *>(decl),
+            clang::TemplateSpecializationKind::TSK_ImplicitInstantiation,
+            /*Complain*/ false);
+        // If the template can't be instantiated, bail.
+        if (notInstantiated)
+          return nullptr;
+      }
+      if (!clangSema.isCompleteType(
               decl->getLocation(),
               Impl.getClangASTContext().getRecordType(decl))) {
         // If we got nullptr definition now it means the type is not complete.
@@ -2673,8 +2684,8 @@ namespace {
       for (auto member : decl->decls()) {
         if (auto varDecl = dyn_cast<clang::VarDecl>(member)) {
           if (varDecl->getTemplateInstantiationPattern())
-            Impl.getClangSema()
-              .InstantiateVariableDefinition(varDecl->getLocation(), varDecl);
+            clangSema.InstantiateVariableDefinition(varDecl->getLocation(),
+                                                    varDecl);
         }
       }
 
@@ -8193,9 +8204,13 @@ ClangImporter::Implementation::importDeclForDeclContext(
   if (!contextDeclsWarnedAbout.insert(contextDecl).second)
     return nullptr;
 
-  auto getDeclName = [](const clang::Decl *D) -> StringRef {
-    if (auto ND = dyn_cast<clang::NamedDecl>(D))
-      return ND->getName();
+  auto getDeclName = [](const clang::Decl *D) -> std::string {
+    if (auto ND = dyn_cast<clang::NamedDecl>(D)) {
+      std::string name;
+      llvm::raw_string_ostream os(name);
+      ND->printName(os);
+      return name;
+    }
     return "<anonymous>";
   };
 
