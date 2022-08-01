@@ -66,6 +66,8 @@ bool isResilientType(Type t) {
   return false;
 }
 
+bool isGenericType(Type t) { return t->is<GenericTypeParamType>(); }
+
 bool isKnownCxxType(Type t, PrimitiveTypeMapping &typeMapping) {
   return isKnownType(t, typeMapping, OutputLanguageMode::Cxx);
 }
@@ -101,7 +103,8 @@ public:
         moduleContext(moduleContext), typeUseKind(typeUseKind) {}
 
   void printInoutTypeModifier() {
-    os << (languageMode == swift::OutputLanguageMode::Cxx ? " &" : " *");
+    os << (languageMode == swift::OutputLanguageMode::Cxx ? " &"
+                                                          : " * _Nonnull");
   }
 
   bool printIfKnownSimpleType(const TypeDecl *typeDecl,
@@ -222,8 +225,14 @@ public:
                                  Optional<OptionalTypeKind> optionalKind,
                                  bool isInOutParam) {
     // FIXME: handle optionalKind.
-    // FIXME: handle isInOutParam.
-    os << "const ";
+    if (typeUseKind == FunctionSignatureTypeUse::ReturnType) {
+      // generic is always returned indirectly in C signature.
+      assert(languageMode == OutputLanguageMode::Cxx);
+      os << genericTpt->getName();
+      return;
+    }
+    if (!isInOutParam)
+      os << "const ";
     if (languageMode == OutputLanguageMode::Cxx) {
       // Pass a reference to a template type.
       os << genericTpt->getName();
@@ -319,7 +328,7 @@ void DeclAndTypeClangFunctionPrinter::printFunctionSignature(
   bool isIndirectReturnType =
       kind == FunctionSignatureKind::CFunctionProto &&
       !isKnownCType(resultTy, typeMapping) &&
-      (isResilientType(resultTy) ||
+      (isResilientType(resultTy) || isGenericType(resultTy) ||
        interopContext.getIrABIDetails().shouldReturnIndirectly(resultTy));
   if (!isIndirectReturnType) {
     OptionalTypeKind retKind;
@@ -425,7 +434,10 @@ void DeclAndTypeClangFunctionPrinter::printCxxToCFunctionParameterUse(
       // FIXME: NEED to handle boxed resilient type.
       // os << "swift::" << cxx_synthesis::getCxxImplNamespaceName() <<
       // "::getOpaquePointer(";
-      os << "reinterpret_cast<const void *>(&";
+      os << "reinterpret_cast<";
+      if (!isInOut)
+        os << "const ";
+      os << "void *>(&";
       namePrinter();
       os << ')';
       return;
@@ -537,6 +549,16 @@ void DeclAndTypeClangFunctionPrinter::printCxxThunkBody(
   // indirectly by a pointer.
   if (!isKnownCxxType(resultTy, typeMapping) &&
       !hasKnownOptionalNullableCxxMapping(resultTy)) {
+    if (isGenericType(resultTy)) {
+      // FIXME: Support returning value types.
+      os << "  T returnValue;\n";
+      std::string returnAddress;
+      llvm::raw_string_ostream ros(returnAddress);
+      ros << "reinterpret_cast<void *>(&returnValue)";
+      printCallToCFunc(/*additionalParam=*/StringRef(ros.str()));
+      os << ";\n  return returnValue;\n";
+      return;
+    }
     if (auto *decl = resultTy->getNominalOrBoundGenericNominal()) {
       if ((isa<StructDecl>(decl) || isa<EnumDecl>(decl))) {
         bool isIndirect =
