@@ -497,8 +497,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
       Args.hasArg(OPT_disable_availability_checking);
   Opts.CheckAPIAvailabilityOnly |=
       Args.hasArg(OPT_check_api_availability_only);
-  Opts.EnableAdHocAvailability |=
-      Args.hasArg(OPT_enable_ad_hoc_availability);
+  Opts.WeakLinkAtTarget |= Args.hasArg(OPT_weak_link_at_target);
 
   if (auto A = Args.getLastArg(OPT_enable_conformance_availability_errors,
                                OPT_disable_conformance_availability_errors)) {
@@ -2398,10 +2397,19 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
       Opts.SwiftAsyncFramePointer = SwiftAsyncFramePointerKind::Never;
   }
 
+  Opts.EmitGenericRODatas =
+      Args.hasFlag(OPT_enable_emit_generic_class_ro_t_list,
+                   OPT_disable_emit_generic_class_ro_t_list,
+                   Opts.EmitGenericRODatas);
+
   Opts.LegacyPassManager =
       Args.hasFlag(OPT_disable_new_llvm_pass_manager,
                    OPT_enable_new_llvm_pass_manager,
                    Opts.LegacyPassManager);
+
+  Opts.EnableStackProtector =
+      Args.hasFlag(OPT_enable_stack_protector, OPT_disable_stack_protector,
+                   Opts.EnableStackProtector);
 
   return false;
 }
