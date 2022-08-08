@@ -4384,7 +4384,7 @@ ExtensionRange NominalTypeDecl::getExtensions() {
 }
 
 void NominalTypeDecl::addExtension(ExtensionDecl *extension) {
-  assert(!extension->alreadyBoundToNominal() && "Already added extension");
+  assert(!extension->NextExtension.getInt() && "Already added extension");
   extension->NextExtension.setInt(true);
   
   // First extension; set both first and last.
@@ -6600,7 +6600,7 @@ bool VarDecl::hasExternalPropertyWrapper() const {
     return true;
 
   // Wrappers with attribute arguments are always implementation-detail.
-  if (getAttachedPropertyWrappers().front()->hasArgs())
+  if (getOutermostAttachedPropertyWrapper()->hasArgs())
     return false;
 
   auto wrapperInfo = getAttachedPropertyWrapperTypeInfo(0);
