@@ -511,7 +511,7 @@ Type TypeBase::typeEraseOpenedArchetypesWithRoot(
   if (!hasOpenedExistential())
     return type;
 
-  const auto sig = root->getASTContext().getOpenedArchetypeSignature(
+  const auto sig = root->getASTContext().getOpenedExistentialSignature(
       root->getExistentialType(), useDC->getGenericSignatureOfContext());
 
   unsigned metatypeDepth = 0;
@@ -882,7 +882,7 @@ Type TypeBase::lookThroughAllOptionalTypes(SmallVectorImpl<Type> &optionals){
 }
 
 unsigned int TypeBase::getOptionalityDepth() {
-  SmallVector<Type, 4> types;
+  SmallVector<Type> types;
   lookThroughAllOptionalTypes(types);
   return types.size();
 }
@@ -1537,7 +1537,7 @@ getCanonicalParams(AnyFunctionType *funcType,
   for (auto param : origParams) {
     // Canonicalize the type and drop the internal label to canonicalize the
     // Param.
-    canParams.emplace_back(param.getPlainType()->getCanonicalType(genericSig),
+    canParams.emplace_back(param.getPlainType()->getReducedType(genericSig),
                            param.getLabel(), param.getParameterFlags(),
                            /*InternalLabel=*/Identifier());
   }
@@ -1673,7 +1673,7 @@ CanType TypeBase::computeCanonicalType() {
     // Transform the parameter and result types.
     SmallVector<AnyFunctionType::Param, 8> canParams;
     getCanonicalParams(funcTy, genericSig, canParams);
-    auto resultTy = funcTy->getResult()->getCanonicalType(genericSig);
+    auto resultTy = funcTy->getResult()->getReducedType(genericSig);
 
     Optional<ASTExtInfo> extInfo = None;
     if (funcTy->hasExtInfo())
@@ -1775,8 +1775,8 @@ CanType TypeBase::computeCanonicalType() {
   return CanonicalType = CanType(Result);
 }
 
-CanType TypeBase::getCanonicalType(GenericSignature sig) {
-  return sig.getCanonicalTypeInContext(this);
+CanType TypeBase::getReducedType(GenericSignature sig) {
+  return sig.getReducedType(this);
 }
 
 CanType TypeBase::getMinimalCanonicalType(const DeclContext *useDC) const {
@@ -2555,9 +2555,9 @@ public:
 
         for (unsigned i : indices(origSubs.getReplacementTypes())) {
           auto origType =
-            origSubs.getReplacementTypes()[i]->getCanonicalType(sig);
+            origSubs.getReplacementTypes()[i]->getReducedType(sig);
           auto substType =
-            substSubs.getReplacementTypes()[i]->getCanonicalType(sig);
+            substSubs.getReplacementTypes()[i]->getReducedType(sig);
 
           auto newType = visit(origType, substType, nullptr, {});
 
@@ -2585,9 +2585,9 @@ public:
         
         for (unsigned i : indices(origSubs.getReplacementTypes())) {
           auto origType =
-            origSubs.getReplacementTypes()[i]->getCanonicalType(sig);
+            origSubs.getReplacementTypes()[i]->getReducedType(sig);
           auto substType =
-            substSubs.getReplacementTypes()[i]->getCanonicalType(sig);
+            substSubs.getReplacementTypes()[i]->getReducedType(sig);
           
           auto newType = visit(origType, substType, nullptr, {});
           
@@ -3570,7 +3570,7 @@ SequenceArchetypeType::SequenceArchetypeType(
 CanType OpaqueTypeArchetypeType::getCanonicalInterfaceType(Type interfaceType) {
   auto sig = Environment->getOpaqueTypeDecl()
       ->getOpaqueInterfaceGenericSignature();
-  CanType canonicalType = interfaceType->getCanonicalType(sig);
+  CanType canonicalType = interfaceType->getReducedType(sig);
   return Environment->maybeApplyOpaqueTypeSubstitutions(canonicalType)
       ->getCanonicalType();
 }
@@ -4001,7 +4001,7 @@ Type ArchetypeType::getNestedTypeByName(Identifier name) {
   Type interfaceType = getInterfaceType();
   Type memberInterfaceType = DependentMemberType::get(interfaceType, name);
   auto genericSig = getGenericEnvironment()->getGenericSignature();
-  if (genericSig->isValidTypeInContext(memberInterfaceType)) {
+  if (genericSig->isValidTypeParameter(memberInterfaceType)) {
     return getGenericEnvironment()->getOrCreateArchetypeFromInterfaceType(
         memberInterfaceType);
   }
@@ -4163,7 +4163,7 @@ CanType ProtocolCompositionType::getMinimalCanonicalType(
   // Use generic signature minimization: the requirements of the signature will
   // represent the minimal composition.
   auto sig = useDC->getGenericSignatureOfContext();
-  const auto Sig = Ctx.getOpenedArchetypeSignature(CanTy, sig);
+  const auto Sig = Ctx.getOpenedExistentialSignature(CanTy, sig);
   const auto &Reqs = Sig.getRequirements();
   if (Reqs.size() == 1) {
     return Reqs.front().getSecondType()->getCanonicalType();

@@ -1348,7 +1348,7 @@ protected:
         }
       } else {
         auto *elseBraceStmt = cast<BraceStmt>(elseStmt);
-        SmallVector<ASTNode, 4> elseBody;
+        SmallVector<ASTNode> elseBody;
 
         std::tie(elseVar, unsupported) = transform(elseBraceStmt, elseBody);
         if (unsupported) {
@@ -2528,7 +2528,7 @@ ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
 
     if (isDebugMode()) {
       auto &log = llvm::errs();
-      auto indent = solverState ? solverState->depth * 2 : 0;
+      auto indent = solverState ? solverState->getCurrentIndent() : 0;
       log.indent(indent) << "------- Transfomed Body -------\n";
       transformedBody->second->dump(log);
       log << '\n';

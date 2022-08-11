@@ -3541,7 +3541,7 @@ isGenericFunctionTypeCanonical(GenericSignature sig,
     return false;
 
   for (auto param : params) {
-    if (!sig->isCanonicalTypeInContext(param.getPlainType()))
+    if (!sig->isReducedType(param.getPlainType()))
       return false;
     if (!param.getInternalLabel().empty()) {
       // Canonical types don't have internal labels
@@ -3549,7 +3549,7 @@ isGenericFunctionTypeCanonical(GenericSignature sig,
     }
   }
 
-  return sig->isCanonicalTypeInContext(result);
+  return sig->isReducedType(result);
 }
 
 AnyFunctionType *AnyFunctionType::withExtInfo(ExtInfo info) const {
@@ -3771,7 +3771,7 @@ GenericFunctionType *GenericFunctionType::get(GenericSignature sig,
   }
 
   // We have to construct this generic function type. Determine whether
-  // it's canonical.  Unfortunately, isCanonicalTypeInContext can cause
+  // it's canonical.  Unfortunately, isReducedType() can cause
   // new GenericFunctionTypes to be created and thus invalidate our insertion
   // point.
   bool isCanonical = isGenericFunctionTypeCanonical(sig, params, result);
@@ -3788,7 +3788,7 @@ GenericFunctionType *GenericFunctionType::get(GenericSignature sig,
   if (info.hasValue())
     globalActor = info->getGlobalActor();
 
-  if (globalActor && !sig->isCanonicalTypeInContext(globalActor))
+  if (globalActor && !sig->isReducedType(globalActor))
     isCanonical = false;
 
   size_t allocSize = totalSizeToAlloc<AnyFunctionType::Param, Type>(
@@ -4655,7 +4655,7 @@ GenericEnvironment *
 GenericEnvironment::forOpenedExistential(
     Type existential, GenericSignature parentSig, UUID uuid) {
   auto &ctx = existential->getASTContext();
-  auto signature = ctx.getOpenedArchetypeSignature(existential, parentSig);
+  auto signature = ctx.getOpenedExistentialSignature(existential, parentSig);
   return GenericEnvironment::forOpenedArchetypeSignature(existential, signature, uuid);
 }
 
@@ -5199,7 +5199,7 @@ Type OpenedArchetypeType::getSelfInterfaceTypeFromContext(GenericSignature paren
 }
 
 CanGenericSignature
-ASTContext::getOpenedArchetypeSignature(Type type, GenericSignature parentSig) {
+ASTContext::getOpenedExistentialSignature(Type type, GenericSignature parentSig) {
   assert(type->isExistentialType());
 
   if (auto existential = type->getAs<ExistentialType>())

@@ -2189,7 +2189,7 @@ namespace {
 
         auto *genericParam = O->getOpaqueGenericParams()[opaqueParamIdx];
         auto underlyingType =
-            Type(genericParam).subst(*unique)->getCanonicalType(sig);
+            Type(genericParam).subst(*unique)->getReducedType(sig);
         return IGM
             .getTypeRef(underlyingType, contextSig,
                         MangledTypeRefRole::Metadata)
@@ -2450,7 +2450,7 @@ namespace {
         auto type =
             Type(O->getOpaqueGenericParams()[OpaqueParamIndex])
                 .subst(substitutions)
-                ->getCanonicalType(O->getOpaqueInterfaceGenericSignature());
+                ->getReducedType(O->getOpaqueInterfaceGenericSignature());
 
         type = genericEnv
                    ? genericEnv->mapTypeIntoContext(type)->getCanonicalType()
@@ -6168,7 +6168,7 @@ irgen::emitExtendedExistentialTypeShape(IRGenModule &IGM,
     }
 
     CanGenericSignature reqSig =
-      IGM.Context.getOpenedArchetypeSignature(existentialType, genSig);
+      IGM.Context.getOpenedExistentialSignature(existentialType, genSig);
 
     CanType typeExpression;
     if (metatypeDepth > 0) {

@@ -1924,8 +1924,8 @@ typeEraseExistentialSelfReferences(
   }
 
   const auto existentialSig =
-      baseTy->getASTContext().getOpenedArchetypeSignature(baseTy,
-                                                          GenericSignature());
+      baseTy->getASTContext().getOpenedExistentialSignature(baseTy,
+                                                            GenericSignature());
 
   unsigned metatypeDepth = 0;
 
@@ -1988,7 +1988,7 @@ typeEraseExistentialSelfReferences(
 
       // If the type parameter is beyond the domain of the existential generic
       // signature, ignore it.
-      if (!existentialSig->isValidTypeInContext(t)) {
+      if (!existentialSig->isValidTypeParameter(t)) {
         return Type(t);
       }
 
@@ -3528,7 +3528,7 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
   if (isDebugMode()) {
     PrintOptions PO;
     PO.PrintTypesForDebugging = true;
-    llvm::errs().indent(solverState ? solverState->depth * 2 : 2)
+    llvm::errs().indent(solverState ? solverState->getCurrentIndent() : 2)
       << "(overload set choice binding "
       << boundType->getString(PO) << " := "
       << adjustedRefType->getString(PO) << ")\n";
@@ -4624,7 +4624,7 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
         << " solutions with fixes ---\n";
     int i = 0;
     for (auto &solution : solutions) {
-      log << "--- Solution #" << i++ << "---\n";
+      log << "\n--- Solution #" << i++ << "---\n";
       solution.dump(log);
       log << "\n";
     }
@@ -5227,7 +5227,8 @@ void constraints::simplifyLocator(ASTNode &anchor,
     case ConstraintLocator::PlaceholderType:
     case ConstraintLocator::SequenceElementType:
     case ConstraintLocator::ConstructorMemberType:
-    case ConstraintLocator::ExistentialSuperclassType:
+    case ConstraintLocator::ExistentialConstraintType:
+    case ConstraintLocator::ProtocolCompositionSuperclassType:
       break;
 
     case ConstraintLocator::GenericArgument:
@@ -6549,7 +6550,7 @@ static bool doesMemberHaveUnfulfillableConstraintsWithExistentialBase(
         return Action::SkipChildren;
       }
 
-      if (!Sig->isValidTypeInContext(ty)) {
+      if (!Sig->isValidTypeParameter(ty)) {
         return Action::SkipChildren;
       }
 
@@ -6560,7 +6561,7 @@ static bool doesMemberHaveUnfulfillableConstraintsWithExistentialBase(
 
       return Action::Stop;
     }
-  } isDependentOnSelfWalker(member->getASTContext().getOpenedArchetypeSignature(
+  } isDependentOnSelfWalker(member->getASTContext().getOpenedExistentialSignature(
       baseTy, GenericSignature()));
 
   for (const auto &req : sig.getRequirements()) {
