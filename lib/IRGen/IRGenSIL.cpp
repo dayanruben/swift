@@ -1087,14 +1087,9 @@ public:
       const SILDebugScope *DS, SILLocation VarLoc, SILDebugVariable VarInfo,
       IndirectionKind Indirection,
       AddrDbgInstrKind DbgInstrKind = AddrDbgInstrKind::DbgDeclare) {
-    // TODO: fix demangling for C++ types (SR-13223).
     if (swift::TypeBase *ty = SILTy.getASTType().getPointer()) {
       if (MetatypeType *metaTy = dyn_cast<MetatypeType>(ty))
         ty = metaTy->getRootClass().getPointer();
-      if (ty->getStructOrBoundGenericStruct() &&
-          isa_and_nonnull<clang::CXXRecordDecl>(
-              ty->getStructOrBoundGenericStruct()->getClangDecl()))
-        return;
     }
 
     assert(IGM.DebugInfo && "debug info not enabled");
@@ -1310,6 +1305,7 @@ public:
   void visitDeallocPartialRefInst(DeallocPartialRefInst *i);
 
   void visitCopyAddrInst(CopyAddrInst *i);
+  void visitExplicitCopyAddrInst(ExplicitCopyAddrInst *i);
   void visitMarkUnresolvedMoveAddrInst(MarkUnresolvedMoveAddrInst *mai) {
     llvm_unreachable("Valid only when ownership is enabled");
   }
@@ -6862,6 +6858,30 @@ void IRGenSILFunction::setAllocatedAddressForBuffer(SILValue v,
 }
 
 void IRGenSILFunction::visitCopyAddrInst(swift::CopyAddrInst *i) {
+  SILType addrTy = i->getSrc()->getType();
+  const TypeInfo &addrTI = getTypeInfo(addrTy);
+  Address src = getLoweredAddress(i->getSrc());
+  // See whether we have a deferred fixed-size buffer initialization.
+  auto &loweredDest = getLoweredValue(i->getDest());
+  assert(!loweredDest.isUnallocatedAddressInBuffer());
+  Address dest = loweredDest.getAnyAddress();
+  if (i->isInitializationOfDest()) {
+    if (i->isTakeOfSrc()) {
+      addrTI.initializeWithTake(*this, dest, src, addrTy, false);
+    } else {
+      addrTI.initializeWithCopy(*this, dest, src, addrTy, false);
+    }
+  } else {
+    if (i->isTakeOfSrc()) {
+      addrTI.assignWithTake(*this, dest, src, addrTy, false);
+    } else {
+      addrTI.assignWithCopy(*this, dest, src, addrTy, false);
+    }
+  }
+}
+
+void IRGenSILFunction::visitExplicitCopyAddrInst(
+    swift::ExplicitCopyAddrInst *i) {
   SILType addrTy = i->getSrc()->getType();
   const TypeInfo &addrTI = getTypeInfo(addrTy);
   Address src = getLoweredAddress(i->getSrc());
