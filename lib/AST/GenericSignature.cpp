@@ -267,7 +267,7 @@ GenericEnvironment *GenericSignature::getGenericEnvironment() const {
 GenericEnvironment *GenericSignatureImpl::getGenericEnvironment() const {
   if (GenericEnv == nullptr) {
     const auto impl = const_cast<GenericSignatureImpl *>(this);
-    impl->GenericEnv = GenericEnvironment::getIncomplete(this);
+    impl->GenericEnv = GenericEnvironment::forPrimary(this);
   }
 
   return GenericEnv;
@@ -373,7 +373,7 @@ bool GenericSignatureImpl::isRequirementSatisfied(
   if (requirement.getFirstType()->hasTypeParameter()) {
     auto *genericEnv = getGenericEnvironment();
 
-    auto substituted = requirement.subst(
+    requirement = requirement.subst(
         [&](SubstitutableType *type) -> Type {
           if (auto *paramType = type->getAs<GenericTypeParamType>())
             return genericEnv->mapTypeIntoContext(paramType);
@@ -381,11 +381,6 @@ bool GenericSignatureImpl::isRequirementSatisfied(
           return type;
         },
         LookUpConformanceInSignature(this));
-
-    if (!substituted)
-      return false;
-
-    requirement = *substituted;
   }
 
   // FIXME: Need to check conditional requirements here.
