@@ -318,6 +318,9 @@ public:
 
   void visitUnsafeInheritExecutorAttr(UnsafeInheritExecutorAttr *attr);
 
+  void visitEagerMoveAttr(EagerMoveAttr *attr);
+  void visitLexicalAttr(LexicalAttr *attr);
+
   void visitCompilerInitializedAttr(CompilerInitializedAttr *attr);
 
   void checkBackDeployAttrs(ArrayRef<BackDeployAttr *> Attrs);
@@ -2733,6 +2736,10 @@ static void lookupReplacedDecl(DeclNameRef replacedDeclName,
                                SmallVectorImpl<ValueDecl *> &results) {
   auto *declCtxt = replacement->getDeclContext();
 
+  // Hop up to the FileUnit if we're in top-level code
+  if (auto *toplevel = dyn_cast<TopLevelCodeDecl>(declCtxt))
+    declCtxt = toplevel->getDeclContext();
+
   // Look at the accessors' storage's context.
   if (auto *accessor = dyn_cast<AccessorDecl>(replacement)) {
     auto *storage = accessor->getStorage();
@@ -3299,14 +3306,22 @@ void AttributeChecker::visitImplementsAttr(ImplementsAttr *attr) {
     // Check that the decl we're decorating is a member of a type that actually
     // conforms to the specified protocol.
     NominalTypeDecl *NTD = DC->getSelfNominalTypeDecl();
-    SmallVector<ProtocolConformance *, 2> conformances;
-    if (!NTD->lookupConformance(PD, conformances)) {
-      diagnose(attr->getLocation(),
-               diag::implements_attr_protocol_not_conformed_to,
-               NTD->getName(), PD->getName())
-        .highlight(attr->getProtocolTypeRepr()->getSourceRange());
+    if (auto *OtherPD = dyn_cast<ProtocolDecl>(NTD)) {
+      if (!OtherPD->inheritsFrom(PD)) {
+        diagnose(attr->getLocation(),
+                 diag::implements_attr_protocol_not_conformed_to,
+                 NTD->getName(), PD->getName())
+          .highlight(attr->getProtocolTypeRepr()->getSourceRange());
+      }
+    } else {
+      SmallVector<ProtocolConformance *, 2> conformances;
+      if (!NTD->lookupConformance(PD, conformances)) {
+        diagnose(attr->getLocation(),
+                 diag::implements_attr_protocol_not_conformed_to,
+                 NTD->getName(), PD->getName())
+          .highlight(attr->getProtocolTypeRepr()->getSourceRange());
+      }
     }
-
   } else {
     diagnose(attr->getLocation(), diag::implements_attr_non_protocol_type)
       .highlight(attr->getProtocolTypeRepr()->getSourceRange());
@@ -6214,6 +6229,16 @@ void AttributeChecker::visitUnsafeInheritExecutorAttr(
   auto fn = cast<FuncDecl>(D);
   if (!fn->isAsyncContext()) {
     diagnose(attr->getLocation(), diag::inherits_executor_without_async);
+  }
+}
+
+void AttributeChecker::visitEagerMoveAttr(EagerMoveAttr *attr) {}
+
+void AttributeChecker::visitLexicalAttr(LexicalAttr *attr) {
+  // @_lexical and @_eagerMove are opposites and can't be combined.
+  if (D->getAttrs().hasAttribute<EagerMoveAttr>()) {
+    diagnoseAndRemoveAttr(attr, diag::eagermove_and_lexical_combined);
+    return;
   }
 }
 

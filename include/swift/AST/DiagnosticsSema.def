@@ -2465,11 +2465,13 @@ WARNING(append_interpolation_access_control,none,
 
 // Protocols and existentials
 ERROR(assoc_type_outside_of_protocol,none,
-      "associated type %0 can only be used with a concrete type or "
-      "generic parameter base", (DeclNameRef))
+      "cannot access associated type %0 from %1; use a concrete type or "
+      "generic parameter base instead",
+      (DeclNameRef, Type))
 ERROR(typealias_outside_of_protocol,none,
-      "type alias %0 can only be used with a concrete type or "
-      "generic parameter base", (DeclNameRef))
+      "cannot access type alias %0 from %1; use a concrete type or "
+      "generic parameter base instead",
+      (DeclNameRef, Type))
 
 ERROR(objc_protocol_inherits_non_objc_protocol,none,
       "@objc protocol %0 cannot refine non-@objc protocol %1", (Type, Type))
@@ -3206,6 +3208,10 @@ ERROR(reasync_without_async_parameter,none,
 
 ERROR(inherits_executor_without_async,none,
       "non-async functions cannot inherit an executor", ())
+
+ERROR(eagermove_and_lexical_combined,none,
+      "@_eagerMove and @_lexical attributes are alternate styles of lifetimes "
+      "and can't be combined", ())
 
 ERROR(autoclosure_function_type,none,
       "@autoclosure attribute only applies to function types",
@@ -5848,6 +5854,10 @@ ERROR(inlinable_typealias_desugars_to_type_from_hidden_module,
       "<<ERROR>>|"
       "%4 was not imported by this file}5",
       (DeclName, StringRef, StringRef, unsigned, Identifier, unsigned))
+
+NOTE(missing_import_inserted,
+     none, "The missing import of module %0 will be added implicitly",
+     (Identifier))
 
 ERROR(availability_macro_in_inlinable, none,
       "availability macro cannot be used in " FRAGILE_FUNC_KIND "0",
