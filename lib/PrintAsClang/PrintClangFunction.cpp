@@ -21,6 +21,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/GenericParamList.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/SwiftNameTranslation.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/ClangImporter/ClangImporter.h"
@@ -95,13 +96,14 @@ public:
       PrimitiveTypeMapping &typeMapping, OutputLanguageMode languageMode,
       SwiftToClangInteropContext &interopContext,
       CFunctionSignatureTypePrinterModifierDelegate modifiersDelegate,
-      const ModuleDecl *moduleContext,
+      const ModuleDecl *moduleContext, DeclAndTypePrinter &declPrinter,
       FunctionSignatureTypeUse typeUseKind =
           FunctionSignatureTypeUse::ParamType)
       : ClangSyntaxPrinter(os), cPrologueOS(cPrologueOS),
         typeMapping(typeMapping), interopContext(interopContext),
         languageMode(languageMode), modifiersDelegate(modifiersDelegate),
-        moduleContext(moduleContext), typeUseKind(typeUseKind) {}
+        moduleContext(moduleContext), declPrinter(declPrinter),
+        typeUseKind(typeUseKind) {}
 
   void printInoutTypeModifier() {
     os << (languageMode == swift::OutputLanguageMode::Cxx ? " &"
@@ -196,6 +198,9 @@ public:
     // Handle known type names.
     if (printIfKnownSimpleType(decl, optionalKind, isInOutParam))
       return ClangRepresentation::representable;
+    if (!declPrinter.shouldInclude(decl))
+      return ClangRepresentation::unsupported; // FIXME: propagate why it's not
+                                               // exposed.
     // FIXME: Handle optional structures.
     if (typeUseKind == FunctionSignatureTypeUse::ParamType) {
       if (languageMode != OutputLanguageMode::Cxx &&
@@ -291,6 +296,7 @@ private:
   OutputLanguageMode languageMode;
   CFunctionSignatureTypePrinterModifierDelegate modifiersDelegate;
   const ModuleDecl *moduleContext;
+  DeclAndTypePrinter &declPrinter;
   FunctionSignatureTypeUse typeUseKind;
 };
 
@@ -303,7 +309,7 @@ DeclAndTypeClangFunctionPrinter::printClangFunctionReturnType(
   CFunctionSignatureTypePrinter typePrinter(
       os, cPrologueOS, typeMapping, outputLang, interopContext,
       CFunctionSignatureTypePrinterModifierDelegate(), moduleContext,
-      FunctionSignatureTypeUse::ReturnType);
+      declPrinter, FunctionSignatureTypeUse::ReturnType);
   // Param for indirect return cannot be marked as inout
   return typePrinter.visit(ty, optKind, /*isInOutParam=*/false);
 }
@@ -343,9 +349,9 @@ ClangRepresentation DeclAndTypeClangFunctionPrinter::printFunctionSignature(
       -> ClangRepresentation {
     // FIXME: add support for noescape and PrintMultiPartType,
     // see DeclAndTypePrinter::print.
-    CFunctionSignatureTypePrinter typePrinter(os, cPrologueOS, typeMapping,
-                                              outputLang, interopContext,
-                                              delegate, emittedModule);
+    CFunctionSignatureTypePrinter typePrinter(
+        os, cPrologueOS, typeMapping, outputLang, interopContext, delegate,
+        emittedModule, declPrinter);
     auto result = typePrinter.visit(ty, optionalKind, isInOutParam);
 
     if (!name.empty()) {
@@ -384,6 +390,12 @@ ClangRepresentation DeclAndTypeClangFunctionPrinter::printFunctionSignature(
             .isUnsupported())
       return resultingRepresentation;
   } else {
+    // FIXME: also try to figure out if indirect is representable using a type
+    // visitor?
+    if (const auto *NT = resultTy->getNominalOrBoundGenericNominal()) {
+      if (!declPrinter.shouldInclude(NT))
+        return ClangRepresentation::unsupported;
+    }
     os << "void";
   }
 
@@ -700,9 +712,11 @@ void DeclAndTypeClangFunctionPrinter::printCxxMethod(
       isa<FuncDecl>(FD) ? cast<FuncDecl>(FD)->isMutating() : false;
   modifiers.isConst =
       !isa<ClassDecl>(typeDeclContext) && !isMutating && !isConstructor;
-  printFunctionSignature(
-      FD, isConstructor ? "init" : FD->getName().getBaseIdentifier().get(),
-      resultTy, FunctionSignatureKind::CxxInlineThunk, {}, modifiers);
+  auto result = printFunctionSignature(
+      FD, isConstructor ? "init" : cxx_translation::getNameForCxx(FD), resultTy,
+      FunctionSignatureKind::CxxInlineThunk, {}, modifiers);
+  assert(!result.isUnsupported() && "C signature should be unsupported too");
+
   if (!isDefinition) {
     os << ";\n";
     return;
@@ -734,7 +748,8 @@ static bool canRemapBoolPropertyNameDirectly(StringRef name) {
 static std::string remapPropertyName(const AccessorDecl *accessor,
                                      Type resultTy) {
   // For a getter or setter, go through the variable or subscript decl.
-  StringRef propertyName = accessor->getStorage()->getBaseIdentifier().str();
+  StringRef propertyName =
+      cxx_translation::getNameForCxx(accessor->getStorage());
 
   // Boolean property getters can be remapped directly in certain cases.
   if (accessor->isGetter() && resultTy->isBool() &&
@@ -761,9 +776,10 @@ void DeclAndTypeClangFunctionPrinter::printCxxPropertyAccessorMethod(
     modifiers.qualifierContext = typeDeclContext;
   modifiers.isInline = true;
   modifiers.isConst = accessor->isGetter() && !isa<ClassDecl>(typeDeclContext);
-  printFunctionSignature(accessor, remapPropertyName(accessor, resultTy),
-                         resultTy, FunctionSignatureKind::CxxInlineThunk, {},
-                         modifiers);
+  auto result = printFunctionSignature(
+      accessor, remapPropertyName(accessor, resultTy), resultTy,
+      FunctionSignatureKind::CxxInlineThunk, {}, modifiers);
+  assert(!result.isUnsupported() && "C signature should be unsupported too!");
   if (!isDefinition) {
     os << ";\n";
     return;

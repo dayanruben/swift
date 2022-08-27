@@ -245,6 +245,7 @@ public:
   void visitAvailableAttr(AvailableAttr *attr);
 
   void visitCDeclAttr(CDeclAttr *attr);
+  void visitExposeAttr(ExposeAttr *attr);
 
   void visitDynamicCallableAttr(DynamicCallableAttr *attr);
 
@@ -1843,6 +1844,29 @@ void AttributeChecker::visitCDeclAttr(CDeclAttr *attr) {
     diagnose(attr->getLocation(), diag::cdecl_empty_name);
 }
 
+void AttributeChecker::visitExposeAttr(ExposeAttr *attr) {
+  const auto *VD = cast<ValueDecl>(D);
+  // Expose cannot be mixed with '@objc'/'@_cdecl' declarations.
+  if (VD->isObjC())
+    diagnose(attr->getLocation(), diag::expose_only_non_other_attr, "@objc");
+  if (VD->getAttrs().hasAttribute<CDeclAttr>())
+    diagnose(attr->getLocation(), diag::expose_only_non_other_attr, "@_cdecl");
+
+  // Nested exposed declarations are expected to be inside
+  // of other exposed declarations.
+  bool hasExpose = true;
+  const ValueDecl *decl = VD;
+  while (const NominalTypeDecl *NMT =
+             dyn_cast<NominalTypeDecl>(decl->getDeclContext())) {
+    decl = NMT;
+    hasExpose = NMT->getAttrs().hasAttribute<ExposeAttr>();
+  }
+  if (!hasExpose) {
+    diagnose(attr->getLocation(), diag::expose_inside_unexposed_decl,
+             decl->getName());
+  }
+}
+
 void AttributeChecker::visitUnsafeNoObjCTaggedPointerAttr(
                                           UnsafeNoObjCTaggedPointerAttr *attr) {
   // Only class protocols can have the attribute.
@@ -2493,6 +2517,9 @@ static void checkSpecializeAttrRequirements(SpecializeAttr *attr,
     }
 
     switch (specializedReq.getKind()) {
+    case RequirementKind::SameCount:
+      llvm_unreachable("Same-count requirement not supported here");
+
     case RequirementKind::Conformance:
     case RequirementKind::Superclass:
       ctx.Diags.diagnose(attr->getLocation(),

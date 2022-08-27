@@ -1481,6 +1481,11 @@ ERROR(cdecl_empty_name,none,
 ERROR(cdecl_throws,none,
       "raising errors from @_cdecl functions is not supported", ())
 
+ERROR(expose_only_non_other_attr,none,
+      "@_expose attribute cannot be applied to an '%0' declaration", (StringRef))
+ERROR(expose_inside_unexposed_decl,none,
+      "@_expose attribute cannot be applied inside of unexposed declaration %0", (DeclName))
+
 ERROR(attr_methods_only,none,
       "only methods can be declared %0", (DeclAttribute))
 ERROR(attr_decl_async,none,
@@ -2344,10 +2349,10 @@ NOTE(protocol_witness_type_conflict,none,
      "candidate has non-matching type %0%1", (Type, StringRef))
 NOTE(protocol_witness_missing_requirement,none,
      "candidate would match if %0 %select{conformed to|subclassed|"
-     "was the same type as}2 %1", (Type, Type, unsigned))
+     "was the same type as|%error|%error}2 %1", (Type, Type, unsigned))
 NOTE(protocol_type_witness_missing_requirement,none,
      "candidate would match if the conformance required that %0 "
-     "%select{conformed to|subclassed|was the same type as}2 %1",
+     "%select{conformed to|subclassed|was the same type as|%error|%error}2 %1",
      (Type, Type, unsigned))
 
 NOTE(protocol_witness_optionality_conflict,none,
@@ -4892,6 +4897,14 @@ ERROR(global_actor_non_final_class,none,
       "non-final class %0 cannot be a global actor", (DeclName))
 ERROR(global_actor_top_level_var,none,
       "top-level code variables cannot have a global actor", ())
+ERROR(global_actor_access,none,
+      "%select{private|fileprivate|internal|public|open}0 %1 %2 "
+      "cannot have %select{private|fileprivate|internal|%error|%error}3 "
+      "global actor %4",
+      (AccessLevel, DescriptiveDeclKind, DeclName, AccessLevel, DeclName))
+ERROR(global_actor_not_usable_from_inline,none,
+      "global actor for %0 %1 must be '@usableFromInline' or public",
+      (DescriptiveDeclKind, DeclName))
 
 ERROR(actor_isolation_multiple_attr,none,
       "%0 %1 has multiple actor-isolation attributes ('%2' and '%3')",

@@ -444,15 +444,6 @@ ConstraintLocator *ConstraintSystem::getImplicitValueConversionLocator(
       break;
     }
 
-    // If the conversion is associated with a contextual type e.g.
-    // `_: Double = CGFloat(1)` then drop `ContextualType` so that
-    // it's easy to find when the underlying expression has been
-    // rewritten.
-    if (!path.empty() && path.back().is<LocatorPathElt::ContextualType>()) {
-      anchor = ASTNode();
-      path.clear();
-    }
-
     // If conversion is for a tuple element, let's drop `TupleType`
     // components from the path since they carry information for
     // diagnostics that `ExprRewriter` won't be able to re-construct
@@ -1773,6 +1764,8 @@ void ConstraintSystem::openGenericRequirement(
 
   auto kind = req.getKind();
   switch (kind) {
+  case RequirementKind::SameCount:
+    llvm_unreachable("Same-count requirement not supported here");
   case RequirementKind::Conformance: {
     auto protoDecl = req.getProtocolDecl();
     // Determine whether this is the protocol 'Self' constraint we should
@@ -6566,6 +6559,9 @@ static bool doesMemberHaveUnfulfillableConstraintsWithExistentialBase(
 
   for (const auto &req : sig.getRequirements()) {
     switch (req.getKind()) {
+    case RequirementKind::SameCount:
+      llvm_unreachable("Same-count requirement not supported here");
+
     case RequirementKind::Superclass: {
       if (req.getFirstType()->getRootGenericParam()->getDepth() > 0 &&
           req.getSecondType().walk(isDependentOnSelfWalker)) {
