@@ -318,24 +318,32 @@ ClangRepresentation DeclAndTypeClangFunctionPrinter::printFunctionSignature(
     const AbstractFunctionDecl *FD, StringRef name, Type resultTy,
     FunctionSignatureKind kind, ArrayRef<AdditionalParam> additionalParams,
     FunctionSignatureModifiers modifiers) {
-  if (kind == FunctionSignatureKind::CxxInlineThunk && FD->isGeneric()) {
-    os << "template<";
-    llvm::interleaveComma(FD->getGenericParams()->getParams(), os,
-                          [&](const GenericTypeParamDecl *genericParam) {
-                            os << "class ";
-                            ClangSyntaxPrinter(os).printBaseName(genericParam);
-                          });
-    os << ">\n";
-    os << "requires ";
-    llvm::interleave(
-        FD->getGenericParams()->getParams(), os,
-        [&](const GenericTypeParamDecl *genericParam) {
-          os << "swift::isUsableInGenericContext<";
-          ClangSyntaxPrinter(os).printBaseName(genericParam);
-          os << ">";
-        },
-        " && ");
-    os << "\n";
+  if (FD->isGeneric()) {
+    auto Signature = FD->getGenericSignature();
+    auto Requirements = Signature.getRequirements();
+    // FIXME: Support generic requirements.
+    if (!Requirements.empty())
+      return ClangRepresentation::unsupported;
+    if (kind == FunctionSignatureKind::CxxInlineThunk) {
+      os << "template<";
+      llvm::interleaveComma(FD->getGenericParams()->getParams(), os,
+                            [&](const GenericTypeParamDecl *genericParam) {
+                              os << "class ";
+                              ClangSyntaxPrinter(os).printBaseName(
+                                  genericParam);
+                            });
+      os << ">\n";
+      os << "requires ";
+      llvm::interleave(
+          FD->getGenericParams()->getParams(), os,
+          [&](const GenericTypeParamDecl *genericParam) {
+            os << "swift::isUsableInGenericContext<";
+            ClangSyntaxPrinter(os).printBaseName(genericParam);
+            os << ">";
+          },
+          " && ");
+      os << "\n";
+    }
   }
   auto emittedModule = FD->getModuleContext();
   OutputLanguageMode outputLang = kind == FunctionSignatureKind::CFunctionProto
@@ -697,9 +705,20 @@ void DeclAndTypeClangFunctionPrinter::printCxxThunkBody(
   }
 }
 
+static StringRef getConstructorName(const AbstractFunctionDecl *FD) {
+  auto name = cxx_translation::getNameForCxx(
+      FD, cxx_translation::CustomNamesOnly_t::CustomNamesOnly);
+  if (!name.empty()) {
+    assert(name.startswith("init"));
+    return name;
+  }
+  return "init";
+}
+
 void DeclAndTypeClangFunctionPrinter::printCxxMethod(
     const NominalTypeDecl *typeDeclContext, const AbstractFunctionDecl *FD,
-    StringRef swiftSymbolName, Type resultTy, bool isDefinition) {
+    StringRef swiftSymbolName, Type resultTy, bool isDefinition,
+    ArrayRef<AdditionalParam> additionalParams) {
   bool isConstructor = isa<ConstructorDecl>(FD);
   os << "  ";
 
@@ -713,8 +732,10 @@ void DeclAndTypeClangFunctionPrinter::printCxxMethod(
   modifiers.isConst =
       !isa<ClassDecl>(typeDeclContext) && !isMutating && !isConstructor;
   auto result = printFunctionSignature(
-      FD, isConstructor ? "init" : cxx_translation::getNameForCxx(FD), resultTy,
-      FunctionSignatureKind::CxxInlineThunk, {}, modifiers);
+      FD,
+      isConstructor ? getConstructorName(FD)
+                    : cxx_translation::getNameForCxx(FD),
+      resultTy, FunctionSignatureKind::CxxInlineThunk, {}, modifiers);
   assert(!result.isUnsupported() && "C signature should be unsupported too");
 
   if (!isDefinition) {
@@ -724,15 +745,9 @@ void DeclAndTypeClangFunctionPrinter::printCxxMethod(
 
   os << " {\n";
   // FIXME: should it be objTy for resultTy?
-  SmallVector<AdditionalParam, 2> additionalParams;
-  if (!isConstructor)
-    additionalParams.push_back(AdditionalParam{
-        AdditionalParam::Role::Self,
-        typeDeclContext->getDeclaredType(),
-        /*isIndirect=*/isMutating,
-    });
   printCxxThunkBody(swiftSymbolName, FD->getModuleContext(), resultTy,
-                    FD->getParameters(), additionalParams, FD->hasThrows());
+                    FD->getParameters(), additionalParams, FD->hasThrows(),
+                    FD->getInterfaceType()->castTo<AnyFunctionType>());
   os << "  }\n";
 }
 
