@@ -15,6 +15,7 @@
 #include "FixedTypeInfo.h"
 #include "GenEnum.h"
 #include "GenType.h"
+#include "GenericRequirement.h"
 #include "IRGen.h"
 #include "IRGenModule.h"
 #include "NativeConventionSchema.h"
@@ -126,6 +127,16 @@ public:
     return {returnTy, {paramTy}};
   }
 
+  SmallVector<GenericRequirement, 2>
+  getTypeMetadataAccessFunctionGenericRequirementParameters(
+      NominalTypeDecl *nominal) {
+    GenericTypeRequirements requirements(IGM, nominal);
+    SmallVector<GenericRequirement, 2> result;
+    for (const auto &req : requirements.getRequirements())
+      result.push_back(req);
+    return result;
+  }
+
   llvm::MapVector<EnumElementDecl *, IRABIDetailsProvider::EnumElementInfo>
   getEnumTagMapping(const EnumDecl *ED) {
     llvm::MapVector<EnumElementDecl *, IRABIDetailsProvider::EnumElementInfo>
@@ -156,20 +167,30 @@ public:
     auto signature = Signature::getUncached(IGM, silFuncType, funcPointerKind,
                                             /*shouldComputeABIDetail=*/true);
 
-    for (const auto &reqt : signature.getABIDetails().GenericRequirements) {
-      params.push_back({IRABIDetailsProvider::ABIAdditionalParam::
-                            ABIParameterRole::GenericRequirementRole,
-                        reqt, typeConverter.Context.getOpaquePointerDecl()});
+    using ABIAdditionalParam = IRABIDetailsProvider::ABIAdditionalParam;
+    using ParamRole = ABIAdditionalParam::ABIParameterRole;
+    for (const auto &typeSource :
+         signature.getABIDetails().polymorphicSignatureExpandedTypeSources) {
+      typeSource.visit(
+          [&](const GenericRequirement &reqt) {
+            params.push_back(ABIAdditionalParam(ParamRole::GenericRequirement,
+                                                reqt, CanType()));
+          },
+          [&](const MetadataSource &metadataSource) {
+            auto index = metadataSource.getParamIndex();
+            auto canType =
+                silFuncType->getParameters()[index].getInterfaceType();
+            params.push_back(ABIAdditionalParam(
+                ParamRole::GenericTypeMetadataSource, llvm::None, canType));
+          });
     }
     for (auto attrSet : signature.getAttributes()) {
       if (attrSet.hasAttribute(llvm::Attribute::AttrKind::SwiftSelf))
         params.push_back(
-            {IRABIDetailsProvider::ABIAdditionalParam::ABIParameterRole::Self,
-             llvm::None, typeConverter.Context.getOpaquePointerDecl()});
+            ABIAdditionalParam(ParamRole::Self, llvm::None, CanType()));
       if (attrSet.hasAttribute(llvm::Attribute::AttrKind::SwiftError))
         params.push_back(
-            {IRABIDetailsProvider::ABIAdditionalParam::ABIParameterRole::Error,
-             llvm::None, typeConverter.Context.getOpaquePointerDecl()});
+            ABIAdditionalParam(ParamRole::Error, llvm::None, CanType()));
     }
     return params;
   }
@@ -219,6 +240,13 @@ bool IRABIDetailsProvider::enumerateDirectPassingRecordMembers(
 IRABIDetailsProvider::FunctionABISignature
 IRABIDetailsProvider::getTypeMetadataAccessFunctionSignature() {
   return impl->getTypeMetadataAccessFunctionSignature();
+}
+
+SmallVector<GenericRequirement, 2>
+IRABIDetailsProvider::getTypeMetadataAccessFunctionGenericRequirementParameters(
+    NominalTypeDecl *nominal) {
+  return impl->getTypeMetadataAccessFunctionGenericRequirementParameters(
+      nominal);
 }
 
 llvm::MapVector<EnumElementDecl *, IRABIDetailsProvider::EnumElementInfo>

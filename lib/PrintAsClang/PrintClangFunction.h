@@ -79,7 +79,7 @@ public:
 
   /// Information about any additional parameters.
   struct AdditionalParam {
-    enum class Role { GenericRequirement, Self, Error };
+    enum class Role { GenericRequirement, GenericTypeMetadata, Self, Error };
 
     Role role;
     Type type;
@@ -157,6 +157,10 @@ private:
       Type type, StringRef name, const ModuleDecl *moduleContext, bool isInOut,
       bool isIndirect = false,
       llvm::Optional<AdditionalParam::Role> paramRole = None);
+
+  // Print out the full type specifier that refers to the
+  // _impl::_impl_<typename> C++ class for the given Swift type.
+  void printTypeImplTypeSpecifier(Type type, const ModuleDecl *moduleContext);
 
   bool hasKnownOptionalNullableCxxMapping(Type type);
 
