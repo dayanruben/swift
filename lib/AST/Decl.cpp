@@ -1873,10 +1873,6 @@ static bool isDefaultInitializable(const TypeRepr *typeRepr, ASTContext &ctx) {
   // Tuple types are default-initializable if all of their element
   // types are.
   if (const auto tuple = dyn_cast<TupleTypeRepr>(typeRepr)) {
-    // ... but not variadic ones.
-    if (tuple->hasEllipsis())
-      return false;
-
     for (const auto &elt : tuple->getElements()) {
       if (!isDefaultInitializable(elt.Type, ctx))
         return false;
@@ -6530,6 +6526,12 @@ bool ParamDecl::isAnonClosureParam() const {
   return nameStr[0] == '$';
 }
 
+bool ParamDecl::isVariadic() const {
+  (void) getInterfaceType();
+
+  return DefaultValueAndFlags.getInt().contains(Flags::IsVariadic);
+}
+
 ParamDecl::Specifier ParamDecl::getSpecifier() const {
   auto &ctx = getASTContext();
 
@@ -7666,8 +7668,7 @@ bool AbstractFunctionDecl::hasDynamicSelfResult() const {
   return isa<ConstructorDecl>(this);
 }
 
-AbstractFunctionDecl *
-AbstractFunctionDecl::getAsyncAlternative(bool isKnownObjC) const {
+AbstractFunctionDecl *AbstractFunctionDecl::getAsyncAlternative() const {
   // Async functions can't have async alternatives
   if (hasAsync())
     return nullptr;
@@ -7691,8 +7692,7 @@ AbstractFunctionDecl::getAsyncAlternative(bool isKnownObjC) const {
   }
 
   auto *renamedDecl = evaluateOrDefault(
-      getASTContext().evaluator, RenamedDeclRequest{this, avAttr, isKnownObjC},
-      nullptr);
+      getASTContext().evaluator, RenamedDeclRequest{this, avAttr}, nullptr);
   auto *alternative = dyn_cast_or_null<AbstractFunctionDecl>(renamedDecl);
   if (!alternative || !alternative->hasAsync())
     return nullptr;
@@ -9211,7 +9211,10 @@ ActorIsolation swift::getActorIsolation(ValueDecl *value) {
       ActorIsolation::forUnspecified());
 }
 
-ActorIsolation swift::getActorIsolationOfContext(DeclContext *dc) {
+ActorIsolation swift::getActorIsolationOfContext(
+    DeclContext *dc,
+    llvm::function_ref<ClosureActorIsolation(AbstractClosureExpr *)>
+        getClosureActorIsolation) {
   auto dcToUse = dc;
   // Defer bodies share actor isolation of their enclosing context.
   if (auto FD = dyn_cast<FuncDecl>(dcToUse)) {
@@ -9226,27 +9229,7 @@ ActorIsolation swift::getActorIsolationOfContext(DeclContext *dc) {
     return getActorIsolation(var);
 
   if (auto *closure = dyn_cast<AbstractClosureExpr>(dcToUse)) {
-    switch (auto isolation = closure->getActorIsolation()) {
-    case ClosureActorIsolation::Independent:
-      return ActorIsolation::forIndependent()
-                .withPreconcurrency(isolation.preconcurrency());
-
-    case ClosureActorIsolation::GlobalActor: {
-      return ActorIsolation::forGlobalActor(
-          isolation.getGlobalActor(), /*unsafe=*/false)
-                .withPreconcurrency(isolation.preconcurrency());
-    }
-
-    case ClosureActorIsolation::ActorInstance: {
-      auto selfDecl = isolation.getActorInstance();
-      auto actor = selfDecl->getType()->getReferenceStorageReferent()
-          ->getAnyActor();
-      assert(actor && "Bad closure actor isolation?");
-      // FIXME: This could be a parameter... or a capture... hmmm.
-      return ActorIsolation::forActorInstanceSelf(actor)
-        .withPreconcurrency(isolation.preconcurrency());
-    }
-    }
+    return getClosureActorIsolation(closure).getActorIsolation();
   }
 
   if (auto *tld = dyn_cast<TopLevelCodeDecl>(dcToUse)) {

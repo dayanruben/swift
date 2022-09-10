@@ -109,11 +109,11 @@ void registerBridgedClass(StringRef className, SwiftMetatype metatype) {
   if (valueNamesToKind.empty()) {
 #define VALUE(ID, PARENT) \
     valueNamesToKind[#ID] = SILNodeKind::ID;
-#define BRIDGED_NON_VALUE_INST(ID, NAME, PARENT, MEMBEHAVIOR, MAYRELEASE) \
+#define NON_VALUE_INST(ID, NAME, PARENT, MEMBEHAVIOR, MAYRELEASE) \
     VALUE(ID, NAME)
 #define ARGUMENT(ID, PARENT) \
     VALUE(ID, NAME)
-#define BRIDGED_SINGLE_VALUE_INST(ID, NAME, PARENT, MEMBEHAVIOR, MAYRELEASE) \
+#define SINGLE_VALUE_INST(ID, NAME, PARENT, MEMBEHAVIOR, MAYRELEASE) \
     VALUE(ID, NAME)
 #define MULTIPLE_VALUE_INST(ID, NAME, PARENT, MEMBEHAVIOR, MAYRELEASE) \
     VALUE(ID, NAME)
@@ -229,6 +229,15 @@ SwiftInt SILFunction_hasSemanticsAttr(BridgedFunction function,
                                       StringRef attrName) {
   SILFunction *f = castToFunction(function);
   return f->hasSemanticsAttr(attrName) ? 1 : 0;
+}
+
+SwiftInt SILFunction_needsStackProtection(BridgedFunction function) {
+  return castToFunction(function)->needsStackProtection() ? 1 : 0;
+}
+
+void SILFunction_setNeedStackProtection(BridgedFunction function,
+                                        SwiftInt needSP) {
+  castToFunction(function)->setNeedStackProtection(needSP != 0);
 }
 
 //===----------------------------------------------------------------------===//
@@ -757,6 +766,14 @@ llvm::StringRef CondFailInst_getMessage(BridgedInstruction cfi) {
 
 BridgedBuiltinID BuiltinInst_getID(BridgedInstruction bi) {
   return (BridgedBuiltinID)castToInst<BuiltinInst>(bi)->getBuiltinInfo().ID;
+}
+
+SwiftInt AddressToPointerInst_needsStackProtection(BridgedInstruction atp) {
+  return castToInst<AddressToPointerInst>(atp)->needsStackProtection() ? 1 : 0;
+}
+
+SwiftInt IndexAddrInst_needsStackProtection(BridgedInstruction ia) {
+  return castToInst<IndexAddrInst>(ia)->needsStackProtection() ? 1 : 0;
 }
 
 BridgedGlobalVar GlobalAccessInst_getGlobal(BridgedInstruction globalInst) {

@@ -1611,6 +1611,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
       const IndexAddrInst *IAI = cast<IndexAddrInst>(&SI);
       operand = IAI->getBase();
       operand2 = IAI->getIndex();
+      Attr = (IAI->needsStackProtection() ? 1 : 0);
     }
     SILTwoOperandsLayout::emitRecord(Out, ScratchRecord,
         SILAbbrCodes[SILTwoOperandsLayout::Code],
@@ -1645,6 +1646,19 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
         (unsigned)operand->getType().getCategory(),
         addValueRef(operand),
         0, 0, S.addUniquedStringRef(CFI->getMessage()));
+    break;
+  }
+  case SILInstructionKind::IncrementProfilerCounterInst: {
+    auto *IPCI = cast<IncrementProfilerCounterInst>(&SI);
+    llvm::SmallString<10> HashStr;
+    APInt(64, IPCI->getPGOFuncHash()).toStringUnsigned(HashStr);
+    SILInstIncrementProfilerCounterLayout::emitRecord(
+        Out, ScratchRecord,
+        SILAbbrCodes[SILInstIncrementProfilerCounterLayout::Code],
+        S.addUniquedStringRef(IPCI->getPGOFuncName()),
+        S.addUniquedStringRef(HashStr),
+        IPCI->getCounterIndex(),
+        IPCI->getNumCounters());
     break;
   }
   case SILInstructionKind::StringLiteralInst: {
@@ -1774,6 +1788,8 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
         attrs |= 0x01;
     } else if (auto *refCast = dyn_cast<UncheckedRefCastInst>(&SI)) {
       attrs = encodeValueOwnership(refCast->getOwnershipKind());
+    } else if (auto *atp = dyn_cast<AddressToPointerInst>(&SI)) {
+      attrs = atp->needsStackProtection() ? 1 : 0;
     }
     writeConversionLikeInstruction(cast<SingleValueInstruction>(&SI), attrs);
     break;
@@ -2848,6 +2864,7 @@ void SILSerializer::writeSILBlock(const SILModule *SILMod) {
   registerSILAbbr<SILInstLinearFunctionLayout>();
   registerSILAbbr<SILInstDifferentiableFunctionExtractLayout>();
   registerSILAbbr<SILInstLinearFunctionExtractLayout>();
+  registerSILAbbr<SILInstIncrementProfilerCounterLayout>();
 
   registerSILAbbr<VTableLayout>();
   registerSILAbbr<VTableEntryLayout>();
