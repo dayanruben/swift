@@ -294,6 +294,7 @@ public:
   void visitCustomAttr(CustomAttr *attr);
   void visitPropertyWrapperAttr(PropertyWrapperAttr *attr);
   void visitTypeWrapperAttr(TypeWrapperAttr *attr);
+  void visitTypeWrapperIgnoredAttr(TypeWrapperIgnoredAttr *attr);
   void visitResultBuilderAttr(ResultBuilderAttr *attr);
 
   void visitImplementationOnlyAttr(ImplementationOnlyAttr *attr);
@@ -324,7 +325,7 @@ public:
 
   bool visitLifetimeAttr(DeclAttribute *attr);
   void visitEagerMoveAttr(EagerMoveAttr *attr);
-  void visitLexicalAttr(LexicalAttr *attr);
+  void visitNoEagerMoveAttr(NoEagerMoveAttr *attr);
 
   void visitCompilerInitializedAttr(CompilerInitializedAttr *attr);
 
@@ -3796,6 +3797,46 @@ void AttributeChecker::visitTypeWrapperAttr(TypeWrapperAttr *attr) {
   }
 }
 
+void AttributeChecker::visitTypeWrapperIgnoredAttr(TypeWrapperIgnoredAttr *attr) {
+  auto *var = cast<VarDecl>(D);
+
+  // @typeWrapperIgnored applies only to properties that type wrapper can manage.
+  if (var->getDeclContext()->isLocalContext()) {
+    diagnoseAndRemoveAttr(attr, diag::type_wrapper_ignored_on_local_properties, attr);
+    return;
+  }
+
+  if (var->isLet()) {
+    diagnoseAndRemoveAttr(attr, diag::attr_only_one_decl_kind, attr, "var");
+    return;
+  }
+
+  if (var->getAttrs().hasAttribute<LazyAttr>()) {
+    diagnoseAndRemoveAttr(attr, diag::type_wrapper_ignored_on_lazy_properties, attr);
+    return;
+  }
+
+  if (var->isStatic()) {
+    diagnoseAndRemoveAttr(attr, diag::type_wrapper_ignored_on_static_properties, attr);
+    return;
+  }
+
+  // computed properties
+  {
+    SmallVector<AccessorKind, 4> accessors{AccessorKind::Get, AccessorKind::Set,
+                                           AccessorKind::Modify,
+                                           AccessorKind::MutableAddress};
+
+    if (llvm::any_of(accessors, [&var](const auto &accessor) {
+          return var->getParsedAccessor(accessor);
+        })) {
+      diagnoseAndRemoveAttr(
+          attr, diag::type_wrapper_ignored_on_computed_properties, attr);
+      return;
+    }
+  }
+}
+
 void AttributeChecker::visitResultBuilderAttr(ResultBuilderAttr *attr) {
   auto *nominal = dyn_cast<NominalTypeDecl>(D);
   auto &ctx = D->getASTContext();
@@ -6519,10 +6560,10 @@ void AttributeChecker::visitEagerMoveAttr(EagerMoveAttr *attr) {
     return;
 }
 
-void AttributeChecker::visitLexicalAttr(LexicalAttr *attr) {
+void AttributeChecker::visitNoEagerMoveAttr(NoEagerMoveAttr *attr) {
   if (visitLifetimeAttr(attr))
     return;
-  // @_lexical and @_eagerMove are opposites and can't be combined.
+  // @_noEagerMove and @_eagerMove are opposites and can't be combined.
   if (D->getAttrs().hasAttribute<EagerMoveAttr>()) {
     diagnoseAndRemoveAttr(attr, diag::eagermove_and_lexical_combined);
     return;
