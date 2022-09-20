@@ -33,7 +33,7 @@ umask 0022
 # The --skip-build parameter, with no product name, does not affect the
 # configuration (CMake parameters). You can turn this option on and
 # off in different invocations of the script for the same build
-# directory without affecting configutation.
+# directory without affecting configuration.
 #
 # skip-build-* and build-* parameters affect the CMake configuration
 # (enable/disable those components).
@@ -62,6 +62,7 @@ KNOWN_SETTINGS=(
     build-args                                    ""                "arguments to the build tool; defaults to -j8 when CMake generator is \"Unix Makefiles\""
     build-dir                                     ""                "out-of-tree build directory; default is in-tree. **This argument is required**"
     build-jobs                                    ""                "The number of parallel build jobs to use"
+    lit-jobs                                      ""                "The number of workers to use when testing with lit"
     build-runtime-with-host-compiler              ""                "use the host c++ compiler to build everything"
     build-stdlib-deployment-targets               "all"             "space-separated list that filters which of the configured targets to build the Swift standard library for, or 'all'"
     build-toolchain-only                          ""                "If set, only build the necessary tools to build an external toolchain"
@@ -829,10 +830,10 @@ function set_build_options_for_host() {
     )
 
     llvm_cmake_options+=(
-        -DLLVM_LIT_ARGS="${LLVM_LIT_ARGS} -j ${BUILD_JOBS}"
+        -DLLVM_LIT_ARGS="${LLVM_LIT_ARGS} -j ${LIT_JOBS}"
     )
     swift_cmake_options+=(
-        -DLLVM_LIT_ARGS="${LLVM_LIT_ARGS} -j ${BUILD_JOBS}"
+        -DLLVM_LIT_ARGS="${LLVM_LIT_ARGS} -j ${LIT_JOBS}"
     )
 
     if [[ "${CLANG_PROFILE_INSTR_USE}" ]]; then
@@ -2949,7 +2950,7 @@ for host in "${ALL_HOSTS[@]}"; do
 
                 if [[ "${ENABLE_ASAN}" ]] ; then
                     # Limit the number of parallel tests
-                    LLVM_LIT_ARGS="${LLVM_LIT_ARGS} -j $(sysctl hw.physicalcpu | awk -v N=${BUILD_JOBS} '{ print (N < $2) ? N : int($2/2) }')"
+                    LLVM_LIT_ARGS="${LLVM_LIT_ARGS} -j $(sysctl hw.physicalcpu | awk -v N=${LIT_JOBS} '{ print (N < $2) ? N : int($2/2) }')"
                 fi
 
                 FILTER_SWIFT_OPTION="--filter=[sS]wift"
@@ -3441,10 +3442,10 @@ for host in "${ALL_HOSTS[@]}"; do
         # The usage for this script says that lipo happens before
         # dsym extraction but that's not really what happens.  At this point,
         # we're processing an individual host (eg macosx-x86_64) but targeting
-        # the (shared) SYMROOT which can cause mutliple hosts to stomp on each
+        # the (shared) SYMROOT which can cause multiple hosts to stomp on each
         # other.  As a hack, I'm segregating the hosts in the symroot but it
         # would probably be better to make the script behave as the usage
-        # descibes
+        # describes
         host_symroot="${INSTALL_SYMROOT}/${host}"
 
         set -x

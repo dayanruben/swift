@@ -4057,6 +4057,21 @@ generateForEachStmtConstraints(
           AwaitExpr::createImplicit(ctx, /*awaitLoc=*/SourceLoc(), nextCall);
     }
 
+    // The iterator type must conform to IteratorProtocol.
+    {
+      ProtocolDecl *iteratorProto = TypeChecker::getProtocol(
+          cs.getASTContext(), stmt->getForLoc(),
+          isAsync ? KnownProtocolKind::AsyncIteratorProtocol
+                  : KnownProtocolKind::IteratorProtocol);
+      if (!iteratorProto)
+        return None;
+
+      cs.setContextualType(
+          nextRef->getBase(),
+          TypeLoc::withoutLoc(iteratorProto->getDeclaredInterfaceType()),
+          CTP_ForEachSequence);
+    }
+
     SolutionApplicationTarget nextTarget(nextCall, dc, CTP_Unused,
                                          /*contextualType=*/Type(),
                                          /*isDiscarded=*/false);
@@ -4350,9 +4365,15 @@ bool ConstraintSystem::generateConstraints(StmtCondition condition,
   for (const auto &condElement : condition) {
     switch (condElement.getKind()) {
     case StmtConditionElement::CK_Availability:
-    case StmtConditionElement::CK_HasSymbol:
       // Nothing to do here.
       continue;
+
+    case StmtConditionElement::CK_HasSymbol: {
+      ASTContext &ctx = getASTContext();
+      ctx.Diags.diagnose(condElement.getStartLoc(),
+                         diag::has_symbol_unsupported_in_closures);
+      return true;
+    }
 
     case StmtConditionElement::CK_Boolean: {
       Expr *condExpr = condElement.getBoolean();
