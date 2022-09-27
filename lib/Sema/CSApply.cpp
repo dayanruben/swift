@@ -1745,11 +1745,12 @@ namespace {
                                     memberLocator);
       } else if (needsCurryThunk) {
         // Another case where we want to build a single closure is when
-        // we have a partial application of a constructor on a statically-
+        // we have a partial application of a static member on a statically-
         // derived metatype value. Again, there are no order of evaluation
         // concerns here, and keeping the call and base together in the AST
         // improves SILGen.
-        if (isa<ConstructorDecl>(member) &&
+        if ((isa<ConstructorDecl>(member)
+             || member->isStatic()) &&
             cs.isStaticallyDerivedMetatype(base)) {
           // Add a useless ".self" to avoid downstream diagnostics.
           base = new (context) DotSelfExpr(base, SourceLoc(), base->getEndLoc(),
@@ -4971,26 +4972,22 @@ namespace {
       cs.cacheType(E);
 
       // To ensure side effects of the key path expression (mainly indices in
-      // subscripts) are only evaluated once, we construct an outer closure,
-      // which is immediately evaluated, and an inner closure, which it returns.
-      // The result looks like this:
+      // subscripts) are only evaluated once, we use a capture list to evaluate
+      // the key path immediately and capture it in the function value created.
+      // The result looks like:
       //
-      //     return "{ $kp$ in { $0[keyPath: $kp$] } }( \(E) )"
+      //     return "{ [$kp$ = \(E)] in $0[keyPath: $kp$] }"
 
       auto &ctx = cs.getASTContext();
       auto discriminator = AutoClosureExpr::InvalidDiscriminator;
 
-      // The inner closure.
-      //
-      //     let closure = "{ $0[keyPath: $kp$] }"
-      //
-      // FIXME: Verify ExtInfo state is correct, not working by accident.
       FunctionType::ExtInfo closureInfo;
       auto closureTy =
           FunctionType::get({FunctionType::Param(baseTy)}, leafTy, closureInfo);
       auto closure = new (ctx)
           AutoClosureExpr(/*set body later*/nullptr, leafTy,
                           discriminator, dc);
+
       auto param = new (ctx) ParamDecl(
           SourceLoc(),
           /*argument label*/ SourceLoc(), Identifier(),
@@ -4998,26 +4995,37 @@ namespace {
       param->setInterfaceType(baseTy->mapTypeOutOfContext());
       param->setSpecifier(ParamSpecifier::Default);
       param->setImplicit();
+      
+      auto params = ParameterList::create(ctx, SourceLoc(),
+                                          param, SourceLoc());
 
-      // The outer closure.
-      //
-      //    let outerClosure = "{ $kp$ in \(closure) }"
-      //
-      // FIXME: Verify ExtInfo state is correct, not working by accident.
-      FunctionType::ExtInfo outerClosureInfo;
-      auto outerClosureTy = FunctionType::get({FunctionType::Param(keyPathTy)},
-                                              closureTy, outerClosureInfo);
-      auto outerClosure = new (ctx)
-          AutoClosureExpr(/*set body later*/nullptr, closureTy,
-                          discriminator, dc);
-      auto outerParam =
-          new (ctx) ParamDecl(SourceLoc(),
-                              /*argument label*/ SourceLoc(), Identifier(),
-                              /*parameter name*/ SourceLoc(),
-                              ctx.getIdentifier("$kp$"), outerClosure);
-      outerParam->setInterfaceType(keyPathTy->mapTypeOutOfContext());
-      outerParam->setSpecifier(ParamSpecifier::Default);
+      closure->setParameterList(params);
+
+      // The capture list.
+      VarDecl *outerParam = new (ctx) VarDecl(/*static*/ false,
+                                          VarDecl::Introducer::Let,
+                                          SourceLoc(),
+                                          ctx.getIdentifier("$kp$"),
+                                          dc);
       outerParam->setImplicit();
+      outerParam->setInterfaceType(keyPathTy->mapTypeOutOfContext());
+      
+      NamedPattern *outerParamPat = new (ctx) NamedPattern(outerParam);
+      outerParamPat->setImplicit();
+      outerParamPat->setType(keyPathTy);
+      
+      auto outerParamPBE = PatternBindingEntry(outerParamPat,
+                                               SourceLoc(), E, dc);
+      solution.setExprTypes(E);
+      auto outerParamDecl = PatternBindingDecl::create(ctx, SourceLoc(),
+                                                       {}, SourceLoc(),
+                                                       outerParamPBE,
+                                                       dc);
+      outerParamDecl->setImplicit();
+      auto outerParamCapture = CaptureListEntry(outerParamDecl);
+      auto captureExpr = CaptureListExpr::create(ctx, outerParamCapture,
+                                                 closure);
+      captureExpr->setImplicit();
 
       // let paramRef = "$0"
       auto *paramRef = new (ctx)
@@ -5043,20 +5051,11 @@ namespace {
       closure->setBody(application);
       closure->setType(closureTy);
       cs.cacheType(closure);
-
-      // Finish up the outer closure.
-      outerClosure->setParameterList(ParameterList::create(ctx, {outerParam}));
-      outerClosure->setBody(closure);
-      outerClosure->setType(outerClosureTy);
-      cs.cacheType(outerClosure);
-
-      // let outerApply = "\( outerClosure )( \(E) )"
-      auto *argList = ArgumentList::forImplicitUnlabeled(ctx, {E});
-      auto outerApply = CallExpr::createImplicit(ctx, outerClosure, argList);
-      outerApply->setType(closureTy);
-      cs.cacheExprTypes(outerApply);
-
-      return coerceToType(outerApply, exprType, cs.getConstraintLocator(E));
+      
+      captureExpr->setType(closureTy);
+      cs.cacheType(captureExpr);
+      
+      return coerceToType(captureExpr, exprType, cs.getConstraintLocator(E));
     }
 
     void buildKeyPathOptionalForceComponent(
