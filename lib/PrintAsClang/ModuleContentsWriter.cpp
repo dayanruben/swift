@@ -374,7 +374,8 @@ public:
           return;
 
         // Bridge, if necessary.
-        TD = printer.getObjCTypeDecl(TD);
+        if (outputLangMode != OutputLanguageMode::Cxx)
+          TD = printer.getObjCTypeDecl(TD);
 
         if (finder.needsDefinition() && isa<NominalTypeDecl>(TD)) {
           // We can delay individual members of classes; do so if necessary.
@@ -758,6 +759,11 @@ EmittedClangHeaderDependencyInfo swift::printModuleContentsAsCxx(
                       OutputLanguageMode::Cxx);
   writer.write();
   info.dependsOnStandardLibrary = writer.isStdlibRequired();
+  if (M.isStdlibModule()) {
+    // Embed an overlay for the standard library.
+    ClangSyntaxPrinter(moduleOS).printIncludeForShimHeader(
+        "_SwiftStdlibCxxOverlay.h");
+  }
 
   os << "#ifndef SWIFT_PRINTED_CORE\n";
   os << "#define SWIFT_PRINTED_CORE\n";

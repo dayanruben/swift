@@ -12,6 +12,7 @@
 
 #include "swift/PrintAsClang/PrintAsClang.h"
 
+#include "ClangSyntaxPrinter.h"
 #include "ModuleContentsWriter.h"
 #include "SwiftToClangInteropContext.h"
 
@@ -107,15 +108,8 @@ static void writePrologue(raw_ostream &out, ASTContext &ctx,
         out << "#include <stdlib.h>\n";
         out << "#include <new>\n";
         out << "#include <type_traits>\n";
-        // FIXME: Look for the header in the SDK.
-        out << "// Look for the C++ interop support header relative to clang's resource dir:\n";
-        out << "//  '<toolchain>/usr/lib/clang/<version>/include/../../../swift/shims'.\n";
-        out << "#if __has_include(<../../../swift/shims/_SwiftCxxInteroperability.h>)\n";
-        out << "#include <../../../swift/shims/_SwiftCxxInteroperability.h>\n";
-        out << "// Alternatively, allow user to find the header using additional include path into 'swift'.\n";
-        out << "#elif __has_include(<shims/_SwiftCxxInteroperability.h>)\n";
-        out << "#include <shims/_SwiftCxxInteroperability.h>\n";
-        out << "#endif\n";
+        ClangSyntaxPrinter(out).printIncludeForShimHeader(
+            "_SwiftCxxInteroperability.h");
       },
       [&] {
         out << "#include <stdint.h>\n"

@@ -284,6 +284,93 @@ bool SILDeclRef::isImplicit() const {
   llvm_unreachable("Unhandled case in switch");
 }
 
+bool SILDeclRef::hasUserWrittenCode() const {
+  // Non-implicit decls generally have user-written code.
+  if (!isImplicit()) {
+    switch (kind) {
+    case Kind::PropertyWrapperBackingInitializer: {
+      // Only has user-written code if any of the property wrappers have
+      // arguments to apply. Otherwise, it's just a forwarding initializer for
+      // the wrappedValue.
+      auto *var = cast<VarDecl>(getDecl());
+      return llvm::any_of(var->getAttachedPropertyWrappers(), [&](auto *attr) {
+        return attr->hasArgs();
+      });
+    }
+    case Kind::PropertyWrapperInitFromProjectedValue:
+      // Never has user-written code, is just a forwarding initializer.
+      return false;
+    default:
+      // TODO: This checking is currently conservative, we ought to
+      // exhaustively handle all the cases here, and use emitOrDelayFunction
+      // in more cases to take advantage of it.
+      return true;
+    }
+    llvm_unreachable("Unhandled case in switch!");
+  }
+
+  // Implicit decls generally don't have user-written code, but some splice
+  // user code into their body.
+  switch (kind) {
+  case Kind::Func: {
+    if (getAbstractClosureExpr()) {
+      // Auto-closures have user-written code.
+      if (auto *ACE = getAutoClosureExpr()) {
+        // Currently all types of auto-closures can contain user code. Note this
+        // logic does not affect delayed emission, as we eagerly emit all
+        // closure definitions. This does however affect profiling.
+        switch (ACE->getThunkKind()) {
+        case AutoClosureExpr::Kind::None:
+        case AutoClosureExpr::Kind::SingleCurryThunk:
+        case AutoClosureExpr::Kind::DoubleCurryThunk:
+        case AutoClosureExpr::Kind::AsyncLet:
+          return true;
+        }
+        llvm_unreachable("Unhandled case in switch!");
+      }
+      // Otherwise, assume an implicit closure doesn't have user code.
+      return false;
+    }
+
+    // Lazy getters splice in the user-written initializer expr.
+    if (auto *accessor = dyn_cast<AccessorDecl>(getFuncDecl())) {
+      auto *storage = accessor->getStorage();
+      if (accessor->isGetter() && !storage->isImplicit() &&
+          storage->getAttrs().hasAttribute<LazyAttr>()) {
+        return true;
+      }
+    }
+    return false;
+  }
+  case Kind::StoredPropertyInitializer: {
+    // Property wrapper initializers for the implicit backing storage can splice
+    // in the user-written initializer on the original property.
+    auto *var = cast<VarDecl>(getDecl());
+    if (auto *originalProperty = var->getOriginalWrappedProperty()) {
+      if (originalProperty->isPropertyMemberwiseInitializedWithWrappedType())
+        return true;
+    }
+    return false;
+  }
+  case Kind::Allocator:
+  case Kind::Initializer:
+  case Kind::EnumElement:
+  case Kind::Destroyer:
+  case Kind::Deallocator:
+  case Kind::GlobalAccessor:
+  case Kind::DefaultArgGenerator:
+  case Kind::IVarInitializer:
+  case Kind::IVarDestroyer:
+  case Kind::PropertyWrapperBackingInitializer:
+  case Kind::PropertyWrapperInitFromProjectedValue:
+  case Kind::EntryPoint:
+  case Kind::AsyncEntryPoint:
+    // Implicit decls for these don't splice in user-written code.
+    return false;
+  }
+  llvm_unreachable("Unhandled case in switch!");
+}
+
 namespace {
 enum class LinkageLimit {
   /// No limit.
@@ -846,11 +933,6 @@ bool SILDeclRef::isBackDeployed() const {
   return false;
 }
 
-bool SILDeclRef::isAnyThunk() const {
-  return isForeignToNativeThunk() || isNativeToForeignThunk() ||
-         isDistributedThunk() || isBackDeploymentThunk();
-}
-
 bool SILDeclRef::isForeignToNativeThunk() const {
   // If this isn't a native entry-point, it's not a foreign-to-native thunk.
   if (isForeign)
@@ -1014,7 +1096,7 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
     // Use the SILGen name only for the original non-thunked, non-curried entry
     // point.
     if (auto NameA = getDecl()->getAttrs().getAttribute<SILGenNameAttr>())
-      if (!NameA->Name.empty() && !isAnyThunk()) {
+      if (!NameA->Name.empty() && !isThunk()) {
         return NameA->Name.str();
       }
       
