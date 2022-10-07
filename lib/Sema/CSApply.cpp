@@ -1651,6 +1651,56 @@ namespace {
 
       // For properties, build member references.
       if (auto *varDecl = dyn_cast<VarDecl>(member)) {
+        // \returns result of the given function type
+        auto resultType = [](Type fnTy) -> Type {
+          return fnTy->castTo<FunctionType>()->getResult();
+        };
+
+        auto isAssignmentDestination = [&](ConstraintLocatorBuilder locator) {
+          if (auto *anchor = getAsExpr(locator.getAnchor())) {
+            if (auto *assignment =
+                    getAsExpr<AssignExpr>(cs.getParentExpr(anchor)))
+              return assignment->getDest() == anchor;
+          }
+          return false;
+        };
+
+        // If this is a reference to an immutable type wrapper
+        // managed property used as an assignment destination
+        // i.e. `self.<name> = ...` in an initializer context,
+        // let's rewrite member access from `self` to `_storage`
+        // injected by the compiler to support type wrapper
+        // initialization.
+        //
+        // Note that this is safe to do only for immutable
+        // properties because they do no support re-assignment.
+        if (isa<ConstructorDecl>(cs.DC) && varDecl->isLet() &&
+            varDecl->isAccessedViaTypeWrapper() &&
+            isAssignmentDestination(memberLocator)) {
+          auto *ctor = cast<ConstructorDecl>(cs.DC);
+          auto *storageVar = ctor->getLocalTypeWrapperStorageVar();
+          auto *storageVarTy =
+              storageVar->getInterfaceType()->castTo<TupleType>();
+
+          base =
+              new (context) DeclRefExpr(storageVar, DeclNameLoc(base->getLoc()),
+                                        /*implicit=*/true);
+          base->setType(
+              LValueType::get(ctor->mapTypeIntoContext(storageVarTy)));
+
+          cs.cacheType(base);
+
+          Expr *memberRefExpr = new (context) TupleElementExpr(
+              base, /*DotLoc=*/SourceLoc(),
+              storageVarTy->getNamedElementId(varDecl->getName()),
+              memberLoc.getBaseNameLoc(), resultType(refTy));
+          memberRefExpr->setImplicit();
+
+          cs.cacheType(memberRefExpr);
+
+          return forceUnwrapIfExpected(memberRefExpr, memberLocator);
+        }
+
         if (isUnboundInstanceMember) {
           assert(memberLocator.getBaseLocator() &&
                  cs.UnevaluatedRootExprs.count(
@@ -1676,11 +1726,6 @@ namespace {
           adjustedRefTy = adjustedRefTy->replaceCovariantResultType(
               containerTy, 1);
         }
-
-        // \returns result of the given function type
-        auto resultType = [](Type fnTy) -> Type {
-          return fnTy->castTo<FunctionType>()->getResult();
-        };
 
         cs.setType(memberRefExpr, resultType(refTy));
 
@@ -6594,7 +6639,7 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
       // foo(bar) // This expression should compile in Swift 3 mode
       // ```
       //
-      // See also: https://bugs.swift.org/browse/SR-6796
+      // See also: https://github.com/apple/swift/issues/49345
       if (cs.getASTContext().isSwiftVersionAtLeast(4) &&
           !cs.getASTContext().isSwiftVersionAtLeast(5)) {
         auto obj1 = fromType->getOptionalObjectType();
@@ -8920,37 +8965,45 @@ ExprWalker::rewriteTarget(SolutionApplicationTarget target) {
       break;
     }
   } else if (auto stmtCondition = target.getAsStmtCondition()) {
+    auto &cs = solution.getConstraintSystem();
+
     for (auto &condElement : *stmtCondition) {
       switch (condElement.getKind()) {
       case StmtConditionElement::CK_Availability:
-      case StmtConditionElement::CK_HasSymbol:
         continue;
 
-      case StmtConditionElement::CK_Boolean: {
-        auto condExpr = condElement.getBoolean();
-        auto finalCondExpr = condExpr->walk(*this);
-        if (!finalCondExpr)
+      case StmtConditionElement::CK_HasSymbol: {
+        auto info = condElement.getHasSymbolInfo();
+        auto target = *cs.getSolutionApplicationTarget(&condElement);
+        auto resolvedTarget = rewriteTarget(target);
+        if (!resolvedTarget) {
+          info->setInvalid();
           return None;
-
-        // Load the condition if needed.
-        solution.setExprTypes(finalCondExpr);
-        if (finalCondExpr->getType()->hasLValueType()) {
-          ASTContext &ctx = solution.getConstraintSystem().getASTContext();
-          finalCondExpr = TypeChecker::addImplicitLoadExpr(ctx, finalCondExpr);
         }
 
-        condElement.setBoolean(finalCondExpr);
+        auto rewrittenExpr = resolvedTarget->getAsExpr();
+        info->setSymbolExpr(rewrittenExpr);
+        info->setReferencedDecl(
+            TypeChecker::getReferencedDeclForHasSymbolCondition(rewrittenExpr));
         continue;
       }
 
-      case StmtConditionElement::CK_PatternBinding: {
-        ConstraintSystem &cs = solution.getConstraintSystem();
+      case StmtConditionElement::CK_Boolean: {
         auto target = *cs.getSolutionApplicationTarget(&condElement);
         auto resolvedTarget = rewriteTarget(target);
         if (!resolvedTarget)
           return None;
 
-        solution.setExprTypes(resolvedTarget->getAsExpr());
+        condElement.setBoolean(resolvedTarget->getAsExpr());
+        continue;
+      }
+
+      case StmtConditionElement::CK_PatternBinding: {
+        auto target = *cs.getSolutionApplicationTarget(&condElement);
+        auto resolvedTarget = rewriteTarget(target);
+        if (!resolvedTarget)
+          return None;
+
         condElement.setInitializer(resolvedTarget->getAsExpr());
         condElement.setPattern(resolvedTarget->getInitializationPattern());
         continue;

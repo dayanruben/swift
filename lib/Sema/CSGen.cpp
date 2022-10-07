@@ -4043,10 +4043,10 @@ generateForEachStmtConstraints(
   // `.next()`. `next()` is called on each iteration of the loop.
   {
     auto *nextRef = UnresolvedDotExpr::createImplicit(
-      ctx,
-      new (ctx) DeclRefExpr(makeIteratorVar, DeclNameLoc(),
-                            /*Implicit=*/true),
-      ctx.Id_next, /*labels=*/ArrayRef<Identifier>());
+        ctx,
+        new (ctx) DeclRefExpr(makeIteratorVar, DeclNameLoc(stmt->getForLoc()),
+                              /*Implicit=*/true),
+        ctx.Id_next, /*labels=*/ArrayRef<Identifier>());
     nextRef->setFunctionRefKind(FunctionRefKind::SingleApply);
 
     Expr *nextCall = CallExpr::createImplicitEmpty(ctx, nextRef);
@@ -4369,25 +4369,26 @@ bool ConstraintSystem::generateConstraints(StmtCondition condition,
       continue;
 
     case StmtConditionElement::CK_HasSymbol: {
-      ASTContext &ctx = getASTContext();
-      ctx.Diags.diagnose(condElement.getStartLoc(),
-                         diag::has_symbol_unsupported_in_closures);
-      return true;
+      Expr *symbolExpr = condElement.getHasSymbolInfo()->getSymbolExpr();
+      auto target = SolutionApplicationTarget(symbolExpr, dc, CTP_Unused,
+                                              Type(), /*isDiscarded=*/false);
+
+      if (generateConstraints(target, FreeTypeVariableBinding::Disallow))
+        return true;
+
+      setSolutionApplicationTarget(&condElement, target);
+      continue;
     }
 
     case StmtConditionElement::CK_Boolean: {
       Expr *condExpr = condElement.getBoolean();
-      setContextualType(condExpr, TypeLoc::withoutLoc(boolTy), CTP_Condition);
+      auto target = SolutionApplicationTarget(condExpr, dc, CTP_Condition,
+                                              boolTy, /*isDiscarded=*/false);
 
-      condExpr = generateConstraints(condExpr, dc);
-      if (!condExpr) {
+      if (generateConstraints(target, FreeTypeVariableBinding::Disallow))
         return true;
-      }
 
-      addConstraint(
-          ConstraintKind::Conversion, getType(condExpr), boolTy,
-          getConstraintLocator(condExpr,
-                               LocatorPathElt::ContextualType(CTP_Condition)));
+      setSolutionApplicationTarget(&condElement, target);
       continue;
     }
 
@@ -4511,6 +4512,7 @@ ConstraintSystem::applyPropertyWrapperToParameter(
       auto wrappedValueType = getType(param->getPropertyWrapperWrappedValueVar());
       addConstraint(ConstraintKind::PropertyWrapper, projectionType, wrappedValueType,
                     getConstraintLocator(param));
+      setType(param->getPropertyWrapperProjectionVar(), projectionType);
     }
 
     initKind = PropertyWrapperInitKind::ProjectedValue;
@@ -4518,6 +4520,7 @@ ConstraintSystem::applyPropertyWrapperToParameter(
     Type wrappedValueType = computeWrappedValueType(param, wrapperType);
     addConstraint(matchKind, paramType, wrappedValueType, locator);
     initKind = PropertyWrapperInitKind::WrappedValue;
+    setType(param->getPropertyWrapperWrappedValueVar(), wrappedValueType);
   }
 
   appliedPropertyWrappers[anchor].push_back({ wrapperType, initKind });

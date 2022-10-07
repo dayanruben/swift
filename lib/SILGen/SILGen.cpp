@@ -1430,6 +1430,24 @@ void SILGenModule::emitConstructor(ConstructorDecl *decl) {
   SILDeclRef constant(decl);
   DeclContext *declCtx = decl->getDeclContext();
 
+  // Make sure that default & memberwise initializers of $Storage
+  // in a type wrapped type are always emitted because they would
+  // later be used to initialize its `$storage` property.
+  if (auto *SD = declCtx->getSelfStructDecl()) {
+    auto &ctx = SD->getASTContext();
+    if (SD->getName() == ctx.Id_TypeWrapperStorage &&
+        (decl->isMemberwiseInitializer() ||
+         decl == SD->getDefaultInitializer())) {
+#ifndef NDEBUG
+      auto *wrapped = SD->getDeclContext()->getSelfNominalTypeDecl();
+      assert(wrapped->hasTypeWrapper());
+#endif
+
+      emitFunctionDefinition(constant, getFunction(constant, ForDefinition));
+      return;
+    }
+  }
+
   if (declCtx->getSelfClassDecl()) {
     // Designated initializers for classes, as well as @objc convenience
     // initializers, have have separate entry points for allocation and
@@ -1928,10 +1946,20 @@ void SILGenModule::visitTopLevelCodeDecl(TopLevelCodeDecl *td) {
   if (!TopLevelSGF->B.hasValidInsertionPoint())
     return;
 
+  // Retrieve the entry point constant we're emitting for.
+  // FIXME: This won't be necessary once we unify emission of the entry point
+  // such that we walk all of the TopLevelCodeDecls in one shot. This will be
+  // needed in order to requestify entry point emission.
+  auto *SF = td->getParentSourceFile();
+  assert(SF && "TopLevelDecl outside of a SourceFile?");
+  auto entryPoint = TopLevelSGF->F.isAsync()
+                      ? SILDeclRef::getAsyncMainFileEntryPoint(SF)
+                      : SILDeclRef::getMainFileEntryPoint(SF);
+
   // A single SILFunction may be used to lower multiple top-level decls. When
   // this happens, fresh profile counters must be assigned to the new decl.
   TopLevelSGF->F.discardProfiler();
-  TopLevelSGF->F.createProfiler(td, SILDeclRef());
+  TopLevelSGF->F.createProfiler(td, entryPoint);
 
   TopLevelSGF->emitProfilerIncrement(td->getBody());
  

@@ -334,8 +334,11 @@ void SILFunction::deleteSnapshot(int ID) {
 
 void SILFunction::createProfiler(ASTNode Root, SILDeclRef Ref) {
   assert(!Profiler && "Function already has a profiler");
+  assert(Root && "Cannot profile a null ASTNode");
+  assert(Ref && "Must have non-null SILDeclRef");
+
   Profiler = SILProfiler::create(Module, Root, Ref);
-  if (!Profiler || Ref.isNull())
+  if (!Profiler)
     return;
 
   // If we loaded a profile, set the entry counts for functions and closures
@@ -940,14 +943,41 @@ void Function_register(SwiftMetatype metatype,
   getEffectInfoFunction = effectInfoFn;
 }
 
-std::pair<const char *, int> SILFunction::
-parseEffects(StringRef attrs, bool fromSIL, int argumentIndex, bool isDerived,
-             ArrayRef<StringRef> paramNames) {
+std::pair<const char *, int>  SILFunction::
+parseArgumentEffectsFromSource(StringRef effectStr, ArrayRef<StringRef> paramNames) {
   if (parseFunction) {
     BridgedParsingError error = parseFunction(
-        {this}, attrs, (SwiftInt)fromSIL,
-        (SwiftInt)argumentIndex, (SwiftInt)isDerived,
+        {this}, effectStr, ParseArgumentEffectsFromSource, -1,
         {(const unsigned char *)paramNames.data(), paramNames.size()});
+    return {(const char *)error.message, (int)error.position};
+  }
+  return {nullptr, 0};
+}
+
+std::pair<const char *, int>  SILFunction::
+parseArgumentEffectsFromSIL(StringRef effectStr, int argumentIndex) {
+  if (parseFunction) {
+    BridgedParsingError error = parseFunction(
+        {this}, effectStr, ParseArgumentEffectsFromSIL, argumentIndex, {nullptr, 0});
+    return {(const char *)error.message, (int)error.position};
+  }
+  return {nullptr, 0};
+}
+
+std::pair<const char *, int>  SILFunction::parseGlobalEffectsFromSIL(StringRef effectStr) {
+  if (parseFunction) {
+    BridgedParsingError error = parseFunction(
+        {this}, effectStr, ParseGlobalEffectsFromSIL, -1, {nullptr, 0});
+    return {(const char *)error.message, (int)error.position};
+  }
+  return {nullptr, 0};
+}
+
+std::pair<const char *, int>  SILFunction::
+parseMultipleEffectsFromSIL(StringRef effectStr) {
+  if (parseFunction) {
+    BridgedParsingError error = parseFunction(
+        {this}, effectStr, ParseMultipleEffectsFromSIL, -1, {nullptr, 0});
     return {(const char *)error.message, (int)error.position};
   }
   return {nullptr, 0};
@@ -968,7 +998,7 @@ void SILFunction::copyEffects(SILFunction *from) {
 bool SILFunction::hasArgumentEffects() const {
   if (getEffectInfoFunction) {
     BridgedFunction f = {const_cast<SILFunction *>(this)};
-    return getEffectInfoFunction(f, 0).argumentIndex >= 0;
+    return getEffectInfoFunction(f, 0).isValid;
   }
   return false;
 }
@@ -982,9 +1012,11 @@ visitArgEffects(std::function<void(int, int, bool)> c) const {
   BridgedFunction bridgedFn = {const_cast<SILFunction *>(this)};
   while (true) {
     BridgedEffectInfo ei = getEffectInfoFunction(bridgedFn, idx);
-    if (ei.argumentIndex < 0)
+    if (!ei.isValid)
       return;
-    c(idx, ei.argumentIndex, ei.isDerived);
+    if (!ei.isEmpty) {
+      c(idx, ei.argumentIndex, ei.isDerived);
+    }
     idx++;
   }
 }

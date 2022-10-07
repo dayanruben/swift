@@ -2260,7 +2260,7 @@ public:
   }
 
   bool checkScopedAddressUses(ScopedAddressValue scopedAddress,
-                              PrunedLiveness *scopedAddressLiveness,
+                              SSAPrunedLiveness *scopedAddressLiveness,
                               DeadEndBlocks *deadEndBlocks) {
     SmallVector<Operand *, 4> uses;
     findTransitiveUsesForAddress(scopedAddress.value, &uses);
@@ -2444,9 +2444,22 @@ public:
     require(isa<AllocStackInst>(SI->getDest()),
             "store_borrow destination can only be an alloc_stack");
 
-    PrunedLiveness scopedAddressLiveness;
+    SSAPrunedLiveness scopedAddressLiveness;
     ScopedAddressValue scopedAddress(SI);
-    bool success = scopedAddress.computeLiveness(scopedAddressLiveness);
+    // FIXME: Reenable @test_load_borrow_store_borrow_nested in
+    // store_borrow_verify_errors once computeLivess can successfully handle a
+    // store_borrow within a load_borrow. This can be fixed in two ways
+    //
+    // (1) With complete lifetimes, this no longer needs to perform transitive
+    // liveness at all.
+    //
+    // (2) findInnerTransitiveGuaranteedUses, which ends up being called on the
+    // load_borrow to compute liveness, can be taught to transitively process
+    // InteriorPointer uses instead of returning PointerEscape. We need to make
+    // sure all uses of the utility need to handle this first.
+    AddressUseKind useKind =
+        scopedAddress.computeTransitiveLiveness(scopedAddressLiveness);
+    bool success = useKind == AddressUseKind::NonEscaping;
 
     require(!success || checkScopedAddressUses(
                             scopedAddress, &scopedAddressLiveness, &DEBlocks),
@@ -2510,11 +2523,13 @@ public:
             "assign instruction can only exist in raw SIL");
     require(Dest->getType().isAddress(), "Must store to an address dest");
 
-    SILValue initFn = AI->getInitializer();
-    CanSILFunctionType initTy = initFn->getType().castTo<SILFunctionType>();
-    SILFunctionConventions initConv(initTy, AI->getModule());
-    checkAssignByWrapperArgs(Src->getType(), initConv);
-    switch (initConv.getNumIndirectSILResults()) {
+    if (AI->getOriginator() ==
+        AssignByWrapperInst::Originator::PropertyWrapper) {
+      SILValue initFn = AI->getInitializer();
+      CanSILFunctionType initTy = initFn->getType().castTo<SILFunctionType>();
+      SILFunctionConventions initConv(initTy, AI->getModule());
+      checkAssignByWrapperArgs(Src->getType(), initConv);
+      switch (initConv.getNumIndirectSILResults()) {
       case 0:
         require(initConv.getNumDirectSILResults() == 1,
                 "wrong number of init function results");
@@ -2535,6 +2550,13 @@ public:
         break;
       default:
         require(false, "wrong number of indirect init function results");
+      }
+    } else {
+      require(AI->getOriginator() ==
+                  AssignByWrapperInst::Originator::TypeWrapper,
+              "wrong originator");
+      require(isa<SILUndef>(AI->getInitializer()),
+              "assignment via type wrapper does not have initializer");
     }
 
     SILValue setterFn = AI->getSetter();

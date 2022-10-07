@@ -619,7 +619,7 @@ ParserResult<Expr> Parser::parseExprUnary(Diag<> Message, bool isExprBasic) {
 ///   !
 ///   [ expression ]
 ParserResult<Expr> Parser::parseExprKeyPath() {
-  SyntaxParsingContext KeyPathCtx(SyntaxContext, SyntaxKind::KeyPathExpr);
+  SyntaxParsingContext KeyPathCtx(SyntaxContext, SyntaxKind::OldKeyPathExpr);
   // Consume '\'.
   SourceLoc backslashLoc = consumeToken(tok::backslash);
   llvm::SaveAndRestore<bool> S(InSwiftKeyPath, true);
@@ -1141,7 +1141,7 @@ static MagicIdentifierLiteralExpr::Kind
 getMagicIdentifierLiteralKind(tok Kind, const LangOptions &Opts) {
   switch (Kind) {
   case tok::pound_file:
-    // TODO: Enable by default at the next source break. (SR-13199)
+    // TODO(https://github.com/apple/swift/issues/55639): Enable by default at the next source break.
     return Opts.hasFeature(Feature::ConciseMagicFile)
          ? MagicIdentifierLiteralExpr::FileIDSpelledAsFile
          : MagicIdentifierLiteralExpr::FilePathSpelledAsFile;
@@ -1713,11 +1713,13 @@ ParserResult<Expr> Parser::parseExprPrimary(Diag<> ID, bool isExprBasic) {
         ParsedPatternSyntax PatternNode =
             ParsedSyntaxRecorder::makeIdentifierPattern(
                 /*UnexpectedNodes=*/None,
-                /*Identifier=*/SyntaxContext->popToken(), *SyntaxContext);
+                /*Identifier=*/SyntaxContext->popToken(),
+                /*UnexpectedNodes=*/None, *SyntaxContext);
         ParsedExprSyntax ExprNode =
             ParsedSyntaxRecorder::makeUnresolvedPatternExpr(
                 /*UnexpectedNodes=*/None,
-                /*Pattern=*/std::move(PatternNode), *SyntaxContext);
+                /*Pattern=*/std::move(PatternNode),
+                /*UnexpectedNodes=*/None, *SyntaxContext);
         SyntaxContext->addSyntax(std::move(ExprNode));
       }
       return makeParserResult(new (Context) UnresolvedPatternExpr(pattern));
