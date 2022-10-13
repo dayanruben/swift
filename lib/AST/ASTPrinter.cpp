@@ -3091,6 +3091,10 @@ static bool usesFeatureAdditiveArithmeticDerivedConformances(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureParserASTGen(Decl *decl) {
+  return false;
+}
+
 static void
 suppressingFeatureNoAsyncAvailability(PrintOptions &options,
                                       llvm::function_ref<void()> action) {
@@ -4748,6 +4752,10 @@ void PrintAST::visitStringToPointerExpr(StringToPointerExpr *expr) {
 
 void PrintAST::visitVarargExpansionExpr(VarargExpansionExpr *expr) {
   visit(expr->getSubExpr());
+}
+
+void PrintAST::visitPackExpansionExpr(PackExpansionExpr *expr) {
+  visit(expr->getPatternExpr());
 }
 
 void PrintAST::visitArchetypeToSuperExpr(ArchetypeToSuperExpr *expr) {
