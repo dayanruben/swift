@@ -15,8 +15,10 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/Basic/Statistic.h"
-#include "swift/SIL/SILModule.h"
+#include "swift/SIL/MemAccessUtils.h"
+#include "swift/SIL/SILBridging.h"
 #include "swift/SIL/SILBridgingUtils.h"
+#include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/OptimizerBridging.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "llvm/Support/Compiler.h"
@@ -362,4 +364,56 @@ BridgedFunction BridgedFunctionArray_get(BridgedCalleeList callees,
   auto iter = cl.begin() + index;
   assert(index >= 0 && iter < cl.end());
   return {*iter};
+}
+
+static InstructionIsDeinitBarrierFn instructionIsDeinitBarrierFunction;
+static CalleeAnalysisGetMemBehvaiorFn getMemBehvaiorFunction = nullptr;
+
+void CalleeAnalysis_register(
+    InstructionIsDeinitBarrierFn instructionIsDeinitBarrierFn,
+    CalleeAnalysisGetMemBehvaiorFn getMemBehvaiorFn) {
+  instructionIsDeinitBarrierFunction = instructionIsDeinitBarrierFn;
+  getMemBehvaiorFunction = getMemBehvaiorFn;
+}
+
+SILInstruction::MemoryBehavior BasicCalleeAnalysis::
+getMemoryBehavior(ApplySite as, bool observeRetains) {
+  if (getMemBehvaiorFunction) {
+    auto b = getMemBehvaiorFunction({pm->getSwiftPassInvocation()},
+                                    {as.getInstruction()->asSILNode()},
+                                    observeRetains);
+    return (SILInstruction::MemoryBehavior)b;
+  }
+  return SILInstruction::MemoryBehavior::MayHaveSideEffects;
+}
+
+/// Implementation of mayBeDeinitBarrierNotConsideringSideEffects for use only
+/// during bootstrapping or in compilers that lack Swift sources.
+///
+/// TODO: Remove.
+static bool
+isDeinitBarrierWithoutEffectsCpp(SILInstruction *const instruction) {
+  auto mayLoadWeakOrUnowned = [](SILInstruction *const instruction) {
+    return isa<LoadWeakInst>(instruction) ||
+           isa<LoadUnownedInst>(instruction) ||
+           isa<StrongCopyUnownedValueInst>(instruction) ||
+           isa<StrongCopyUnmanagedValueInst>(instruction);
+  };
+  auto maySynchronize = [](SILInstruction *const instruction) {
+    return isa<FullApplySite>(instruction) || isa<EndApplyInst>(instruction) ||
+           isa<AbortApplyInst>(instruction);
+  };
+  return mayAccessPointer(instruction) || mayLoadWeakOrUnowned(instruction) ||
+         maySynchronize(instruction);
+}
+
+bool swift::isDeinitBarrier(SILInstruction *const instruction,
+                            BasicCalleeAnalysis *bca) {
+  if (!instructionIsDeinitBarrierFunction) {
+    return isDeinitBarrierWithoutEffectsCpp(instruction);
+  }
+  BridgedInstruction inst = {
+      cast<SILNode>(const_cast<SILInstruction *>(instruction))};
+  BridgedCalleeAnalysis analysis = {bca};
+  return instructionIsDeinitBarrierFunction(inst, analysis);
 }

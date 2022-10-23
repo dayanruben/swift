@@ -16,13 +16,15 @@
 
 #include "CodeSynthesis.h"
 
-#include "TypeChecker.h"
 #include "TypeCheckDecl.h"
+#include "TypeCheckDistributed.h"
 #include "TypeCheckObjC.h"
 #include "TypeCheckType.h"
-#include "TypeCheckDistributed.h"
+#include "TypeChecker.h"
+#include "swift/AST/ASTMangler.h"
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/Availability.h"
+#include "swift/AST/DistributedDecl.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Initializer.h"
@@ -31,7 +33,6 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/TypeCheckRequests.h"
-#include "swift/AST/DistributedDecl.h"
 #include "swift/Basic/Defer.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/Sema/ConstraintSystem.h"
@@ -212,20 +213,6 @@ static void maybeAddTypeWrapperDefaultArg(ParamDecl *arg, VarDecl *var,
 
   if (!initExpr)
     return;
-
-  // Type wrapper variables are never initialized directly,
-  // initialization expression (if any) becomes an default
-  // argument of the initializer synthesized by the type wrapper.
-  {
-    // Since type wrapper is applied to backing property, that's
-    // the the initializer it subsumes.
-    if (var->hasAttachedPropertyWrapper()) {
-      auto *backingVar = var->getPropertyWrapperBackingProperty();
-      PBD = backingVar->getParentPatternBinding();
-    }
-
-    PBD->setInitializerSubsumed(/*index=*/0);
-  }
 
   arg->setDefaultExpr(initExpr, PBD->isInitializerChecked(/*index=*/0));
   arg->setDefaultArgumentKind(DefaultArgumentKind::Normal);
@@ -584,10 +571,9 @@ createDesignatedInitOverrideGenericParams(ASTContext &ctx,
 
   SmallVector<GenericTypeParamDecl *, 4> newParams;
   for (auto *param : genericParams->getParams()) {
-    auto *newParam = GenericTypeParamDecl::create(
-        classDecl, param->getName(), SourceLoc(), param->isTypeSequence(),
-        depth, param->getIndex(), param->isOpaqueType(),
-        /*opaqueTypeRepr=*/nullptr);
+    auto *newParam = GenericTypeParamDecl::createImplicit(
+        classDecl, param->getName(), depth, param->getIndex(),
+        param->isParameterPack(), param->isOpaqueType());
     newParams.push_back(newParam);
   }
 
@@ -1607,4 +1593,33 @@ ConstructorDecl *SynthesizeTypeWrappedTypeMemberwiseInitializer::evaluate(
 
   ctor->setBody(body, AbstractFunctionDecl::BodyKind::Parsed);
   return ctor;
+}
+
+FuncDecl *ValueDecl::getHasSymbolQueryDecl() const {
+  return evaluateOrDefault(getASTContext().evaluator,
+                           SynthesizeHasSymbolQueryRequest{this}, nullptr);
+}
+
+FuncDecl *
+SynthesizeHasSymbolQueryRequest::evaluate(Evaluator &evaluator,
+                                          const ValueDecl *decl) const {
+  auto &ctx = decl->getASTContext();
+  auto dc = decl->getModuleContext();
+
+  Mangle::ASTMangler mangler;
+  auto mangledName = ctx.AllocateCopy(mangler.mangleHasSymbolQuery(decl));
+
+  ParameterList *params = ParameterList::createEmpty(ctx);
+
+  DeclName funcName =
+      DeclName(ctx, DeclBaseName(ctx.getIdentifier(mangledName)),
+               /*argumentNames=*/ArrayRef<Identifier>());
+
+  auto i1 = BuiltinIntegerType::get(1, ctx);
+  FuncDecl *func = FuncDecl::createImplicit(
+      ctx, swift::StaticSpellingKind::None, funcName, SourceLoc(),
+      /*async=*/false, /*throws=*/false, nullptr, params, i1, dc);
+
+  func->getAttrs().add(new (ctx) SILGenNameAttr(mangledName, IsImplicit));
+  return func;
 }

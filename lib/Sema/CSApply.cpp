@@ -33,6 +33,7 @@
 #include "swift/AST/OperatorNameLookup.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/ProtocolConformance.h"
+#include "swift/AST/SourceFile.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/StringExtras.h"
@@ -52,6 +53,10 @@
 
 using namespace swift;
 using namespace constraints;
+
+extern "C" ptrdiff_t swift_ASTGen_evaluateMacro(
+    void *sourceFile, const void *sourceLocation,
+    const char **evaluatedSource, ptrdiff_t *evaluatedSourceLength);
 
 bool Solution::hasFixedType(TypeVariableType *typeVar) const {
   auto knownBinding = typeBindings.find(typeVar);
@@ -726,8 +731,6 @@ namespace {
         return inout->getSubExpr();
       } else if (auto force = dyn_cast<ForceValueExpr>(expr)) {
         return force->getSubExpr();
-      } else if (auto rebind = dyn_cast<RebindSelfInConstructorExpr>(expr)) {
-        return rebind->getSubExpr();
       } else {
         return nullptr;
       }
@@ -818,6 +821,11 @@ namespace {
       // we can close this existential, and record it.
       unsigned maxArgCount = member->getNumCurryLevels();
       unsigned depth = ExprStack.size() - getArgCount(maxArgCount);
+
+      // Invalid case -- direct call of a metatype. Has one less argument
+      // application because there's no ".init".
+      if (isa<ApplyExpr>(ExprStack.back()))
+        depth++;
 
       // Create the opaque opened value. If we started with a
       // metatype, it's a metatype.
@@ -2966,6 +2974,28 @@ namespace {
     }
 
     Expr *visitMagicIdentifierLiteralExpr(MagicIdentifierLiteralExpr *expr) {
+#if SWIFT_SWIFT_PARSER
+      auto &ctx = cs.getASTContext();
+      if (ctx.LangOpts.hasFeature(Feature::BuiltinMacros)) {
+        if (auto sf = dc->getParentSourceFile()) {
+          if (auto astGenSF = sf->exportedSourceFile) {
+            const char *evaluatedSource;
+            ptrdiff_t evaluatedSourceLength;
+            swift_ASTGen_evaluateMacro(
+                astGenSF, expr->getStartLoc().getOpaquePointerValue(),
+                &evaluatedSource, &evaluatedSourceLength);
+            if (evaluatedSource) {
+              llvm::outs() << "Macro rewrite: "
+                << MagicIdentifierLiteralExpr::getKindString(expr->getKind())
+                << " --> " << StringRef(evaluatedSource, evaluatedSourceLength)
+                << "\n";
+              free((void*)evaluatedSource);
+            }
+          }
+        }
+      }
+#endif
+
       switch (expr->getKind()) {
 #define MAGIC_STRING_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
       case MagicIdentifierLiteralExpr::NAME: \
@@ -3591,10 +3621,6 @@ namespace {
       return simplifyExprType(expr);
     }
 
-    Expr *visitPackExpr(PackExpr *expr) {
-      return simplifyExprType(expr);
-    }
-
     Expr *visitSubscriptExpr(SubscriptExpr *expr) {
       auto *memberLocator =
           cs.getConstraintLocator(expr, ConstraintLocator::SubscriptMember);
@@ -3904,12 +3930,7 @@ namespace {
         expr->setSubExpr(newSubExpr);
       }
 
-      // We might have opened existentials in the argument list of the
-      // constructor call.
-      Expr *result = expr;
-      closeExistentials(result, cs.getConstraintLocator(expr));
-
-      return result;
+      return expr;
     }
 
     Expr *visitTernaryExpr(TernaryExpr *expr) {
@@ -5348,6 +5369,11 @@ namespace {
       llvm_unreachable("already type-checked?");
     }
 
+    Expr *visitMacroExpansionExpr(MacroExpansionExpr *E) {
+      // TODO: Expand macro.
+      return E;
+    }
+
     /// Interface for ExprWalker
     void walkToExprPre(Expr *expr) {
       // If we have an apply, make a note of its callee locator prior to
@@ -5851,55 +5877,7 @@ ArgumentList *ExprRewriter::coerceCallArguments(
     const auto &param = params[paramIdx];
     auto paramLabel = param.getLabel();
 
-    // Handle variadic generic parameters.
-    if (ctx.LangOpts.hasFeature(Feature::VariadicGenerics) &&
-        paramInfo.isVariadicGenericParameter(paramIdx)) {
-      assert(!param.isInOut());
-
-      SmallVector<Expr *, 4> variadicArgs;
-
-      // The first argument of this vararg parameter may have had a label;
-      // save its location.
-      auto &varargIndices = parameterBindings[paramIdx];
-      SourceLoc labelLoc;
-      if (!varargIndices.empty())
-        labelLoc = args->getLabelLoc(varargIndices[0]);
-
-      // Convert the arguments.
-      auto paramTuple = param.getPlainType()->castTo<PackType>();
-      for (auto varargIdx : indices(varargIndices)) {
-        auto argIdx = varargIndices[varargIdx];
-        auto *arg = args->getExpr(argIdx);
-        auto argType = cs.getType(arg);
-
-        // If the argument type exactly matches, this just works.
-        auto paramTy = paramTuple->getElementType(varargIdx);
-        if (argType->isEqual(paramTy)) {
-          variadicArgs.push_back(arg);
-          continue;
-        }
-
-        // Convert the argument.
-        auto convertedArg = coerceToType(
-            arg, paramTy,
-            getArgLocator(argIdx, paramIdx, param.getParameterFlags()));
-        if (!convertedArg)
-          return nullptr;
-
-        // Add the converted argument.
-        variadicArgs.push_back(convertedArg);
-      }
-
-      // Collect them into a PackExpr.
-      auto *packExpr = PackExpr::create(ctx, variadicArgs, paramTuple);
-      packExpr->setType(paramTuple);
-      cs.cacheType(packExpr);
-
-      newArgs.push_back(Argument(labelLoc, paramLabel, packExpr));
-      continue;
-    }
-
-    // Handle plain variadic parameters.
+    // Handle variadic parameters.
     if (param.isVariadic()) {
       assert(!param.isInOut());
 
@@ -7011,11 +6989,6 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
       finishApply(implicitInit, toType, callLocator, callLocator);
       return implicitInit;
     }
-    case ConversionRestrictionKind::ReifyPackToType: {
-      auto reifyPack =
-          cs.cacheType(new (ctx) ReifyPackExpr(expr, toType));
-      return coerceToType(reifyPack, toType, locator);
-    }
     }
   }
 
@@ -7122,7 +7095,8 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   case TypeKind::PrimaryArchetype:
   case TypeKind::OpenedArchetype:
   case TypeKind::OpaqueTypeArchetype:
-  case TypeKind::SequenceArchetype:
+  case TypeKind::PackArchetype:
+  case TypeKind::ElementArchetype:
     if (!cast<ArchetypeType>(desugaredFromType)->requiresClass())
       break;
     LLVM_FALLTHROUGH;
@@ -7445,7 +7419,8 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   case TypeKind::PrimaryArchetype:
   case TypeKind::OpenedArchetype:
   case TypeKind::OpaqueTypeArchetype:
-  case TypeKind::SequenceArchetype:
+  case TypeKind::PackArchetype:
+  case TypeKind::ElementArchetype:
   case TypeKind::GenericTypeParam:
   case TypeKind::DependentMember:
   case TypeKind::Function:
@@ -7464,7 +7439,10 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   if (fromType->hasUnresolvedType() || toType->hasUnresolvedType())
     return cs.cacheType(new (ctx) UnresolvedTypeConversionExpr(expr, toType));
 
-  llvm_unreachable("Unhandled coercion");
+  llvm::errs() << "Unhandled coercion:\n";
+  fromType->dump(llvm::errs());
+  toType->dump(llvm::errs());
+  abort();
 }
 
 /// Detect whether an assignment to \c baseExpr.member in the given

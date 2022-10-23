@@ -649,12 +649,6 @@ public:
   /// Can this instruction abort the program in some manner?
   bool mayTrap() const;
 
-  /// Involves a synchronization point like a memory barrier, lock or syscall.
-  ///
-  /// TODO: We need side-effect analysis and library annotation for this to be
-  ///       a reasonable API.  For now, this is just a placeholder.
-  bool maySynchronize() const;
-
   /// Returns true if the given instruction is completely identical to RHS.
   bool isIdenticalTo(const SILInstruction *RHS) const {
     return isIdenticalTo(RHS,
@@ -2795,7 +2789,7 @@ public:
 
   Optional<SILResultInfo> getSingleResult() const {
     auto SubstCallee = getSubstCalleeType();
-    if (SubstCallee->getNumAllResults() != 1)
+    if (SubstCallee->getNumResults() != 1)
       return None;
     return SubstCallee->getSingleResult();
   }
@@ -4931,6 +4925,32 @@ public:
   void setTrace(bool trace = true) {
     sharedUInt8().DebugValueInst.trace = trace;
   }
+};
+
+class TestSpecificationInst final
+    : public InstructionBase<SILInstructionKind::TestSpecificationInst,
+                             NonValueInstruction>,
+      private llvm::TrailingObjects<TestSpecificationInst, char> {
+  friend TrailingObjects;
+  friend SILBuilder;
+
+  unsigned ArgumentsSpecificationLength;
+
+  TestSpecificationInst(SILDebugLocation Loc,
+                        unsigned ArgumentsSpecificationLength)
+      : InstructionBase(Loc),
+        ArgumentsSpecificationLength(ArgumentsSpecificationLength) {}
+
+  static TestSpecificationInst *
+  create(SILDebugLocation Loc, StringRef argumentsSpecification, SILModule &M);
+
+public:
+  StringRef getArgumentsSpecification() const {
+    return StringRef(getTrailingObjects<char>(), ArgumentsSpecificationLength);
+  }
+
+  ArrayRef<Operand> getAllOperands() const { return {}; }
+  MutableArrayRef<Operand> getAllOperands() { return {}; }
 };
 
 /// An abstract class representing a load from some kind of reference storage.

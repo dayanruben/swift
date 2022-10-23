@@ -2133,7 +2133,16 @@ namespace {
         if (auto friendDecl = dyn_cast<clang::FriendDecl>(m)) {
           if (friendDecl->getFriendDecl()) {
             m = friendDecl->getFriendDecl();
-            auto lookupTable = Impl.findLookupTable(m->getOwningModule());
+
+            // Find the owning module of the class template. Members of class
+            // template specializations don't have an owning module.
+            clang::Module *owningModule = nullptr;
+            if (auto spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(decl))
+              owningModule = spec->getSpecializedTemplate()->getOwningModule();
+            else
+              owningModule = decl->getOwningModule();
+
+            auto lookupTable = Impl.findLookupTable(owningModule);
             addEntryToLookupTable(*lookupTable, friendDecl->getFriendDecl(),
                                   Impl.getNameImporter());
           }
@@ -3027,8 +3036,10 @@ namespace {
 
           auto *typeParam = Impl.createDeclWithClangNode<GenericTypeParamDecl>(
               param, AccessLevel::Public, dc,
-              Impl.SwiftContext.getIdentifier(param->getName()), SourceLoc(),
-              /*type sequence*/ false, /*depth*/ 0, /*index*/ i);
+              Impl.SwiftContext.getIdentifier(param->getName()),
+              /*nameLoc*/ SourceLoc(),
+              /*ellipsisLoc*/ SourceLoc(),
+              /*depth*/ 0, /*index*/ i, /*isParameterPack*/ false);
           templateParams.push_back(typeParam);
           (void)++i;
         }
@@ -3477,8 +3488,8 @@ namespace {
                 param, AccessLevel::Public, dc,
                 Impl.SwiftContext.getIdentifier(param->getName()),
                 Impl.importSourceLoc(param->getLocation()),
-                /*type sequence*/ false, /*depth*/ 0,
-                /*index*/ genericParams.size());
+                /*ellipsisLoc*/ SourceLoc(), /*depth*/ 0,
+                /*index*/ genericParams.size(), /*isParameterPack*/ false);
         genericParams.push_back(genericParamDecl);
       }
       auto genericParamList = GenericParamList::create(
@@ -6590,7 +6601,8 @@ Optional<GenericParamList *> SwiftDeclConverter::importObjCGenericParams(
         objcGenericParam, AccessLevel::Public, dc,
         Impl.SwiftContext.getIdentifier(objcGenericParam->getName()),
         Impl.importSourceLoc(objcGenericParam->getLocation()),
-        /*type sequence*/ false, /*depth*/ 0, /*index*/ genericParams.size());
+        /*ellipsisLoc*/ SourceLoc(),
+        /*depth*/ 0, /*index*/ genericParams.size(), /*isParameterPack*/ false);
     // NOTE: depth is always 0 for ObjC generic type arguments, since only
     // classes may have generic types in ObjC, and ObjC classes cannot be
     // nested.
@@ -8229,6 +8241,15 @@ ClangImporter::Implementation::importDeclContextOf(
     // decl (aka LinkageSpecDecl) and then proceed.
     if (dc->getDeclKind() == clang::Decl::LinkageSpec)
       dc = dc->getParent();
+
+    // Treat friend decls like top-level decls.
+    if (auto functionDecl = dyn_cast<clang::FunctionDecl>(decl)) {
+      if (functionDecl->getFriendObjectKind()) {
+        // Find the top-level decl context.
+        while (isa<clang::NamedDecl>(dc))
+          dc = dc->getParent();
+      }
+    }
 
     if (dc->isTranslationUnit()) {
       if (auto *module = getClangModuleForDecl(decl))

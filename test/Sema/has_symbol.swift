@@ -119,6 +119,19 @@ func doIt(_ closure: () -> ()) {
   closure()
 }
 
+@inlinable
+func testInlinable() {
+  if #_hasSymbol(noArgFunc) {} // expected-error {{'#_hasSymbol' cannot be used in an '@inlinable' function}}
+  doIt {
+    if #_hasSymbol(noArgFunc) {} // expected-error {{'#_hasSymbol' cannot be used in an '@inlinable' function}}
+  }
+}
+
+@_alwaysEmitIntoClient
+func testAEIC() {
+  if #_hasSymbol(noArgFunc) {} // expected-error {{'#_hasSymbol' cannot be used in an '@_alwaysEmitIntoClient' function}}
+}
+
 func testClosure() {
   doIt { if #_hasSymbol(global) {} }
   doIt { if #_hasSymbol(noArgFunc) {} }
