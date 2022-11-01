@@ -2977,9 +2977,12 @@ namespace {
         auto kind = MagicIdentifierLiteralExpr::getKindString(expr->getKind())
             .drop_front();
         auto expandedType = solution.simplifyType(solution.getType(expr));
+        cs.setType(expr, expandedType);
+
         if (auto newExpr = expandMacroExpr(dc, expr, kind, expandedType)) {
           auto expansion = new (ctx) MacroExpansionExpr(
-              expr->getStartLoc(), expr, nullptr, /*isImplicit=*/true,
+              expr->getStartLoc(), DeclNameRef(ctx.getIdentifier(kind)),
+              DeclNameLoc(expr->getLoc()), nullptr, /*isImplicit=*/true,
               expandedType);
           expansion->setRewritten(newExpr);
           cs.cacheExprTypes(expansion);
@@ -3592,7 +3595,23 @@ namespace {
     }
 
     Expr *visitParenExpr(ParenExpr *expr) {
-      return simplifyExprType(expr);
+      Expr *result = expr;
+      auto type = simplifyType(cs.getType(expr));
+
+      // A ParenExpr can end up with a tuple type if it contains
+      // a pack expansion. Rewrite it to a TupleExpr.
+      if (dyn_cast<PackExpansionExpr>(expr->getSubExpr())) {
+        auto &ctx = cs.getASTContext();
+        result = TupleExpr::create(ctx, expr->getLParenLoc(),
+                                   {expr->getSubExpr()},
+                                   /*elementNames=*/{},
+                                   /*elementNameLocs=*/{},
+                                   expr->getRParenLoc(),
+                                   expr->isImplicit());
+      }
+
+      cs.setType(result, type);
+      return result;
     }
 
     Expr *visitUnresolvedMemberChainResultExpr(
@@ -3796,7 +3815,13 @@ namespace {
     }
 
     Expr *visitPackExpansionExpr(PackExpansionExpr *expr) {
-      llvm_unreachable("not implemented for PackExpansionExpr");
+      for (unsigned i = 0; i < expr->getNumBindings(); ++i) {
+        auto *binding = expr->getBindings()[i];
+        expr->setBinding(i, visit(binding));
+      }
+
+      simplifyExprType(expr);
+      return expr;
     }
 
     Expr *visitDynamicTypeExpr(DynamicTypeExpr *expr) {
@@ -3808,7 +3833,6 @@ namespace {
     }
 
     Expr *visitOpaqueValueExpr(OpaqueValueExpr *expr) {
-      assert(expr->isPlaceholder() && "Already type-checked");
       return expr;
     }
 
@@ -5364,7 +5388,21 @@ namespace {
     }
 
     Expr *visitMacroExpansionExpr(MacroExpansionExpr *E) {
-      // TODO: Expand macro.
+#if SWIFT_SWIFT_PARSER
+      auto &ctx = cs.getASTContext();
+      if (ctx.LangOpts.hasFeature(Feature::Macros)) {
+        auto macroIdent = E->getMacroName().getBaseIdentifier();
+        auto expandedType = solution.simplifyType(solution.getType(E));
+        cs.setType(E, expandedType);
+        if (auto newExpr = expandMacroExpr(
+                dc, E, macroIdent.str(), expandedType)) {
+          E->setRewritten(newExpr);
+          cs.cacheExprTypes(E);
+          return E;
+        }
+        // Fall through to use old implementation.
+      }
+#endif
       return E;
     }
 
@@ -7060,9 +7098,30 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
                                             /*isImplicit*/ true));
   }
 
-  case TypeKind::Pack:
-  case TypeKind::PackExpansion: {
+  case TypeKind::Pack: {
     llvm_unreachable("Unimplemented!");
+  }
+
+  case TypeKind::PackExpansion: {
+    auto toExpansionType = toType->getAs<PackExpansionType>();
+    auto *expansion = dyn_cast<PackExpansionExpr>(expr);
+
+    auto *elementEnv = expansion->getGenericEnvironment();
+    auto toElementType = elementEnv->mapPackTypeIntoElementContext(
+        toExpansionType->getPatternType()->mapTypeOutOfContext());
+
+    auto *pattern = coerceToType(expansion->getPatternExpr(),
+                                 toElementType, locator);
+    auto *packEnv = cs.DC->getGenericEnvironmentOfContext();
+    auto patternType = packEnv->mapElementTypeIntoPackContext(
+        toElementType->mapTypeOutOfContext());
+    auto shapeType = toExpansionType->getCountType();
+    auto expansionTy = PackExpansionType::get(patternType, shapeType);
+
+    return cs.cacheType(PackExpansionExpr::create(ctx, pattern,
+        expansion->getOpaqueValues(), expansion->getBindings(),
+        expansion->getEndLoc(), expansion->getGenericEnvironment(),
+        expansion->isImplicit(), expansionTy));
   }
 
   case TypeKind::BuiltinTuple:

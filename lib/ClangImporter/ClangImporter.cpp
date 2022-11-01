@@ -14,6 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "swift/ClangImporter/ClangImporter.h"
+#include "CFTypeInfo.h"
 #include "ClangDerivedConformances.h"
 #include "ClangDiagnosticConsumer.h"
 #include "ClangIncludePaths.h"
@@ -401,6 +402,10 @@ ClangImporter::createDependencyCollector(
     std::shared_ptr<llvm::FileCollectorBase> FileCollector) {
   return std::make_shared<ClangImporterDependencyCollector>(Mode,
                                                             FileCollector);
+}
+
+bool ClangImporter::isKnownCFTypeName(llvm::StringRef name) {
+  return CFPointeeInfo::isKnownCFTypeName(name);
 }
 
 void ClangImporter::Implementation::addBridgeHeaderTopLevelDecls(
@@ -2018,7 +2023,8 @@ ModuleDecl *ClangImporter::Implementation::loadModuleClang(
 
 ModuleDecl *
 ClangImporter::loadModule(SourceLoc importLoc,
-                          ImportPath::Module path) {
+                          ImportPath::Module path,
+                          bool AllowMemoryCache) {
   return Impl.loadModule(importLoc, path);
 }
 
@@ -6328,37 +6334,41 @@ CxxRecordSemantics::evaluate(Evaluator &evaluator,
     return CxxRecordSemanticsKind::Reference;
   }
 
-  if (!hasRequiredValueTypeOperations(decl)) {
-    if (hasUnsafeAPIAttr(decl))
+  auto cxxDecl = dyn_cast<clang::CXXRecordDecl>(decl);
+  if (!cxxDecl)
+    return CxxRecordSemanticsKind::Trivial;
+
+  if (!hasRequiredValueTypeOperations(cxxDecl)) {
+    if (hasUnsafeAPIAttr(cxxDecl))
       desc.ctx.Diags.diagnose({}, diag::api_pattern_attr_ignored,
                               "import_unsafe", decl->getNameAsString());
-    if (hasOwnedValueAttr(decl))
+    if (hasOwnedValueAttr(cxxDecl))
       desc.ctx.Diags.diagnose({}, diag::api_pattern_attr_ignored,
                               "import_owned", decl->getNameAsString());
-    if (hasIteratorAPIAttr(decl))
+    if (hasIteratorAPIAttr(cxxDecl))
       desc.ctx.Diags.diagnose({}, diag::api_pattern_attr_ignored,
                               "import_iterator", decl->getNameAsString());
 
     return CxxRecordSemanticsKind::MissingLifetimeOperation;
   }
 
-  if (hasUnsafeAPIAttr(decl)) {
+  if (hasUnsafeAPIAttr(cxxDecl)) {
     return CxxRecordSemanticsKind::ExplicitlyUnsafe;
   }
 
-  if (hasOwnedValueAttr(decl)) {
+  if (hasOwnedValueAttr(cxxDecl)) {
     return CxxRecordSemanticsKind::Owned;
   }
 
-  if (hasIteratorAPIAttr(decl) || isIterator(decl)) {
+  if (hasIteratorAPIAttr(cxxDecl) || isIterator(cxxDecl)) {
     return CxxRecordSemanticsKind::Iterator;
   }
 
-  if (hasPointerInSubobjects(decl)) {
+  if (hasPointerInSubobjects(cxxDecl)) {
     return CxxRecordSemanticsKind::UnsafePointerMember;
   }
 
-  if (isSufficientlyTrivial(decl)) {
+  if (isSufficientlyTrivial(cxxDecl)) {
     return CxxRecordSemanticsKind::Trivial;
   }
 

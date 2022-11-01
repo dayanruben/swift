@@ -617,7 +617,7 @@ protected:
     HasAnyUnavailableValues : 1
   );
 
-  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1+1+1+1,
     /// If the module is compiled as static library.
     StaticLibrary : 1,
 
@@ -631,6 +631,10 @@ protected:
     ///
     /// \sa ResilienceStrategy
     RawResilienceStrategy : 1,
+
+    /// Whether the module was rebuilt from a module interface instead of being
+    /// build from the full source.
+    IsBuiltFromInterface : 1,
 
     /// Whether all imports have been resolved. Used to detect circular imports.
     HasResolvedImports : 1,
@@ -2379,6 +2383,10 @@ public:
   /// Asserts if this is not a member of a protocol.
   bool isProtocolRequirement() const;
 
+  /// Return true if this is a member implementation for an \c @_objcImplementation
+  /// extension.
+  bool isObjCMemberImplementation() const;
+
   void setUserAccessible(bool Accessible) {
     Bits.ValueDecl.IsUserAccessible = Accessible;
   }
@@ -3926,8 +3934,12 @@ public:
   NominalTypeDecl *getTypeWrapperStorageDecl() const;
 
   /// If this declaration is a type wrapper, retrieve
-  /// its required initializer - `init(storage:)`.
+  /// its required initializer - `init(storageWrapper:)`.
   ConstructorDecl *getTypeWrapperInitializer() const;
+
+  /// Get an initializer that accepts a type wrapper instance to
+  /// initialize the wrapped type.
+  ConstructorDecl *getTypeWrappedTypeStorageInitializer() const;
 
   /// Get a memberwise initializer that could be used to instantiate a
   /// type wrapped type.
@@ -6907,6 +6919,11 @@ public:
   /// For a method of a class, checks whether it will require a new entry in the
   /// vtable.
   bool needsNewVTableEntry() const;
+
+  /// True if the decl is a method which introduces a new witness table entry.
+  bool requiresNewWitnessTableEntry() const {
+    return getOverriddenDecls().empty();
+  }
 
 public:
   /// Retrieve the source range of the function body.

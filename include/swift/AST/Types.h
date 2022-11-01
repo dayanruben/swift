@@ -4683,17 +4683,6 @@ public:
   /// differentiability from all parameters.
   CanSILFunctionType getWithoutDifferentiability();
 
-  /// Given that `this` is a `@differentiable` function type, returns the type
-  /// of the given `@differentiable` function type component.
-  CanSILFunctionType getDifferentiableComponentType(
-      NormalDifferentiableFunctionTypeComponent component, SILModule &module);
-
-  /// Given that `this` is a `@differentiable(linear)` function type, returns
-  /// the type of the given `@differentiable(linear)` function type component.
-  CanSILFunctionType
-  getLinearComponentType(LinearDifferentiableFunctionTypeComponent component,
-                         SILModule &module);
-
   /// Returns the type of the derivative function for the given parameter
   /// indices, result indices, derivative function kind, derivative function
   /// generic signature (optional), and other auxiliary parameters.
@@ -6009,11 +5998,17 @@ BEGIN_CAN_TYPE_WRAPPER(OpenedArchetypeType, ArchetypeType)
   }
 END_CAN_TYPE_WRAPPER(OpenedArchetypeType, ArchetypeType)
 
+/// A wrapper around a shape type to use in ArchetypeTrailingObjects
+/// for PackArchetypeType.
+struct PackShape {
+  Type shapeType;
+};
+
 /// An archetype that represents an opaque element of a type
 /// parameter pack in context.
 class PackArchetypeType final
     : public ArchetypeType,
-      private ArchetypeTrailingObjects<PackArchetypeType> {
+      private ArchetypeTrailingObjects<PackArchetypeType, PackShape> {
   friend TrailingObjects;
   friend ArchetypeType;
 
@@ -6024,9 +6019,12 @@ public:
   /// by this routine.
   static CanTypeWrapper<PackArchetypeType>
   get(const ASTContext &Ctx, GenericEnvironment *GenericEnv,
-      Type InterfaceType,
+      Type InterfaceType, Type ShapeType,
       SmallVectorImpl<ProtocolDecl *> &ConformsTo, Type Superclass,
       LayoutConstraint Layout);
+
+  // Returns the reduced shape type for this pack archetype.
+  Type getShape() const;
 
   static bool classof(const TypeBase *T) {
     return T->getKind() == TypeKind::PackArchetype;
@@ -6035,7 +6033,7 @@ public:
 private:
   PackArchetypeType(const ASTContext &Ctx, GenericEnvironment *GenericEnv,
                     Type InterfaceType, ArrayRef<ProtocolDecl *> ConformsTo,
-                    Type Superclass, LayoutConstraint Layout);
+                    Type Superclass, LayoutConstraint Layout, PackShape Shape);
 };
 BEGIN_CAN_TYPE_WRAPPER(PackArchetypeType, ArchetypeType)
 END_CAN_TYPE_WRAPPER(PackArchetypeType, ArchetypeType)
@@ -6162,6 +6160,14 @@ public:
   /// struct Foo<T...> { }
   /// \endcode
   bool isParameterPack() const;
+
+  /// Returns a new GenericTypeParamType with the same depth and index
+  /// as this one, with the type parameter pack bit set.
+  GenericTypeParamType *asParameterPack(ASTContext &ctx) const;
+
+  /// Returns a new GenericTypeParamType with the same depth and index
+  /// as this one, removing the type parameter pack bit.
+  GenericTypeParamType *asScalar(ASTContext &ctx) const;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {

@@ -822,6 +822,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.EnableModuleLoadingRemarks = Args.hasArg(OPT_remark_loading_module);
 
+  Opts.EnableIndexingSystemModuleRemarks = Args.hasArg(OPT_remark_indexing_system_module);
+
   Opts.EnableSkipExplicitInterfaceModuleBuildRemarks = Args.hasArg(OPT_remark_skip_explicit_interface_build);
   
   llvm::Triple Target = Opts.Target;
@@ -1404,6 +1406,13 @@ static bool ParseSearchPathArgs(SearchPathOptions &Opts,
   // is called before setTargetTriple() and parseArgs().
   // TODO: improve the handling of RuntimeIncludePath.
 
+  std::vector<std::string> CompilerPluginLibraryPaths(
+      Opts.getCompilerPluginLibraryPaths());
+  for (const Arg *A : Args.filtered(OPT_load_plugin_library)) {
+    CompilerPluginLibraryPaths.push_back(resolveSearchPath(A->getValue()));
+  }
+  Opts.setCompilerPluginLibraryPaths(CompilerPluginLibraryPaths);
+
   return false;
 }
 
@@ -1444,6 +1453,7 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
 
   Opts.FixitCodeForAllDiagnostics |= Args.hasArg(OPT_fixit_all);
   Opts.SuppressWarnings |= Args.hasArg(OPT_suppress_warnings);
+  Opts.SuppressRemarks |= Args.hasArg(OPT_suppress_remarks);
   Opts.WarningsAsErrors = Args.hasFlag(options::OPT_warnings_as_errors,
                                        options::OPT_no_warnings_as_errors,
                                        false);

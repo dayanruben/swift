@@ -677,7 +677,7 @@ class ModuleInterfaceLoaderImpl {
   std::pair<std::string, std::string> getCompiledModuleCandidates() {
     std::pair<std::string, std::string> result;
     // Should we attempt to load a swiftmodule adjacent to the swiftinterface?
-    bool shouldLoadAdjacentModule = true;
+    bool shouldLoadAdjacentModule = !ctx.IgnoreAdjacentModules;
 
     // Don't use the adjacent swiftmodule for frameworks from the public
     // Frameworks folder of the SDK.
@@ -1031,7 +1031,8 @@ class ModuleInterfaceLoaderImpl {
         ctx.SourceMgr, diagsToUse,
         astDelegate, interfacePath, moduleName, cacheDir,
         prebuiltCacheDir, backupInterfaceDir, StringRef(),
-        Opts.disableInterfaceLock, diagnosticLoc,
+        Opts.disableInterfaceLock,
+        ctx.IgnoreAdjacentModules, diagnosticLoc,
         dependencyTracker);
       // If we found an out-of-date .swiftmodule, we still want to add it as
       // a dependency of the .swiftinterface. That way if it's updated, but
@@ -1063,7 +1064,8 @@ class ModuleInterfaceLoaderImpl {
       ImplicitModuleInterfaceBuilder fallbackBuilder(
         ctx.SourceMgr, &ctx.Diags, astDelegate, backupPath, moduleName, cacheDir,
         prebuiltCacheDir, backupInterfaceDir, StringRef(),
-        Opts.disableInterfaceLock, diagnosticLoc,
+        Opts.disableInterfaceLock,
+        ctx.IgnoreAdjacentModules, diagnosticLoc,
         dependencyTracker);
       if (rebuildInfo.sawOutOfDateModule(modulePath))
         fallbackBuilder.addExtraDependency(modulePath);
@@ -1247,7 +1249,8 @@ bool ModuleInterfaceLoader::buildSwiftModuleFromSwiftInterface(
     StringRef OutPath, StringRef ABIOutputPath,
     bool SerializeDependencyHashes,
     bool TrackSystemDependencies, ModuleInterfaceLoaderOptions LoaderOpts,
-    RequireOSSAModules_t RequireOSSAModules) {
+    RequireOSSAModules_t RequireOSSAModules,
+    bool silenceInterfaceDiagnostics) {
   InterfaceSubContextDelegateImpl astDelegate(
       SourceMgr, &Diags, SearchPathOpts, LangOpts, ClangOpts, LoaderOpts,
       /*CreateCacheDirIfAbsent*/ true, CacheDir, PrebuiltCacheDir,
@@ -1256,7 +1259,8 @@ bool ModuleInterfaceLoader::buildSwiftModuleFromSwiftInterface(
   ImplicitModuleInterfaceBuilder builder(SourceMgr, &Diags, astDelegate, InPath,
                                          ModuleName, CacheDir, PrebuiltCacheDir,
                                          BackupInterfaceDir, ABIOutputPath,
-                                         LoaderOpts.disableInterfaceLock);
+                                         LoaderOpts.disableInterfaceLock,
+                                         silenceInterfaceDiagnostics);
   // FIXME: We really only want to serialize 'important' dependencies here, if
   //        we want to ship the built swiftmodules to another machine.
   auto failed = builder.buildSwiftModule(OutPath, /*shouldSerializeDeps*/true,
@@ -1274,7 +1278,8 @@ bool ModuleInterfaceLoader::buildSwiftModuleFromSwiftInterface(
   ImplicitModuleInterfaceBuilder backupBuilder(SourceMgr, &Diags, astDelegate, backInPath,
                                                ModuleName, CacheDir, PrebuiltCacheDir,
                                                BackupInterfaceDir, ABIOutputPath,
-                                               LoaderOpts.disableInterfaceLock);
+                                               LoaderOpts.disableInterfaceLock,
+                                               silenceInterfaceDiagnostics);
   // Ensure we can rebuild module after user changed the original interface file.
   backupBuilder.addExtraDependency(InPath);
   // FIXME: We really only want to serialize 'important' dependencies here, if
@@ -1405,7 +1410,7 @@ void ModuleInterfaceLoader::collectVisibleTopLevelModuleNames(
 
 void InterfaceSubContextDelegateImpl::inheritOptionsForBuildingInterface(
     const SearchPathOptions &SearchPathOpts, const LangOptions &LangOpts,
-    RequireOSSAModules_t RequireOSSAModules) {
+    bool suppressRemarks, RequireOSSAModules_t RequireOSSAModules) {
   GenericArgs.push_back("-frontend");
   // Start with a genericSubInvocation that copies various state from our
   // invoking ASTContext.
@@ -1458,9 +1463,14 @@ void InterfaceSubContextDelegateImpl::inheritOptionsForBuildingInterface(
   }
 
   // Inhibit warnings from the genericSubInvocation since we are assuming the user
-  // is not in a position to fix them.
+  // is not in a position to address them.
   genericSubInvocation.getDiagnosticOptions().SuppressWarnings = true;
   GenericArgs.push_back("-suppress-warnings");
+  // Inherit the parent invocation's setting on whether to suppress remarks
+  if (suppressRemarks) {
+    genericSubInvocation.getDiagnosticOptions().SuppressRemarks = true;
+    GenericArgs.push_back("-suppress-remarks");
+  }
 
   // Inherit this setting down so that it can affect error diagnostics (mostly
   // by making them non-fatal).
@@ -1538,6 +1548,7 @@ InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
     : SM(SM), Diags(Diags), ArgSaver(Allocator) {
   genericSubInvocation.setMainExecutablePath(LoaderOpts.mainExecutablePath);
   inheritOptionsForBuildingInterface(searchPathOpts, langOpts,
+                                     Diags->getSuppressRemarks(),
                                      requireOSSAModules);
   // Configure front-end input.
   auto &SubFEOpts = genericSubInvocation.getFrontendOptions();

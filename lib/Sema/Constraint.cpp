@@ -79,6 +79,8 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second,
   case ConstraintKind::UnresolvedMemberChainBase:
   case ConstraintKind::PropertyWrapper:
   case ConstraintKind::BindTupleOfFunctionParams:
+  case ConstraintKind::PackElementOf:
+  case ConstraintKind::ShapeOf:
     assert(!First.isNull());
     assert(!Second.isNull());
     break;
@@ -165,6 +167,8 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second, Type Third,
   case ConstraintKind::PropertyWrapper:
   case ConstraintKind::SyntacticElement:
   case ConstraintKind::BindTupleOfFunctionParams:
+  case ConstraintKind::PackElementOf:
+  case ConstraintKind::ShapeOf:
     llvm_unreachable("Wrong constructor");
 
   case ConstraintKind::KeyPath:
@@ -310,6 +314,8 @@ Constraint *Constraint::clone(ConstraintSystem &cs) const {
   case ConstraintKind::UnresolvedMemberChainBase:
   case ConstraintKind::PropertyWrapper:
   case ConstraintKind::BindTupleOfFunctionParams:
+  case ConstraintKind::PackElementOf:
+  case ConstraintKind::ShapeOf:
     return create(cs, getKind(), getFirstType(), getSecondType(), getLocator());
 
   case ConstraintKind::ApplicableFunction:
@@ -546,6 +552,14 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm, unsigned inden
     Out << " bind tuple of function params to ";
     break;
 
+  case ConstraintKind::PackElementOf:
+    Out << " element of pack expansion pattern ";
+    break;
+
+  case ConstraintKind::ShapeOf:
+    Out << " shape of ";
+    break;
+
   case ConstraintKind::Disjunction:
     llvm_unreachable("disjunction handled above");
   case ConstraintKind::Conjunction:
@@ -710,6 +724,8 @@ gatherReferencedTypeVars(Constraint *constraint,
   case ConstraintKind::UnresolvedMemberChainBase:
   case ConstraintKind::PropertyWrapper:
   case ConstraintKind::BindTupleOfFunctionParams:
+  case ConstraintKind::PackElementOf:
+  case ConstraintKind::ShapeOf:
     constraint->getFirstType()->getTypeVariables(typeVars);
     constraint->getSecondType()->getTypeVariables(typeVars);
     break;

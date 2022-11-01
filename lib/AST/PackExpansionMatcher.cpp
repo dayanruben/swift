@@ -24,9 +24,24 @@
 
 using namespace swift;
 
-static PackType *gatherTupleElements(ArrayRef<TupleTypeElt> &elts,
-                                     Identifier name,
-                                     ASTContext &ctx) {
+static Type createPackBinding(ASTContext &ctx, ArrayRef<Type> types) {
+  // If there is only one element and it's a pack expansion type,
+  // return the pattern type directly. Because PackType can only appear
+  // inside a PackExpansion, PackType(PackExpansionType()) will always
+  // simplify to the pattern type.
+  if (types.size() == 1) {
+    if (types.front()->is<PackExpansionType>()) {
+      return types.front();
+    }
+  }
+
+  auto *packType = PackType::get(ctx, types);
+  return PackExpansionType::get(packType, packType);
+}
+
+static Type gatherTupleElements(ArrayRef<TupleTypeElt> &elts,
+                                Identifier name,
+                                ASTContext &ctx) {
   SmallVector<Type, 2> types;
 
   if (!elts.empty() && elts.front().getName() == name) {
@@ -36,7 +51,7 @@ static PackType *gatherTupleElements(ArrayRef<TupleTypeElt> &elts,
     } while (!elts.empty() && !elts.front().hasName());
   }
 
-  return PackType::get(ctx, types);
+  return createPackBinding(ctx, types);
 }
 
 TuplePackMatcher::TuplePackMatcher(TupleType *lhsTuple, TupleType *rhsTuple)
@@ -69,8 +84,8 @@ bool TuplePackMatcher::match() {
              "Tuple element with pack expansion type cannot be followed "
              "by an unlabeled element");
 
-      auto *rhs = gatherTupleElements(rhsElts, lhsElt.getName(), ctx);
-      pairs.emplace_back(lhsExpansionType->getPatternType(), rhs, idx++);
+      auto rhs = gatherTupleElements(rhsElts, lhsElt.getName(), ctx);
+      pairs.emplace_back(lhsExpansionType, rhs, idx++);
       continue;
     }
 
@@ -89,8 +104,8 @@ bool TuplePackMatcher::match() {
              "Tuple element with pack expansion type cannot be followed "
              "by an unlabeled element");
 
-      auto *lhs = gatherTupleElements(lhsElts, rhsElt.getName(), ctx);
-      pairs.emplace_back(lhs, rhsExpansionType->getPatternType(), idx++);
+      auto lhs = gatherTupleElements(lhsElts, rhsElt.getName(), ctx);
+      pairs.emplace_back(lhs, rhsExpansionType, idx++);
       continue;
     }
 
@@ -175,16 +190,16 @@ bool ParamPackMatcher::match() {
   // to what remains of the right hand side.
   if (lhsParams.size() == 1) {
     auto lhsType = lhsParams[0].getPlainType();
-    if (auto *lhsExpansionType = lhsType->getAs<PackExpansionType>()) {
+    if (lhsType->is<PackExpansionType>()) {
       SmallVector<Type, 2> rhsTypes;
       for (auto rhsParam : rhsParams) {
         // FIXME: Check rhs flags
         rhsTypes.push_back(rhsParam.getPlainType());
       }
-      auto rhs = PackType::get(ctx, rhsTypes);
+      auto rhs = createPackBinding(ctx, rhsTypes);
 
       // FIXME: Check lhs flags
-      pairs.emplace_back(lhsExpansionType->getPatternType(), rhs, prefixLength);
+      pairs.emplace_back(lhsType, rhs, prefixLength);
       return false;
     }
   }
@@ -193,13 +208,13 @@ bool ParamPackMatcher::match() {
   // to what remains of the left hand side.
   if (rhsParams.size() == 1) {
     auto rhsType = rhsParams[0].getPlainType();
-    if (auto *rhsExpansionType = rhsType->getAs<PackExpansionType>()) {
+    if (rhsType->is<PackExpansionType>()) {
       SmallVector<Type, 2> lhsTypes;
       for (auto lhsParam : lhsParams) {
         // FIXME: Check lhs flags
         lhsTypes.push_back(lhsParam.getPlainType());
       }
-      auto lhs = PackType::get(ctx, lhsTypes);
+      auto lhs = createPackBinding(ctx, lhsTypes);
 
       // FIXME: Check rhs flags
       pairs.emplace_back(lhs, rhsType, prefixLength);
@@ -272,10 +287,10 @@ bool PackMatcher::match() {
   // to what remains of the right hand side.
   if (lhsTypes.size() == 1) {
     auto lhsType = lhsTypes[0];
-    if (auto *lhsExpansionType = lhsType->getAs<PackExpansionType>()) {
-      auto rhs = PackType::get(ctx, rhsTypes);
+    if (lhsType->is<PackExpansionType>()) {
+      auto rhs = createPackBinding(ctx, rhsTypes);
 
-      pairs.emplace_back(lhsExpansionType->getPatternType(), rhs, prefixLength);
+      pairs.emplace_back(lhsType, rhs, prefixLength);
       return false;
     }
   }
@@ -284,8 +299,8 @@ bool PackMatcher::match() {
   // to what remains of the left hand side.
   if (rhsTypes.size() == 1) {
     auto rhsType = rhsTypes[0];
-    if (auto *rhsExpansionType = rhsType->getAs<PackExpansionType>()) {
-      auto lhs = PackType::get(ctx, lhsTypes);
+    if (rhsType->is<PackExpansionType>()) {
+      auto lhs = createPackBinding(ctx, lhsTypes);
 
       pairs.emplace_back(lhs, rhsType, prefixLength);
       return false;

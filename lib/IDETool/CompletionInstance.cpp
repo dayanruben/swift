@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/IDE/CompletionInstance.h"
+#include "swift/IDETool/CompletionInstance.h"
 
 #include "DependencyChecking.h"
 #include "swift/AST/ASTContext.h"
@@ -247,10 +247,12 @@ bool CompletionInstance::performCachedOperationIfPossible(
   registerIDERequestFunctions(tmpCtx->evaluator);
   registerTypeCheckerRequestFunctions(tmpCtx->evaluator);
   registerClangImporterRequestFunctions(tmpCtx->evaluator);
+  registerConstExtractRequestFunctions(tmpCtx->evaluator);
   registerSILGenRequestFunctions(tmpCtx->evaluator);
   ModuleDecl *tmpM = ModuleDecl::create(Identifier(), *tmpCtx);
   SourceFile *tmpSF = new (*tmpCtx)
       SourceFile(*tmpM, oldSF->Kind, tmpBufferID, oldSF->getParsingOptions());
+  tmpM->addAuxiliaryFile(*tmpSF);
 
   // FIXME: Since we don't setup module loaders on the temporary AST context,
   // 'canImport()' conditional compilation directive always fails. That causes

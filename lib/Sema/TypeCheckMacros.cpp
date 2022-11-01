@@ -17,23 +17,87 @@
 #include "TypeCheckMacros.h"
 #include "TypeChecker.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/CompilerPlugin.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/SourceFile.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/SourceManager.h"
+#include "swift/Basic/StringExtras.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/Parse/Parser.h"
 
 using namespace swift;
 
+extern "C" void *swift_ASTGen_lookupMacro(const char *macroName);
+
+extern "C" void swift_ASTGen_destroyMacro(void *macro);
+
+extern "C" void
+swift_ASTGen_getMacroEvaluationContext(const void *sourceFile,
+                                       void *declContext, void *astContext,
+                                       void *macro, void **evaluationContext);
+
 extern "C" ptrdiff_t swift_ASTGen_evaluateMacro(
     void *sourceFile, const void *sourceLocation,
     const char **evaluatedSource, ptrdiff_t *evaluatedSourceLength);
+
+extern "C" void
+swift_ASTGen_getMacroTypeSignature(void *macro, const char **genericSignature,
+                                   ptrdiff_t *genericSignatureLength);
+
+StructDecl *MacroContextRequest::evaluate(Evaluator &evaluator,
+                                          std::string macroName,
+                                          ModuleDecl *mod) const {
+#if SWIFT_SWIFT_PARSER
+  auto &ctx = mod->getASTContext();
+  auto *macro = swift_ASTGen_lookupMacro(macroName.c_str());
+  if (!macro)
+    return nullptr;
+
+  const char *evaluatedSource;
+  ptrdiff_t evaluatedSourceLength;
+  swift_ASTGen_getMacroTypeSignature(macro, &evaluatedSource,
+                                     &evaluatedSourceLength);
+
+  // Create a new source buffer with the contents of the macro's
+  // signature.
+  SourceManager &sourceMgr = ctx.SourceMgr;
+  std::string bufferName;
+  {
+    llvm::raw_string_ostream out(bufferName);
+    out << "Macro signature of #" << macroName;
+  }
+  auto macroBuffer = llvm::MemoryBuffer::getMemBuffer(
+      StringRef(evaluatedSource, evaluatedSourceLength), bufferName);
+  unsigned macroBufferID =
+      sourceMgr.addNewSourceBuffer(std::move(macroBuffer));
+  auto macroSourceFile = new (ctx) SourceFile(
+      *mod, SourceFileKind::Library, macroBufferID);
+  mod->addAuxiliaryFile(*macroSourceFile);
+
+  // Make sure implicit imports are resolved in this file.
+  performImportResolution(*macroSourceFile);
+
+  auto *start = sourceMgr.getLocForBufferStart(macroBufferID)
+                    .getOpaquePointerValue();
+  void *context = nullptr;
+  swift_ASTGen_getMacroEvaluationContext(
+      (const void *)start, (void *)(DeclContext *)macroSourceFile,
+      (void *)&ctx, macro, &context);
+
+  ctx.addCleanup([macro]() { swift_ASTGen_destroyMacro(macro); });
+  return dyn_cast<StructDecl>((Decl *)context);
+#else
+  return nullptr;
+#endif // SWIFT_SWIFT_PARSER
+}
 
 #if SWIFT_SWIFT_PARSER
 Expr *swift::expandMacroExpr(
     DeclContext *dc, Expr *expr, StringRef macroName, Type expandedType
 ) {
   ASTContext &ctx = dc->getASTContext();
+  SourceManager &sourceMgr = ctx.SourceMgr;
 
   // FIXME: Introduce a more robust way to ensure that we can get the "exported"
   // source file for a given context. If it's within a macro expansion, it
@@ -44,20 +108,50 @@ Expr *swift::expandMacroExpr(
   if (!sourceFile)
     return nullptr;
 
-  auto astGenSourceFile = sourceFile->exportedSourceFile;
-  if (!astGenSourceFile)
-    return nullptr;
-
   // Evaluate the macro.
-  const char *evaluatedSource;
-  ptrdiff_t evaluatedSourceLength;
-  swift_ASTGen_evaluateMacro(
-      astGenSourceFile, expr->getStartLoc().getOpaquePointerValue(),
-      &evaluatedSource, &evaluatedSourceLength);
-  if (!evaluatedSource)
-    return nullptr;
+  NullTerminatedStringRef evaluatedSource;
 
-  SourceManager &sourceMgr = ctx.SourceMgr;
+  // Built-in macros go through `MacroSystem` in Swift Syntax linked to this
+  // compiler.
+  if (swift_ASTGen_lookupMacro(macroName.str().c_str())) {
+    auto astGenSourceFile = sourceFile->exportedSourceFile;
+    if (!astGenSourceFile)
+      return nullptr;
+  
+    const char *evaluatedSourceAddress;
+    ptrdiff_t evaluatedSourceLength;
+    swift_ASTGen_evaluateMacro(
+        astGenSourceFile, expr->getStartLoc().getOpaquePointerValue(),
+        &evaluatedSourceAddress, &evaluatedSourceLength);
+    if (!evaluatedSourceAddress)
+      return nullptr;
+    evaluatedSource = NullTerminatedStringRef(evaluatedSourceAddress,
+                                              (size_t)evaluatedSourceLength);
+  }
+  // Other macros go through a compiler plugin.
+  else {
+    auto mee = cast<MacroExpansionExpr>(expr);
+    auto *plugin = ctx.getLoadedPlugin(macroName);
+    if (!plugin) {
+      ctx.Diags.diagnose(
+          mee->getLoc(), diag::macro_undefined, macroName)
+      .highlight(mee->getMacroNameLoc().getSourceRange());
+      return nullptr;
+    }
+    auto bufferID = sourceFile->getBufferID();
+    auto sourceFileText = sourceMgr.getEntireTextForBuffer(*bufferID);
+    auto evaluated = plugin->invokeRewrite(
+        /*targetModuleName*/ dc->getParentModule()->getName().str(),
+        /*filePath*/ sourceFile->getFilename(),
+        /*sourceFileText*/ sourceFileText,
+        /*range*/ Lexer::getCharSourceRangeFromSourceRange(
+            sourceMgr, mee->getSourceRange()),
+        ctx);
+    if (evaluated)
+      evaluatedSource = *evaluated;
+    else
+      return nullptr;
+  }
 
   // Figure out a reasonable name for the macro expansion buffer.
   std::string bufferName;
@@ -84,14 +178,14 @@ Expr *swift::expandMacroExpr(
 
   // Create a new source buffer with the contents of the expanded macro.
   auto macroBuffer =
-      llvm::MemoryBuffer::getMemBuffer(
-          StringRef(evaluatedSource, evaluatedSourceLength), bufferName);
+      llvm::MemoryBuffer::getMemBuffer(evaluatedSource, bufferName);
   unsigned macroBufferID = sourceMgr.addNewSourceBuffer(std::move(macroBuffer));
 
-  // Create a source file to hold the macro buffer.
-  // FIXME: Seems like we should record this somewhere?
+  // Create a source file to hold the macro buffer. This is automatically
+  // registered with the enclosing module.
   auto macroSourceFile = new (ctx) SourceFile(
-      *dc->getParentModule(), SourceFileKind::Library, macroBufferID);
+      *dc->getParentModule(), SourceFileKind::MacroExpansion, macroBufferID,
+      /*parsingOpts=*/{}, /*isPrimary=*/false, expr);
 
   // Parse the expression.
   Parser parser(macroBufferID, *macroSourceFile, &ctx.Diags, nullptr, nullptr);

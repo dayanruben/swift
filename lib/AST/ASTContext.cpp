@@ -19,6 +19,7 @@
 #include "ForeignRepresentationInfo.h"
 #include "SubstitutionMapStorage.h"
 #include "swift/AST/ClangModuleLoader.h"
+#include "swift/AST/CompilerPlugin.h"
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSema.h"
@@ -96,7 +97,8 @@ llvm::StringRef swift::getProtocolName(KnownProtocolKind kind) {
 namespace {
   enum class SearchPathKind : uint8_t {
     Import = 1 << 0,
-    Framework = 1 << 1
+    Framework = 1 << 1,
+    CompilerPlugin = 1 << 2
   };
 } // end anonymous namespace
 
@@ -680,10 +682,14 @@ ASTContext::ASTContext(
     getImpl().SearchPathsSet[path] |= SearchPathKind::Import;
   for (const auto &framepath : SearchPathOpts.getFrameworkSearchPaths())
     getImpl().SearchPathsSet[framepath.Path] |= SearchPathKind::Framework;
+  for (StringRef path : SearchPathOpts.getCompilerPluginLibraryPaths())
+    getImpl().SearchPathsSet[path] |= SearchPathKind::CompilerPlugin;
 
   // Register any request-evaluator functions available at the AST layer.
   registerAccessRequestFunctions(evaluator);
   registerNameLookupRequestFunctions(evaluator);
+
+  loadCompilerPlugins();
 }
 
 ASTContext::~ASTContext() {
@@ -1115,7 +1121,11 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
     break;
   case KnownProtocolKind::CxxSequence:
   case KnownProtocolKind::UnsafeCxxInputIterator:
+  case KnownProtocolKind::UnsafeCxxRandomAccessIterator:
     M = getLoadedModule(Id_Cxx);
+    break;
+  case KnownProtocolKind::CompilerPlugin:
+    M = getLoadedModule(Id_CompilerPluginSupport);
     break;
   default:
     M = getStdlibModule();
@@ -2191,6 +2201,10 @@ void ASTContext::addLoadedModule(ModuleDecl *M) {
   getImpl().LoadedModules[M->getRealName()] = M;
 }
 
+void ASTContext::setIgnoreAdjacentModules(bool value) {
+  IgnoreAdjacentModules = value;
+}
+
 rewriting::RewriteContext &
 ASTContext::getRewriteContext() {
   auto &rewriteCtx = getImpl().TheRewriteContext;
@@ -2441,17 +2455,19 @@ bool ASTContext::canImportModule(ImportPath::Module ModuleName,
 }
 
 ModuleDecl *
-ASTContext::getModule(ImportPath::Module ModulePath) {
+ASTContext::getModule(ImportPath::Module ModulePath, bool AllowMemoryCached) {
   assert(!ModulePath.empty());
 
-  if (auto *M = getLoadedModule(ModulePath))
-    return M;
+  if (AllowMemoryCached)
+    if (auto *M = getLoadedModule(ModulePath))
+      return M;
 
   auto moduleID = ModulePath[0];
   if (PreModuleImportCallback)
     PreModuleImportCallback(moduleID.Item.str(), false /*=IsOverlay*/);
   for (auto &importer : getImpl().ModuleLoaders) {
-    if (ModuleDecl *M = importer->loadModule(moduleID.Loc, ModulePath)) {
+    if (ModuleDecl *M = importer->loadModule(moduleID.Loc, ModulePath,
+                                             AllowMemoryCached)) {
       if (LangOpts.EnableModuleLoadingRemarks) {
         Diags.diagnose(ModulePath.getSourceRange().Start,
                        diag::module_loaded,
@@ -3134,15 +3150,6 @@ TupleType *TupleType::get(ArrayRef<TupleTypeElt> Fields, const ASTContext &C) {
     auto eltTy = Elt.getType();
     if (!eltTy) continue;
     properties |= eltTy->getRecursiveProperties();
-  }
-
-  // Enforce an invariant.
-  for (unsigned i = 0, e = Fields.size(); i < e; ++i) {
-    if (Fields[i].getType()->is<PackExpansionType>()) {
-      assert(i == e - 1 || Fields[i + 1].hasName() &&
-             "Tuple element with pack expansion type cannot be followed "
-             "by an unlabeled element");
-    }
   }
 
   auto arena = getArena(properties);
@@ -5609,20 +5616,14 @@ ASTContext::getOpenedElementSignature(CanGenericSignature baseGenericSig) {
   SmallVector<GenericTypeParamType *, 2> genericParams;
   SmallVector<Requirement, 2> requirements;
 
-  auto eraseParameterPack = [&](GenericTypeParamType *paramType) {
-    return GenericTypeParamType::get(
-        paramType->getDepth(), paramType->getIndex(),
-        /*isParameterPack=*/false, *this);
-  };
-
   for (auto paramType : baseGenericSig.getGenericParams()) {
-    genericParams.push_back(eraseParameterPack(paramType));
+    genericParams.push_back(paramType->asScalar(*this));
   }
 
   auto eraseParameterPackRec = [&](Type type) -> Type {
     return type.transformRec([&](Type t) -> Optional<Type> {
       if (auto *paramType = t->getAs<GenericTypeParamType>())
-        return Type(eraseParameterPack(paramType));
+        return Type(paramType->asScalar(*this));
       return None;
     });
   };
@@ -6045,4 +6046,25 @@ BuiltinTupleType *ASTContext::getBuiltinTupleType() {
   result = new (*this) BuiltinTupleType(getBuiltinTupleDecl(), *this);
 
   return result;
+}
+
+CompilerPlugin *ASTContext::getLoadedPlugin(StringRef name) {
+  auto lookup = LoadedPlugins.find(name);
+  if (lookup == LoadedPlugins.end())
+    return nullptr;
+  return &lookup->second;
+}
+
+void *ASTContext::getAddressOfSymbol(StringRef name,
+                                     llvm::sys::DynamicLibrary *libraryHint) {
+  auto lookup = LoadedSymbols.try_emplace(name, nullptr);
+  void *&address = lookup.first->getValue();
+  if (lookup.second) {
+    if (libraryHint && libraryHint->isValid())
+      address = libraryHint->getAddressOfSymbol(name.data());
+    else
+      address = llvm::sys::DynamicLibrary::
+          SearchForAddressOfSymbol(name.data());
+  }
+  return address;
 }

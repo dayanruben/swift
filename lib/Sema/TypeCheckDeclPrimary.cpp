@@ -1230,8 +1230,11 @@ static void checkObjCImplementationMemberAvoidsVTable(ValueDecl *VD) {
          !ED->getSelfClassDecl()->hasKnownSwiftImplementation() &&
          "@_objcImplementation on non-class or Swift class?");
 
-  if (VD->isSemanticallyFinal() || VD->isObjC()) {
-    assert(isa<DestructorDecl>(VD) || !VD->isObjC() || VD->isDynamic() &&
+  if (!VD->isObjCMemberImplementation())
+    return;
+
+  if (VD->isObjC()) {
+    assert(isa<DestructorDecl>(VD) || VD->isDynamic() &&
            "@objc decls in @_objcImplementations should be dynamic!");
     return;
   }
@@ -1536,6 +1539,7 @@ static void maybeDiagnoseClassWithoutInitializers(ClassDecl *classDecl) {
       return;
     case SourceFileKind::Library:
     case SourceFileKind::Main:
+    case SourceFileKind::MacroExpansion:
       break;
     }
   }
@@ -2182,6 +2186,7 @@ public:
             return;
           case SourceFileKind::Main:
           case SourceFileKind::Library:
+          case SourceFileKind::MacroExpansion:
             break;
           }
 
@@ -2202,6 +2207,7 @@ public:
           case SourceFileKind::SIL:
             return;
           case SourceFileKind::Library:
+          case SourceFileKind::MacroExpansion:
             break;
           }
 
@@ -2891,6 +2897,7 @@ public:
         return false;
       case SourceFileKind::Library:
       case SourceFileKind::Main:
+      case SourceFileKind::MacroExpansion:
         break;
       }
     }

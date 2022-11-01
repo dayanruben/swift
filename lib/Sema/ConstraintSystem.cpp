@@ -15,13 +15,15 @@
 // inference for expressions.
 //
 //===----------------------------------------------------------------------===//
+#include "swift/Sema/ConstraintSystem.h"
 #include "CSDiagnostics.h"
-#include "TypeChecker.h"
 #include "TypeCheckAvailability.h"
 #include "TypeCheckConcurrency.h"
+#include "TypeCheckMacros.h"
 #include "TypeCheckType.h"
-#include "swift/AST/Initializer.h"
+#include "TypeChecker.h"
 #include "swift/AST/GenericEnvironment.h"
+#include "swift/AST/Initializer.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/TypeCheckRequests.h"
@@ -29,7 +31,6 @@
 #include "swift/Basic/Statistic.h"
 #include "swift/Sema/CSFix.h"
 #include "swift/Sema/ConstraintGraph.h"
-#include "swift/Sema/ConstraintSystem.h"
 #include "swift/Sema/SolutionResult.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
@@ -1773,8 +1774,6 @@ void ConstraintSystem::openGenericRequirement(
 
   auto kind = req.getKind();
   switch (kind) {
-  case RequirementKind::SameShape:
-    llvm_unreachable("Same-shape requirement not supported here");
   case RequirementKind::Conformance: {
     auto protoDecl = req.getProtocolDecl();
     // Determine whether this is the protocol 'Self' constraint we should
@@ -1788,6 +1787,7 @@ void ConstraintSystem::openGenericRequirement(
   }
   case RequirementKind::Superclass:
   case RequirementKind::SameType:
+  case RequirementKind::SameShape:
     openedReq = Requirement(kind, openedFirst, substFn(req.getSecondType()));
     break;
   case RequirementKind::Layout:
@@ -2428,8 +2428,9 @@ ConstraintSystem::getTypeOfMemberReference(
 
   // Adjust the opened type for concurrency.
   Type origOpenedType = openedType;
-  if ((isa<AbstractFunctionDecl>(value) || isa<EnumElementDecl>(value)) &&
-      !isRequirementOrWitness(locator)) {
+  if (isRequirementOrWitness(locator)) {
+    // Don't adjust when doing witness matching, because that can cause cycles.
+  } else if (isa<AbstractFunctionDecl>(value) || isa<EnumElementDecl>(value)) {
     unsigned numApplies = getNumApplications(
         value, hasAppliedSelf, functionRefKind);
     openedType = adjustFunctionTypeForConcurrency(
@@ -2469,6 +2470,29 @@ ConstraintSystem::getTypeOfMemberReference(
 
   return { origOpenedType, openedType, origType, type };
 }
+
+#if SWIFT_SWIFT_PARSER
+Type ConstraintSystem::getTypeOfMacroReference(StringRef macroName,
+                                               Expr *anchor) {
+  auto req = MacroContextRequest{macroName.str(), DC->getParentModule()};
+  auto *macroCtx = evaluateOrDefault(getASTContext().evaluator, req, nullptr);
+  if (!macroCtx)
+    return Type();
+
+  auto *locator = getConstraintLocator(anchor);
+  // Dig through to __MacroEvaluationContext.SignatureType
+  auto sig = getASTContext().getIdentifier("SignatureType");
+  auto *signature = cast<TypeAliasDecl>(macroCtx->lookupDirect(sig).front());
+  auto type = signature->getUnderlyingType();
+
+  // Open any the generic types.
+  OpenedTypeMap replacements;
+  openGeneric(signature->getParent(), signature->getGenericSignature(),
+              locator, replacements);
+
+  return openType(type, replacements);
+}
+#endif
 
 Type ConstraintSystem::getEffectiveOverloadType(ConstraintLocator *locator,
                                                 const OverloadChoice &overload,
