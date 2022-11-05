@@ -123,10 +123,6 @@ const clang::Module *ClangNode::getClangModule() const {
 }
 
 void ClangNode::dump() const {
-#if SWIFT_BUILD_ONLY_SYNTAXPARSERLIB
-  return; // not needed for the parser library.
-#endif
-
   if (auto D = getAsDecl())
     D->dump();
   else if (auto M = getAsMacro())
@@ -5494,6 +5490,7 @@ ProtocolDecl::ProtocolDecl(DeclContext *DC, SourceLoc ProtocolLoc,
   Bits.ProtocolDecl.KnownProtocol = 0;
   Bits.ProtocolDecl.HasAssociatedTypes = 0;
   Bits.ProtocolDecl.HasLazyAssociatedTypes = 0;
+  Bits.ProtocolDecl.ProtocolRequirementsValid = false;
   setTrailingWhereClause(TrailingWhere);
 }
 
@@ -5533,7 +5530,7 @@ ProtocolDecl::getAssociatedTypeMembers() const {
     contextData->loader->loadAssociatedTypes(
         this, contextData->associatedTypesData, result);
   } else {
-    for (auto member : getMembers()) {
+    for (auto member : getProtocolRequirements()) {
       if (auto ATD = dyn_cast<AssociatedTypeDecl>(member)) {
         result.push_back(ATD);
       }
@@ -5542,6 +5539,12 @@ ProtocolDecl::getAssociatedTypeMembers() const {
 
   self->AssociatedTypes = getASTContext().AllocateCopy(result);
   return AssociatedTypes;
+}
+
+ArrayRef<ValueDecl *> ProtocolDecl::getProtocolRequirements() const {
+  auto *mutableSelf = const_cast<ProtocolDecl *>(this);
+  return evaluateOrDefault(getASTContext().evaluator,
+                           ProtocolRequirementsRequest{mutableSelf}, {});
 }
 
 ValueDecl *ProtocolDecl::getSingleRequirement(DeclName name) const {

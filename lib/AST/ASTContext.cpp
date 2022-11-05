@@ -73,6 +73,10 @@
 #include <queue>
 #include <memory>
 
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
+
 #include "RequirementMachine/RewriteContext.h"
 
 using namespace swift;
@@ -554,10 +558,8 @@ struct ASTContext::Implementation {
   /// The IRGen specific SIL transforms that have been registered.
   SILTransformCtors IRGenSILPasses;
 
-#if !SWIFT_BUILD_ONLY_SYNTAXPARSERLIB
   /// The scratch context used to allocate intrinsic data on behalf of \c swift::IntrinsicInfo
   std::unique_ptr<llvm::LLVMContext> IntrinsicScratchContext;
-#endif
 
   /// Memory allocation arena for the term rewriting system.
   std::unique_ptr<rewriting::RewriteContext> TheRewriteContext;
@@ -571,10 +573,8 @@ struct ASTContext::Implementation {
 
 ASTContext::Implementation::Implementation()
     : IdentifierTable(Allocator),
-      TheSyntaxArena(new syntax::SyntaxArena())
-#if !SWIFT_BUILD_ONLY_SYNTAXPARSERLIB
-      , IntrinsicScratchContext(new llvm::LLVMContext())
-#endif
+      TheSyntaxArena(new syntax::SyntaxArena()),
+      IntrinsicScratchContext(new llvm::LLVMContext())
       {}
 ASTContext::Implementation::~Implementation() {
   for (auto &cleanup : Cleanups)
@@ -1119,6 +1119,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   case KnownProtocolKind::DistributedTargetInvocationResultHandler:
     M = getLoadedModule(Id_Distributed);
     break;
+  case KnownProtocolKind::CxxRandomAccessCollection:
   case KnownProtocolKind::CxxSequence:
   case KnownProtocolKind::UnsafeCxxInputIterator:
   case KnownProtocolKind::UnsafeCxxRandomAccessIterator:
@@ -6007,9 +6008,7 @@ AutoDiffDerivativeFunctionIdentifier *AutoDiffDerivativeFunctionIdentifier::get(
 }
 
 llvm::LLVMContext &ASTContext::getIntrinsicScratchContext() const {
-#if !SWIFT_BUILD_ONLY_SYNTAXPARSERLIB
   return *getImpl().IntrinsicScratchContext.get();
-#endif
 }
 
 bool ASTContext::isASCIIString(StringRef s) const {
@@ -6055,16 +6054,15 @@ CompilerPlugin *ASTContext::getLoadedPlugin(StringRef name) {
   return &lookup->second;
 }
 
-void *ASTContext::getAddressOfSymbol(StringRef name,
-                                     llvm::sys::DynamicLibrary *libraryHint) {
+void *ASTContext::getAddressOfSymbol(const char *name,
+                                     void *libraryHandleHint) {
   auto lookup = LoadedSymbols.try_emplace(name, nullptr);
   void *&address = lookup.first->getValue();
+#if !defined(_WIN32)
   if (lookup.second) {
-    if (libraryHint && libraryHint->isValid())
-      address = libraryHint->getAddressOfSymbol(name.data());
-    else
-      address = llvm::sys::DynamicLibrary::
-          SearchForAddressOfSymbol(name.data());
+    auto *handle = libraryHandleHint ? libraryHandleHint : RTLD_DEFAULT;
+    address = dlsym(handle, name);
   }
+#endif
   return address;
 }
