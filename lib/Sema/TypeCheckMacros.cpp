@@ -107,7 +107,9 @@ StructDecl *MacroContextRequest::evaluate(Evaluator &evaluator,
     swift_ASTGen_getMacroEvaluationContext(
         (const void *)start, (void *)(DeclContext *)macroSourceFile,
         (void *)&ctx, builtinMacro, &context);
-    ctx.addCleanup([builtinMacro]() { swift_ASTGen_destroyMacro(builtinMacro); });
+    ctx.addCleanup([builtinMacro]() {
+      swift_ASTGen_destroyMacro(builtinMacro);
+    });
     return dyn_cast<StructDecl>((Decl *)context);
   } else {
     Parser parser(macroBufferID, *macroSourceFile, &ctx.Diags, nullptr,
@@ -145,7 +147,7 @@ Expr *swift::expandMacroExpr(
 
   // Built-in macros go through `MacroSystem` in Swift Syntax linked to this
   // compiler.
-  if (swift_ASTGen_lookupMacro(macroName.str().c_str())) {
+  if (auto *macro = swift_ASTGen_lookupMacro(macroName.str().c_str())) {
     auto astGenSourceFile = sourceFile->exportedSourceFile;
     if (!astGenSourceFile)
       return nullptr;
@@ -159,6 +161,7 @@ Expr *swift::expandMacroExpr(
       return nullptr;
     evaluatedSource = NullTerminatedStringRef(evaluatedSourceAddress,
                                               (size_t)evaluatedSourceLength);
+    swift_ASTGen_destroyMacro(macro);
   }
   // Other macros go through a compiler plugin.
   else {
@@ -217,6 +220,26 @@ Expr *swift::expandMacroExpr(
   // Parse the expression.
   Parser parser(macroBufferID, *macroSourceFile, &ctx.Diags, nullptr, nullptr);
   parser.consumeTokenWithoutFeedingReceiver();
+
+  // Set up a "local context" for parsing, so that we have a source of
+  // closure and local-variable discriminators.
+  LocalContext tempContext{};
+  parser.CurDeclContext = dc;
+  parser.CurLocalContext = &tempContext;
+  {
+    DiscriminatorFinder finder;
+    expr->walk(finder);
+
+    unsigned closureDiscriminator;
+    if (finder.getFirstDiscriminator() ==
+          AbstractClosureExpr::InvalidDiscriminator)
+      closureDiscriminator = 0;
+    else
+      closureDiscriminator = finder.getFirstDiscriminator() + 1;
+
+    tempContext.overrideNextClosureDiscriminator(closureDiscriminator);
+  }
+
   auto parsedResult = parser.parseExpr(diag::expected_macro_expansion_expr);
   if (parsedResult.isParseError() || parsedResult.isNull()) {
     // Tack on a note to say where we expanded the macro from?
