@@ -371,7 +371,7 @@ static void ParseModuleInterfaceArgs(ModuleInterfaceOptions &Opts,
   Opts.AliasModuleNames |=
     Args.hasFlag(OPT_alias_module_names_in_module_interface,
                  OPT_disable_alias_module_names_in_module_interface,
-                 false);
+                 ::getenv("SWIFT_ALIAS_MODULE_NAMES_IN_INTERFACES"));
   Opts.PrintFullConvention |=
     Args.hasArg(OPT_experimental_print_full_convention);
   Opts.ExperimentalSPIImports |=
@@ -693,8 +693,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   // Map historical flags over to experimental features. We do this for all
   // compilers because that's how existing experimental feature flags work.
-  if (Args.hasArg(OPT_enable_experimental_variadic_generics))
-    Opts.Features.insert(Feature::VariadicGenerics);
   if (Args.hasArg(OPT_enable_experimental_static_assert))
     Opts.Features.insert(Feature::StaticAssert);
   if (Args.hasArg(OPT_enable_experimental_named_opaque_types))
@@ -714,10 +712,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   
   if (Args.hasArg(OPT_enable_experimental_opaque_type_erasure))
     Opts.Features.insert(Feature::OpaqueTypeErasure);
-  if (Args.hasArg(OPT_enable_experimental_implicit_some)){
-      Opts.Features.insert(Feature::ImplicitSome);
-      Opts.Features.insert(Feature::ExistentialAny);
-  }
 
   Opts.EnableAppExtensionRestrictions |= Args.hasArg(OPT_enable_app_extension);
 
