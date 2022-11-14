@@ -1606,6 +1606,25 @@ ConstraintSystem::getTypeOfReference(ValueDecl *value,
     return { type, type, type, type };
   }
 
+  // Unqualified reference to a macro.
+  if (auto macro = dyn_cast<MacroDecl>(value)) {
+    Type macroType = macro->getInterfaceType();
+
+    // Open any the generic types.
+    OpenedTypeMap replacements;
+    openGeneric(macro->getParentModule(), macro->getGenericSignature(),
+                locator, replacements);
+
+    // If we opened up any type variables, record the replacements.
+    recordOpenedTypes(locator, replacements);
+
+    Type openedType = openType(macroType, replacements);
+
+    // FIXME: Should we use replaceParamErrorTypeByPlaceholder() here?
+
+    return { openedType, openedType, openedType, openedType };
+  }
+
   // Only remaining case: unqualified reference to a property.
   auto *varDecl = cast<VarDecl>(value);
 
@@ -2470,29 +2489,6 @@ ConstraintSystem::getTypeOfMemberReference(
 
   return { origOpenedType, openedType, origType, type };
 }
-
-#if SWIFT_SWIFT_PARSER
-Type ConstraintSystem::getTypeOfMacroReference(StringRef macroName,
-                                               Expr *anchor) {
-  auto req = MacroContextRequest{macroName.str(), DC->getParentModule()};
-  auto *macroCtx = evaluateOrDefault(getASTContext().evaluator, req, nullptr);
-  if (!macroCtx)
-    return Type();
-
-  auto *locator = getConstraintLocator(anchor);
-  // Dig through to __MacroEvaluationContext.SignatureType
-  auto sig = getASTContext().getIdentifier("SignatureType");
-  auto *signature = cast<TypeAliasDecl>(macroCtx->lookupDirect(sig).front());
-  auto type = signature->getUnderlyingType();
-
-  // Open any the generic types.
-  OpenedTypeMap replacements;
-  openGeneric(signature->getParent(), signature->getGenericSignature(),
-              locator, replacements);
-
-  return openType(type, replacements);
-}
-#endif
 
 Type ConstraintSystem::getEffectiveOverloadType(ConstraintLocator *locator,
                                                 const OverloadChoice &overload,

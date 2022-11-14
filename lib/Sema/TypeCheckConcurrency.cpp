@@ -3099,6 +3099,7 @@ void swift::checkFunctionActorIsolation(AbstractFunctionDecl *decl) {
     if (auto superInit = ctor->getSuperInitCall())
       superInit->walk(checker);
   }
+
   if (decl->getAttrs().hasAttribute<DistributedActorAttr>()) {
     if (auto func = dyn_cast<FuncDecl>(decl)) {
       checkDistributedFunction(func);
@@ -3455,6 +3456,7 @@ static Optional<MemberIsolationPropagation> getMemberIsolationPropagation(
   case DeclKind::Destructor:
   case DeclKind::EnumCase:
   case DeclKind::EnumElement:
+  case DeclKind::Macro:
   case DeclKind::MacroExpansion:
     return None;
 
@@ -3708,6 +3710,39 @@ static Optional<unsigned> getIsolatedParamIndex(ValueDecl *value) {
   return None;
 }
 
+/// Verifies rules about `isolated` parameters for the given decl. There is more
+/// checking about these in TypeChecker::checkParameterList.
+///
+/// This function is focused on rules that apply when it's a declaration with
+/// an isolated parameter, rather than some generic parameter list in a
+/// DeclContext.
+///
+/// This function assumes the value already contains an isolated parameter.
+static void checkDeclWithIsolatedParameter(ValueDecl *value) {
+  // assume there is an isolated parameter.
+  assert(getIsolatedParamIndex(value));
+
+  // Suggest removing global-actor attributes written on it, as its ignored.
+  if (auto attr = value->getGlobalActorAttr()) {
+    if (!attr->first->isImplicit()) {
+      value->diagnose(diag::isolated_parameter_combined_global_actor_attr,
+                      value->getDescriptiveKind())
+          .fixItRemove(attr->first->getRangeWithAt())
+          .warnUntilSwiftVersion(6);
+    }
+  }
+
+  // Suggest removing `nonisolated` as it is also ignored
+  if (auto attr = value->getAttrs().getAttribute<NonisolatedAttr>()) {
+    if (!attr->isImplicit()) {
+      value->diagnose(diag::isolated_parameter_combined_nonisolated,
+                      value->getDescriptiveKind())
+          .fixItRemove(attr->getRangeWithAt())
+          .warnUntilSwiftVersion(6);
+    }
+  }
+}
+
 ActorIsolation ActorIsolationRequest::evaluate(
     Evaluator &evaluator, ValueDecl *value) const {
   // If this declaration has actor-isolated "self", it's isolated to that
@@ -3721,6 +3756,8 @@ ActorIsolation ActorIsolationRequest::evaluate(
   // If this declaration has an isolated parameter, it's isolated to that
   // parameter.
   if (auto paramIdx = getIsolatedParamIndex(value)) {
+    checkDeclWithIsolatedParameter(value);
+
     // FIXME: This doesn't allow us to find an Actor or DistributedActor
     // bound on the parameter type effectively.
     auto param = getParameterList(value)->get(*paramIdx);
@@ -5101,6 +5138,7 @@ static bool isNonValueReference(const ValueDecl *value) {
   case DeclKind::Accessor:
   case DeclKind::Func:
   case DeclKind::Subscript:
+  case DeclKind::Macro:
     return false;
 
   case DeclKind::BuiltinTuple:

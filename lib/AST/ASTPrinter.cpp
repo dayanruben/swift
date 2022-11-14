@@ -1787,22 +1787,26 @@ void PrintAST::printSingleDepthOfGenericSignature(
 }
 
 void PrintAST::printRequirement(const Requirement &req) {
-  printTransformedType(req.getFirstType());
   switch (req.getKind()) {
   case RequirementKind::SameShape:
-    Printer << ".shape == ";
+    Printer << "((";
+    printTransformedType(req.getFirstType());
+    Printer << ", ";
     printTransformedType(req.getSecondType());
-    Printer << ".shape";
+    Printer << ")...) : Any";
     return;
   case RequirementKind::Layout:
+    printTransformedType(req.getFirstType());
     Printer << " : ";
     req.getLayoutConstraint()->print(Printer, Options);
     return;
   case RequirementKind::Conformance:
   case RequirementKind::Superclass:
+    printTransformedType(req.getFirstType());
     Printer << " : ";
     break;
   case RequirementKind::SameType:
+    printTransformedType(req.getFirstType());
     Printer << " == ";
     break;
   }
@@ -1894,6 +1898,10 @@ bool ShouldPrintChecker::shouldPrint(const Decl *D,
         contributesToParentTypeStorage(ASD))
       return true;
   }
+
+  // Skip macros, which don't have an in-source representation.
+  if (isa<MacroDecl>(D))
+    return false;
 
   // Skip declarations that are not accessible.
   if (auto *VD = dyn_cast<ValueDecl>(D)) {
@@ -4431,6 +4439,10 @@ void PrintAST::visitMissingMemberDecl(MissingMemberDecl *decl) {
   if (numFieldOffsetVectorEntries > 0)
     Printer << " (field offsets: " << numFieldOffsetVectorEntries << ")";
   Printer << " */";
+}
+
+void PrintAST::visitMacroDecl(MacroDecl *decl) {
+  // No in-source representation of macros.
 }
 
 void PrintAST::visitMacroExpansionDecl(MacroExpansionDecl *decl) {

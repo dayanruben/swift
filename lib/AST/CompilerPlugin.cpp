@@ -188,9 +188,9 @@ void ASTContext::loadCompilerPlugins() {
     swift_ASTGen_getMacroTypes(getter, &metatypesAddress, &metatypeCount);
     ArrayRef<const void *> metatypes(metatypesAddress, metatypeCount);
     for (const void *metatype : metatypes) {
-      CompilerPlugin plugin(metatype, lib, *this);
-      auto name = plugin.getName();
-      LoadedPlugins.try_emplace(name, std::move(plugin));
+      auto plugin = new CompilerPlugin(metatype, lib, *this);
+      auto name = plugin->getName();
+      addLoadedPlugin(name, plugin);
     }
     free(const_cast<void *>((const void *)metatypes.data()));
 #endif // SWIFT_SWIFT_PARSER
@@ -314,6 +314,30 @@ StringRef CompilerPlugin::invokeTypeSignature() const {
       SWIFT_CONTEXT const void *, const void *, const void *);
   auto method = getWitnessMethodUnsafe<Method>(
       WitnessTableEntry::TypeSignature);
+  return method(metadata, metadata, witnessTable).str();
+#else
+  llvm_unreachable("Incompatible host compiler");
+#endif
+}
+
+StringRef CompilerPlugin::invokeOwningModule() const {
+#if __clang__
+  using Method = SWIFT_CC CharBuffer(
+      SWIFT_CONTEXT const void *, const void *, const void *);
+  auto method = getWitnessMethodUnsafe<Method>(
+      WitnessTableEntry::OwningModule);
+  return method(metadata, metadata, witnessTable).str();
+#else
+  llvm_unreachable("Incompatible host compiler");
+#endif
+}
+
+StringRef CompilerPlugin::invokeSupplementalSignatureModules() const {
+#if __clang__
+  using Method = SWIFT_CC CharBuffer(
+      SWIFT_CONTEXT const void *, const void *, const void *);
+  auto method = getWitnessMethodUnsafe<Method>(
+      WitnessTableEntry::SupplementalSignatureModules);
   return method(metadata, metadata, witnessTable).str();
 #else
   llvm_unreachable("Incompatible host compiler");
