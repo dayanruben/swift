@@ -3002,18 +3002,18 @@ public:
   }
   
   void setUniqueUnderlyingTypeSubstitutions(SubstitutionMap subs) {
-    assert(!UniqueUnderlyingType.hasValue() && "resetting underlying type?!");
+    assert(!UniqueUnderlyingType.has_value() && "resetting underlying type?!");
     UniqueUnderlyingType = subs;
   }
 
   bool hasConditionallyAvailableSubstitutions() const {
-    return ConditionallyAvailableTypes.hasValue();
+    return ConditionallyAvailableTypes.has_value();
   }
 
   ArrayRef<ConditionallyAvailableSubstitutions *>
   getConditionallyAvailableSubstitutions() const {
     assert(ConditionallyAvailableTypes);
-    return ConditionallyAvailableTypes.getValue();
+    return ConditionallyAvailableTypes.value();
   }
 
   void setConditionallyAvailableSubstitutions(
@@ -3565,10 +3565,6 @@ class NominalTypeDecl : public GenericTypeDecl, public IterableDeclContext {
   /// Prepare to traverse the list of extensions.
   void prepareExtensions();
 
-  /// Add loaded members from all extensions. Eagerly load any members that we
-  /// can't lazily load.
-  void addLoadedExtensions();
-
   /// Retrieve the conformance loader (if any), and removing it in the
   /// same operation. The caller is responsible for loading the
   /// conformances.
@@ -3583,13 +3579,19 @@ class NominalTypeDecl : public GenericTypeDecl, public IterableDeclContext {
   std::pair<LazyMemberLoader *, uint64_t> takeConformanceLoaderSlow();
 
   /// A lookup table containing all of the members of this type and
-  /// its extensions.
+  /// its extensions, together with a bit indicating if the table
+  /// has been prepared.
   ///
   /// The table itself is lazily constructed and updated when
   /// lookupDirect() is called.
-  MemberLookupTable *LookupTable = nullptr;
+  llvm::PointerIntPair<MemberLookupTable *, 1, bool> LookupTable;
+
+  /// Get the lookup table, lazily constructing an empty table if
+  /// necessary.
+  MemberLookupTable *getLookupTable();
 
   /// Prepare the lookup table to make it ready for lookups.
+  /// Does nothing when called more than once.
   void prepareLookupTable();
 
   /// Note that we have added a member into the iterable declaration context,
@@ -4891,7 +4893,7 @@ public:
 
   /// Has the requirement signature been computed yet?
   bool isRequirementSignatureComputed() const {
-    return RequirementSig.hasValue();
+    return RequirementSig.has_value();
   }
 
   void setRequirementSignature(RequirementSignature requirementSig);
@@ -6451,8 +6453,8 @@ class BodyAndFingerprint {
 
 public:
   BodyAndFingerprint(BraceStmt *body, Optional<Fingerprint> fp)
-      : BodyAndHasFp(body, fp.hasValue()),
-        Fp(fp.hasValue() ? *fp : Fingerprint::ZERO()) {}
+      : BodyAndHasFp(body, fp.has_value()),
+        Fp(fp.has_value() ? *fp : Fingerprint::ZERO()) {}
   BodyAndFingerprint() : BodyAndFingerprint(nullptr, None) {}
 
   BraceStmt *getBody() const { return BodyAndHasFp.getPointer(); }
@@ -6465,7 +6467,7 @@ public:
   }
 
   void setFingerprint(Optional<Fingerprint> fp) {
-    if (fp.hasValue()) {
+    if (fp.has_value()) {
       Fp = *fp;
       BodyAndHasFp.setInt(true);
     } else {

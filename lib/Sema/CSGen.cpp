@@ -2932,7 +2932,10 @@ namespace {
       auto *shapeTypeVar = CS.createTypeVariable(shapeLoc,
                                                  TVO_CanBindToPack |
                                                  TVO_CanBindToHole);
-      CS.addConstraint(ConstraintKind::ShapeOf, patternTy, shapeTypeVar,
+      auto packReference = expr->getBindings().front();
+      auto packType = CS.simplifyType(CS.getType(packReference))
+          ->castTo<PackExpansionType>()->getPatternType();
+      CS.addConstraint(ConstraintKind::ShapeOf, packType, shapeTypeVar,
                        CS.getConstraintLocator(expr));
 
       return PackExpansionType::get(patternTy, shapeTypeVar);
@@ -4685,10 +4688,10 @@ ResolvedMemberResult::operator bool() const {
 }
 
 bool ResolvedMemberResult::
-hasBestOverload() const { return Impl->BestIdx.hasValue(); }
+hasBestOverload() const { return Impl->BestIdx.has_value(); }
 
 ValueDecl* ResolvedMemberResult::
-getBestOverload() const { return Impl->AllDecls[Impl->BestIdx.getValue()]; }
+getBestOverload() const { return Impl->AllDecls[Impl->BestIdx.value()]; }
 
 ArrayRef<ValueDecl*> ResolvedMemberResult::
 getMemberDecls(InterestedMemberKind Kind) {
@@ -4740,8 +4743,8 @@ ResolvedMemberResult swift::resolveValueMember(DeclContext &DC, Type BaseTy,
   CS.addOverloadSet(TV, LookupResult.ViableCandidates, &DC, Locator);
   Optional<Solution> OpSolution = CS.solveSingle();
   ValueDecl *Selected = nullptr;
-  if (OpSolution.hasValue()) {
-    Selected = OpSolution.getValue().overloadChoices[Locator].choice.getDecl();
+  if (OpSolution.has_value()) {
+    Selected = OpSolution.value().overloadChoices[Locator].choice.getDecl();
   }
   for (OverloadChoice& Choice : LookupResult.ViableCandidates) {
     ValueDecl *VD = Choice.getDecl();

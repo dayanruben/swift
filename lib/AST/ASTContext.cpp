@@ -1905,7 +1905,7 @@ static void findPath_dfs(ModuleDependencyID X,
   }
   visited.insert(X);
   auto node = cache.findDependencies(X.first, {X.second, searchPathSet});
-  assert(node.hasValue() && "Expected cache value for dependency.");
+  assert(node.has_value() && "Expected cache value for dependency.");
   for (const auto &dep : node->getModuleDependencies()) {
     Optional<ModuleDependenciesKind> lookupKind = None;
     // Underlying Clang module needs an explicit lookup to avoid confusing it
@@ -1914,7 +1914,7 @@ static void findPath_dfs(ModuleDependencyID X,
       lookupKind = ModuleDependenciesKind::Clang;
 
     auto depNode = cache.findDependencies(dep, {lookupKind, searchPathSet});
-    if (!depNode.hasValue())
+    if (!depNode.has_value())
       continue;
     auto depID = std::make_pair(dep, depNode->getKind());
     if (!visited.count(depID)) {
@@ -1932,7 +1932,7 @@ findPathToDependency(ModuleDependencyID dependency,
                                               {ModuleDependenciesKind::SwiftSource,
                                                searchPathSet});
   // We may be in a batch scan instance which does not have this dependency
-  if (!mainModuleDep.hasValue())
+  if (!mainModuleDep.has_value())
     return {};
   auto mainModuleID = std::make_pair(cache.getMainModuleName().str(),
                                      ModuleDependenciesKind::SwiftSource);
@@ -1951,17 +1951,17 @@ static void diagnoseScannerFailure(StringRef moduleName,
                                    const llvm::StringSet<> &searchPathSet,
                                    llvm::Optional<ModuleDependencyID> dependencyOf) {
   Diags.diagnose(SourceLoc(), diag::dependency_scan_module_not_found, moduleName);
-  if (dependencyOf.hasValue()) {
-    auto path = findPathToDependency(dependencyOf.getValue(), cache, searchPathSet);
+  if (dependencyOf.has_value()) {
+    auto path = findPathToDependency(dependencyOf.value(), cache, searchPathSet);
     // We may fail to construct a path in some cases, such as a Swift overlay of a Clang
     // module dependnecy.
     if (path.empty())
-      path = {dependencyOf.getValue()};
+      path = {dependencyOf.value()};
     
     for (auto it = path.rbegin(), end = path.rend(); it != end; ++it) {
       const auto &entry = *it;
       auto entryNode = cache.findDependencies(entry.first, {entry.second, searchPathSet});
-      assert(entryNode.hasValue());
+      assert(entryNode.has_value());
       std::string moduleFilePath = "";
       bool isClang = false;
       switch (entryNode->getKind()) {
@@ -2479,7 +2479,10 @@ ASTContext::getModule(ImportPath::Module ModulePath, bool AllowMemoryCached) {
       if (LangOpts.EnableModuleLoadingRemarks) {
         Diags.diagnose(ModulePath.getSourceRange().Start,
                        diag::module_loaded,
-                       M->getModuleFilename());
+                       M->getName(),
+                       /*overlay=*/false,
+                       M->getModuleSourceFilename(),
+                       M->getModuleLoadedFilename());
       }
       return M;
     }
@@ -2507,8 +2510,17 @@ ModuleDecl *ASTContext::getOverlayModule(const FileUnit *FU) {
   for (auto &importer : getImpl().ModuleLoaders) {
     if (importer.get() == getClangModuleLoader())
       continue;
-    if (ModuleDecl *M = importer->loadModule(SourceLoc(), ModPath))
+    if (ModuleDecl *M = importer->loadModule(SourceLoc(), ModPath)) {
+      if (LangOpts.EnableModuleLoadingRemarks) {
+        Diags.diagnose(SourceLoc(),
+                       diag::module_loaded,
+                       M->getName(),
+                       /*overlay=*/true,
+                       M->getModuleSourceFilename(),
+                       M->getModuleLoadedFilename());
+      }
       return M;
+    }
   }
 
   return nullptr;
@@ -3011,9 +3023,12 @@ TypeAliasType::TypeAliasType(TypeAliasDecl *typealias, Type parent,
 
   // Record the substitutions.
   if (substitutions) {
+    assert(typealias->getGenericSignature()->isEqual(
+        substitutions.getGenericSignature()));
     Bits.TypeAliasType.HasSubstitutionMap = true;
     *getTrailingObjects<SubstitutionMap>() = substitutions;
   } else {
+    assert(!typealias->isGenericContext());
     Bits.TypeAliasType.HasSubstitutionMap = false;
   }
 }
@@ -3715,7 +3730,7 @@ MetatypeType *MetatypeType::get(Type T, Optional<MetatypeRepresentation> Repr,
   auto arena = getArena(properties);
 
   unsigned reprKey;
-  if (Repr.hasValue())
+  if (Repr.has_value())
     reprKey = static_cast<unsigned>(*Repr) + 1;
   else
     reprKey = 0;
@@ -3750,7 +3765,7 @@ ExistentialMetatypeType::get(Type T, Optional<MetatypeRepresentation> repr,
   auto arena = getArena(properties);
 
   unsigned reprKey;
-  if (repr.hasValue())
+  if (repr.has_value())
     reprKey = static_cast<unsigned>(*repr) + 1;
   else
     reprKey = 0;
@@ -3978,8 +3993,8 @@ void FunctionType::Profile(llvm::FoldingSetNodeID &ID,
                            Optional<ExtInfo> info) {
   profileParams(ID, params);
   ID.AddPointer(result.getPointer());
-  if (info.hasValue()) {
-    auto infoKey = info.getValue().getFuncAttrKey();
+  if (info.has_value()) {
+    auto infoKey = info.value().getFuncAttrKey();
     ID.AddInteger(std::get<0>(infoKey));
     ID.AddPointer(std::get<1>(infoKey));
     ID.AddPointer(std::get<2>(infoKey));
@@ -3989,17 +4004,17 @@ void FunctionType::Profile(llvm::FoldingSetNodeID &ID,
 FunctionType *FunctionType::get(ArrayRef<AnyFunctionType::Param> params,
                                 Type result, Optional<ExtInfo> info) {
   Type globalActor;
-  if (info.hasValue())
+  if (info.has_value())
     globalActor = info->getGlobalActor();
 
   auto properties = getFunctionRecursiveProperties(params, result, globalActor);
   auto arena = getArena(properties);
 
-  if (info.hasValue()) {
+  if (info.has_value()) {
     // Canonicalize all thin functions to be escaping (to keep compatibility
     // with generic parameters). Note that one can pass SIL-level representation
     // here, so we need additional check for maximum non-SIL value.
-    Representation rep = info.getValue().getRepresentation();
+    Representation rep = info.value().getRepresentation();
     if (rep <= FunctionTypeRepresentation::Last &&
         isThinRepresentation(rep))
       info = info->withNoEscape(false);
@@ -4018,11 +4033,11 @@ FunctionType *FunctionType::get(ArrayRef<AnyFunctionType::Param> params,
   }
 
   ClangTypeInfo clangTypeInfo;
-  if (info.hasValue())
-    clangTypeInfo = info.getValue().getClangTypeInfo();
+  if (info.has_value())
+    clangTypeInfo = info.value().getClangTypeInfo();
 
   bool hasClangInfo =
-      info.hasValue() && !info.getValue().getClangTypeInfo().empty();
+      info.has_value() && !info.value().getClangTypeInfo().empty();
 
   size_t allocSize = totalSizeToAlloc<
       AnyFunctionType::Param, ClangTypeInfo, Type
@@ -4055,8 +4070,8 @@ FunctionType::FunctionType(ArrayRef<AnyFunctionType::Param> params, Type output,
                       params.size(), info) {
   std::uninitialized_copy(params.begin(), params.end(),
                           getTrailingObjects<AnyFunctionType::Param>());
-  if (info.hasValue()) {
-    auto clangTypeInfo = info.getValue().getClangTypeInfo();
+  if (info.has_value()) {
+    auto clangTypeInfo = info.value().getClangTypeInfo();
     if (!clangTypeInfo.empty())
       *getTrailingObjects<ClangTypeInfo>() = clangTypeInfo;
     if (Type globalActor = info->getGlobalActor())
@@ -4071,8 +4086,8 @@ void GenericFunctionType::Profile(llvm::FoldingSetNodeID &ID,
   ID.AddPointer(sig.getPointer());
   profileParams(ID, params);
   ID.AddPointer(result.getPointer());
-  if (info.hasValue()) {
-    auto infoKey = info.getValue().getFuncAttrKey();
+  if (info.has_value()) {
+    auto infoKey = info.value().getFuncAttrKey();
     ID.AddInteger(std::get<0>(infoKey));
     ID.AddPointer(std::get<1>(infoKey));
     ID.AddPointer(std::get<2>(infoKey));
@@ -4104,7 +4119,7 @@ GenericFunctionType *GenericFunctionType::get(GenericSignature sig,
   // point.
   bool isCanonical = isGenericFunctionTypeCanonical(sig, params, result);
 
-  assert((!info.hasValue() || info.getValue().getClangTypeInfo().empty()) &&
+  assert((!info.has_value() || info.value().getClangTypeInfo().empty()) &&
          "Generic functions do not have Clang types at the moment.");
 
   if (auto funcTy
@@ -4113,7 +4128,7 @@ GenericFunctionType *GenericFunctionType::get(GenericSignature sig,
   }
 
   Type globalActor;
-  if (info.hasValue())
+  if (info.has_value())
     globalActor = info->getGlobalActor();
 
   if (globalActor && !sig->isReducedType(globalActor))
@@ -4234,7 +4249,7 @@ SILFunctionType::SILFunctionType(
       InvocationGenericSig(CanGenericSignature(genericSig)),
       WitnessMethodConformance(witnessMethodConformance) {
 
-  Bits.SILFunctionType.HasErrorResult = errorResult.hasValue();
+  Bits.SILFunctionType.HasErrorResult = errorResult.has_value();
   Bits.SILFunctionType.ExtInfoBits = ext.getBits();
   Bits.SILFunctionType.HasClangTypeInfo = false;
   Bits.SILFunctionType.HasPatternSubs = (bool) patternSubs;
@@ -4428,7 +4443,7 @@ CanSILFunctionType SILFunctionType::get(
   // [FIXME: Clang-type-plumbing]
   if (ctx.LangOpts.UseClangFunctionTypes) {
     if (auto error = ext.checkClangType()) {
-      error.getValue().dump();
+      error.value().dump();
       llvm_unreachable("Unexpected Clang type in SILExtInfo.");
     }
   } else if (!ext.getClangTypeInfo().empty()) {
@@ -5016,7 +5031,8 @@ GenericEnvironment::forOpenedExistential(
 
 /// Create a new generic environment for an element archetype.
 GenericEnvironment *
-GenericEnvironment::forOpenedElement(GenericSignature signature, UUID uuid) {
+GenericEnvironment::forOpenedElement(GenericSignature signature, UUID uuid,
+                                     SubstitutionMap outerSubs) {
   auto &ctx = signature->getASTContext();
 
   auto &openedElementEnvironments =
@@ -5038,7 +5054,8 @@ GenericEnvironment::forOpenedElement(GenericSignature signature, UUID uuid) {
                                   OpenedElementEnvironmentData, Type>(
       0, 0, 1, numGenericParams);
   void *mem = ctx.Allocate(bytes, alignof(GenericEnvironment));
-  auto *genericEnv = new (mem) GenericEnvironment(signature, uuid);
+  auto *genericEnv = new (mem) GenericEnvironment(signature, uuid,
+                                                  outerSubs);
 
   openedElementEnvironments[uuid] = genericEnv;
 
@@ -5463,7 +5480,7 @@ ClangTypeConverter &ASTContext::getClangTypeConverter() {
     auto *cml = getClangModuleLoader();
     impl.Converter.emplace(*this, cml->getClangASTContext(), LangOpts.Target);
   }
-  return impl.Converter.getValue();
+  return impl.Converter.value();
 }
 
 const clang::Type *
@@ -5621,40 +5638,75 @@ ASTContext::getOpenedElementSignature(CanGenericSignature baseGenericSig) {
   }
 #endif
 
-  SmallVector<GenericTypeParamType *, 2> genericParams;
+  // The pack element signature includes all type parameters and requirements
+  // from the outer context, plus a new set of type parameters representing
+  // open pack elements and their corresponding element requirements.
+
+  llvm::SmallMapVector<GenericTypeParamType *,
+                       GenericTypeParamType *, 2> packElementParams;
+  SmallVector<GenericTypeParamType *, 2> genericParams(
+      baseGenericSig.getGenericParams().begin(), baseGenericSig.getGenericParams().end());
   SmallVector<Requirement, 2> requirements;
 
+  auto packElementDepth =
+      baseGenericSig.getInnermostGenericParams().front()->getDepth() + 1;
+
   for (auto paramType : baseGenericSig.getGenericParams()) {
-    genericParams.push_back(paramType->asScalar(*this));
+    if (!paramType->isParameterPack())
+      continue;
+
+    auto *elementParam = GenericTypeParamType::get(/*isParameterPack*/false,
+                                                   packElementDepth,
+                                                   packElementParams.size(),
+                                                   *this);
+    genericParams.push_back(elementParam);
+    packElementParams[paramType] = elementParam;
   }
 
   auto eraseParameterPackRec = [&](Type type) -> Type {
     return type.transformRec([&](Type t) -> Optional<Type> {
-      if (auto *paramType = t->getAs<GenericTypeParamType>())
-        return Type(paramType->asScalar(*this));
+      if (auto *paramType = t->getAs<GenericTypeParamType>()) {
+        if (paramType->isParameterPack()) {
+          return Type(packElementParams[paramType]);
+        }
+
+        return t;
+      }
       return None;
     });
   };
 
   for (auto requirement : baseGenericSig.getRequirements()) {
+    requirements.push_back(requirement);
+
+    // If this requirement contains parameter packs, create a new requirement
+    // for the corresponding pack element.
     switch (requirement.getKind()) {
     case RequirementKind::SameShape:
       // Drop same-shape requirements from the element signature.
       break;
     case RequirementKind::Conformance:
     case RequirementKind::Superclass:
-    case RequirementKind::SameType:
-      requirements.emplace_back(
-          requirement.getKind(),
-          eraseParameterPackRec(requirement.getFirstType()),
-          eraseParameterPackRec(requirement.getSecondType()));
+    case RequirementKind::SameType: {
+      auto firstType = eraseParameterPackRec(requirement.getFirstType());
+      auto secondType = eraseParameterPackRec(requirement.getSecondType());
+      if (firstType->isEqual(requirement.getFirstType()) &&
+          secondType->isEqual(requirement.getSecondType()))
+        break;
+
+      requirements.emplace_back(requirement.getKind(),
+                                firstType, secondType);
       break;
-    case RequirementKind::Layout:
-      requirements.emplace_back(
-          requirement.getKind(),
-          eraseParameterPackRec(requirement.getFirstType()),
-          requirement.getLayoutConstraint());
+    }
+    case RequirementKind::Layout: {
+      auto firstType = eraseParameterPackRec(requirement.getFirstType());
+      if (firstType->isEqual(requirement.getFirstType()))
+        break;
+
+      requirements.emplace_back(requirement.getKind(), firstType,
+                                requirement.getLayoutConstraint());
       break;
+    }
     }
   }
 
@@ -5942,7 +5994,7 @@ void VarDecl::setOriginalWrappedProperty(VarDecl *originalProperty) {
 static bool isSourceLocInOrignalBuffer(const Decl *D, SourceLoc Loc) {
   assert(Loc.isValid());
   auto bufferID = D->getDeclContext()->getParentSourceFile()->getBufferID();
-  assert(bufferID.hasValue() && "Source buffer ID must be set");
+  assert(bufferID.has_value() && "Source buffer ID must be set");
   auto &SM = D->getASTContext().SourceMgr;
   return SM.getRangeForBuffer(*bufferID).contains(Loc);
 }

@@ -58,7 +58,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 722; // has_symbol SIL serialization
+const uint16_t SWIFTMODULE_VERSION_MINOR = 724; // allowable client serialization
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -634,13 +634,13 @@ enum class GenericEnvironmentKind : uint8_t {
     unsigned X##_Major = 0, X##_Minor = 0, X##_Subminor = 0,\
              X##_HasMinor = 0, X##_HasSubminor = 0;\
     const auto &X##_Val = X_Expr;\
-    if (X##_Val.hasValue()) {\
-      const auto &Y = X##_Val.getValue();\
+    if (X##_Val.has_value()) {\
+      const auto &Y = X##_Val.value();\
       X##_Major = Y.getMajor();\
-      X##_Minor = Y.getMinor().getValueOr(0);\
-      X##_Subminor = Y.getSubminor().getValueOr(0);\
-      X##_HasMinor = Y.getMinor().hasValue();\
-      X##_HasSubminor = Y.getSubminor().hasValue();\
+      X##_Minor = Y.getMinor().value_or(0);\
+      X##_Subminor = Y.getSubminor().value_or(0);\
+      X##_HasMinor = Y.getMinor().has_value();\
+      X##_HasSubminor = Y.getSubminor().has_value();\
     }
 
 /// The various types of blocks that can occur within a serialized Swift
@@ -769,7 +769,8 @@ namespace control_block {
     TARGET,
     SDK_NAME,
     REVISION,
-    IS_OSSA
+    IS_OSSA,
+    ALLOWABLE_CLIENT_NAME
   };
 
   using MetadataLayout = BCRecordLayout<
@@ -808,6 +809,11 @@ namespace control_block {
   using IsOSSALayout = BCRecordLayout<
     IS_OSSA,
     BCFixed<1>
+  >;
+
+  using AllowableClientLayout = BCRecordLayout<
+    ALLOWABLE_CLIENT_NAME,
+    BCBlob
   >;
 }
 
@@ -1729,7 +1735,8 @@ namespace decls_block {
     GENERIC_ENVIRONMENT,
     BCFixed<1>,                  // GenericEnvironmentKind
     TypeIDField,                 // existential type
-    GenericSignatureIDField      // parent signature
+    GenericSignatureIDField,     // parent signature
+    SubstitutionMapIDField       // substitution map
   >;
 
   using SubstitutionMapLayout = BCRecordLayout<
