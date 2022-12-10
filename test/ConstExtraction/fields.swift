@@ -154,6 +154,17 @@
 // CHECK-NEXT:        "isComputed": "true",
 // CHECK-NEXT:        "valueKind": "RawLiteral",
 // CHECK-NEXT:        "value": "3"
+// CHECK-NEXT:      },
+// CHECK-NEXT:      {
+// CHECK-NEXT:        "label": "e1",
+// CHECK-NEXT:        "type": "fields.Foo.Boo",
+// CHECK-NEXT:        "isStatic": "false",
+// CHECK-NEXT:        "isComputed": "true",
+// CHECK-NEXT:        "valueKind": "InitCall",
+// CHECK-NEXT:        "value": {
+// CHECK-NEXT:          "type": "fields.Foo.Boo",
+// CHECK-NEXT:          "arguments": []
+// CHECK-NEXT:        }
 // CHECK-NEXT:      }
 // CHECK-NEXT:    ]
 // CHECK-NEXT:  }
@@ -176,6 +187,12 @@ public struct Foo {
     let p11: Bat = .init()
     let p12 = Bat(buz: "hello", fuz: adder(2, 3))
     let p13: Int = adder(2, 3)
+}
+
+extension Foo {
+    struct Boo {}
+
+    var e1: Boo { Boo() }
 }
 
 func adder(_ x: Int, _ y: Int) -> Int {
