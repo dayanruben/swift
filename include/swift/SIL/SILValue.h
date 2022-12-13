@@ -494,6 +494,13 @@ public:
   }
   SILInstruction *getDefiningInstruction();
 
+  /// Return the instruction that defines this value, terminator instruction
+  /// that produces this result, or null if it is not defined by an instruction.
+  const SILInstruction *getDefiningInstructionOrTerminator() const {
+    return const_cast<ValueBase*>(this)->getDefiningInstructionOrTerminator();
+  }
+  SILInstruction *getDefiningInstructionOrTerminator();
+
   /// Return the SIL instruction that can be used to describe the first time
   /// this value is available.
   ///
@@ -666,21 +673,6 @@ public:
   const SILInstruction *getDefiningInstruction() const {
     return Value->getDefiningInstruction();
   }
-
-  /// Returns the ValueOwnershipKind that describes this SILValue's ownership
-  /// semantics if the SILValue has ownership semantics. Returns is a value
-  /// without any Ownership Semantics.
-  ///
-  /// An example of a SILValue without ownership semantics is a
-  /// struct_element_addr.
-  ///
-  /// NOTE: This is implemented in ValueOwnership.cpp not SILValue.cpp.
-  ///
-  /// FIXME: remove this redundant API from SILValue.
-  [[deprecated("Please use ValueBase::getOwnershipKind()")]] ValueOwnershipKind
-  getOwnershipKind() const {
-    return Value->getOwnershipKind();
-  };
 
   /// Verify that this SILValue and its uses respects ownership invariants.
   void verifyOwnership(DeadEndBlocks *DEBlocks) const;

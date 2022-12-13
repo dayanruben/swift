@@ -665,15 +665,15 @@ ArrayRef<SourceFile *> ModuleDecl::getPrimarySourceFiles() const {
   return evaluateOrDefault(eval, PrimarySourceFilesRequest{mutableThis}, {});
 }
 
-SourceFile *CodeCompletionFileRequest::evaluate(Evaluator &evaluator,
-                                                ModuleDecl *mod) const {
+SourceFile *IDEInspectionFileRequest::evaluate(Evaluator &evaluator,
+                                               ModuleDecl *mod) const {
   const auto &SM = mod->getASTContext().SourceMgr;
   assert(mod->isMainModule() && "Can only do completion in the main module");
-  assert(SM.hasCodeCompletionBuffer() && "Not performing code completion?");
+  assert(SM.hasIDEInspectionTargetBuffer() && "Not in IDE inspection mode?");
 
   for (auto *file : mod->getFiles()) {
     auto *SF = dyn_cast<SourceFile>(file);
-    if (SF && SF->getBufferID() == SM.getCodeCompletionBufferID())
+    if (SF && SF->getBufferID() == SM.getIDEInspectionTargetBufferID())
       return SF;
   }
   llvm_unreachable("Couldn't find the completion file?");
@@ -1994,6 +1994,23 @@ StringRef ModuleDecl::getModuleLoadedFilename() const {
     }
   }
   return StringRef();
+}
+
+bool ModuleDecl::isSDKModule() const {
+  auto sdkPath = getASTContext().SearchPathOpts.getSDKPath();
+  if (sdkPath.empty())
+    return false;
+
+  auto modulePath = getModuleSourceFilename();
+  auto si = llvm::sys::path::begin(sdkPath),
+       se = llvm::sys::path::end(sdkPath);
+  for (auto mi = llvm::sys::path::begin(modulePath),
+       me = llvm::sys::path::end(modulePath);
+       si != se && mi != me; ++si, ++mi) {
+    if (*si != *mi)
+      return false;
+  }
+  return si == se;
 }
 
 bool ModuleDecl::isStdlibModule() const {
