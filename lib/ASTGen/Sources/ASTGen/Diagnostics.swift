@@ -5,7 +5,6 @@ import SwiftSyntax
 fileprivate func emitDiagnosticParts(
   diagEnginePtr: UnsafeMutablePointer<UInt8>,
   sourceFileBuffer: UnsafeMutableBufferPointer<UInt8>,
-  nodeStartOffset: Int?,
   message: String,
   severity: DiagnosticSeverity,
   position: AbsolutePosition,
@@ -22,18 +21,8 @@ fileprivate func emitDiagnosticParts(
 
   // Form a source location for the given absolute position
   func sourceLoc(
-    at origPosition: AbsolutePosition
+    at position: AbsolutePosition
   ) -> UnsafeMutablePointer<UInt8>? {
-    // FIXME: Our tree is very confused about absolute offsets. Work around
-    // the issue in a very hacky way.
-    let position: AbsolutePosition
-    if let nodeStartOffset = nodeStartOffset,
-        origPosition.utf8Offset < nodeStartOffset {
-      position = origPosition + SourceLength(utf8Length: nodeStartOffset)
-    } else {
-      position = origPosition
-    }
-
     if let sourceFileBase = sourceFileBuffer.baseAddress,
       position.utf8Offset >= 0 &&
         position.utf8Offset < sourceFileBuffer.count {
@@ -99,37 +88,37 @@ fileprivate func emitDiagnosticParts(
 func emitDiagnostic(
   diagEnginePtr: UnsafeMutablePointer<UInt8>,
   sourceFileBuffer: UnsafeMutableBufferPointer<UInt8>,
-  nodeStartOffset: Int? = nil,
-  diagnostic: Diagnostic
+  diagnostic: Diagnostic,
+  messageSuffix: String? = nil
 ) {
-  // Collect all of the Fix-It changes based on their Fix-It ID.
-  var fixItChangesByID: [MessageID : [FixIt.Change]] = [:]
-  for fixIt in diagnostic.fixIts {
-    fixItChangesByID[fixIt.message.fixItID, default: []]
-      .append(contentsOf: fixIt.changes.changes)
-  }
-
   // Emit the main diagnostic
   emitDiagnosticParts(
     diagEnginePtr: diagEnginePtr,
     sourceFileBuffer: sourceFileBuffer,
-    nodeStartOffset: nodeStartOffset,
-    message: diagnostic.diagMessage.message,
+    message: diagnostic.diagMessage.message + (messageSuffix ?? ""),
     severity: diagnostic.diagMessage.severity,
     position: diagnostic.position,
-    highlights: diagnostic.highlights,
-    fixItChanges: fixItChangesByID[diagnostic.diagnosticID] ?? []
+    highlights: diagnostic.highlights
   )
+
+  // Emit Fix-Its.
+  for fixIt in diagnostic.fixIts {
+    emitDiagnosticParts(
+        diagEnginePtr: diagEnginePtr,
+        sourceFileBuffer: sourceFileBuffer,
+        message: fixIt.message.message,
+        severity: .note, position: diagnostic.position,
+        fixItChanges: fixIt.changes.changes
+    )
+  }
 
   // Emit any notes as follow-ons.
   for note in diagnostic.notes {
     emitDiagnosticParts(
       diagEnginePtr: diagEnginePtr,
       sourceFileBuffer: sourceFileBuffer,
-      nodeStartOffset: nodeStartOffset,
       message: note.message,
-      severity: .note, position: note.position,
-      fixItChanges: fixItChangesByID[note.noteMessage.fixItID] ?? []
+      severity: .note, position: note.position
     )
   }
 }

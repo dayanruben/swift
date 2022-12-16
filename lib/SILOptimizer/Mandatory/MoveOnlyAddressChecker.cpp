@@ -151,197 +151,11 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include "MoveOnlyDiagnostics.h"
+#include "MoveOnlyObjectChecker.h"
+
 using namespace swift;
-
-//===----------------------------------------------------------------------===//
-//                         MARK: Diagnostic Utilities
-//===----------------------------------------------------------------------===//
-
-template <typename... T, typename... U>
-static void diagnose(ASTContext &Context, SourceLoc loc, Diag<T...> diag,
-                     U &&...args) {
-  Context.Diags.diagnose(loc, diag, std::forward<U>(args)...);
-}
-
-static StringRef getVariableNameForValue(MarkMustCheckInst *mmci) {
-  if (auto *allocInst = dyn_cast<AllocationInst>(mmci->getOperand())) {
-    DebugVarCarryingInst debugVar(allocInst);
-    if (auto varInfo = debugVar.getVarInfo()) {
-      return varInfo->Name;
-    } else {
-      if (auto *decl = debugVar.getDecl()) {
-        return decl->getBaseName().userFacingName();
-      }
-    }
-  }
-
-  if (auto *use = getSingleDebugUse(mmci)) {
-    DebugVarCarryingInst debugVar(use->getUser());
-    if (auto varInfo = debugVar.getVarInfo()) {
-      return varInfo->Name;
-    } else {
-      if (auto *decl = debugVar.getDecl()) {
-        return decl->getBaseName().userFacingName();
-      }
-    }
-  }
-
-  return "unknown";
-}
-
-namespace {
-
-struct DiagnosticEmitter {
-  // Track any violating uses we have emitted a diagnostic for so we don't emit
-  // multiple diagnostics for the same use.
-  SmallPtrSet<SILInstruction *, 8> useWithDiagnostic;
-
-  void clear() { useWithDiagnostic.clear(); }
-
-  void emitAddressDiagnostic(MarkMustCheckInst *markedValue,
-                             SILInstruction *lastLiveUse,
-                             SILInstruction *violatingUse, bool isUseConsuming,
-                             bool isInOutEndOfFunction);
-  void emitInOutEndOfFunctionDiagnostic(MarkMustCheckInst *markedValue,
-                                        SILInstruction *violatingUse);
-  void emitAddressDiagnosticNoCopy(MarkMustCheckInst *markedValue,
-                                   SILInstruction *consumingUse);
-  void emitExclusivityHazardDiagnostic(MarkMustCheckInst *markedValue,
-                                       SILInstruction *consumingUse);
-};
-
-} // namespace
-
-void DiagnosticEmitter::emitExclusivityHazardDiagnostic(
-    MarkMustCheckInst *markedValue, SILInstruction *consumingUse) {
-  if (!useWithDiagnostic.insert(consumingUse).second)
-    return;
-
-  auto &astContext = markedValue->getFunction()->getASTContext();
-  StringRef varName = getVariableNameForValue(markedValue);
-
-  LLVM_DEBUG(llvm::dbgs() << "Emitting error for exclusivity!\n");
-  LLVM_DEBUG(llvm::dbgs() << "    Mark: " << *markedValue);
-  LLVM_DEBUG(llvm::dbgs() << "    Consuming use: " << *consumingUse);
-
-  diagnose(astContext,
-           markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_exclusivity_violation, varName);
-  diagnose(astContext, consumingUse->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_consuming_use_here);
-}
-
-void DiagnosticEmitter::emitAddressDiagnostic(
-    MarkMustCheckInst *markedValue, SILInstruction *lastLiveUse,
-    SILInstruction *violatingUse, bool isUseConsuming,
-    bool isInOutEndOfFunction = false) {
-  if (!useWithDiagnostic.insert(violatingUse).second)
-    return;
-
-  auto &astContext = markedValue->getFunction()->getASTContext();
-  StringRef varName = getVariableNameForValue(markedValue);
-
-  LLVM_DEBUG(llvm::dbgs() << "Emitting error!\n");
-  LLVM_DEBUG(llvm::dbgs() << "    Mark: " << *markedValue);
-  LLVM_DEBUG(llvm::dbgs() << "    Last Live Use: " << *lastLiveUse);
-  LLVM_DEBUG(llvm::dbgs() << "    Last Live Use Is Consuming? "
-                          << (isUseConsuming ? "yes" : "no") << '\n');
-  LLVM_DEBUG(llvm::dbgs() << "    Violating Use: " << *violatingUse);
-
-  // If our liveness use is the same as our violating use, then we know that we
-  // had a loop. Give a better diagnostic.
-  if (lastLiveUse == violatingUse) {
-    diagnose(astContext,
-             markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_value_consumed_in_a_loop, varName);
-    diagnose(astContext, violatingUse->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_consuming_use_here);
-    return;
-  }
-
-  if (isInOutEndOfFunction) {
-    diagnose(
-        astContext,
-        markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-        diag::
-            sil_moveonlychecker_inout_not_reinitialized_before_end_of_function,
-        varName);
-    diagnose(astContext, violatingUse->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_consuming_use_here);
-    return;
-  }
-
-  // First if we are consuming emit an error for no implicit copy semantics.
-  if (isUseConsuming) {
-    diagnose(astContext,
-             markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_owned_value_consumed_more_than_once,
-             varName);
-    diagnose(astContext, violatingUse->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_consuming_use_here);
-    diagnose(astContext, lastLiveUse->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_consuming_use_here);
-    return;
-  }
-
-  // Otherwise, use the "used after consuming use" error.
-  diagnose(astContext,
-           markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_value_used_after_consume, varName);
-  diagnose(astContext, violatingUse->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_consuming_use_here);
-  diagnose(astContext, lastLiveUse->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_nonconsuming_use_here);
-}
-
-void DiagnosticEmitter::emitInOutEndOfFunctionDiagnostic(
-    MarkMustCheckInst *markedValue, SILInstruction *violatingUse) {
-  if (!useWithDiagnostic.insert(violatingUse).second)
-    return;
-
-  assert(cast<SILFunctionArgument>(markedValue->getOperand())
-             ->getArgumentConvention()
-             .isInoutConvention() &&
-         "Expected markedValue to be on an inout");
-
-  auto &astContext = markedValue->getFunction()->getASTContext();
-  StringRef varName = getVariableNameForValue(markedValue);
-
-  LLVM_DEBUG(llvm::dbgs() << "Emitting inout error error!\n");
-  LLVM_DEBUG(llvm::dbgs() << "    Mark: " << *markedValue);
-  LLVM_DEBUG(llvm::dbgs() << "    Violating Use: " << *violatingUse);
-
-  // Otherwise, we need to do no implicit copy semantics. If our last use was
-  // consuming message:
-  diagnose(
-      astContext,
-      markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-      diag::sil_moveonlychecker_inout_not_reinitialized_before_end_of_function,
-      varName);
-  diagnose(astContext, violatingUse->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_consuming_use_here);
-}
-
-void DiagnosticEmitter::emitAddressDiagnosticNoCopy(
-    MarkMustCheckInst *markedValue, SILInstruction *consumingUse) {
-  if (!useWithDiagnostic.insert(consumingUse).second)
-    return;
-
-  auto &astContext = markedValue->getFunction()->getASTContext();
-  StringRef varName = getVariableNameForValue(markedValue);
-
-  LLVM_DEBUG(llvm::dbgs() << "Emitting no copy error!\n");
-  LLVM_DEBUG(llvm::dbgs() << "    Mark: " << *markedValue);
-  LLVM_DEBUG(llvm::dbgs() << "    Consuming Use: " << *consumingUse);
-
-  // Otherwise, we need to do no implicit copy semantics. If our last use was
-  // consuming message:
-  diagnose(astContext,
-           markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_guaranteed_value_consumed, varName);
-  diagnose(astContext, consumingUse->getLoc().getSourceLoc(),
-           diag::sil_moveonlychecker_consuming_use_here);
-}
+using namespace swift::siloptimizer;
 
 //===----------------------------------------------------------------------===//
 //                           MARK: Memory Utilities
@@ -478,6 +292,7 @@ struct UseState {
   llvm::SmallMapVector<SILInstruction *, TypeTreeLeafTypeRange, 4> livenessUses;
   llvm::SmallMapVector<SILInstruction *, TypeTreeLeafTypeRange, 4> borrows;
   llvm::SmallMapVector<SILInstruction *, TypeTreeLeafTypeRange, 4> takeInsts;
+  llvm::SmallMapVector<SILInstruction *, TypeTreeLeafTypeRange, 4> copyInsts;
   llvm::SmallMapVector<SILInstruction *, TypeTreeLeafTypeRange, 4> initInsts;
   llvm::SmallMapVector<SILInstruction *, TypeTreeLeafTypeRange, 4> reinitInsts;
 
@@ -487,6 +302,7 @@ struct UseState {
     destroys.clear();
     livenessUses.clear();
     borrows.clear();
+    copyInsts.clear();
     takeInsts.clear();
     initInsts.clear();
     reinitInsts.clear();
@@ -543,25 +359,11 @@ struct MoveOnlyChecker {
   /// A set of mark_must_check that we are actually going to process.
   SmallSetVector<MarkMustCheckInst *, 32> moveIntroducersToProcess;
 
-  /// A per mark must check, vector of uses that copy propagation says need a
-  /// copy and thus are not final consuming uses.
-  SmallVector<Operand *, 32> consumingUsesNeedingCopy;
-
-  /// A per mark must check, vector of consuming uses that copy propagation says
-  /// are actual last uses.
-  SmallVector<Operand *, 32> finalConsumingUses;
-
-  /// A set of mark must checks that we emitted diagnostics for. Used to
-  /// reprocess mark_must_checks and clean up after the cases where we did not
-  /// emit a diagnostic. We don't care about the cases where we emitted
-  /// diagnostics since we are going to fail.
-  SmallPtrSet<MarkMustCheckInst *, 4> valuesWithDiagnostics;
-
   /// The instruction deleter used by \p canonicalizer.
   InstructionDeleter deleter;
 
-  /// The OSSA canonicalizer used to perform move checking for objects.
-  CanonicalizeOSSALifetime canonicalizer;
+  /// State to run CanonicalizeOSSALifetime.
+  OSSACanonicalizer canonicalizer;
 
   /// Per mark must check address use state.
   UseState addressUseState;
@@ -573,29 +375,35 @@ struct MoveOnlyChecker {
   MoveOnlyChecker(SILFunction *fn, DeadEndBlocks *deBlocks,
                   NonLocalAccessBlockAnalysis *accessBlockAnalysis,
                   DominanceInfo *domTree)
-      : fn(fn),
-        deleter(InstModCallbacks().onDelete([&](SILInstruction *instToDelete) {
+      : fn(fn), deleter(), canonicalizer(), diagnosticEmitter() {
+    deleter.setCallbacks(std::move(
+        InstModCallbacks().onDelete([&](SILInstruction *instToDelete) {
           if (auto *mvi = dyn_cast<MarkMustCheckInst>(instToDelete))
             moveIntroducersToProcess.remove(mvi);
           instToDelete->eraseFromParent();
-        })),
-        canonicalizer(
-            false /*pruneDebugMode*/,
-            !fn->shouldOptimize() /*maximizeLifetime*/, accessBlockAnalysis,
-            domTree, deleter,
-            [&](Operand *use) { consumingUsesNeedingCopy.push_back(use); },
-            [&](Operand *use) { finalConsumingUses.push_back(use); }) {}
+        })));
+    canonicalizer.init(fn, accessBlockAnalysis, domTree, deleter);
+    diagnosticEmitter.fn = fn;
+    diagnosticEmitter.canonicalizer = &canonicalizer;
+  }
 
   /// Search through the current function for candidate mark_must_check
   /// [noimplicitcopy]. If we find one that does not fit a pattern that we
   /// understand, emit an error diagnostic telling the programmer that the move
   /// checker did not know how to recognize this code pattern.
-  void searchForCandidateMarkMustChecks();
+  ///
+  /// Returns true if we emitted a diagnostic. Returns false otherwise.
+  bool searchForCandidateMarkMustChecks();
+
+  /// After we have emitted a diagnostic, we need to clean up the instruction
+  /// stream by converting /all/ copies of move only typed things to use
+  /// explicit_copy_value so that we maintain the SIL invariant that in
+  /// canonical SIL move only types are not copied by normal copies.
+  ///
+  /// Returns true if we actually changed any instructions.
+  void cleanupAfterEmittingDiagnostic();
 
   /// Emits an error diagnostic for \p markedValue.
-  void emitObjectDiagnostic(MarkMustCheckInst *markedValue,
-                            bool originalValueGuaranteed);
-
   void performObjectCheck(MarkMustCheckInst *markedValue);
 
   bool performSingleCheck(MarkMustCheckInst *markedValue);
@@ -672,7 +480,7 @@ struct GatherUsesVisitor : public AccessUseVisitor {
     liveness.computeSimple();
     for (auto *consumingUse : li->getConsumingUses()) {
       if (!liveness.isWithinBoundary(consumingUse->getUser())) {
-        diagnosticEmitter.emitExclusivityHazardDiagnostic(
+        diagnosticEmitter.emitAddressExclusivityHazardDiagnostic(
             markedValue, consumingUse->getUser());
         emittedError = true;
       }
@@ -756,11 +564,13 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
   // At this point, we have handled all of the non-loadTakeOrCopy/consuming
   // uses.
   if (auto *copyAddr = dyn_cast<CopyAddrInst>(user)) {
+    assert(op->getOperandNumber() == CopyAddrInst::Src &&
+           "Should have dest above in memInstMust{Rei,I}nitialize");
+
     if (markedValue->getCheckKind() == MarkMustCheckInst::CheckKind::NoCopy) {
       LLVM_DEBUG(llvm::dbgs()
                  << "Found mark must check [nocopy] error: " << *user);
       diagnosticEmitter.emitAddressDiagnosticNoCopy(markedValue, copyAddr);
-      moveChecker.valuesWithDiagnostics.insert(markedValue);
       emittedEarlyDiagnostic = true;
       return true;
     }
@@ -769,8 +579,13 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
     if (!leafRange)
       return false;
 
-    LLVM_DEBUG(llvm::dbgs() << "Found take: " << *user);
-    useState.takeInsts.insert({user, *leafRange});
+    if (copyAddr->isTakeOfSrc()) {
+      LLVM_DEBUG(llvm::dbgs() << "Found take: " << *user);
+      useState.takeInsts.insert({user, *leafRange});
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "Found copy: " << *user);
+      useState.copyInsts.insert({user, *leafRange});
+    }
     return true;
   }
 
@@ -786,27 +601,21 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
     if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Copy ||
         li->getOwnershipQualifier() == LoadOwnershipQualifier::Take) {
       LLVM_DEBUG(llvm::dbgs() << "Found load: " << *li);
-      SWIFT_DEFER {
-        moveChecker.consumingUsesNeedingCopy.clear();
-        moveChecker.finalConsumingUses.clear();
-      };
+      SWIFT_DEFER { moveChecker.canonicalizer.clear(); };
 
       // Canonicalize the lifetime of the load [take], load [copy].
-      moveChecker.changed |=
-          moveChecker.canonicalizer.canonicalizeValueLifetime(li);
+      moveChecker.changed |= moveChecker.canonicalizer.canonicalize(li);
 
       // If we are asked to perform guaranteed checking, emit an error if we
       // have /any/ consuming uses. This is a case that can always be converted
       // to a load_borrow if we pass the check.
       if (markedValue->getCheckKind() == MarkMustCheckInst::CheckKind::NoCopy) {
-        if (!moveChecker.consumingUsesNeedingCopy.empty() ||
-            !moveChecker.finalConsumingUses.empty()) {
+        if (!moveChecker.canonicalizer.foundAnyConsumingUses()) {
           LLVM_DEBUG(llvm::dbgs()
                      << "Found mark must check [nocopy] error: " << *user);
-          moveChecker.emitObjectDiagnostic(markedValue,
-                                           true /*original value guaranteed*/);
+          moveChecker.diagnosticEmitter.emitObjectGuaranteedDiagnostic(
+              markedValue);
           emittedEarlyDiagnostic = true;
-          moveChecker.valuesWithDiagnostics.insert(markedValue);
           return true;
         }
 
@@ -822,7 +631,6 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
         if (checkForExclusivityHazards(li)) {
           LLVM_DEBUG(llvm::dbgs() << "Found exclusivity violation?!\n");
           emittedEarlyDiagnostic = true;
-          moveChecker.valuesWithDiagnostics.insert(markedValue);
           return true;
         }
 
@@ -834,7 +642,7 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
       // copy. This will always be an error and we allow the user to recompile
       // and eliminate the error. This just allows us to rely on invariants
       // later.
-      if (!moveChecker.consumingUsesNeedingCopy.empty()) {
+      if (moveChecker.canonicalizer.foundConsumingUseRequiringCopy()) {
         LLVM_DEBUG(llvm::dbgs()
                    << "Found that load at object level requires copies!\n");
         // If we failed to understand how to perform the check or did not find
@@ -842,39 +650,45 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
         // checker did not understand diagnostic later and in the former, we
         // succeeded.
         // Otherwise, emit the diagnostic.
-        moveChecker.emitObjectDiagnostic(markedValue,
-                                         false /*original value guaranteed*/);
+        moveChecker.diagnosticEmitter.emitObjectOwnedDiagnostic(markedValue);
         emittedEarlyDiagnostic = true;
-        moveChecker.valuesWithDiagnostics.insert(markedValue);
         LLVM_DEBUG(llvm::dbgs() << "Emitted early object level diagnostic.\n");
         return true;
       }
 
       // Then if we had any final consuming uses, mark that this liveness use is
-      // a take and if not, mark this as a borrow.
+      // a take/copy and if not, mark this as a borrow.
       auto leafRange = TypeTreeLeafTypeRange::get(op->get(), getRootAddress());
       if (!leafRange)
         return false;
 
-      if (moveChecker.finalConsumingUses.empty()) {
+      if (!moveChecker.canonicalizer.foundFinalConsumingUses()) {
         LLVM_DEBUG(llvm::dbgs() << "Found potential borrow inst: " << *user);
         if (checkForExclusivityHazards(li)) {
           LLVM_DEBUG(llvm::dbgs() << "Found exclusivity violation?!\n");
           emittedEarlyDiagnostic = true;
-          moveChecker.valuesWithDiagnostics.insert(markedValue);
           return true;
         }
 
         useState.borrows.insert({user, *leafRange});
       } else {
-        LLVM_DEBUG(llvm::dbgs() << "Found take inst: " << *user);
-        useState.takeInsts.insert({user, *leafRange});
+        // If we had a load [copy], store this into the copy list. These are the
+        // things that we must merge into destroy_addr or reinits after we are
+        // done checking. The load [take] are already complete and good to go.
+        if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Take) {
+          LLVM_DEBUG(llvm::dbgs() << "Found take inst: " << *user);
+          useState.takeInsts.insert({user, *leafRange});
+        } else {
+          LLVM_DEBUG(llvm::dbgs() << "Found copy inst: " << *user);
+          useState.copyInsts.insert({user, *leafRange});
+        }
       }
       return true;
     }
   }
 
-  // Now that we have handled or loadTakeOrCopy, we need to now track our Takes.
+  // Now that we have handled or loadTakeOrCopy, we need to now track our
+  // additional pure takes.
   if (::memInstMustConsume(op)) {
     auto leafRange = TypeTreeLeafTypeRange::get(op->get(), getRootAddress());
     if (!leafRange)
@@ -1075,13 +889,11 @@ struct BlockSummaries {
   bool isInOut;
   DiagnosticEmitter &diagnosticEmitter;
   UseState &addressUseState;
-  SmallPtrSetImpl<MarkMustCheckInst *> &valuesWithDiagnostics;
 
   BlockSummaries(MoveOnlyChecker &checker, MarkMustCheckInst *markedAddress)
       : markedAddress(markedAddress), isInOut(false),
         diagnosticEmitter(checker.diagnosticEmitter),
-        addressUseState(checker.addressUseState),
-        valuesWithDiagnostics(checker.valuesWithDiagnostics) {
+        addressUseState(checker.addressUseState) {
     if (auto *fArg = dyn_cast<SILFunctionArgument>(markedAddress->getOperand()))
       isInOut |= fArg->getArgumentConvention().isInoutConvention();
   }
@@ -1169,7 +981,65 @@ void BlockSummaries::summarize(SILBasicBlock &block) {
 
         (void)emittedSomeDiagnostic;
         assert(emittedSomeDiagnostic);
-        valuesWithDiagnostics.insert(markedAddress);
+        continue;
+      }
+    }
+
+    {
+      auto iter = addressUseState.copyInsts.find(&inst);
+      if (iter != addressUseState.copyInsts.end()) {
+        // If we are not yet tracking a "take up" or a "liveness up", then we
+        // can update our state. In those other two cases we emit an error
+        // diagnostic below.
+        if (!state.isTrackingAnyState()) {
+          LLVM_DEBUG(llvm::dbgs()
+                     << "    Tracking new take up: " << *iter->first);
+          state.trackTake(iter->first, iter->second);
+          continue;
+        }
+
+        bool emittedSomeDiagnostic = false;
+        if (auto *takeUp = state.getTakeUp()) {
+          LLVM_DEBUG(llvm::dbgs() << "    Found two takes, emitting error!\n");
+          LLVM_DEBUG(llvm::dbgs() << "    First take: " << *takeUp);
+          LLVM_DEBUG(llvm::dbgs() << "    Second take: " << inst);
+          diagnosticEmitter.emitAddressDiagnostic(markedAddress, takeUp, &inst,
+                                                  true /*is consuming*/);
+          emittedSomeDiagnostic = true;
+        }
+
+        // If we found a liveness inst, we are going to emit an error since we
+        // have a use after free.
+        if (auto *livenessUpInst = state.getLivenessUp()) {
+          // If we are tracking state for an inout and our liveness inst is a
+          // function exiting instruction, we want to emit a special
+          // diagnostic error saying that the user has not reinitialized inout
+          // along a path to the end of the function.
+          if (livenessUpInst == term && isInOut) {
+            LLVM_DEBUG(llvm::dbgs()
+                       << "    Found liveness inout error: " << inst);
+            // Even though we emit a diagnostic for inout here, we actually
+            // want to no longer track the inout liveness use and instead want
+            // to track the consuming use so that earlier errors are on the
+            // take and not on the inout. This is to ensure that we only emit
+            // a single inout not reinitialized before end of function error
+            // if we have multiple consumes along that path.
+            diagnosticEmitter.emitInOutEndOfFunctionDiagnostic(markedAddress,
+                                                               &inst);
+            state.trackTakeForLivenessError(iter->first, iter->second);
+          } else {
+            // Otherwise, we just emit a normal liveness error.
+            LLVM_DEBUG(llvm::dbgs() << "    Found liveness error: " << inst);
+            diagnosticEmitter.emitAddressDiagnostic(markedAddress,
+                                                    livenessUpInst, &inst,
+                                                    false /*is not consuming*/);
+            state.trackTakeForLivenessError(iter->first, iter->second);
+          }
+          emittedSomeDiagnostic = true;
+        }
+
+        (void)emittedSomeDiagnostic;
+        assert(emittedSomeDiagnostic);
         continue;
       }
     }
@@ -1474,7 +1344,44 @@ bool GlobalDataflow::compute() {
 //                       MARK: Main Pass Implementation
 //===----------------------------------------------------------------------===//
 
-void MoveOnlyChecker::searchForCandidateMarkMustChecks() {
+void MoveOnlyChecker::cleanupAfterEmittingDiagnostic() {
+  for (auto &block : *fn) {
+    for (auto ii = block.begin(), ie = block.end(); ii != ie;) {
+      auto *inst = &*ii;
+      ++ii;
+
+      // Convert load [copy] -> load_borrow + explicit_copy_value.
+      if (auto *li = dyn_cast<LoadInst>(inst)) {
+        if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Copy) {
+          SILBuilderWithScope builder(li);
+          auto *lbi = builder.createLoadBorrow(li->getLoc(), li->getOperand());
+          auto *cvi = builder.createExplicitCopyValue(li->getLoc(), lbi);
+          builder.createEndBorrow(li->getLoc(), lbi);
+          li->replaceAllUsesWith(cvi);
+          li->eraseFromParent();
+          changed = true;
+        }
+      }
+
+      // Convert copy_addr !take of src to its explicit value form so we don't
+      // error.
+      if (auto *copyAddr = dyn_cast<CopyAddrInst>(inst)) {
+        if (!copyAddr->isTakeOfSrc()) {
+          SILBuilderWithScope builder(copyAddr);
+          builder.createExplicitCopyAddr(
+              copyAddr->getLoc(), copyAddr->getSrc(), copyAddr->getDest(),
+              IsTake_t(copyAddr->isTakeOfSrc()),
+              IsInitialization_t(copyAddr->isInitializationOfDest()));
+          copyAddr->eraseFromParent();
+          changed = true;
+        }
+      }
+    }
+  }
+}
+
+bool MoveOnlyChecker::searchForCandidateMarkMustChecks() {
+  bool emittedDiagnostic = false;
   for (auto &block : *fn) {
     for (auto ii = block.begin(), ie = block.end(); ii != ie;) {
       auto *mmci = dyn_cast<MarkMustCheckInst>(&*ii);
@@ -1490,14 +1397,8 @@ void MoveOnlyChecker::searchForCandidateMarkMustChecks() {
           LLVM_DEBUG(
               llvm::dbgs()
               << "Early emitting diagnostic for unsupported alloc box!\n");
-          if (mmci->getType().isMoveOnlyWrapped()) {
-            diagnose(fn->getASTContext(), mmci->getLoc().getSourceLoc(),
-                     diag::sil_moveonlychecker_not_understand_no_implicit_copy);
-          } else {
-            diagnose(fn->getASTContext(), mmci->getLoc().getSourceLoc(),
-                     diag::sil_moveonlychecker_not_understand_moveonly);
-          }
-          valuesWithDiagnostics.insert(mmci);
+          diagnosticEmitter.emitCheckerDoesntUnderstandDiagnostic(mmci);
+          emittedDiagnostic = true;
           continue;
         }
 
@@ -1506,15 +1407,8 @@ void MoveOnlyChecker::searchForCandidateMarkMustChecks() {
             LLVM_DEBUG(
                 llvm::dbgs()
                 << "Early emitting diagnostic for unsupported alloc box!\n");
-            if (mmci->getType().isMoveOnlyWrapped()) {
-              diagnose(
-                  fn->getASTContext(), mmci->getLoc().getSourceLoc(),
-                  diag::sil_moveonlychecker_not_understand_no_implicit_copy);
-            } else {
-              diagnose(fn->getASTContext(), mmci->getLoc().getSourceLoc(),
-                       diag::sil_moveonlychecker_not_understand_moveonly);
-            }
-            valuesWithDiagnostics.insert(mmci);
+            diagnosticEmitter.emitCheckerDoesntUnderstandDiagnostic(mmci);
+            emittedDiagnostic = true;
             continue;
           }
         }
@@ -1523,69 +1417,11 @@ void MoveOnlyChecker::searchForCandidateMarkMustChecks() {
       moveIntroducersToProcess.insert(mmci);
     }
   }
-}
-
-void MoveOnlyChecker::emitObjectDiagnostic(MarkMustCheckInst *markedValue,
-                                           bool originalValueGuaranteed) {
-  auto &astContext = fn->getASTContext();
-  StringRef varName = getVariableNameForValue(markedValue);
-  LLVM_DEBUG(llvm::dbgs() << "Emitting error for: " << *markedValue);
-
-  if (originalValueGuaranteed) {
-    diagnose(astContext,
-             markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_guaranteed_value_consumed, varName);
-  } else {
-    diagnose(astContext,
-             markedValue->getDefiningInstruction()->getLoc().getSourceLoc(),
-             diag::sil_moveonlychecker_owned_value_consumed_more_than_once,
-             varName);
-  }
-
-  while (consumingUsesNeedingCopy.size()) {
-    auto *consumingUse = consumingUsesNeedingCopy.pop_back_val();
-
-    LLVM_DEBUG(llvm::dbgs()
-               << "Consuming use needing copy: " << *consumingUse->getUser());
-    // See if the consuming use is an owned moveonly_to_copyable whose only
-    // user is a return. In that case, use the return loc instead. We do this
-    // b/c it is illegal to put a return value location on a non-return value
-    // instruction... so we have to hack around this slightly.
-    auto *user = consumingUse->getUser();
-    auto loc = user->getLoc();
-    if (auto *mtc = dyn_cast<MoveOnlyWrapperToCopyableValueInst>(user)) {
-      if (auto *ri = mtc->getSingleUserOfType<ReturnInst>()) {
-        loc = ri->getLoc();
-      }
-    }
-
-    diagnose(astContext, loc.getSourceLoc(),
-             diag::sil_moveonlychecker_consuming_use_here);
-  }
-
-  while (finalConsumingUses.size()) {
-    auto *consumingUse = finalConsumingUses.pop_back_val();
-    LLVM_DEBUG(llvm::dbgs()
-               << "Final consuming use: " << *consumingUse->getUser());
-    // See if the consuming use is an owned moveonly_to_copyable whose only
-    // user is a return. In that case, use the return loc instead. We do this
-    // b/c it is illegal to put a return value location on a non-return value
-    // instruction... so we have to hack around this slightly.
-    auto *user = consumingUse->getUser();
-    auto loc = user->getLoc();
-    if (auto *mtc = dyn_cast<MoveOnlyWrapperToCopyableValueInst>(user)) {
-      if (auto *ri = mtc->getSingleUserOfType<ReturnInst>()) {
-        loc = ri->getLoc();
-      }
-    }
-
-    diagnose(astContext, loc.getSourceLoc(),
-             diag::sil_moveonlychecker_consuming_use_here);
-  }
+  return emittedDiagnostic;
 }
 
 bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
-  SWIFT_DEFER { diagnosticEmitter.clear(); };
+  SWIFT_DEFER { diagnosticEmitter.clearUsesWithDiagnostic(); };
 
   auto accessPathWithBase = AccessPathWithBase::compute(markedAddress);
   auto accessPath = accessPathWithBase.accessPath;
@@ -1637,7 +1473,7 @@ bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
   // DISCUSSION: This ensures that later when performing the global dataflow, we
   // can rely on the invariant that any potential single block cases are correct
   // already.
-  if (valuesWithDiagnostics.size())
+  if (diagnosticEmitter.emittedAnyDiagnostics())
     return true;
 
   //---
@@ -1660,7 +1496,7 @@ bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
     // If we had any errors, we do not want to modify the SIL... just bail.
     if (emitter.compute()) {
       // TODO: Remove next line.
-      valuesWithDiagnostics.insert(markedAddress);
+      diagnosticEmitter.valuesWithDiagnostics.insert(markedAddress);
       return true;
     }
   }
@@ -1716,27 +1552,24 @@ bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
             addressUseState.reinitInsts.count(&*ii))
           break;
 
-        if (addressUseState.takeInsts.count(&*ii)) {
+        assert(!addressUseState.takeInsts.count(&*ii) &&
+               "Double destroy?! Should have errored on this?!");
+
+        if (addressUseState.copyInsts.count(&*ii)) {
           if (auto *li = dyn_cast<LoadInst>(&*ii)) {
-            if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Copy) {
-              // If we have a copy in the single block case, erase the destroy
-              // and visit the next one.
-              destroy->eraseFromParent();
-              changed = true;
-              foundSingleBlockCase = true;
-              break;
-            }
-            llvm_unreachable("Error?! This is a double destroy?!");
+            // If we have a copy in the single block case, erase the destroy
+            // and visit the next one.
+            destroy->eraseFromParent();
+            changed = true;
+            foundSingleBlockCase = true;
+            break;
           }
 
           if (auto *copyAddr = dyn_cast<CopyAddrInst>(&*ii)) {
-            if (!copyAddr->isTakeOfSrc()) {
-              destroy->eraseFromParent();
-              changed = true;
-              foundSingleBlockCase = true;
-              break;
-            }
-            llvm_unreachable("Error?! This is a double destroy?!");
+            destroy->eraseFromParent();
+            changed = true;
+            foundSingleBlockCase = true;
+            break;
           }
         }
 
@@ -1755,28 +1588,17 @@ bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
   // Now that we have rewritten all borrows, convert any takes that are today
   // copies into their take form. If we couldn't do this, we would have had an
   // error.
-  for (auto take : addressUseState.takeInsts) {
+  for (auto take : addressUseState.copyInsts) {
     if (auto *li = dyn_cast<LoadInst>(take.first)) {
-      switch (li->getOwnershipQualifier()) {
-      case LoadOwnershipQualifier::Unqualified:
-      case LoadOwnershipQualifier::Trivial:
-        llvm_unreachable("Should never hit this");
-      case LoadOwnershipQualifier::Take:
-        // This is already correct.
-        continue;
-      case LoadOwnershipQualifier::Copy:
-        // Convert this to its take form.
-        if (auto *access = dyn_cast<BeginAccessInst>(li->getOperand()))
-          access->setAccessKind(SILAccessKind::Modify);
-        li->setOwnershipQualifier(LoadOwnershipQualifier::Take);
-        changed = true;
-        continue;
-      }
+      // Convert this to its take form.
+      if (auto *access = dyn_cast<BeginAccessInst>(li->getOperand()))
+        access->setAccessKind(SILAccessKind::Modify);
+      li->setOwnershipQualifier(LoadOwnershipQualifier::Take);
+      changed = true;
+      continue;
     }
 
     if (auto *copy = dyn_cast<CopyAddrInst>(take.first)) {
-      if (copy->isTakeOfSrc())
-        continue;
       // Convert this to its take form.
       if (auto *access = dyn_cast<BeginAccessInst>(copy->getSrc()))
         access->setAccessKind(SILAccessKind::Modify);
@@ -1784,7 +1606,7 @@ bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
       continue;
     }
 
-    llvm::dbgs() << "Take User: " << *take.first;
+    llvm::dbgs() << "Unhandled copy user: " << *take.first;
     llvm_unreachable("Unhandled case?!");
   }
 
@@ -1794,15 +1616,18 @@ bool MoveOnlyChecker::performSingleCheck(MarkMustCheckInst *markedAddress) {
 bool MoveOnlyChecker::check() {
   // First search for candidates to process and emit diagnostics on any
   // mark_must_check [noimplicitcopy] we didn't recognize.
-  searchForCandidateMarkMustChecks();
+  bool emittedDiagnostic = searchForCandidateMarkMustChecks();
 
   // If we didn't find any introducers to check, just return changed.
   //
   // NOTE: changed /can/ be true here if we had any mark_must_check
   // [noimplicitcopy] that we didn't understand and emitting a diagnostic upon
   // and then deleting.
-  if (moveIntroducersToProcess.empty())
+  if (moveIntroducersToProcess.empty()) {
+    if (emittedDiagnostic)
+      cleanupAfterEmittingDiagnostic();
     return changed;
+  }
 
   for (auto *markedValue : moveIntroducersToProcess) {
     LLVM_DEBUG(llvm::dbgs() << "Visiting: " << *markedValue);
@@ -1812,17 +1637,10 @@ bool MoveOnlyChecker::check() {
       LLVM_DEBUG(llvm::dbgs()
                  << "Failed to perform single check! Emitting error!\n");
       // If we fail the address check in some way, set the diagnose!
-      if (markedValue->getType().isMoveOnlyWrapped()) {
-        diagnose(fn->getASTContext(), markedValue->getLoc().getSourceLoc(),
-                 diag::sil_moveonlychecker_not_understand_no_implicit_copy);
-      } else {
-        diagnose(fn->getASTContext(), markedValue->getLoc().getSourceLoc(),
-                 diag::sil_moveonlychecker_not_understand_moveonly);
-      }
-      valuesWithDiagnostics.insert(markedValue);
+      diagnosticEmitter.emitCheckerDoesntUnderstandDiagnostic(markedValue);
     }
   }
-  bool emittedDiagnostic = valuesWithDiagnostics.size();
+  emittedDiagnostic = diagnosticEmitter.emittedAnyDiagnostics();
 
   // Ok, now that we have performed our checks, we need to eliminate all mark
   // must check inst since it is invalid for these to be in canonical SIL and
@@ -1843,40 +1661,7 @@ bool MoveOnlyChecker::check() {
   // It is also ok that we use a little more compile time and go over the
   // function again, since we are going to fail the compilation and not codegen.
   if (emittedDiagnostic) {
-    for (auto &block : *fn) {
-      for (auto ii = block.begin(), ie = block.end(); ii != ie;) {
-        auto *inst = &*ii;
-        ++ii;
-
-        // Convert load [copy] -> load_borrow + explicit_copy_value.
-        if (auto *li = dyn_cast<LoadInst>(inst)) {
-          if (li->getOwnershipQualifier() == LoadOwnershipQualifier::Copy) {
-            SILBuilderWithScope builder(li);
-            auto *lbi =
-                builder.createLoadBorrow(li->getLoc(), li->getOperand());
-            auto *cvi = builder.createExplicitCopyValue(li->getLoc(), lbi);
-            builder.createEndBorrow(li->getLoc(), lbi);
-            li->replaceAllUsesWith(cvi);
-            li->eraseFromParent();
-            changed = true;
-          }
-        }
-
-        // Convert copy_addr !take of src to its explicit value form so we don't
-        // error.
-        if (auto *copyAddr = dyn_cast<CopyAddrInst>(inst)) {
-          if (!copyAddr->isTakeOfSrc()) {
-            SILBuilderWithScope builder(copyAddr);
-            builder.createExplicitCopyAddr(
-                copyAddr->getLoc(), copyAddr->getSrc(), copyAddr->getDest(),
-                IsTake_t(copyAddr->isTakeOfSrc()),
-                IsInitialization_t(copyAddr->isInitializationOfDest()));
-            copyAddr->eraseFromParent();
-            changed = true;
-          }
-        }
-      }
-    }
+    cleanupAfterEmittingDiagnostic();
   }
 
   return changed;

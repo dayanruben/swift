@@ -685,6 +685,14 @@ public:
     return getResultsImpl().getTypes();
   }
 
+  /// Run the given function for each local archetype this instruction
+  /// defines, passing the value that should be used to record the
+  /// dependency.
+  void forEachDefinedLocalArchetype(
+      llvm::function_ref<void(CanLocalArchetypeType archetype,
+                              SILValue typeDependency)> function) const;
+  bool definesLocalArchetypes() const;
+
   MemoryBehavior getMemoryBehavior() const;
   ReleasingBehavior getReleasingBehavior() const;
 
@@ -1095,10 +1103,6 @@ public:
     return node->getKind() >= SILNodeKind::First_SingleValueInstruction &&
            node->getKind() <= SILNodeKind::Last_SingleValueInstruction;
   }
-
-  /// If this is an instruction which "defines" a root opened archetype, it is
-  /// returned.
-  CanOpenedArchetypeType getDefinedOpenedArchetype() const;
 
   SILInstruction *getPreviousInstruction() {
     return SILInstruction::getPreviousInstruction();
@@ -4364,47 +4368,7 @@ class EndBorrowInst
   EndBorrowInst(SILDebugLocation debugLoc, SILValue borrowedValue)
       : UnaryInstructionBase(debugLoc, borrowedValue) {}
 
-public:
-  /// Return the value that this end_borrow is ending the borrow of if we are
-  /// borrowing a single value.
-  SILValue getSingleOriginalValue() const {
-    SILValue v = getOperand();
-    if (auto *bbi = dyn_cast<BeginBorrowInst>(v))
-      return bbi->getOperand();
-    if (auto *lbi = dyn_cast<LoadBorrowInst>(v))
-      return lbi->getOperand();
-    return SILValue();
-  }
 
-  /// Return the set of guaranteed values that have scopes ended by this
-  /// end_borrow.
-  ///
-  /// Discussion: We can only have multiple values associated with an end_borrow
-  /// in the case of having Phi arguments with guaranteed inputs. This is
-  /// necessary to represent certain conditional operations such as:
-  ///
-  /// class Klass {
-  ///   let k1: Klass
-  ///   let k2: Klass
-  /// }
-  ///
-  /// func useKlass(k: Klass) { ... }
-  /// var boolValue : Bool { ... }
-  ///
-  /// func f(k: Klass) {
-  ///   useKlass(boolValue ? k.k1 : k.k2)
-  /// }
-  ///
-  /// Today, when we SILGen such code, we copy k.k1 and k.k2 before the Phi when
-  /// it could potentially be avoided. So today this just appends
-  /// getSingleOriginalValue() to originalValues.
-  ///
-  /// TODO: Once this changes, this code must be update.
-  void getOriginalValues(SmallVectorImpl<SILValue> &originalValues) const {
-    SILValue value = getSingleOriginalValue();
-    assert(value && "Guaranteed phi arguments are not supported now");
-    originalValues.emplace_back(value);
-  }
 };
 
 /// Different kinds of access.
@@ -7137,6 +7101,13 @@ public:
   }
 
   OpenedExistentialAccess getAccessKind() const { return ForAccess; }
+
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const {
+    const auto archetype = getOpenedArchetypeOf(getType().getASTType());
+    assert(archetype && archetype->isRoot() &&
+           "Type should be a root opened archetype");
+    return archetype;
+  }
 };
 
 /// Given an opaque value referring to an existential, "opens" the
@@ -7150,6 +7121,14 @@ class OpenExistentialValueInst
   OpenExistentialValueInst(SILDebugLocation debugLoc, SILValue operand,
                            SILType selfTy,
                            ValueOwnershipKind forwardingOwnershipKind);
+
+public:
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const {
+    const auto archetype = getOpenedArchetypeOf(getType().getASTType());
+    assert(archetype && archetype->isRoot() &&
+           "Type should be a root opened archetype");
+    return archetype;
+  }
 };
 
 /// Given a class existential, "opens" the
@@ -7163,6 +7142,14 @@ class OpenExistentialRefInst
   OpenExistentialRefInst(SILDebugLocation DebugLoc, SILValue Operand,
                          SILType Ty,
                          ValueOwnershipKind forwardingOwnershipKind);
+
+public:
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const {
+    const auto archetype = getOpenedArchetypeOf(getType().getASTType());
+    assert(archetype && archetype->isRoot() &&
+           "Type should be a root opened archetype");
+    return archetype;
+  }
 };
 
 /// Given an existential metatype,
@@ -7177,6 +7164,14 @@ class OpenExistentialMetatypeInst
 
   OpenExistentialMetatypeInst(SILDebugLocation DebugLoc, SILValue operand,
                               SILType ty);
+
+public:
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const {
+    const auto archetype = getOpenedArchetypeOf(getType().getASTType());
+    assert(archetype && archetype->isRoot() &&
+           "Type should be a root opened archetype");
+    return archetype;
+  }
 };
 
 /// Given a boxed existential container,
@@ -7190,6 +7185,14 @@ class OpenExistentialBoxInst
 
   OpenExistentialBoxInst(SILDebugLocation DebugLoc, SILValue operand,
                          SILType ty);
+
+public:
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const {
+    const auto archetype = getOpenedArchetypeOf(getType().getASTType());
+    assert(archetype && archetype->isRoot() &&
+           "Type should be a root opened archetype");
+    return archetype;
+  }
 };
 
 /// Given a boxed existential container, "opens" the existential by returning a
@@ -7203,6 +7206,14 @@ class OpenExistentialBoxValueInst
   OpenExistentialBoxValueInst(SILDebugLocation DebugLoc, SILValue operand,
                               SILType ty,
                               ValueOwnershipKind forwardingOwnershipKind);
+
+public:
+  CanOpenedArchetypeType getDefinedOpenedArchetype() const {
+    const auto archetype = getOpenedArchetypeOf(getType().getASTType());
+    assert(archetype && archetype->isRoot() &&
+           "Type should be a root opened archetype");
+    return archetype;
+  }
 };
 
 /// Given an address to an uninitialized buffer of

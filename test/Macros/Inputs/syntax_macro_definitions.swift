@@ -63,6 +63,10 @@ struct SimpleDiagnosticMessage: DiagnosticMessage {
   let severity: DiagnosticSeverity
 }
 
+extension SimpleDiagnosticMessage: FixItMessage {
+  var fixItID: MessageID { diagnosticID }
+}
+
 public struct AddBlocker: ExpressionMacro {
   public static func expansion(
     of node: MacroExpansionExprSyntax, in context: inout MacroExpansionContext
@@ -77,49 +81,76 @@ public struct AddBlocker: ExpressionMacro {
       context.diagnose(error.asDiagnostic)
     }
 
-   class AddVisitor: SyntaxVisitor {
-      var diagnostics: [Diagnostic] = []
-      let startPosition: AbsolutePosition
+    // Link the folded argument back into the tree.
+    var node = node.withArgumentList(node.argumentList.replacing(childAt: 0, with: node.argumentList.first!.withExpression(foldedArgument.as(ExprSyntax.self)!)))
 
-      init(startPosition: AbsolutePosition) {
-        self.startPosition = startPosition
-        super.init(viewMode: .sourceAccurate)
-      }
+   class AddVisitor: SyntaxRewriter {
+      var diagnostics: [Diagnostic] = []
 
       override func visit(
         _ node: InfixOperatorExprSyntax
-      ) -> SyntaxVisitorContinueKind {
+      ) -> ExprSyntax {
         if let binOp = node.operatorOperand.as(BinaryOperatorExprSyntax.self) {
           if binOp.operatorToken.text == "+" {
+            let messageID = MessageID(domain: "silly", id: "addblock")
             diagnostics.append(
               Diagnostic(
                 node: Syntax(node.operatorOperand),
-                position: startPosition + SourceLength(utf8Length: binOp.operatorToken.position.utf8Offset),
                 message: SimpleDiagnosticMessage(
-                  message: "blocked an add",
-                  diagnosticID: MessageID(domain: "silly", id: "addblock"),
+                  message: "blocked an add; did you mean to subtract?",
+                  diagnosticID: messageID,
                   severity: .error
                 ),
                 highlights: [
                   Syntax(node.leftOperand.withoutTrivia()),
                   Syntax(node.rightOperand.withoutTrivia())
+                ],
+                fixIts: [
+                  FixIt(
+                    message: SimpleDiagnosticMessage(
+                      message: "use '-'",
+                      diagnosticID: messageID,
+                      severity: .error
+                    ),
+                    changes: [
+                      FixIt.Change.replace(
+                        oldNode: Syntax(binOp.operatorToken.withoutTrivia()),
+                        newNode: Syntax(
+                          TokenSyntax(
+                            .spacedBinaryOperator("-"),
+                            presence: .present
+                          )
+                        )
+                      )
+                    ]
+                  ),
                 ]
+              )
+            )
+
+            return ExprSyntax(
+              node.withOperatorOperand(
+                ExprSyntax(
+                  binOp.withOperatorToken(
+                    binOp.operatorToken.withKind(.spacedBinaryOperator("-"))
+                  )
+                )
               )
             )
           }
         }
 
-        return .visitChildren
+        return ExprSyntax(node)
       }
     }
 
-    let visitor = AddVisitor(startPosition: argument.position)
-    visitor.walk(Syntax(foldedArgument))
+    let visitor = AddVisitor()
+    let result = visitor.visit(Syntax(node))
 
     for diag in visitor.diagnostics {
       context.diagnose(diag)
     }
 
-    return argument
+    return result.as(MacroExpansionExprSyntax.self)!.argumentList.first!.expression
   }
 }

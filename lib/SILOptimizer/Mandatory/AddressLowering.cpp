@@ -1301,8 +1301,8 @@ AllocStackInst *OpaqueStorageAllocation::createStackAllocation(SILValue value) {
   // Instructions that produce an opened type never reach here because they
   // have guaranteed ownership--they project their storage. We reach this
   // point after the opened value has been copied.
-  assert((!isa<SingleValueInstruction>(value)
-          || !cast<SingleValueInstruction>(value)->getDefinedOpenedArchetype())
+  assert((!value->getDefiningInstruction() ||
+          !value->getDefiningInstruction()->definesLocalArchetypes())
          && "owned open_existential is unsupported");
 
   SILType allocTy = value->getType();
@@ -1319,7 +1319,7 @@ AllocStackInst *OpaqueStorageAllocation::createStackAllocation(SILValue value) {
 
     if (auto openedTy = getOpenedArchetypeOf(archetype)) {
       auto openingVal =
-          pass.getModule()->getRootOpenedArchetypeDef(openedTy, pass.function);
+          pass.getModule()->getRootLocalArchetypeDef(openedTy, pass.function);
 
       auto *openingInst = openingVal->getDefiningInstruction();
       assert(openingVal && "all opened archetypes should be resolved");
@@ -2815,8 +2815,8 @@ void YieldRewriter::rewriteYield(YieldInst *yieldInst) {
 void YieldRewriter::rewriteOperand(YieldInst *yieldInst, unsigned index) {
   auto info = opaqueFnConv.getYieldInfoForOperandIndex(index);
   auto convention = info.getConvention();
-  auto ty =
-      opaqueFnConv.getSILType(info, pass.function->getTypeExpansionContext());
+  auto ty = pass.function->mapTypeIntoContext(
+      opaqueFnConv.getSILType(info, pass.function->getTypeExpansionContext()));
   if (ty.isAddressOnly(*pass.function)) {
     assert(yieldInst->getOperand(index)->getType().isAddress() &&
            "rewriting yield of of address-only value after use rewriting!?");

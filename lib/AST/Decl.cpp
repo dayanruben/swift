@@ -6599,14 +6599,6 @@ bool VarDecl::isMemberwiseInitialized(bool preferDeclaredProperties) const {
   return true;
 }
 
-bool VarDecl::isTypeWrapperLocalStorageForInitializer() const {
-  if (auto *ctor =
-          dyn_cast_or_null<ConstructorDecl>(getDeclContext()->getAsDecl())) {
-    return this == ctor->getLocalTypeWrapperStorageVar();
-  }
-  return false;
-}
-
 bool VarDecl::isLet() const {
   // An awful hack that stabilizes the value of 'isLet' for ParamDecl instances.
   //
@@ -8891,14 +8883,6 @@ bool ConstructorDecl::isObjCZeroParameterWithLongSelector() const {
   return params->get(0)->getInterfaceType()->isVoid();
 }
 
-VarDecl *ConstructorDecl::getLocalTypeWrapperStorageVar() const {
-  auto &ctx = getASTContext();
-  auto *mutableSelf = const_cast<ConstructorDecl *>(this);
-  return evaluateOrDefault(
-      ctx.evaluator, SynthesizeLocalVariableForTypeWrapperStorage{mutableSelf},
-      nullptr);
-}
-
 DestructorDecl::DestructorDecl(SourceLoc DestructorLoc, DeclContext *Parent)
   : AbstractFunctionDecl(DeclKind::Destructor, Parent,
                          DeclBaseName::createDestructor(), DestructorLoc,
@@ -9105,6 +9089,20 @@ Type ConstructorDecl::getInitializerInterfaceType() {
 }
 
 CtorInitializerKind ConstructorDecl::getInitKind() const {
+  const auto *ED =
+      dyn_cast_or_null<ExtensionDecl>(getDeclContext()->getAsDecl());
+  if (ED && !ED->hasBeenBound()) {
+    // When the declaration context is an extension and this is called when the
+    // extended nominal hasn't be bound yet, e.g. dumping pre-typechecked AST,
+    // there is not enough information about extended nominal to use for
+    // computing init kind on InitKindRequest as bindExtensions is done at
+    // typechecking, so in that case just look to parsed attribute in init
+    // declaration.
+    return getAttrs().hasAttribute<ConvenienceAttr>()
+               ? CtorInitializerKind::Convenience
+               : CtorInitializerKind::Designated;
+  }
+
   return evaluateOrDefault(getASTContext().evaluator,
     InitKindRequest{const_cast<ConstructorDecl *>(this)},
     CtorInitializerKind::Designated);

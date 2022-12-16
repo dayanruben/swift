@@ -2354,7 +2354,7 @@ llvm::Function *irgen::createFunction(IRGenModule &IGM, LinkInfo &linkInfo,
 llvm::GlobalVariable *swift::irgen::createVariable(
     IRGenModule &IGM, LinkInfo &linkInfo, llvm::Type *storageType,
     Alignment alignment, DebugTypeInfo DbgTy, Optional<SILLocation> DebugLoc,
-    StringRef DebugName, bool inFixedBuffer) {
+    StringRef DebugName) {
   auto name = linkInfo.getName();
   llvm::GlobalValue *existingValue = IGM.Module.getNamedGlobal(name);
   if (existingValue) {
@@ -2384,7 +2384,7 @@ llvm::GlobalVariable *swift::irgen::createVariable(
   if (IGM.DebugInfo && !DbgTy.isNull() && linkInfo.isForDefinition())
     IGM.DebugInfo->emitGlobalVariableDeclaration(
         var, DebugName.empty() ? name : DebugName, name, DbgTy,
-        var->hasInternalLinkage(), inFixedBuffer, DebugLoc);
+        var->hasInternalLinkage(), DebugLoc);
 
   return var;
 }
@@ -2666,10 +2666,13 @@ Address IRGenModule::getAddrOfSILGlobalVariable(SILGlobalVariable *var,
           loc = var->getLocation();
         name = var->getName();
       }
-      auto DbgTy = DebugTypeInfo::getGlobal(var, storageTypeWithContainer,
-                                            fixedSize, fixedAlignment);
+      DebugTypeInfo DbgTy =
+          inFixedBuffer
+              ? DebugTypeInfo::getGlobalFixedBuffer(
+                    var, storageTypeWithContainer, fixedSize, fixedAlignment)
+              : DebugTypeInfo::getGlobal(var, storageTypeWithContainer, *this);
       gvar = createVariable(*this, link, storageTypeWithContainer,
-                            fixedAlignment, DbgTy, loc, name, inFixedBuffer);
+                            fixedAlignment, DbgTy, loc, name);
     }
     /// Add a zero initializer.
     if (forDefinition)
@@ -4798,9 +4801,10 @@ llvm::GlobalValue *IRGenModule::defineTypeMetadata(
                 : LinkEntity::forTypeMetadata(
                       concreteType, TypeMetadataAddress::FullMetadata));
 
-  auto DbgTy = DebugTypeInfo::getMetadata(MetatypeType::get(concreteType),
-    entity.getDefaultDeclarationType(*this)->getPointerTo(),
-    Size(0), Alignment(1));
+  auto DbgTy = DebugTypeInfo::getGlobalMetadata(
+      MetatypeType::get(concreteType),
+      entity.getDefaultDeclarationType(*this)->getPointerTo(), Size(0),
+      Alignment(1));
 
   // Define the variable.
   llvm::GlobalVariable *var = cast<llvm::GlobalVariable>(
@@ -4942,9 +4946,9 @@ IRGenModule::getAddrOfTypeMetadata(CanType concreteType,
         LinkEntity::forNoncanonicalSpecializedGenericTypeMetadata(concreteType);
     break;
   }
-  DbgTy = DebugTypeInfo::getMetadata(MetatypeType::get(concreteType),
-                                     defaultVarTy->getPointerTo(), Size(0),
-                                     Alignment(1));
+  DbgTy = DebugTypeInfo::getGlobalMetadata(MetatypeType::get(concreteType),
+                                           defaultVarTy->getPointerTo(),
+                                           Size(0), Alignment(1));
 
   ConstantReference addr;
   llvm::Type *typeOfValue = nullptr;

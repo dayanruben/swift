@@ -123,9 +123,7 @@ parseProtocolListFromFile(StringRef protocolListFilePath,
 static std::shared_ptr<CompileTimeValue> extractCompileTimeValue(Expr *expr) {
   if (expr) {
     switch (expr->getKind()) {
-    case ExprKind::Array:
     case ExprKind::Dictionary:
-    case ExprKind::Tuple:
 
     case ExprKind::BooleanLiteral:
     case ExprKind::FloatLiteral:
@@ -139,6 +137,42 @@ static std::shared_ptr<CompileTimeValue> extractCompileTimeValue(Expr *expr) {
         return std::make_shared<RawLiteralValue>(literalOutput);
       }
       break;
+    }
+
+    case ExprKind::Array: {
+      auto arrayExpr = cast<ArrayExpr>(expr);
+      std::vector<std::shared_ptr<CompileTimeValue>> elementValues;
+      for (const auto elementExpr : arrayExpr->getElements()) {
+        elementValues.push_back(extractCompileTimeValue(elementExpr));
+      }
+      return std::make_shared<ArrayValue>(elementValues);
+    }
+
+    case ExprKind::Tuple: {
+      auto tupleExpr = cast<TupleExpr>(expr);
+
+      std::vector<TupleElement> elements;
+      if (tupleExpr->hasElementNames()) {
+        for (auto pair : llvm::zip(tupleExpr->getElements(),
+                                   tupleExpr->getElementNames())) {
+          auto elementExpr = std::get<0>(pair);
+          auto elementName = std::get<1>(pair);
+
+          Optional<std::string> label =
+              elementName.empty()
+                  ? Optional<std::string>()
+                  : Optional<std::string>(elementName.str().str());
+
+          elements.push_back({label, elementExpr->getType(),
+                              extractCompileTimeValue(elementExpr)});
+        }
+      } else {
+        for (auto elementExpr : tupleExpr->getElements()) {
+          elements.push_back({Optional<std::string>(), elementExpr->getType(),
+                              extractCompileTimeValue(elementExpr)});
+        }
+      }
+      return std::make_shared<TupleValue>(elements);
     }
 
     case ExprKind::Call: {
@@ -164,6 +198,11 @@ static std::shared_ptr<CompileTimeValue> extractCompileTimeValue(Expr *expr) {
       break;
     }
 
+    case ExprKind::Erasure: {
+      auto erasureExpr = cast<ErasureExpr>(expr);
+      return extractCompileTimeValue(erasureExpr->getSubExpr());
+    }
+
     default: {
       break;
     }
@@ -172,11 +211,44 @@ static std::shared_ptr<CompileTimeValue> extractCompileTimeValue(Expr *expr) {
   return std::make_shared<RuntimeValue>();
 }
 
-static std::shared_ptr<CompileTimeValue>
-extractPropertyInitializationValue(VarDecl *propertyDecl) {
-  if (auto binding = propertyDecl->getParentPatternBinding()) {
-    if (auto originalInit = binding->getOriginalInit(0)) {
-      return extractCompileTimeValue(originalInit);
+static std::vector<CustomAttrValue>
+extractCustomAttrValues(VarDecl *propertyDecl) {
+  std::vector<CustomAttrValue> customAttrValues;
+
+  for (auto *propertyWrapper : propertyDecl->getAttachedPropertyWrappers()) {
+    std::vector<FunctionParameter> parameters;
+
+    if (const auto *args = propertyWrapper->getArgs()) {
+      for (auto arg : *args) {
+        const auto label = arg.getLabel().str().str();
+        auto argExpr = arg.getExpr();
+
+        if (auto defaultArgument = dyn_cast<DefaultArgumentExpr>(argExpr)) {
+          auto *decl = defaultArgument->getParamDecl();
+          if (decl->hasDefaultExpr()) {
+            argExpr = decl->getTypeCheckedDefaultExpr();
+          }
+        }
+        parameters.push_back(
+            {label, argExpr->getType(), extractCompileTimeValue(argExpr)});
+      }
+    }
+    customAttrValues.push_back({propertyWrapper->getType(), parameters});
+  }
+
+  return customAttrValues;
+}
+
+static ConstValueTypePropertyInfo
+extractTypePropertyInfo(VarDecl *propertyDecl) {
+  if (const auto binding = propertyDecl->getParentPatternBinding()) {
+    if (const auto originalInit = binding->getOriginalInit(0)) {
+      if (propertyDecl->hasAttachedPropertyWrapper()) {
+        return {propertyDecl, extractCompileTimeValue(originalInit),
+                extractCustomAttrValues(propertyDecl)};
+      }
+
+      return {propertyDecl, extractCompileTimeValue(originalInit)};
     }
   }
 
@@ -184,12 +256,12 @@ extractPropertyInitializationValue(VarDecl *propertyDecl) {
     auto node = accessorDecl->getTypecheckedBody()->getFirstElement();
     if (node.is<Stmt *>()) {
       if (auto returnStmt = dyn_cast<ReturnStmt>(node.get<Stmt *>())) {
-        return extractCompileTimeValue(returnStmt->getResult());
+        return {propertyDecl, extractCompileTimeValue(returnStmt->getResult())};
       }
     }
   }
 
-  return std::make_shared<RuntimeValue>();
+  return {propertyDecl, std::make_shared<RuntimeValue>()};
 }
 
 ConstValueTypeInfo
@@ -202,8 +274,7 @@ ConstantValueInfoRequest::evaluate(Evaluator &Evaluator,
 
   std::vector<ConstValueTypePropertyInfo> Properties;
   for (auto Property : StoredProperties) {
-    Properties.push_back(
-        {Property, extractPropertyInitializationValue(Property)});
+    Properties.push_back(extractTypePropertyInfo(Property));
   }
 
   for (auto Member : Decl->getMembers()) {
@@ -212,13 +283,13 @@ ConstantValueInfoRequest::evaluate(Evaluator &Evaluator,
     // instead gather up remaining static and computed properties.
     if (!VD || StoredPropertiesSet.count(VD))
       continue;
-    Properties.push_back({VD, extractPropertyInitializationValue(VD)});
+    Properties.push_back(extractTypePropertyInfo(VD));
   }
 
   for (auto Extension: Decl->getExtensions()) {
     for (auto Member : Extension->getMembers()) {
       if (auto *VD = dyn_cast<VarDecl>(Member)) {
-        Properties.push_back({VD, extractPropertyInitializationValue(VD)});
+        Properties.push_back(extractTypePropertyInfo(VD));
       }
     }
   }
@@ -287,6 +358,24 @@ void writeValue(llvm::json::OStream &JSON,
     break;
   }
 
+  case CompileTimeValue::ValueKind::Tuple: {
+    auto tupleValue = cast<TupleValue>(value);
+
+    JSON.attribute("valueKind", "Tuple");
+    JSON.attributeArray("value", [&] {
+      for (auto TV : tupleValue->getElements()) {
+        JSON.object([&] {
+          if (auto Label = TV.Label) {
+            JSON.attribute("label", Label);
+          }
+          JSON.attribute("type", toFullyQualifiedTypeNameString(TV.Type));
+          writeValue(JSON, TV.Value);
+        });
+      }
+    });
+    break;
+  }
+
   case CompileTimeValue::ValueKind::Builder: {
     JSON.attribute("valueKind", "Builder");
     break;
@@ -297,11 +386,48 @@ void writeValue(llvm::json::OStream &JSON,
     break;
   }
 
+  case CompileTimeValue::ValueKind::Array: {
+    auto arrayValue = cast<ArrayValue>(value);
+
+    JSON.attribute("valueKind", "Array");
+    JSON.attributeArray("value", [&] {
+      for (auto CTP : arrayValue->getElements()) {
+        JSON.object([&] { writeValue(JSON, CTP); });
+      }
+    });
+    break;
+  }
+
   case CompileTimeValue::ValueKind::Runtime: {
     JSON.attribute("valueKind", "Runtime");
     break;
   }
   }
+}
+
+void writeAttributes(
+    llvm::json::OStream &JSON,
+    llvm::Optional<std::vector<CustomAttrValue>> PropertyWrappers) {
+  if (!PropertyWrappers.hasValue()) {
+    return;
+  }
+
+  JSON.attributeArray("attributes", [&] {
+    for (auto PW : PropertyWrappers.value()) {
+      JSON.object([&] {
+        JSON.attribute("type", toFullyQualifiedTypeNameString(PW.Type));
+        JSON.attributeArray("arguments", [&] {
+          for (auto FP : PW.Parameters) {
+            JSON.object([&] {
+              JSON.attribute("label", FP.Label);
+              JSON.attribute("type", toFullyQualifiedTypeNameString(FP.Type));
+              writeValue(JSON, FP.Value);
+            });
+          }
+        });
+      });
+    }
+  });
 }
 
 bool writeAsJSONToFile(const std::vector<ConstValueTypeInfo> &ConstValueInfos,
@@ -327,6 +453,7 @@ bool writeAsJSONToFile(const std::vector<ConstValueTypeInfo> &ConstValueInfos,
               JSON.attribute("isComputed",
                              !decl->hasStorage() ? "true" : "false");
               writeValue(JSON, PropertyInfo.Value);
+              writeAttributes(JSON, PropertyInfo.PropertyWrappers);
             });
           }
         });

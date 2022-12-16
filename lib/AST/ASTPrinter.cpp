@@ -37,6 +37,7 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SILLayout.h"
 #include "swift/AST/Stmt.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/AST/TypeWalker.h"
 #include "swift/AST/Types.h"
@@ -1178,6 +1179,16 @@ void PrintAST::printAttributes(const Decl *D) {
   }
 
   D->getAttrs().print(Printer, Options, D);
+
+  // We need to check whether this is a type with an inferred
+  // type wrapper attribute and if so print it explicitly.
+  if (auto *NTD = dyn_cast<NominalTypeDecl>(D)) {
+    auto typeWrapperInfo = NTD->getTypeWrapper();
+    // The attribute has been inferred and we have to print it.
+    if (typeWrapperInfo && typeWrapperInfo->IsInferred) {
+      typeWrapperInfo->Attr->print(Printer, Options, D);
+    }
+  }
 
   // Print the implicit 'final' attribute.
   if (auto VD = dyn_cast<ValueDecl>(D)) {
@@ -2936,7 +2947,19 @@ static bool usesFeatureSpecializeAttributeWithAvailability(Decl *decl) {
 }
 
 static bool usesFeatureTypeWrappers(Decl *decl) {
-  return decl->getAttrs().hasAttribute<TypeWrapperAttr>();
+  NullablePtr<NominalTypeDecl> typeDecl;
+
+  if (auto *extension = dyn_cast<ExtensionDecl>(decl)) {
+    typeDecl = extension->getExtendedNominal();
+  } else {
+    typeDecl = dyn_cast<NominalTypeDecl>(decl);
+  }
+
+  if (!typeDecl)
+    return false;
+
+  return evaluateOrDefault(decl->getASTContext().evaluator,
+                           UsesTypeWrapperFeature{typeDecl.get()}, false);
 }
 
 static bool usesFeatureRuntimeDiscoverableAttrs(Decl *decl) {
@@ -2951,7 +2974,7 @@ static bool usesFeatureParserValidation(Decl *decl) {
   return false;
 }
 
-static bool usesFeatureParserSequenceFolding(Decl *decl) {
+static bool usesFeatureParserDiagnostics(Decl *decl) {
   return false;
 }
 
@@ -4856,6 +4879,10 @@ void PrintAST::visitVarargExpansionExpr(VarargExpansionExpr *expr) {
 
 void PrintAST::visitPackExpansionExpr(PackExpansionExpr *expr) {
   visit(expr->getPatternExpr());
+}
+
+void PrintAST::visitPackElementExpr(PackElementExpr *expr) {
+  visit(expr->getPackRefExpr());
 }
 
 void PrintAST::visitArchetypeToSuperExpr(ArchetypeToSuperExpr *expr) {
@@ -7101,13 +7128,14 @@ swift::getInheritedForPrinting(
   llvm::SetVector<ProtocolDecl *> protocols;
   llvm::TinyPtrVector<ProtocolDecl *> uncheckedProtocols;
   for (auto attr : decl->getAttrs().getAttributes<SynthesizedProtocolAttr>()) {
-    if (auto *proto = ctx.getProtocol(attr->getProtocolKind())) {
+    if (auto *proto = attr->getProtocol()) {
       // The SerialExecutor conformance is only synthesized on the root
       // actor class, so we can just test resilience immediately.
       if (proto->isSpecificProtocol(KnownProtocolKind::SerialExecutor) &&
           cast<ClassDecl>(decl)->isResilient())
         continue;
-      if (attr->getProtocolKind() == KnownProtocolKind::RawRepresentable &&
+      if (proto->getKnownProtocolKind() &&
+          *proto->getKnownProtocolKind() == KnownProtocolKind::RawRepresentable &&
           isa<EnumDecl>(decl) &&
           cast<EnumDecl>(decl)->hasRawType())
         continue;

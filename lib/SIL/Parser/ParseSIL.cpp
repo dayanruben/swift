@@ -6495,16 +6495,20 @@ bool SILParser::parseSILBasicBlock(SILBuilder &B) {
           return true;
 
         bool foundNoImplicitCopy = false;
+        bool foundClosureCapture = false;
         bool foundLexical = false;
         bool foundEagerMove = false;
-        while (auto attributeName = parseOptionalAttribute(
-                   {"noImplicitCopy", "_lexical", "_eagerMove"})) {
+        while (auto attributeName =
+                   parseOptionalAttribute({"noImplicitCopy", "_lexical",
+                                           "_eagerMove", "closureCapture"})) {
           if (*attributeName == "noImplicitCopy")
             foundNoImplicitCopy = true;
           else if (*attributeName == "_lexical")
             foundLexical = true;
           else if (*attributeName == "_eagerMove")
             foundEagerMove = true;
+          else if (*attributeName == "closureCapture")
+            foundClosureCapture = true;
           else {
             llvm_unreachable("Unexpected attribute!");
           }
@@ -6533,6 +6537,7 @@ bool SILParser::parseSILBasicBlock(SILBuilder &B) {
         if (IsEntry) {
           auto *fArg = BB->createFunctionArgument(Ty);
           fArg->setNoImplicitCopy(foundNoImplicitCopy);
+          fArg->setClosureCapture(foundClosureCapture);
           fArg->setLifetimeAnnotation(lifetime);
           Arg = fArg;
 
@@ -6739,11 +6744,11 @@ bool SILParserState::parseDeclSIL(Parser &P) {
         P.parseMatchingToken(tok::r_brace, RBraceLoc, diag::expected_sil_rbrace,
                              LBraceLoc);
 
-        // Check that there are no unresolved forward definitions of opened
+        // Check that there are no unresolved forward definitions of local
         // archetypes.
-        if (M.hasUnresolvedOpenedArchetypeDefinitions())
+        if (M.hasUnresolvedLocalArchetypeDefinitions())
           llvm_unreachable(
-              "All forward definitions of opened archetypes should be resolved");
+              "All forward definitions of local archetypes should be resolved");
       }
     }
 

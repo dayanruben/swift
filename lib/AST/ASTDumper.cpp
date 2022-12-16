@@ -2504,6 +2504,12 @@ public:
     PrintWithColorRAII(OS, ParenthesisColor) << ')';
   }
 
+  void visitPackElementExpr(PackElementExpr *E) {
+    printCommon(E, "pack_element_expr") << "\n";
+    printRec(E->getPackRefExpr());
+    PrintWithColorRAII(OS, ParenthesisColor) << ')';
+  }
+
   void visitForceTryExpr(ForceTryExpr *E) {
     printCommon(E, "force_try_expr");
     OS << '\n';
@@ -3138,6 +3144,12 @@ public:
   void visitPackExpansionTypeRepr(PackExpansionTypeRepr *T) {
     printCommon("pack_expansion") << '\n';
     printRec(T->getPatternType());
+    PrintWithColorRAII(OS, ParenthesisColor) << ')';
+  }
+
+  void visitPackReferenceTypeRepr(PackReferenceTypeRepr *T) {
+    printCommon("pack_reference");
+    printRec(T->getPackType());
     PrintWithColorRAII(OS, ParenthesisColor) << ')';
   }
 
@@ -3942,6 +3954,7 @@ namespace {
       printField("index", T->getIndex());
       if (auto decl = T->getDecl())
         printField("decl", decl->printRef());
+      printFlag(T->isParameterPack(), "pack");
       PrintWithColorRAII(OS, ParenthesisColor) << ')';
     }
 

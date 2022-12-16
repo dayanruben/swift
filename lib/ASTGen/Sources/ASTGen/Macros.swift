@@ -1,3 +1,4 @@
+import SwiftDiagnostics
 import SwiftParser
 import SwiftSyntax
 import _SwiftSyntaxMacros
@@ -94,6 +95,17 @@ extension String {
   }
 }
 
+/// Diagnostic message used for thrown errors.
+fileprivate struct ThrownErrorDiagnostic: DiagnosticMessage {
+  let message: String
+
+  var severity: DiagnosticSeverity { .error }
+
+  var diagnosticID: MessageID {
+    .init(domain: "SwiftSyntaxMacros", id: "ThrownErrorDiagnostic")
+  }
+}
+
 @_cdecl("swift_ASTGen_evaluateMacro")
 @usableFromInline
 func evaluateMacro(
@@ -148,18 +160,29 @@ func evaluateMacro(
         return ExprSyntax(parentExpansion)
       }
 
-      return exprMacro.expansion(of: parentExpansion, in: &context)
+      do {
+        return try exprMacro.expansion(of: parentExpansion, in: &context)
+      } catch {
+        // Record the error
+        context.diagnose(
+          Diagnostic(
+            node: Syntax(parentExpansion),
+            message: ThrownErrorDiagnostic(message: String(describing: error))
+          )
+        )
+
+        return ExprSyntax(parentExpansion)
+      }
     }
 
     // Emit diagnostics accumulated in the context.
+    let macroName = parentExpansion.macro.withoutTrivia().description
     for diag in context.diagnostics {
-      // FIXME: Consider tacking on a note that says that this diagnostic
-      // came from a macro expansion.
       emitDiagnostic(
         diagEnginePtr: diagEnginePtr,
         sourceFileBuffer: .init(mutating: sourceFile.pointee.buffer),
-        nodeStartOffset: parentSyntax.position.utf8Offset,
-        diagnostic: diag
+        diagnostic: diag,
+        messageSuffix: " (from macro '\(macroName)')"
       )
     }
 
