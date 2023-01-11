@@ -3480,9 +3480,11 @@ public:
   bool isCached() const { return true; }
 };
 
-class IsSemanticallyUnavailableRequest
-    : public SimpleRequest<IsSemanticallyUnavailableRequest,
-                           bool(const Decl *),
+using AvailableAttrDeclPair = std::pair<const AvailableAttr *, const Decl *>;
+
+class SemanticAvailableRangeAttrRequest
+    : public SimpleRequest<SemanticAvailableRangeAttrRequest,
+                           Optional<AvailableAttrDeclPair>(const Decl *),
                            RequestFlags::Cached> {
 public:
   using SimpleRequest::SimpleRequest;
@@ -3490,7 +3492,25 @@ public:
 private:
   friend SimpleRequest;
 
-  bool evaluate(Evaluator &evaluator, const Decl *decl) const;
+  Optional<AvailableAttrDeclPair> evaluate(Evaluator &evaluator,
+                                           const Decl *decl) const;
+
+public:
+  bool isCached() const { return true; }
+};
+
+class SemanticUnavailableAttrRequest
+    : public SimpleRequest<SemanticUnavailableAttrRequest,
+                           Optional<AvailableAttrDeclPair>(const Decl *),
+                           RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  Optional<AvailableAttrDeclPair> evaluate(Evaluator &evaluator,
+                                           const Decl *decl) const;
 
 public:
   bool isCached() const { return true; }
@@ -3745,6 +3765,23 @@ public:
   bool isCached() const { return true; }
 };
 
+/// Check whether this is a protocol that has a type wrapper attribute
+/// or one of its dependencies does.
+class UsesTypeWrapperFeature
+    : public SimpleRequest<UsesTypeWrapperFeature, bool(NominalTypeDecl *),
+                           RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  bool evaluate(Evaluator &evaluator, NominalTypeDecl *) const;
+
+public:
+  bool isCached() const { return true; }
+};
+
 /// Find the definition of a given macro.
 class MacroDefinitionRequest
     : public SimpleRequest<MacroDefinitionRequest,
@@ -3762,6 +3799,24 @@ public:
   // Source location
   SourceLoc getNearestLoc() const;
 
+  bool isCached() const { return true; }
+};
+
+/// Find the definition of a given macro.
+class ExpandMacroExpansionDeclRequest
+    : public SimpleRequest<ExpandMacroExpansionDeclRequest,
+                           ArrayRef<Decl *>(MacroExpansionDecl *),
+                           RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  ArrayRef<Decl *> evaluate(Evaluator &evaluator,
+                            MacroExpansionDecl *med) const;
+
+public:
   bool isCached() const { return true; }
 };
 

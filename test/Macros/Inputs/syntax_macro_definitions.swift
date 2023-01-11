@@ -167,3 +167,48 @@ public class RecursiveMacro: ExpressionMacro {
     return "()"
   }
 }
+
+public class NestedDeclInExprMacro: ExpressionMacro {
+  public static func expansion(
+    of macro: MacroExpansionExprSyntax, in context: inout MacroExpansionContext
+  ) -> ExprSyntax {
+    return """
+    { () -> Void in
+      struct Foo { }
+      return ()
+    }
+    """
+  }
+}
+
+enum CustomError: Error, CustomStringConvertible {
+  case message(String)
+
+  var description: String {
+    switch self {
+    case .message(let text):
+      return text
+    }
+  }
+}
+
+public struct DefineBitwidthNumberedStructsMacro: FreestandingDeclarationMacro {
+  public static func expansion(
+    of node: MacroExpansionDeclSyntax,
+    in context: inout MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    guard let firstElement = node.argumentList.first,
+          let stringLiteral = firstElement.expression.as(StringLiteralExprSyntax.self),
+          stringLiteral.segments.count == 1,
+          case let .stringSegment(prefix) = stringLiteral.segments.first else {
+      throw CustomError.message("#bitwidthNumberedStructs macro requires a string literal")
+    }
+
+    return [8, 16, 32, 64].map { bitwidth in
+      """
+
+      struct \(raw: prefix)\(raw: String(bitwidth)) { }
+      """
+    }
+  }
+}

@@ -33,6 +33,7 @@
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/DeclNameLoc.h"
 #include "swift/AST/KnownProtocols.h"
+#include "swift/AST/MacroDeclaration.h"
 #include "swift/AST/Ownership.h"
 #include "swift/AST/PlatformKind.h"
 #include "swift/AST/Requirement.h"
@@ -2302,6 +2303,40 @@ public:
   }
 };
 
+class DeclarationAttr final
+    : public DeclAttribute,
+      private llvm::TrailingObjects<DeclarationAttr, MacroIntroducedDeclName> {
+  friend TrailingObjects;
+
+  MacroContext macroContext;
+  unsigned numPeerNames, numMemberNames;
+
+  DeclarationAttr(SourceLoc atLoc, SourceRange range, MacroContext macroContext,
+                  ArrayRef<MacroIntroducedDeclName> peerNames,
+                  ArrayRef<MacroIntroducedDeclName> memberNames,
+                  bool implicit);
+
+public:
+  static DeclarationAttr *create(ASTContext &ctx, SourceLoc atLoc,
+                                 SourceRange range, MacroContext macroContext,
+                                 ArrayRef<MacroIntroducedDeclName> peerNames,
+                                 ArrayRef<MacroIntroducedDeclName> memberNames,
+                                 bool implicit);
+
+  size_t numTrailingObjects(OverloadToken<MacroIntroducedDeclName>) const {
+    return numPeerNames + numMemberNames;
+  }
+
+  MacroContext getMacroContext() const { return macroContext; }
+  ArrayRef<MacroIntroducedDeclName> getPeerAndMemberNames() const;
+  ArrayRef<MacroIntroducedDeclName> getPeerNames() const;
+  ArrayRef<MacroIntroducedDeclName> getMemberNames() const;
+
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DAK_Declaration;
+  }
+};
+
 /// Attributes that may be applied to declarations.
 class DeclAttributes {
   /// Linked list of declaration attributes.
@@ -2366,6 +2401,10 @@ public:
   /// a declaration is unavailable from asynchronous contexts, or null
   /// otherwise.
   const AvailableAttr *getNoAsync(const ASTContext &ctx) const;
+
+  /// Returns the \c @_backDeploy attribute that is active for the current
+  /// platform.
+  const BackDeployAttr *getBackDeploy(const ASTContext &ctx) const;
 
   SWIFT_DEBUG_DUMPER(dump(const Decl *D = nullptr));
   void print(ASTPrinter &Printer, const PrintOptions &Options,

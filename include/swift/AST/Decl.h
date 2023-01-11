@@ -1098,11 +1098,26 @@ public:
 
   bool isAvailableAsSPI() const;
 
-  /// Whether the declaration is considered unavailable through either being
-  /// explicitly marked as such, or has a parent decl that is semantically
-  /// unavailable. This is a broader notion of unavailability than is checked by
-  /// \c AvailableAttr::isUnavailable.
-  bool isSemanticallyUnavailable() const;
+  /// Retrieve the @available attribute that provides the OS version range that
+  /// this declaration is available in.
+  ///
+  /// This attribute may come from an enclosing decl since availability is
+  /// inherited. The second member of the returned pair is the decl that owns
+  /// the attribute.
+  Optional<std::pair<const AvailableAttr *, const Decl *>>
+  getSemanticAvailableRangeAttr() const;
+
+  /// Retrieve the @available attribute that makes this declaration unavailable,
+  /// if any.
+  ///
+  /// This attribute may come from an enclosing decl since availability is
+  /// inherited. The second member of the returned pair is the decl that owns
+  /// the attribute.
+  ///
+  /// Note that this notion of unavailability is broader than that which is
+  /// checked by \c AvailableAttr::isUnavailable.
+  Optional<std::pair<const AvailableAttr *, const Decl *>>
+  getSemanticUnavailableAttr() const;
 
   // List the SPI groups declared with @_spi or inherited by this decl.
   //
@@ -8316,17 +8331,6 @@ public:
   }
 };
 
-/// The context in which a macro can be used, which determines the syntax it
-/// uses.
-enum class MacroContext: uint8_t {
-  /// An expression macro, referenced explicitly via "#stringify" or similar
-  /// in the source code.
-  Expression = 0x01,
-};
-
-/// The contexts in which a particular macro declaration can be used.
-using MacroContexts = OptionSet<MacroContext>;
-
 /// Provides a declaration of a macro.
 ///
 /// Macros are declared within the source code with the `macro` introducer.
@@ -8399,7 +8403,10 @@ class MacroExpansionDecl : public Decl {
   SourceLoc LeftAngleLoc, RightAngleLoc;
   ArrayRef<TypeRepr *> GenericArgs;
   ArgumentList *ArgList;
-  Decl *Rewritten;
+  ArrayRef<Decl *> Rewritten;
+
+  /// The referenced macro.
+  ConcreteDeclRef macroRef;
 
 public:
   MacroExpansionDecl(DeclContext *dc, SourceLoc poundLoc, DeclNameRef macro,
@@ -8411,7 +8418,7 @@ public:
       : Decl(DeclKind::MacroExpansion, dc), PoundLoc(poundLoc),
         Macro(macro), MacroLoc(macroLoc),
         LeftAngleLoc(leftAngleLoc), RightAngleLoc(rightAngleLoc),
-        GenericArgs(genericArgs), ArgList(args), Rewritten(nullptr) {}
+        GenericArgs(genericArgs), ArgList(args), Rewritten({}) {}
 
   ArrayRef<TypeRepr *> getGenericArgs() const { return GenericArgs; }
 
@@ -8425,8 +8432,10 @@ public:
   DeclNameLoc getMacroLoc() const { return MacroLoc; }
   DeclNameRef getMacro() const { return Macro; }
   ArgumentList *getArgs() const { return ArgList; }
-  Decl *getRewritten() const { return Rewritten; }
-  void setRewritten(Decl *rewritten) { Rewritten = rewritten; }
+  ArrayRef<Decl *> getRewritten() const { return Rewritten; }
+  void setRewritten(ArrayRef<Decl *> rewritten) { Rewritten = rewritten; }
+  ConcreteDeclRef getMacroRef() const { return macroRef; }
+  void setMacroRef(ConcreteDeclRef ref) { macroRef = ref; }
 
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::MacroExpansion;

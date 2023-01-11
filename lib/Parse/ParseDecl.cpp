@@ -2132,6 +2132,40 @@ Parser::parseDocumentationAttribute(SourceLoc AtLoc, SourceLoc Loc) {
   return makeParserResult(new (Context) DocumentationAttr(Loc, range, FinalMetadata, Visibility, false));
 }
 
+ParserResult<DeclarationAttr>
+Parser::parseDeclarationAttribute(SourceLoc AtLoc, SourceLoc Loc) {
+  StringRef attrName = "declaration";
+  bool isDeclModifier = DeclAttribute::isDeclModifier(DAK_Declaration);
+  if (!consumeIf(tok::l_paren)) {
+    diagnose(Tok, diag::attr_expected_lparen, attrName, isDeclModifier);
+    return makeParserError();
+  }
+  if (Tok.isNot(tok::identifier)) {
+    diagnose(Tok, diag::declaration_attr_expected_kind);
+    errorAndSkipUntilConsumeRightParen(*this, attrName);
+    return makeParserError();
+  }
+  auto kind = llvm::StringSwitch<Optional<MacroContext>>(Tok.getText())
+      .Case("freestanding", MacroContext::FreestandingDeclaration)
+      .Case("attached", MacroContext::AttachedDeclaration)
+      .Default(None);
+  if (!kind) {
+    diagnose(Tok, diag::declaration_attr_expected_kind);
+    errorAndSkipUntilConsumeRightParen(*this, attrName);
+    return makeParserError();
+  }
+  consumeToken(tok::identifier);
+  // TODO: Parse peer and member names.
+  SourceLoc rParenLoc;
+  if (!consumeIf(tok::r_paren, rParenLoc)) {
+    diagnose(Tok, diag::attr_expected_rparen, attrName, isDeclModifier);
+    return makeParserError();
+  }
+  SourceRange range(Loc, rParenLoc);
+  return makeParserResult(DeclarationAttr::create(
+      Context, AtLoc, range, *kind, {}, {}, /*isImplicit*/ false));
+}
+
 /// Guts of \c parseSingleAttrOption and \c parseSingleAttrOptionIdentifier.
 ///
 /// \param P The parser object.
@@ -3116,6 +3150,14 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
   }
   case DAK_Documentation: {
     auto Attr = parseDocumentationAttribute(AtLoc, Loc);
+    if (Attr.isNonNull())
+      Attributes.add(Attr.get());
+    else
+      return false;
+    break;
+  }
+  case DAK_Declaration: {
+    auto Attr = parseDeclarationAttribute(AtLoc, Loc);
     if (Attr.isNonNull())
       Attributes.add(Attr.get());
     else
@@ -4948,13 +4990,13 @@ Parser::parseDecl(ParseDeclOptions Flags,
 
     if (CurDeclContext) {
       if (auto nominal = dyn_cast<NominalTypeDecl>(CurDeclContext)) {
-        diagnose(nominal->getLoc(), diag::note_in_decl_extension, false,
+        diagnose(nominal->getLoc(), diag::note_in_decl_of,
                  nominal->createNameRef());
       } else if (auto extension = dyn_cast<ExtensionDecl>(CurDeclContext)) {
         if (auto repr = extension->getExtendedTypeRepr()) {
-          if (auto idRepr = dyn_cast<IdentTypeRepr>(repr)) {
-            diagnose(extension->getLoc(), diag::note_in_decl_extension, true,
-                     idRepr->getComponentRange().front()->getNameRef());
+          if (auto declRefTR = dyn_cast<DeclRefTypeRepr>(repr)) {
+            diagnose(extension->getLoc(), diag::note_in_extension_of,
+                     declRefTR);
           }
         }
       }

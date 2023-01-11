@@ -428,8 +428,9 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   bool visitMacroExpansionDecl(MacroExpansionDecl *MED) {
     if (MED->getArgs() && doIt(MED->getArgs()))
       return true;
-    if (MED->getRewritten() && doIt(MED->getRewritten()))
-      return true;
+    for (auto *decl : MED->getRewritten())
+      if (doIt(decl))
+        return true;
     return false;
   }
 
@@ -1972,8 +1973,11 @@ bool Traversal::visitGenericIdentTypeRepr(GenericIdentTypeRepr *T) {
   return false;
 }
 
-bool Traversal::visitCompoundIdentTypeRepr(CompoundIdentTypeRepr *T) {
-  for (auto comp : T->getComponents()) {
+bool Traversal::visitMemberTypeRepr(MemberTypeRepr *T) {
+  if (doIt(T->getBaseComponent()))
+    return true;
+
+  for (auto comp : T->getMemberComponents()) {
     if (doIt(comp))
       return true;
   }
@@ -1999,6 +2003,11 @@ bool Traversal::visitOptionalTypeRepr(OptionalTypeRepr *T) {
 bool Traversal::visitImplicitlyUnwrappedOptionalTypeRepr(ImplicitlyUnwrappedOptionalTypeRepr *T) {
   return doIt(T->getBase());
 }
+
+bool Traversal::visitVarargTypeRepr(VarargTypeRepr *T) {
+  return doIt(T->getElementType());
+}
+
 bool Traversal::visitPackExpansionTypeRepr(PackExpansionTypeRepr *T) {
   return doIt(T->getPatternType());
 }

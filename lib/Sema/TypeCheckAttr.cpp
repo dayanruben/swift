@@ -160,6 +160,7 @@ public:
   IGNORED_ATTR(BackDeploy)
   IGNORED_ATTR(Documentation)
   IGNORED_ATTR(Expression)
+  IGNORED_ATTR(Declaration)
 #undef IGNORED_ATTR
 
   void visitAlignmentAttr(AlignmentAttr *attr) {
@@ -1882,51 +1883,48 @@ void AttributeChecker::visitAvailableAttr(AvailableAttr *attr) {
   // is fully contained within that declaration's range. If there is no such
   // enclosing declaration, then there is nothing to check.
   Optional<AvailabilityContext> EnclosingAnnotatedRange;
-  bool EnclosingDeclIsUnavailable = false;
-  Decl *EnclosingDecl = getEnclosingDeclForDecl(D);
-
-  while (EnclosingDecl) {
-    if (EnclosingDecl->getAttrs().getUnavailable(Ctx)) {
-      EnclosingDeclIsUnavailable = true;
-      break;
-    }
-
-    EnclosingAnnotatedRange =
-        AvailabilityInference::annotatedAvailableRange(EnclosingDecl, Ctx);
-
-    if (EnclosingAnnotatedRange.has_value())
-      break;
-
-    EnclosingDecl = getEnclosingDeclForDecl(EnclosingDecl);
-  }
-
   AvailabilityContext AttrRange{
       VersionRange::allGTE(attr->Introduced.value())};
 
-  if (EnclosingDecl) {
-    if (EnclosingDeclIsUnavailable) {
+  if (auto *parent = getEnclosingDeclForDecl(D)) {
+    if (auto enclosingUnavailable = parent->getSemanticUnavailableAttr()) {
       if (!AttrRange.isKnownUnreachable()) {
-        diagnose(D->isImplicit() ? EnclosingDecl->getLoc()
+        const Decl *enclosingDecl = enclosingUnavailable.value().second;
+        diagnose(D->isImplicit() ? enclosingDecl->getLoc()
                                  : attr->getLocation(),
                  diag::availability_decl_more_than_unavailable_enclosing,
                  D->getDescriptiveKind());
-        diagnose(EnclosingDecl->getLoc(),
+        diagnose(parent->getLoc(),
                  diag::availability_decl_more_than_unavailable_enclosing_here);
       }
-    } else if (!AttrRange.isContainedIn(EnclosingAnnotatedRange.value())) {
-      diagnose(D->isImplicit() ? EnclosingDecl->getLoc() : attr->getLocation(),
-               diag::availability_decl_more_than_enclosing,
-               D->getDescriptiveKind());
-      if (D->isImplicit())
-        diagnose(EnclosingDecl->getLoc(),
-                 diag::availability_implicit_decl_here,
-                 D->getDescriptiveKind(),
+    } else if (auto enclosingAvailable =
+                   parent->getSemanticAvailableRangeAttr()) {
+      const AvailableAttr *enclosingAttr = enclosingAvailable.value().first;
+      const Decl *enclosingDecl = enclosingAvailable.value().second;
+      EnclosingAnnotatedRange.emplace(
+          VersionRange::allGTE(enclosingAttr->Introduced.value()));
+      if (!AttrRange.isContainedIn(*EnclosingAnnotatedRange)) {
+        // Members of extensions of nominal types with available ranges were
+        // not diagnosed previously, so only emit a warning in that case.
+        auto limit = (enclosingDecl != parent && isa<ExtensionDecl>(parent))
+                         ? DiagnosticBehavior::Warning
+                         : DiagnosticBehavior::Unspecified;
+        diagnose(D->isImplicit() ? enclosingDecl->getLoc()
+                                 : attr->getLocation(),
+                 diag::availability_decl_more_than_enclosing,
+                 D->getDescriptiveKind())
+            .limitBehavior(limit);
+        if (D->isImplicit())
+          diagnose(enclosingDecl->getLoc(),
+                   diag::availability_implicit_decl_here,
+                   D->getDescriptiveKind(),
+                   prettyPlatformString(targetPlatform(Ctx.LangOpts)),
+                   AttrRange.getOSVersion().getLowerEndpoint());
+        diagnose(enclosingDecl->getLoc(),
+                 diag::availability_decl_more_than_enclosing_here,
                  prettyPlatformString(targetPlatform(Ctx.LangOpts)),
-                 AttrRange.getOSVersion().getLowerEndpoint());
-      diagnose(EnclosingDecl->getLoc(),
-               diag::availability_decl_more_than_enclosing_here,
-               prettyPlatformString(targetPlatform(Ctx.LangOpts)),
-               EnclosingAnnotatedRange->getOSVersion().getLowerEndpoint());
+                 EnclosingAnnotatedRange->getOSVersion().getLowerEndpoint());
+      }
     }
   }
 
@@ -4520,6 +4518,8 @@ void AttributeChecker::checkBackDeployAttrs(ArrayRef<BackDeployAttr *> Attrs) {
   auto *VD = cast<ValueDecl>(D);
   std::map<PlatformKind, SourceLoc> seenPlatforms;
 
+  auto *ActiveAttr = D->getAttrs().getBackDeploy(Ctx);
+
   for (auto *Attr : Attrs) {
     // Back deployment only makes sense for public declarations.
     if (diagnoseAndRemoveAttrIfDeclIsNonPublic(Attr, /*isError=*/true))
@@ -4559,18 +4559,47 @@ void AttributeChecker::checkBackDeployAttrs(ArrayRef<BackDeployAttr *> Attrs) {
       continue;
     }
 
-    // Require explicit availability for back deployed decls.
-    if (diagnoseMissingAvailability(Attr, Platform))
+    if (Ctx.LangOpts.DisableAvailabilityChecking)
       continue;
+
+    // Availability conflicts can only be diagnosed for attributes that apply
+    // to the active platform.
+    if (Attr != ActiveAttr)
+      continue;
+
+    // Unavailable decls cannot be back deployed.
+    if (auto unavailableAttrPair = VD->getSemanticUnavailableAttr()) {
+      auto unavailableAttr = unavailableAttrPair.value().first;
+      DeclName name;
+      unsigned accessorKind;
+      std::tie(accessorKind, name) = getAccessorKindAndNameForDiagnostics(VD);
+      diagnose(AtLoc, diag::attr_has_no_effect_on_unavailable_decl, Attr,
+               accessorKind, name, prettyPlatformString(Platform));
+      diagnose(unavailableAttr->AtLoc, diag::availability_marked_unavailable,
+               accessorKind, name)
+          .highlight(unavailableAttr->getRange());
+      continue;
+    }
 
     // Verify that the decl is available before the back deployment boundary.
     // If it's not, the attribute doesn't make sense since the back deployment
     // fallback could never be executed at runtime.
-    auto IntroVer = D->getIntroducedOSVersion(Platform);
-    if (Attr->Version <= IntroVer.value()) {
-      diagnose(AtLoc, diag::attr_has_no_effect_decl_not_available_before, Attr,
-               VD->getName(), prettyPlatformString(Platform), Attr->Version);
-      continue;
+    if (auto availableRangeAttrPair = VD->getSemanticAvailableRangeAttr()) {
+      auto availableAttr = availableRangeAttrPair.value().first;
+      if (Attr->Version <= availableAttr->Introduced.value()) {
+        DeclName name;
+        unsigned accessorKind;
+        std::tie(accessorKind, name) = getAccessorKindAndNameForDiagnostics(VD);
+        diagnose(AtLoc, diag::attr_has_no_effect_decl_not_available_before,
+                 Attr, accessorKind, name, prettyPlatformString(Platform),
+                 Attr->Version);
+        diagnose(availableAttr->AtLoc, diag::availability_introduced_in_version,
+                 accessorKind, name,
+                 prettyPlatformString(availableAttr->Platform),
+                 *availableAttr->Introduced)
+            .highlight(availableAttr->getRange());
+        continue;
+      }
     }
   }
 }

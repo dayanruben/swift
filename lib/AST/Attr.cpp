@@ -398,6 +398,29 @@ const AvailableAttr *DeclAttributes::getNoAsync(const ASTContext &ctx) const {
   return bestAttr;
 }
 
+const BackDeployAttr *
+DeclAttributes::getBackDeploy(const ASTContext &ctx) const {
+  const BackDeployAttr *bestAttr = nullptr;
+
+  for (auto attr : *this) {
+    auto *backDeployAttr = dyn_cast<BackDeployAttr>(attr);
+    if (!backDeployAttr)
+      continue;
+
+    if (backDeployAttr->isInvalid() || !backDeployAttr->isActivePlatform(ctx))
+      continue;
+
+    // We have an attribute that is active for the platform, but
+    // is it more specific than our current best?
+    if (!bestAttr || inheritsAvailabilityFromPlatform(backDeployAttr->Platform,
+                                                      bestAttr->Platform)) {
+      bestAttr = backDeployAttr;
+    }
+  }
+
+  return bestAttr;
+}
+
 void DeclAttributes::dump(const Decl *D) const {
   StreamPrinter P(llvm::errs());
   PrintOptions PO = PrintOptions::printDeclarations();
@@ -1460,6 +1483,8 @@ StringRef DeclAttribute::getAttrName() const {
     return "_expose";
   case DAK_Documentation:
     return "_documentation";
+  case DAK_Declaration:
+    return "declaration";
   }
   llvm_unreachable("bad DeclAttrKind");
 }
@@ -2283,6 +2308,52 @@ bool CustomAttr::isArgUnsafe() const {
   }
 
   return isArgUnsafeBit;
+}
+
+DeclarationAttr::DeclarationAttr(SourceLoc atLoc, SourceRange range,
+                                 MacroContext macroContext,
+                                 ArrayRef<MacroIntroducedDeclName> peerNames,
+                                 ArrayRef<MacroIntroducedDeclName> memberNames,
+                                 bool implicit)
+    : DeclAttribute(DAK_Declaration, atLoc, range, implicit),
+      macroContext(macroContext), numPeerNames(peerNames.size()),
+      numMemberNames(memberNames.size()) {
+  auto *trailingNamesBuffer = getTrailingObjects<MacroIntroducedDeclName>();
+  std::uninitialized_copy(peerNames.begin(), peerNames.end(),
+                          trailingNamesBuffer);
+  std::uninitialized_copy(memberNames.begin(), memberNames.end(),
+                          trailingNamesBuffer + peerNames.size());
+}
+
+DeclarationAttr *
+DeclarationAttr::create(ASTContext &ctx, SourceLoc atLoc, SourceRange range,
+                        MacroContext macroContext,
+                        ArrayRef<MacroIntroducedDeclName> peerNames,
+                        ArrayRef<MacroIntroducedDeclName> memberNames,
+                        bool implicit) {
+  unsigned size = totalSizeToAlloc<MacroIntroducedDeclName>(
+      peerNames.size() + memberNames.size());
+  auto *mem = ctx.Allocate(size, alignof(DeclarationAttr));
+  return new (mem) DeclarationAttr(atLoc, range, macroContext, peerNames,
+                                   memberNames, implicit);
+}
+
+ArrayRef<MacroIntroducedDeclName> DeclarationAttr::getPeerAndMemberNames() const {
+  return {
+    getTrailingObjects<MacroIntroducedDeclName>(),
+    numPeerNames + numMemberNames
+  };
+}
+
+ArrayRef<MacroIntroducedDeclName> DeclarationAttr::getPeerNames() const {
+  return {getTrailingObjects<MacroIntroducedDeclName>(), numPeerNames};
+}
+
+ArrayRef<MacroIntroducedDeclName> DeclarationAttr::getMemberNames() const {
+  return {
+    getTrailingObjects<MacroIntroducedDeclName>() + numPeerNames,
+    numMemberNames
+  };
 }
 
 const DeclAttribute *

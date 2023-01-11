@@ -23,6 +23,7 @@
 #include "TypeCheckAvailability.h"
 #include "TypeCheckConcurrency.h"
 #include "TypeCheckDecl.h"
+#include "TypeCheckMacros.h"
 #include "TypeCheckObjC.h"
 #include "TypeCheckType.h"
 #include "TypeChecker.h"
@@ -39,6 +40,7 @@
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Initializer.h"
+#include "swift/AST/MacroDefinition.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/PrettyStackTrace.h"
@@ -2004,10 +2006,44 @@ public:
       MD->diagnose(diag::macro_in_nested, MD->getName());
     if (!MD->getMacroContexts())
       MD->diagnose(diag::macro_without_context, MD->getName());
+
+    // Check the macro definition.
+    switch (auto macroDef = MD->getDefinition()) {
+    case MacroDefinition::Kind::Undefined:
+      MD->diagnose(diag::macro_must_be_defined, MD->getName());
+      break;
+
+    case MacroDefinition::Kind::Invalid:
+    case MacroDefinition::Kind::Builtin:
+      // Nothing else to check here.
+      break;
+
+    case MacroDefinition::Kind::External: {
+        // Retrieve the external definition of the macro.
+      auto external = macroDef.getExternalMacro();
+      ExternalMacroDefinitionRequest request{
+        &Ctx, external.moduleName, external.macroTypeName
+      };
+      auto externalDef = evaluateOrDefault(
+          Ctx.evaluator, request, ExternalMacroDefinition()
+                                           );
+      if (!externalDef.opaqueHandle) {
+        MD->diagnose(
+            diag::external_macro_not_found,
+            external.moduleName.str(),
+            external.macroTypeName.str(),
+            MD->getName()
+        ).limitBehavior(DiagnosticBehavior::Warning);
+      }
+
+      break;
+    }
+    }
   }
 
   void visitMacroExpansionDecl(MacroExpansionDecl *MED) {
-    llvm_unreachable("FIXME: macro expansion decl not handled in DeclChecker");
+    (void)evaluateOrDefault(
+        Ctx.evaluator, ExpandMacroExpansionDeclRequest{MED}, {});
   }
 
   void visitBoundVariable(VarDecl *VD) {
@@ -3621,4 +3657,104 @@ void TypeChecker::checkParameterList(ParameterList *params,
     // Check for duplicate parameter names.
     diagnoseDuplicateDecls(*params);
   }
+}
+
+ArrayRef<Decl *>
+ExpandMacroExpansionDeclRequest::evaluate(Evaluator &evaluator,
+                                          MacroExpansionDecl *MED) const {
+  auto &ctx = MED->getASTContext();
+  auto *dc = MED->getDeclContext();
+  auto foundMacros = TypeChecker::lookupMacros(
+      MED->getDeclContext(), MED->getMacro(),
+      MED->getLoc(), MacroContext::FreestandingDeclaration);
+  if (foundMacros.empty()) {
+    MED->diagnose(diag::macro_undefined, MED->getMacro().getBaseIdentifier())
+        .highlight(MED->getMacroLoc().getSourceRange());
+    return {};
+  }
+  // Resolve macro candidates.
+  MacroDecl *macro;
+  // Non-call declaration macros cannot be overloaded.
+  auto *args = MED->getArgs();
+  if (!args) {
+    if (foundMacros.size() > 1) {
+      MED->diagnose(diag::ambiguous_decl_ref, MED->getMacro())
+          .highlight(MED->getMacroLoc().getSourceRange());
+      for (auto *candidate : foundMacros)
+        candidate->diagnose(diag::found_candidate);
+      return {};
+    }
+    macro = foundMacros.front();
+  }
+    // Call-like macros need to be resolved.
+  else {
+    using namespace constraints;
+    ConstraintSystem cs(dc, ConstraintSystemOptions());
+    // Type-check macro arguments.
+    for (auto *arg : args->getArgExprs())
+      cs.setType(arg, TypeChecker::typeCheckExpression(arg, dc));
+    auto choices = map<SmallVector<OverloadChoice, 1>>(
+        foundMacros,
+        [](MacroDecl *md) {
+          return OverloadChoice(Type(), md, FunctionRefKind::SingleApply);
+        });
+    auto locator = cs.getConstraintLocator(MED);
+    auto macroRefType = Type(cs.createTypeVariable(locator, 0));
+    cs.addOverloadSet(macroRefType, choices, dc, locator);
+    if (MED->getGenericArgsRange().isValid()) {
+      // FIXME: Deal with generic args.
+      MED->diagnose(diag::macro_unsupported);
+      return {};
+    }
+    auto getMatchingParams = [&](
+        ArgumentList *argList,
+        SmallVectorImpl<AnyFunctionType::Param> &result) {
+      for (auto arg : *argList) {
+        ParameterTypeFlags flags;
+        auto ty = cs.getType(arg.getExpr()); if (arg.isInOut()) {
+          ty = ty->getInOutObjectType();
+          flags = flags.withInOut(true);
+        }
+        if (arg.isConst()) {
+          flags = flags.withCompileTimeConst(true);
+        }
+        result.emplace_back(ty, arg.getLabel(), flags);
+      }
+    };
+    SmallVector<AnyFunctionType::Param, 8> params;
+    getMatchingParams(args, params);
+    cs.associateArgumentList(locator, args);
+    cs.addConstraint(
+        ConstraintKind::ApplicableFunction,
+        FunctionType::get(params, ctx.getVoidType()),
+        macroRefType,
+        cs.getConstraintLocator(MED, ConstraintLocator::ApplyFunction));
+    // Solve.
+    auto solution = cs.solveSingle();
+    if (!solution) {
+      MED->diagnose(diag::no_overloads_match_exactly_in_call,
+                    /*reference|call*/false, DescriptiveDeclKind::Macro,
+                    false, MED->getMacro().getBaseName())
+          .highlight(MED->getMacroLoc().getSourceRange());
+      for (auto *candidate : foundMacros)
+        candidate->diagnose(diag::found_candidate);
+      return {};
+    }
+    auto choice = solution->getOverloadChoice(locator).choice;
+    macro = cast<MacroDecl>(choice.getDecl());
+  }
+  MED->setMacroRef(macro);
+
+  // Expand the macro.
+  SmallVector<Decl *, 2> expandedTemporary;
+  if (!expandFreestandingDeclarationMacro(MED, expandedTemporary))
+    return {};
+  auto expanded = ctx.AllocateCopy(expandedTemporary);
+  // FIXME: Handle this in name lookup instead of `addMember`.
+  // MED->setRewritten(expanded);
+  if (auto *parentDecl = MED->getDeclContext()->getAsDecl())
+    if (auto *idc = dyn_cast<IterableDeclContext>(parentDecl))
+      for (auto *decl : expanded)
+        idc->addMember(decl);
+  return expanded;
 }
