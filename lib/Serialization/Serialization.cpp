@@ -1824,6 +1824,9 @@ static bool shouldSerializeMember(Decl *D) {
       return false;
     llvm_unreachable("decl should never be a member");
 
+  case DeclKind::Missing:
+    llvm_unreachable("attempting to serialize a missing decl");
+
   case DeclKind::MissingMember:
     if (D->getASTContext().LangOpts.AllowModuleWithCompilerErrors)
       return false;
@@ -2212,14 +2215,15 @@ getStableSelfAccessKind(swift::SelfAccessKind MM) {
   llvm_unreachable("Unhandled StaticSpellingKind in switch.");
 }
 
-static uint8_t getRawStableMacroContext(swift::MacroContext context) {
+static uint8_t getRawStableMacroRole(swift::MacroRole context) {
   switch (context) {
 #define CASE(NAME) \
-  case swift::MacroContext::NAME: \
-    return static_cast<uint8_t>(serialization::MacroContext::NAME);
+  case swift::MacroRole::NAME: \
+    return static_cast<uint8_t>(serialization::MacroRole::NAME);
   CASE(Expression)
   CASE(FreestandingDeclaration)
-  CASE(AttachedDeclaration)
+  CASE(Accessor)
+  CASE(MemberAttribute)
   }
 #undef CASE
   llvm_unreachable("bad result declaration macro kind");
@@ -2233,7 +2237,6 @@ static uint8_t getRawStableMacroIntroducedDeclNameKind(
     return static_cast<uint8_t>(serialization::MacroIntroducedDeclNameKind::NAME);
     CASE(Named)
     CASE(Overloaded)
-    CASE(Accessors)
     CASE(Prefixed)
     CASE(Suffixed)
     CASE(Arbitrary)
@@ -2852,6 +2855,11 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
     case DAK_Custom: {
       auto abbrCode = S.DeclTypeAbbrCodes[CustomDeclAttrLayout::Code];
       auto theAttr = cast<CustomAttr>(DA);
+
+      // Macro attributes are not serialized.
+      if (theAttr->isAttachedMacro(D))
+        return;
+
       auto typeID = S.addTypeRef(theAttr->getType());
       if (!typeID && !S.allowCompilerErrors()) {
         llvm::PrettyStackTraceString message("CustomAttr has no type");
@@ -2980,8 +2988,8 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
     case DAK_Declaration: {
       auto *theAttr = cast<DeclarationAttr>(DA);
       auto abbrCode = S.DeclTypeAbbrCodes[DeclarationDeclAttrLayout::Code];
-      auto rawMacroContext =
-          getRawStableMacroContext(theAttr->getMacroContext());
+      auto rawMacroRole =
+          getRawStableMacroRole(theAttr->getMacroRole());
       SmallVector<IdentifierID, 4> introducedDeclNames;
       for (auto name : theAttr->getPeerAndMemberNames()) {
         introducedDeclNames.push_back(IdentifierID(
@@ -2992,8 +3000,28 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
 
       DeclarationDeclAttrLayout::emitRecord(
           S.Out, S.ScratchRecord, abbrCode, theAttr->isImplicit(),
-          rawMacroContext, theAttr->getPeerNames().size(),
+          rawMacroRole, theAttr->getPeerNames().size(),
           theAttr->getMemberNames().size(), introducedDeclNames);
+      return;
+    }
+
+    case DAK_Attached: {
+      auto *theAttr = cast<AttachedAttr>(DA);
+      auto abbrCode = S.DeclTypeAbbrCodes[AttachedDeclAttrLayout::Code];
+      auto rawMacroRole =
+          getRawStableMacroRole(theAttr->getMacroRole());
+      SmallVector<IdentifierID, 4> introducedDeclNames;
+      for (auto name : theAttr->getNames()) {
+        introducedDeclNames.push_back(IdentifierID(
+            getRawStableMacroIntroducedDeclNameKind(name.getKind())));
+        introducedDeclNames.push_back(
+            S.addDeclBaseNameRef(name.getIdentifier()));
+      }
+
+      AttachedDeclAttrLayout::emitRecord(
+          S.Out, S.ScratchRecord, abbrCode, theAttr->isImplicit(),
+          rawMacroRole, theAttr->getNames().size(),
+          introducedDeclNames);
       return;
     }
     }
@@ -3345,15 +3373,27 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
   ///
   /// This should be kept conservative. Compiler crashes are still better than
   /// miscompiles.
-  static bool overriddenDeclAffectsABI(const ValueDecl *overridden) {
+  static bool overriddenDeclAffectsABI(const ValueDecl *override,
+                                       const ValueDecl *overridden) {
     if (!overridden)
       return false;
-    // There's one case where we know a declaration doesn't affect the ABI of
+    // There's a few cases where we know a declaration doesn't affect the ABI of
     // its overrides after they've been compiled: if the declaration is '@objc'
     // and 'dynamic'. In that case, all accesses to the method or property will
     // go through the Objective-C method tables anyway.
     if (overridden->hasClangNode() || overridden->shouldUseObjCDispatch())
       return false;
+
+    // In a public-override-internal case, the override doesn't have ABI
+    // implications.
+    auto isPublic = [](const ValueDecl *VD) {
+      return VD->getFormalAccessScope(VD->getDeclContext(),
+                                      /*treatUsableFromInlineAsPublic*/true)
+               .isPublic();
+    };
+    if (isPublic(override) && !isPublic(overridden))
+      return false;
+
     return true;
   }
 
@@ -4044,7 +4084,7 @@ public:
                            fn->isImplicitlyUnwrappedOptional(),
                            S.addDeclRef(fn->getOperatorDecl()),
                            S.addDeclRef(fn->getOverriddenDecl()),
-                           overriddenDeclAffectsABI(fn->getOverriddenDecl()),
+                           overriddenDeclAffectsABI(fn, fn->getOverriddenDecl()),
                            fn->getName().getArgumentNames().size() +
                              fn->getName().isCompoundName(),
                            rawAccessLevel,
@@ -4136,7 +4176,7 @@ public:
       uint8_t(getStableAccessorKind(fn->getAccessorKind()));
 
     bool overriddenAffectsABI =
-        overriddenDeclAffectsABI(fn->getOverriddenDecl());
+        overriddenDeclAffectsABI(fn, fn->getOverriddenDecl());
 
     Type ty = fn->getInterfaceType();
     SmallVector<IdentifierID, 4> dependencies;
@@ -4444,6 +4484,10 @@ public:
 
   void visitModuleDecl(const ModuleDecl *) {
     llvm_unreachable("module decls are not serialized");
+  }
+
+  void visitMissingDecl(const MissingDecl *) {
+    llvm_unreachable("missing decls are not serialized");
   }
 
   void visitMissingMemberDecl(const MissingMemberDecl *) {

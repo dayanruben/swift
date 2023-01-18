@@ -36,7 +36,7 @@ public struct FileIDMacro: ExpressionMacro {
   public static func expansion(
     of macro: MacroExpansionExprSyntax, in context: inout MacroExpansionContext
   ) -> ExprSyntax {
-    let fileLiteral: ExprSyntax = #""\#(context.moduleName)/\#(context.fileName)""#
+    let fileLiteral: ExprSyntax = #""\#(raw: context.moduleName)/\#(raw: context.fileName)""#
     if let leadingTrivia = macro.leadingTrivia {
       return fileLiteral.withLeadingTrivia(leadingTrivia)
     }
@@ -82,9 +82,9 @@ public enum AddBlocker: ExpressionMacro {
     }
 
     // Link the folded argument back into the tree.
-    var node = node.withArgumentList(node.argumentList.replacing(childAt: 0, with: node.argumentList.first!.withExpression(foldedArgument.as(ExprSyntax.self)!)))
+    let node = node.withArgumentList(node.argumentList.replacing(childAt: 0, with: node.argumentList.first!.withExpression(foldedArgument.as(ExprSyntax.self)!)))
 
-   class AddVisitor: SyntaxRewriter {
+    class AddVisitor: SyntaxRewriter {
       var diagnostics: [Diagnostic] = []
 
       override func visit(
@@ -117,7 +117,7 @@ public enum AddBlocker: ExpressionMacro {
                         oldNode: Syntax(binOp.operatorToken.withoutTrivia()),
                         newNode: Syntax(
                           TokenSyntax(
-                            .spacedBinaryOperator("-"),
+                            .binaryOperator("-"),
                             presence: .present
                           )
                         )
@@ -132,7 +132,7 @@ public enum AddBlocker: ExpressionMacro {
               node.withOperatorOperand(
                 ExprSyntax(
                   binOp.withOperatorToken(
-                    binOp.operatorToken.withKind(.spacedBinaryOperator("-"))
+                    binOp.operatorToken.withKind(.binaryOperator("-"))
                   )
                 )
               )
@@ -210,5 +210,120 @@ public struct DefineBitwidthNumberedStructsMacro: FreestandingDeclarationMacro {
       struct \(raw: prefix)\(raw: String(bitwidth)) { }
       """
     }
+  }
+}
+
+public struct PropertyWrapperMacro {}
+
+extension PropertyWrapperMacro: AccessorDeclarationMacro, Macro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    attachedTo declaration: DeclSyntax,
+    in context: inout MacroExpansionContext
+  ) throws -> [AccessorDeclSyntax] {
+    guard let varDecl = declaration.as(VariableDeclSyntax.self),
+      let binding = varDecl.bindings.first,
+      let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier,
+      binding.accessor == nil
+    else {
+      return []
+    }
+
+    return [
+      """
+
+        get {
+          _\(identifier).wrappedValue
+        }
+      """,
+      """
+
+        set {
+          _\(identifier).wrappedValue = newValue
+        }
+      """,
+    ]
+  }
+}
+
+public struct WrapAllProperties: MemberAttributeMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    attachedTo parent: DeclSyntax,
+    annotating member: DeclSyntax,
+    in context: inout MacroExpansionContext
+  ) throws -> [AttributeSyntax] {
+    guard member.is(VariableDeclSyntax.self) else {
+      return []
+    }
+
+    let wrapperTypeName: String
+    if parent.is(ClassDeclSyntax.self) {
+      wrapperTypeName = "EnclosingSelfWrapper"
+    } else {
+      wrapperTypeName = "Wrapper"
+    }
+
+    let propertyWrapperAttr = AttributeSyntax(
+      attributeName: SimpleTypeIdentifierSyntax(
+        name: .identifier(wrapperTypeName)
+      )
+    )
+
+    return [propertyWrapperAttr]
+  }
+}
+
+public struct TypeWrapperMacro: MemberAttributeMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    attachedTo decl: DeclSyntax,
+    annotating member: DeclSyntax,
+    in context: inout MacroExpansionContext
+  ) throws -> [AttributeSyntax] {
+    guard let varDecl = member.as(VariableDeclSyntax.self),
+      let binding = varDecl.bindings.first,
+      let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier,
+      binding.accessor == nil
+    else {
+      return []
+    }
+
+    if identifier.text == "_storage" {
+      return []
+    }
+
+    let customAttr = AttributeSyntax(
+      attributeName: SimpleTypeIdentifierSyntax(
+        name: .identifier("accessViaStorage")
+      )
+    )
+
+    return [customAttr]
+  }
+}
+
+public struct AccessViaStorageMacro: AccessorDeclarationMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    attachedTo declaration: DeclSyntax,
+    in context: inout MacroExpansionContext
+  ) throws -> [AccessorDeclSyntax] {
+    guard let varDecl = declaration.as(VariableDeclSyntax.self),
+      let binding = varDecl.bindings.first,
+      let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier,
+      binding.accessor == nil
+    else {
+      return []
+    }
+
+    if identifier.text == "_storage" {
+      return []
+    }
+
+    return [
+      "get { _storage.\(identifier) }",
+      "set { _storage.\(identifier) = newValue }",
+    ]
   }
 }

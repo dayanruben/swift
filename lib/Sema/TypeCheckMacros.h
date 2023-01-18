@@ -16,12 +16,15 @@
 #ifndef SWIFT_SEMA_TYPECHECKMACROS_H
 #define SWIFT_SEMA_TYPECHECKMACROS_H
 
+#include "swift/AST/Attr.h"
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/Type.h"
 
 namespace swift {
 
+class CustomAttr;
 class Expr;
+class MacroDecl;
 class MacroExpansionDecl;
 class TypeRepr;
 
@@ -39,6 +42,16 @@ Expr *expandMacroExpr(
 /// \returns true if expansion succeeded, false if failed.
 bool expandFreestandingDeclarationMacro(
     MacroExpansionDecl *med, SmallVectorImpl<Decl *> &results);
+
+/// Expand the accessors for the given storage declaration based on the
+/// custom attribute that references the given macro.
+void expandAccessors(
+    AbstractStorageDecl *storage, CustomAttr *attr, MacroDecl *macro
+);
+
+/// Expand the attributes for the given member declaration based
+/// on the custom attribute that references the given macro.
+bool expandAttributes(CustomAttr *attr, MacroDecl *macro, Decl *member);
 
 } // end namespace swift
 

@@ -1992,6 +1992,13 @@ public:
     checkAccessControl(PGD);
   }
 
+  void visitMissingDecl(MissingDecl *missing) {
+    // FIXME: Expanded attribute lists should be type checked against
+    // the real declaration they will be attached to. Attempting to
+    // type check a missing decl should produce an error.
+    TypeChecker::checkDeclAttributes(missing);
+  }
+
   void visitMissingMemberDecl(MissingMemberDecl *MMD) {
     llvm_unreachable("should always be type-checked already");
   }
@@ -2004,7 +2011,7 @@ public:
       MD->diagnose(diag::macro_experimental);
     if (!MD->getDeclContext()->isModuleScopeContext())
       MD->diagnose(diag::macro_in_nested, MD->getName());
-    if (!MD->getMacroContexts())
+    if (!MD->getMacroRoles())
       MD->diagnose(diag::macro_without_context, MD->getName());
 
     // Check the macro definition.
@@ -3666,7 +3673,7 @@ ExpandMacroExpansionDeclRequest::evaluate(Evaluator &evaluator,
   auto *dc = MED->getDeclContext();
   auto foundMacros = TypeChecker::lookupMacros(
       MED->getDeclContext(), MED->getMacro(),
-      MED->getLoc(), MacroContext::FreestandingDeclaration);
+      MED->getLoc(), MacroRole::FreestandingDeclaration);
   if (foundMacros.empty()) {
     MED->diagnose(diag::macro_undefined, MED->getMacro().getBaseIdentifier())
         .highlight(MED->getMacroLoc().getSourceRange());
