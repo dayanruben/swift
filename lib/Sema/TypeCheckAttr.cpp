@@ -1863,6 +1863,11 @@ void AttributeChecker::visitAvailableAttr(AvailableAttr *attr) {
 
   }
 
+  // Skip the remaining diagnostics in swiftinterfaces.
+  auto *SF = D->getDeclContext()->getParentSourceFile();
+  if (SF && SF->Kind == SourceFileKind::Interface)
+    return;
+
   if (!attr->hasPlatform() || !attr->isActivePlatform(Ctx) ||
       !attr->Introduced.has_value()) {
     return;
@@ -2096,8 +2101,14 @@ void AttributeChecker::visitMoveOnlyAttr(MoveOnlyAttr *attr) {
     return;
   }
 
-  if (isa<NominalTypeDecl>(D))
+  if (isa<StructDecl>(D) || isa<EnumDecl>(D))
     return;
+
+  // for development purposes, allow it if specifically requested for classes.
+  if (D->getASTContext().LangOpts.hasFeature(Feature::MoveOnlyClasses)) {
+    if (isa<ClassDecl>(D))
+      return;
+  }
 
   diagnose(attr->getLocation(), diag::moveOnly_not_allowed_here)
     .fixItRemove(attr->getRange());
@@ -4498,12 +4509,16 @@ void AttributeChecker::checkOriginalDefinedInAttrs(
 void AttributeChecker::checkAvailableAttrs(ArrayRef<AvailableAttr *> Attrs) {
   if (Attrs.empty())
     return;
-  // If all available are spi available, we should use @_spi instead.
-  if (std::all_of(Attrs.begin(), Attrs.end(), [](AvailableAttr *AV) {
-    return AV->IsSPI;
-  })) {
-    diagnose(D->getLoc(), diag::spi_preferred_over_spi_available);
-  };
+
+  // Only diagnose top level decls since nested ones may have inherited availability.
+  if (!D->getDeclContext()->getInnermostDeclarationDeclContext()) {
+    // If all available are spi available, we should use @_spi instead.
+    if (std::all_of(Attrs.begin(), Attrs.end(), [](AvailableAttr *AV) {
+      return AV->IsSPI;
+    })) {
+      diagnose(D->getLoc(), diag::spi_preferred_over_spi_available);
+    }
+  }
 }
 
 void AttributeChecker::checkBackDeployAttrs(ArrayRef<BackDeployAttr *> Attrs) {
