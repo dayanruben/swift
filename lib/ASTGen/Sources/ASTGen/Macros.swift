@@ -117,6 +117,29 @@ fileprivate struct ThrownErrorDiagnostic: DiagnosticMessage {
   }
 }
 
+extension MacroExpansionDeclSyntax {
+  func asMacroExpansionExpr() -> MacroExpansionExprSyntax {
+    MacroExpansionExprSyntax(
+      unexpectedBeforePoundToken,
+      poundToken: poundToken,
+      unexpectedBetweenPoundTokenAndMacro,
+      macro: macro,
+      genericArguments: genericArguments,
+      unexpectedBetweenGenericArgumentsAndLeftParen,
+      leftParen: leftParen,
+      unexpectedBetweenLeftParenAndArgumentList,
+      argumentList: argumentList,
+      unexpectedBetweenArgumentListAndRightParen,
+      rightParen: rightParen,
+      unexpectedBetweenRightParenAndTrailingClosure,
+      trailingClosure: trailingClosure,
+      unexpectedBetweenTrailingClosureAndAdditionalTrailingClosures,
+      additionalTrailingClosures: additionalTrailingClosures,
+      unexpectedAfterAdditionalTrailingClosures
+    )
+  }
+}
+
 @_cdecl("swift_ASTGen_evaluateMacro")
 @usableFromInline
 func evaluateMacro(
@@ -169,21 +192,27 @@ func evaluateMacro(
     switch macroPtr.pointee.macro {
     // Handle expression macro.
     case let exprMacro as ExpressionMacro.Type:
-      guard let parentExpansion = parentSyntax.as(MacroExpansionExprSyntax.self) else {
-        print("not on a macro expansion node: \(token.recursiveDescription)")
+      let parentExpansion: MacroExpansionExprSyntax
+      if let expansionExpr = parentSyntax.as(MacroExpansionExprSyntax.self) {
+        parentExpansion = expansionExpr
+      } else if let expansionDecl = parentSyntax.as(MacroExpansionDeclSyntax.self) {
+        parentExpansion = expansionDecl.asMacroExpansionExpr()
+      } else {
+        print("not on a macro expansion node: \(parentSyntax.recursiveDescription)")
         return -1
       }
-      macroName = parentExpansion.macro.withoutTrivia().description
+
+      macroName = parentExpansion.macro.text
       evaluatedSyntax = Syntax(try exprMacro.expansion(of: parentExpansion, in: &context))
 
     // Handle expression macro. The resulting decls are wrapped in a `CodeBlockItemListSyntax`.
-    case let declMacro as FreestandingDeclarationMacro.Type:
+    case let declMacro as DeclarationMacro.Type:
       guard let parentExpansion = parentSyntax.as(MacroExpansionDeclSyntax.self) else {
         print("not on a macro expansion node: \(token.recursiveDescription)")
         return -1
       }
       let decls = try declMacro.expansion(of: parentExpansion, in: &context)
-      macroName = parentExpansion.macro.withoutTrivia().description
+      macroName = parentExpansion.macro.text
       evaluatedSyntax = Syntax(CodeBlockItemListSyntax(
         decls.map { CodeBlockItemSyntax(item: .decl($0)) }))
 
@@ -212,7 +241,7 @@ func evaluateMacro(
     )
   }
 
-  var evaluatedSyntaxStr = evaluatedSyntax.withoutTrivia().description
+  var evaluatedSyntaxStr = evaluatedSyntax.trimmedDescription
   evaluatedSyntaxStr.withUTF8 { utf8 in
     let evaluatedResultPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: utf8.count + 1)
     if let baseAddress = utf8.baseAddress {
@@ -321,14 +350,14 @@ func expandAttachedMacro(
   var evaluatedSyntaxStr: String
   do {
     switch (macro, macroRole) {
-    case (let attachedMacro as AccessorDeclarationMacro.Type, .Accessor):
+    case (let attachedMacro as AccessorMacro.Type, .Accessor):
       let accessors = try attachedMacro.expansion(
         of: customAttrNode, attachedTo: declarationNode, in: &context
       )
 
       // Form a buffer of accessor declarations to return to the caller.
       evaluatedSyntaxStr = accessors.map {
-        $0.withoutTrivia().description
+        $0.trimmedDescription
       }.joined(separator: "\n\n")
 
     case (let attachedMacro as MemberAttributeMacro.Type, .MemberAttribute):
@@ -351,10 +380,10 @@ func expandAttachedMacro(
 
       // Form a buffer containing an attribute list to return to the caller.
       evaluatedSyntaxStr = attributes.map {
-        $0.withoutTrivia().description
+        $0.trimmedDescription
       }.joined(separator: " ")
 
-    case (let attachedMacro as MemberDeclarationMacro.Type, .SynthesizedMembers):
+    case (let attachedMacro as MemberMacro.Type, .SynthesizedMembers):
       let members = try attachedMacro.expansion(
         of: customAttrNode,
         attachedTo: declarationNode,
@@ -363,7 +392,7 @@ func expandAttachedMacro(
 
       // Form a buffer of member declarations to return to the caller.
       evaluatedSyntaxStr = members.map {
-        $0.withoutTrivia().description
+        $0.trimmedDescription
       }.joined(separator: "\n\n")
 
     default:

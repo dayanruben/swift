@@ -907,7 +907,7 @@ Optional<MacroRole> SourceFile::getFulfilledMacroRole() const {
     return MacroRole::Expression;
 
   case GeneratedSourceInfo::FreestandingDeclMacroExpansion:
-    return MacroRole::FreestandingDeclaration;
+    return MacroRole::Declaration;
 
   case GeneratedSourceInfo::AccessorMacroExpansion:
     return MacroRole::Accessor;
@@ -1908,6 +1908,8 @@ StringRef ModuleDecl::ReverseFullNameIterator::operator*() const {
 
   auto *clangModule =
       static_cast<const clang::Module *>(current.get<const void *>());
+  if (!clangModule->isSubModule() && clangModule->Name == "std")
+    return "CxxStdlib";
   return clangModule->Name;
 }
 
