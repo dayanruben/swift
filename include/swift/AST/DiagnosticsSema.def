@@ -3894,8 +3894,8 @@ ERROR(unresolved_member_no_inference,none,
       (DeclNameRef))
 ERROR(cannot_infer_base_of_unresolved_member,none,
       "cannot infer contextual base in reference to member %0", (DeclNameRef))
-ERROR(cannot_infer_concrete_for_opaque_result,none,
-      "cannot infer concrete type for opaque result %0 from return expression",
+ERROR(cannot_infer_underlying_for_opaque_result,none,
+      "cannot infer underlying type for opaque result %0 from return expression",
       (Type))
 ERROR(unresolved_nil_literal,none,
       "'nil' requires a contextual type", ())
@@ -5216,6 +5216,9 @@ ERROR(pack_reference_outside_expansion,none,
 ERROR(each_non_pack,none,
       "'each' cannot be applied to non-pack type %0",
       (Type))
+ERROR(pack_expansion_missing_pack_reference,none,
+      "pack expansion %0 must specify a pack reference",
+      (TypeRepr*))
 ERROR(tuple_duplicate_label,none,
       "cannot create a tuple with a duplicate element label", ())
 ERROR(multiple_ellipsis_in_tuple,none,

@@ -4926,7 +4926,9 @@ bool MissingArgumentsFailure::diagnoseClosure(const ClosureExpr *closure) {
 
   auto *locator = getLocator();
   if (locator->isForContextualType()) {
-    funcType = getContextualType(locator->getAnchor())->getAs<FunctionType>();
+    if (auto contextualType = getContextualType(locator->getAnchor())) {
+      funcType = contextualType->getAs<FunctionType>();
+    }
   } else if (auto info = getFunctionArgApplyInfo(locator)) {
     auto paramType = info->getParamType();
     // Drop a single layer of optionality because argument could get injected
@@ -5968,7 +5970,7 @@ bool MissingGenericArgumentsFailure::diagnoseAsError() {
   if (auto opaqueElt =
           locator->findLast<LocatorPathElt::OpenedOpaqueArchetype>()) {
     auto *opaqueDecl = opaqueElt->getDecl();
-    emitDiagnostic(diag::cannot_infer_concrete_for_opaque_result,
+    emitDiagnostic(diag::cannot_infer_underlying_for_opaque_result,
                    opaqueDecl->getDeclaredInterfaceType());
     return true;
   }
