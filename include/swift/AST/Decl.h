@@ -859,6 +859,10 @@ public:
     return Attrs;
   }
 
+  /// Retrieve runtime discoverable attributes (if any) associated
+  /// with this declaration.
+  ArrayRef<CustomAttr *> getRuntimeDiscoverableAttrs() const;
+
   /// Returns the semantic attributes attached to this declaration,
   /// including attributes that are generated as the result of member
   /// attribute macro expansion.
@@ -871,6 +875,11 @@ public:
   /// declaration.
   void forEachAttachedMacro(MacroRole role, MacroCallback) const;
 
+  /// Retrieve the discriminator for the given custom attribute that names
+  /// an attached macro.
+  unsigned getAttachedMacroDiscriminator(
+      MacroRole role, const CustomAttr *attr) const;
+
   /// Returns the innermost enclosing decl with an availability annotation.
   const Decl *getInnermostDeclWithAvailability() const;
 
@@ -880,9 +889,9 @@ public:
   Optional<llvm::VersionTuple> getIntroducedOSVersion(PlatformKind Kind) const;
 
   /// Returns the OS version in which the decl became ABI as specified by the
-  /// @_backDeploy attribute.
+  /// @backDeployed attribute.
   Optional<llvm::VersionTuple>
-  getBackDeployBeforeOSVersion(ASTContext &Ctx) const;
+  getBackDeployedBeforeOSVersion(ASTContext &Ctx) const;
 
   /// Returns the starting location of the entire declaration.
   SourceLoc getStartLoc() const { return getSourceRange().Start; }
@@ -2851,9 +2860,6 @@ public:
   GenericParameterReferenceInfo findExistentialSelfReferences(
       Type baseTy, bool treatNonResultCovariantSelfAsInvariant) const;
 
-  /// Retrieve runtime discoverable attributes (if any) associated
-  /// with this declaration.
-  ArrayRef<CustomAttr *> getRuntimeDiscoverableAttrs() const;
   /// Retrieve a nominal type declaration backing given runtime discoverable
   /// attribute.
   ///
@@ -6807,8 +6813,8 @@ public:
   /// \return the synthesized thunk, or null if the base of the call has
   ///         diagnosed errors during type checking.
   FuncDecl *getDistributedThunk() const;
-  
-  /// Returns 'true' if the function has (or inherits) the @c @_backDeploy
+
+  /// Returns 'true' if the function has (or inherits) the `@backDeployed`
   /// attribute.
   bool isBackDeployed() const;
 

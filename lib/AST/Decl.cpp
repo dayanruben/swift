@@ -58,6 +58,7 @@
 #include "swift/Demangling/ManglingMacros.h"
 #include "swift/Parse/Lexer.h" // FIXME: Bad dependency
 #include "clang/Lex/MacroInfo.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallString.h"
@@ -397,15 +398,36 @@ void Decl::forEachAttachedMacro(MacroRole role,
   }
 }
 
-const Decl *Decl::getInnermostDeclWithAvailability() const {
-  const Decl *enclosingDecl = this;
-  // Find the innermost enclosing declaration with an @available annotation.
-  while (enclosingDecl != nullptr) {
-    if (enclosingDecl->getAttrs().hasAttribute<AvailableAttr>())
-      return enclosingDecl;
+unsigned Decl::getAttachedMacroDiscriminator(
+    MacroRole role, const CustomAttr *attr
+) const {
+  assert(isAttachedMacro(role) && "Not an attached macro role");
 
-    enclosingDecl = enclosingDecl->getDeclContext()->getAsDecl();
+  // Member-attribute macros are written on the enclosing declaration,
+  // but apply to the member itself. Adjust the owning declaration accordingly.
+  const Decl *owningDecl = this;
+  if (role == MacroRole::MemberAttribute) {
+    owningDecl = getDeclContext()->getAsDecl();
   }
+
+  llvm::SmallDenseMap<Identifier, unsigned> nextDiscriminator;
+  Optional<unsigned> foundDiscriminator;
+
+  owningDecl->forEachAttachedMacro(
+    role,
+    [&](CustomAttr *foundAttr, MacroDecl *foundMacro) {
+      unsigned discriminator =
+        nextDiscriminator[foundMacro->getBaseIdentifier()]++;
+      if (attr == foundAttr)
+        foundDiscriminator = discriminator;
+    });
+
+  return *foundDiscriminator;
+}
+
+const Decl *Decl::getInnermostDeclWithAvailability() const {
+  if (auto attrAndDecl = getSemanticAvailableRangeAttr())
+    return attrAndDecl.value().second;
 
   return nullptr;
 }
@@ -423,13 +445,13 @@ Decl::getIntroducedOSVersion(PlatformKind Kind) const {
 }
 
 Optional<llvm::VersionTuple>
-Decl::getBackDeployBeforeOSVersion(ASTContext &Ctx) const {
-  if (auto *attr = getAttrs().getBackDeploy(Ctx))
+Decl::getBackDeployedBeforeOSVersion(ASTContext &Ctx) const {
+  if (auto *attr = getAttrs().getBackDeployed(Ctx))
     return attr->Version;
 
-  // Accessors may inherit `@_backDeploy`.
+  // Accessors may inherit `@backDeployed`.
   if (auto *AD = dyn_cast<AccessorDecl>(this))
-    return AD->getStorage()->getBackDeployBeforeOSVersion(Ctx);
+    return AD->getStorage()->getBackDeployedBeforeOSVersion(Ctx);
 
   return None;
 }
@@ -977,8 +999,8 @@ AvailabilityContext Decl::getAvailabilityForLinkage() const {
   ASTContext &ctx = getASTContext();
 
   // When computing availability for linkage, use the "before" version from
-  // the @_backDeploy attribute, if present.
-  if (auto backDeployVersion = getBackDeployBeforeOSVersion(ctx))
+  // the @backDeployed attribute, if present.
+  if (auto backDeployVersion = getBackDeployedBeforeOSVersion(ctx))
     return AvailabilityContext{VersionRange::allGTE(*backDeployVersion)};
 
   auto containingContext =
@@ -3799,6 +3821,7 @@ getAccessScopeForFormalAccess(const ValueDecl *VD,
   case AccessLevel::Internal:
     return AccessScope(resultDC->getParentModule());
   case AccessLevel::Package:
+    return AccessScope::getPackage();
   case AccessLevel::Public:
   case AccessLevel::Open:
     return AccessScope::getPublic();
@@ -3834,8 +3857,15 @@ static bool checkAccessUsingAccessScopes(const DeclContext *useDC,
   if (accessScope.getDeclContext() == useDC) return true;
   if (!AccessScope(useDC).isChildOf(accessScope)) return false;
 
+  // useDC is null only when caller wants to skip non-public type checks.
+  if (!useDC) return true;
+
+  // Check package access; accessing package decl should not be allowed if package names are different
+  if (accessScope.isPackage())
+    return VD->getDeclContext()->getParentModule()->getPackageName() == useDC->getParentModule()->getPackageName();
+
   // Check SPI access
-  if (!useDC || !VD->isSPI()) return true;
+  if (!VD->isSPI()) return true;
   auto useSF = dyn_cast<SourceFile>(useDC->getModuleScopeContext());
   return !useSF || useSF->isImportedAsSPI(VD) ||
          VD->getDeclContext()->getParentModule() == useDC->getParentModule();
@@ -8071,12 +8101,12 @@ bool AbstractFunctionDecl::isSendable() const {
 }
 
 bool AbstractFunctionDecl::isBackDeployed() const {
-  if (getAttrs().hasAttribute<BackDeployAttr>())
+  if (getAttrs().hasAttribute<BackDeployedAttr>())
     return true;
 
   // Property and subscript accessors inherit the attribute.
   if (auto *AD = dyn_cast<AccessorDecl>(this)) {
-    if (AD->getStorage()->getAttrs().hasAttribute<BackDeployAttr>())
+    if (AD->getStorage()->getAttrs().hasAttribute<BackDeployedAttr>())
       return true;
   }
 
@@ -9888,8 +9918,8 @@ ValueDecl::getRuntimeDiscoverableAttrTypeDecl(CustomAttr *attr) const {
   return nominal;
 }
 
-ArrayRef<CustomAttr *> ValueDecl::getRuntimeDiscoverableAttrs() const {
-  auto *mutableSelf = const_cast<ValueDecl *>(this);
+ArrayRef<CustomAttr *> Decl::getRuntimeDiscoverableAttrs() const {
+  auto *mutableSelf = const_cast<Decl *>(this);
   return evaluateOrDefault(getASTContext().evaluator,
                            GetRuntimeDiscoverableAttributes{mutableSelf},
                            nullptr);

@@ -13,6 +13,7 @@
 #define DEBUG_TYPE "sil-move-only-checker"
 
 #include "swift/AST/DiagnosticsSIL.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/FrozenMultiMap.h"
 #include "swift/Basic/STLExtras.h"
@@ -21,6 +22,7 @@
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SIL/FieldSensitivePrunedLiveness.h"
 #include "swift/SIL/InstructionUtils.h"
+#include "swift/SIL/NodeBits.h"
 #include "swift/SIL/OwnershipUtils.h"
 #include "swift/SIL/PostOrder.h"
 #include "swift/SIL/PrunedLiveness.h"
@@ -290,12 +292,88 @@ bool swift::siloptimizer::cleanupSILAfterEmittingObjectMoveOnlyDiagnostics(
         cvi->replaceAllUsesWith(expCopy);
         cvi->eraseFromParent();
         localChanged = true;
+        continue;
+      }
+
+      // Also eliminate any mark_must_check on objects, just to be safe. We
+      // emitted an object level diagnostic and if the user wants to get more
+      // diagnostics, they should fix these diagnostics and recompile.
+      if (auto *mmci = dyn_cast<MarkMustCheckInst>(&*ii)) {
+        ++ii;
+
+        if (mmci->getType().isAddress())
+          continue;
+
+        mmci->replaceAllUsesWith(mmci->getOperand());
+        mmci->eraseFromParent();
+        localChanged = true;
+        continue;
       }
 
       ++ii;
     }
   }
   return localChanged;
+}
+
+//===----------------------------------------------------------------------===//
+//                          MARK: OSSACanonicalizer
+//===----------------------------------------------------------------------===//
+
+void OSSACanonicalizer::computeBoundaryData(SILValue value) {
+  // Now we have our liveness information. First compute the original boundary
+  // (which ignores destroy_value).
+  PrunedLivenessBoundary originalBoundary;
+  canonicalizer->findOriginalBoundary(originalBoundary);
+
+  // Then use that information to stash for our diagnostics the boundary
+  // consuming/non-consuming users as well as enter the boundary consuming users
+  // into the boundaryConsumignUserSet for quick set testing later.
+  using IsInterestingUser = CanonicalizeOSSALifetime::IsInterestingUser;
+  InstructionSet boundaryConsumingUserSet(value->getFunction());
+  for (auto *lastUser : originalBoundary.lastUsers) {
+    LLVM_DEBUG(llvm::dbgs() << "Looking at boundary use: " << *lastUser);
+    switch (canonicalizer->isInterestingUser(lastUser)) {
+    case IsInterestingUser::NonUser:
+      llvm_unreachable("Last user of original boundary should be a user?!");
+    case IsInterestingUser::NonLifetimeEndingUse:
+      LLVM_DEBUG(llvm::dbgs() << "    NonLifetimeEndingUse!\n");
+      nonConsumingBoundaryUsers.push_back(lastUser);
+      continue;
+    case IsInterestingUser::LifetimeEndingUse:
+      LLVM_DEBUG(llvm::dbgs() << "    LifetimeEndingUse!\n");
+      consumingBoundaryUsers.push_back(lastUser);
+      boundaryConsumingUserSet.insert(lastUser);
+      continue;
+    }
+  }
+
+  // Then go through any of the consuming interesting uses found by our liveness
+  // and any that are not on the boundary are ones that we must error for.
+  for (auto *consumingUser : canonicalizer->getLifetimeEndingUsers()) {
+    bool isConsumingUseOnBoundary =
+        boundaryConsumingUserSet.contains(consumingUser);
+    LLVM_DEBUG(llvm::dbgs() << "Is consuming user on boundary "
+                            << (isConsumingUseOnBoundary ? "yes" : "no") << ": "
+                            << *consumingUser);
+    if (!isConsumingUseOnBoundary) {
+      consumingUsesNeedingCopy.push_back(consumingUser);
+    }
+  }
+}
+
+bool OSSACanonicalizer::canonicalize(SILValue value) {
+  // First compute liveness. If we fail, bail.
+  if (!computeLiveness(value)) {
+    return false;
+  }
+
+  computeBoundaryData(value);
+
+  // Finally, rewrite lifetimes.
+  rewriteLifetimes();
+
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
@@ -312,9 +390,16 @@ struct MoveOnlyChecker {
   /// A set of mark_must_check that we are actually going to process.
   SmallSetVector<MarkMustCheckInst *, 32> moveIntroducersToProcess;
 
+  BorrowToDestructureTransform::IntervalMapAllocator allocator;
+
   MoveOnlyChecker(SILFunction *fn, DeadEndBlocks *deBlocks) : fn(fn) {}
 
-  void check(DominanceInfo *domTree);
+  void check(DominanceInfo *domTree, PostOrderAnalysis *poa);
+
+  bool convertBorrowExtractsToOwnedDestructures(MarkMustCheckInst *mmci,
+                                                DiagnosticEmitter &emitter,
+                                                DominanceInfo *domTree,
+                                                PostOrderAnalysis *poa);
 
   /// After we have emitted a diagnostic, we need to clean up the instruction
   /// stream by converting /all/ copies of move only typed things to use
@@ -327,15 +412,210 @@ struct MoveOnlyChecker {
     changed |= localChange;
     return localChange;
   }
+
+  bool checkForSameInstMultipleUseErrors(MarkMustCheckInst *base,
+                                         DiagnosticEmitter &emitter);
 };
 
 } // namespace
+
+bool MoveOnlyChecker::convertBorrowExtractsToOwnedDestructures(
+    MarkMustCheckInst *mmci, DiagnosticEmitter &diagnosticEmitter,
+    DominanceInfo *domTree, PostOrderAnalysis *poa) {
+  StackList<BeginBorrowInst *> borrowWorklist(mmci->getFunction());
+
+  // If we failed to gather borrows due to the transform not understanding part
+  // of the SIL, fail and return false.
+  if (!BorrowToDestructureTransform::gatherBorrows(mmci, borrowWorklist))
+    return false;
+
+  // If we do not have any borrows to process, return true early to show we
+  // succeeded in processing.
+  if (borrowWorklist.empty()) {
+    LLVM_DEBUG(llvm::dbgs() << "    Did not find any borrows to process!\n");
+    return true;
+  }
+
+  SmallVector<SILBasicBlock *, 8> discoveredBlocks;
+
+  // Now that we have found all of our borrows, we want to find struct_extract
+  // uses of our borrow as well as any operands that cannot use an owned value.
+  SWIFT_DEFER { discoveredBlocks.clear(); };
+  BorrowToDestructureTransform transform(allocator, mmci, diagnosticEmitter,
+                                         poa, discoveredBlocks);
+
+  // Attempt to gather uses. Return false if we saw something that we did not
+  // understand.
+  if (!transform.gatherUses(borrowWorklist))
+    return false;
+
+  // Next make sure that any destructure needing instructions are on the
+  // boundary in a per bit field sensitive manner.
+  unsigned diagnosticCount = diagnosticEmitter.getDiagnosticCount();
+  transform.checkDestructureUsesOnBoundary();
+
+  // If we emitted any diagnostic, break out. We return true since we actually
+  // succeeded in our processing by finding the error. We only return false if
+  // we want to tell the rest of the checker that there was an internal
+  // compiler error that we need to emit a "compiler doesn't understand
+  // error".
+  if (diagnosticCount != diagnosticEmitter.getDiagnosticCount())
+    return true;
+
+  // Then check if we had two consuming uses on the same instruction or a
+  // consuming/non-consuming use on the same isntruction.
+  transform.checkForErrorsOnSameInstruction();
+
+  // If we emitted any diagnostic, break out. We return true since we actually
+  // succeeded in our processing by finding the error. We only return false if
+  // we want to tell the rest of the checker that there was an internal
+  // compiler error that we need to emit a "compiler doesn't understand
+  // error".
+  if (diagnosticCount != diagnosticEmitter.getDiagnosticCount())
+    return true;
+
+  // At this point, we know that all of our destructure requiring uses are on
+  // the boundary of our live range. Now we need to do the rewriting.
+  transform.blockToAvailableValues.emplace(transform.liveness);
+  transform.rewriteUses();
+
+  // Now that we have done our rewritting, we need to do a few cleanups.
+  transform.cleanup(borrowWorklist);
+
+  return true;
+}
+
+bool MoveOnlyChecker::checkForSameInstMultipleUseErrors(
+    MarkMustCheckInst *mmci, DiagnosticEmitter &diagnosticEmitter) {
+  LLVM_DEBUG(llvm::dbgs() << "Checking for same inst multiple use error!\n");
+
+  SmallFrozenMultiMap<SILInstruction *, Operand *, 8> instToOperandsMap;
+  StackList<Operand *> worklist(mmci->getFunction());
+  for (auto *use : mmci->getUses())
+    worklist.push_back(use);
+
+  while (!worklist.empty()) {
+    auto *nextUse = worklist.pop_back_val();
+
+    switch (nextUse->getOperandOwnership()) {
+    case OperandOwnership::NonUse:
+      continue;
+
+    // Conservatively treat a conversion to an unowned value as a pointer
+    // escape. If we see this in the SIL, fail and return false so we emit a
+    // "compiler doesn't understand error".
+    case OperandOwnership::ForwardingUnowned:
+    case OperandOwnership::PointerEscape:
+    case OperandOwnership::BitwiseEscape:
+      LLVM_DEBUG(llvm::dbgs()
+                 << "        Found forwarding unowned or escape!\n");
+      return false;
+
+    case OperandOwnership::TrivialUse:
+    case OperandOwnership::InstantaneousUse:
+    case OperandOwnership::UnownedInstantaneousUse:
+      // Look through copy_value.
+      if (auto *cvi = dyn_cast<CopyValueInst>(nextUse->getUser())) {
+        for (auto *use : cvi->getUses())
+          worklist.push_back(use);
+        continue;
+      }
+
+      // Treat these as non-consuming uses that could have a consuming use as an
+      // additional operand.
+      LLVM_DEBUG(llvm::dbgs()
+                 << "        Found non consuming use: " << *nextUse->getUser());
+      instToOperandsMap.insert(nextUse->getUser(), nextUse);
+      continue;
+    case OperandOwnership::InteriorPointer:
+      // We do not care about interior pointer uses since there aren't any
+      // interior pointer using instructions that are also consuming uses.
+      continue;
+
+    case OperandOwnership::DestroyingConsume:
+      if (isa<DestroyValueInst>(nextUse->getUser()))
+        continue;
+      [[fallthrough]];
+    case OperandOwnership::ForwardingConsume:
+      LLVM_DEBUG(llvm::dbgs()
+                 << "        Found consuming use: " << *nextUse->getUser());
+
+      instToOperandsMap.insert(nextUse->getUser(), nextUse);
+      continue;
+
+    case OperandOwnership::EndBorrow:
+    case OperandOwnership::Reborrow:
+    case OperandOwnership::GuaranteedForwarding:
+      llvm_unreachable(
+          "We do not process borrows recursively so should never see this.");
+
+    case OperandOwnership::Borrow:
+      // We don't care about borrows so we don't process them recursively
+      continue;
+    }
+  }
+
+  // Ok, we have our list of potential uses. Sort the multi-map and then search
+  // for errors.
+  instToOperandsMap.setFrozen();
+  for (auto pair : instToOperandsMap.getRange()) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "Checking inst for multiple uses: " << *pair.first);
+    Operand *foundConsumingUse = nullptr;
+    Operand *foundNonConsumingUse = nullptr;
+    for (auto *use : pair.second) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "    Visiting use: " << use->getOperandNumber() << '\n');
+      if (use->isConsuming()) {
+        LLVM_DEBUG(llvm::dbgs() << "        Is consuming!\n");
+        if (foundConsumingUse) {
+          // Emit error.
+          LLVM_DEBUG(
+              llvm::dbgs()
+              << "        Had previous consuming use! Emitting error!\n");
+          diagnosticEmitter.emitObjectInstConsumesValueTwice(
+              mmci, foundConsumingUse, use);
+          continue;
+        }
+
+        if (foundNonConsumingUse) {
+          LLVM_DEBUG(
+              llvm::dbgs()
+              << "        Had previous non consuming use! Emitting error!\n");
+          // Emit error.
+          diagnosticEmitter.emitObjectInstConsumesAndUsesValue(
+              mmci, use, foundNonConsumingUse);
+          continue;
+        }
+
+        if (!foundConsumingUse)
+          foundConsumingUse = use;
+        continue;
+      }
+
+      LLVM_DEBUG(llvm::dbgs() << "        Is non consuming!\n");
+      if (foundConsumingUse) {
+        // Emit error.
+        LLVM_DEBUG(llvm::dbgs()
+                   << "        Had previous consuming use! Emitting error!\n");
+        diagnosticEmitter.emitObjectInstConsumesAndUsesValue(
+            mmci, foundConsumingUse, use);
+        continue;
+      }
+
+      if (!foundNonConsumingUse)
+        foundNonConsumingUse = use;
+    }
+  }
+
+  return true;
+}
 
 //===----------------------------------------------------------------------===//
 //                             MARK: Main Routine
 //===----------------------------------------------------------------------===//
 
-void MoveOnlyChecker::check(DominanceInfo *domTree) {
+void MoveOnlyChecker::check(DominanceInfo *domTree, PostOrderAnalysis *poa) {
   auto callbacks =
       InstModCallbacks().onDelete([&](SILInstruction *instToDelete) {
         if (auto *mvi = dyn_cast<MarkMustCheckInst>(instToDelete))
@@ -386,12 +666,52 @@ void MoveOnlyChecker::check(DominanceInfo *domTree) {
     moveIntroducers = moveIntroducers.drop_front(1);
     LLVM_DEBUG(llvm::dbgs() << "Visiting: " << *markedValue);
 
-    // First canonicalize ownership.
-    //
-    // NOTE: We previously ran BorrowToDestructureTransform to ensure that any
-    // struct_extract/tuple_extracts that we see are converted to destructures
-    // or we errored.
-    if (!canonicalizer.canonicalize(markedValue)) {
+    // Before we do anything, we need to look for borrowed extracted values and
+    // convert them to destructure operations.
+    unsigned diagnosticCount = diagnosticEmitter.getDiagnosticCount();
+    if (!convertBorrowExtractsToOwnedDestructures(
+            markedValue, diagnosticEmitter, domTree, poa)) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Borrow extract to owned destructure transformation didn't "
+                    "understand part of the SIL\n");
+      diagnosticEmitter.emitCheckerDoesntUnderstandDiagnostic(markedValue);
+      continue;
+    }
+
+    // If we emitted any non-exceptional diagnostics in
+    // convertBorrowExtractsToOwnedDestructures, continue and process the next
+    // instruction. The user can fix and re-compile. We want the OSSA
+    // canonicalizer to be able to assume that all such borrow + struct_extract
+    // uses were already handled.
+    if (diagnosticCount != diagnosticEmitter.getDiagnosticCount()) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Emitting diagnostic in BorrowExtractToOwnedDestructure "
+                    "transformation!\n");
+      continue;
+    }
+
+    // First search for transitive consuming uses and prove that we do not have
+    // any errors where a single instruction consumes the same value twice or
+    // consumes and uses a value.
+    if (!checkForSameInstMultipleUseErrors(markedValue, diagnosticEmitter)) {
+      LLVM_DEBUG(llvm::dbgs() << "checkForSameInstMultipleUseError didn't "
+                                 "understand part of the SIL\n");
+      diagnosticEmitter.emitCheckerDoesntUnderstandDiagnostic(markedValue);
+      continue;
+    }
+
+    if (diagnosticCount != diagnosticEmitter.getDiagnosticCount()) {
+      LLVM_DEBUG(llvm::dbgs() << "Found single inst multiple user error!\n");
+      continue;
+    }
+
+    // Once that is complete, we then begin to canonicalize ownership, finding
+    // our boundary and any uses that need a copy. We in this section only deal
+    // with instructions due to our first step where we emitted errors for
+    // instructions containing multiple operands.
+
+    // Step 1. Compute liveness.
+    if (!canonicalizer.computeLiveness(markedValue)) {
       diagnosticEmitter.emitCheckerDoesntUnderstandDiagnostic(markedValue);
       LLVM_DEBUG(
           llvm::dbgs()
@@ -403,12 +723,23 @@ void MoveOnlyChecker::check(DominanceInfo *domTree) {
       changed = true;
     }
 
+    // NOTE: In the following we only rewrite lifetimes once we have emitted
+    // diagnostics. This ensures that we can emit diagnostics using the the
+    // liveness information before rewrite lifetimes has enriched the liveness
+    // info with maximized liveness information.
+
+    // Step 2. Compute our boundary non consuming, consuming uses, and consuming
+    // uses that need copies.
+    canonicalizer.computeBoundaryData(markedValue);
+
     // If we are asked to perform guaranteed checking, emit an error if we have
-    // /any/ consuming uses.
+    // /any/ consuming boundary uses or uses that need copies and then rewrite
+    // lifetimes.
     if (markedValue->getCheckKind() == MarkMustCheckInst::CheckKind::NoCopy) {
       if (canonicalizer.foundAnyConsumingUses()) {
         diagnosticEmitter.emitObjectGuaranteedDiagnostic(markedValue);
       }
+      canonicalizer.rewriteLifetimes();
       continue;
     }
 
@@ -417,10 +748,13 @@ void MoveOnlyChecker::check(DominanceInfo *domTree) {
       // any targets... continue. In the former case we want to fail with a
       // checker did not understand diagnostic later and in the former, we
       // succeeded.
+      canonicalizer.rewriteLifetimes();
       continue;
     }
 
+    // Finally emit our object owned diagnostics and then rewrite lifetimes.
     diagnosticEmitter.emitObjectOwnedDiagnostic(markedValue);
+    canonicalizer.rewriteLifetimes();
   }
 
   bool emittedDiagnostic = diagnosticEmitter.emittedAnyDiagnostics();
@@ -447,7 +781,14 @@ void MoveOnlyChecker::check(DominanceInfo *domTree) {
     if (!diagnosticEmitter.emittedDiagnosticForValue(markedInst)) {
       if (markedInst->getCheckKind() == MarkMustCheckInst::CheckKind::NoCopy) {
         if (auto *cvi = dyn_cast<CopyValueInst>(markedInst->getOperand())) {
-          if (auto *arg = dyn_cast<SILFunctionArgument>(cvi->getOperand())) {
+          SingleValueInstruction *i = cvi;
+          if (auto *copyToMoveOnly =
+                  dyn_cast<CopyableToMoveOnlyWrapperValueInst>(
+                      cvi->getOperand())) {
+            i = copyToMoveOnly;
+          }
+
+          if (auto *arg = dyn_cast<SILFunctionArgument>(i->getOperand(0))) {
             if (arg->getOwnershipKind() == OwnershipKind::Guaranteed) {
               for (auto *use : markedInst->getConsumingUses()) {
                 destroys.push_back(cast<DestroyValueInst>(use->getUser()));
@@ -509,9 +850,10 @@ class MoveOnlyCheckerPass : public SILFunctionTransform {
     auto *dominanceAnalysis = getAnalysis<DominanceAnalysis>();
     DominanceInfo *domTree = dominanceAnalysis->get(fn);
     auto *deAnalysis = getAnalysis<DeadEndBlocksAnalysis>()->get(fn);
+    auto *postOrderAnalysis = getAnalysis<PostOrderAnalysis>();
 
     MoveOnlyChecker checker(getFunction(), deAnalysis);
-    checker.check(domTree);
+    checker.check(domTree, postOrderAnalysis);
     if (checker.changed) {
       invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
     }

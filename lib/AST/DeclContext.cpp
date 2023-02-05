@@ -466,13 +466,13 @@ swift::FragileFunctionKindRequest::evaluate(Evaluator &evaluator,
                 /*allowUsableFromInline=*/true};
       }
 
-      if (AFD->getAttrs().hasAttribute<BackDeployAttr>()) {
+      if (AFD->getAttrs().hasAttribute<BackDeployedAttr>()) {
         return {FragileFunctionKind::BackDeploy,
                 /*allowUsableFromInline=*/true};
       }
 
       // Property and subscript accessors inherit @_alwaysEmitIntoClient,
-      // @_backDeploy, and @inlinable from their storage declarations.
+      // @backDeployed, and @inlinable from their storage declarations.
       if (auto accessor = dyn_cast<AccessorDecl>(AFD)) {
         auto *storage = accessor->getStorage();
         if (storage->getAttrs().getAttribute<InlinableAttr>()) {
@@ -483,7 +483,7 @@ swift::FragileFunctionKindRequest::evaluate(Evaluator &evaluator,
           return {FragileFunctionKind::AlwaysEmitIntoClient,
                   /*allowUsableFromInline=*/true};
         }
-        if (storage->getAttrs().hasAttribute<BackDeployAttr>()) {
+        if (storage->getAttrs().hasAttribute<BackDeployedAttr>()) {
           return {FragileFunctionKind::BackDeploy,
                   /*allowUsableFromInline=*/true};
         }
@@ -583,7 +583,7 @@ void DeclContext::dumpContext() const {
 void AccessScope::dump() const {
   llvm::errs() << getAccessLevelSpelling(accessLevelForDiagnostics()) << ": ";
 
-  if (isPublic()) {
+  if (isPublic() || isPackage()) {
     llvm::errs() << "(null)\n";
     return;
   }
@@ -1194,7 +1194,7 @@ AccessScope::AccessScope(const DeclContext *DC, AccessLimitKind limitKind)
     isPrivate = true;
   }
   if (!DC || isa<ModuleDecl>(DC))
-    assert(!isPrivate && "public or internal scope can't be private");
+    assert(!isPrivate && "public, package, or internal scope can't be private");
 }
 
 bool AccessScope::isFileScope() const {
@@ -1210,6 +1210,8 @@ bool AccessScope::isInternal() const {
 AccessLevel AccessScope::accessLevelForDiagnostics() const {
   if (isPublic())
     return AccessLevel::Public;
+  if (isPackage())
+    return AccessLevel::Package;
   if (isa<ModuleDecl>(getDeclContext()))
     return AccessLevel::Internal;
   if (getDeclContext()->isModuleScopeContext()) {

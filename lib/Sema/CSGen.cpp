@@ -1211,7 +1211,8 @@ namespace {
 
         auto macroIdent = ctx.getIdentifier(kind);
         auto macros = lookupMacros(
-            macroIdent, expr->getLoc(), FunctionRefKind::Unapplied);
+            macroIdent, expr->getLoc(), FunctionRefKind::Unapplied,
+            MacroRole::Expression);
         if (!macros.empty()) {
           // Introduce an overload set for the macro reference.
           auto locator = CS.getConstraintLocator(expr);
@@ -3713,6 +3714,10 @@ namespace {
       llvm_unreachable("found KeyPathDotExpr in CSGen");
     }
 
+    Type visitSingleValueStmtExpr(SingleValueStmtExpr *E) {
+      llvm_unreachable("Handled by the walker directly");
+    }
+
     Type visitOneWayExpr(OneWayExpr *expr) {
       auto locator = CS.getConstraintLocator(expr);
       auto resultTypeVar = CS.createTypeVariable(locator, 0);
@@ -3742,12 +3747,42 @@ namespace {
       SmallVector<std::pair<Type, ConstraintLocator *>, 4> elements;
       elements.reserve(expr->getNumElements());
 
-      for (auto *element : expr->getElements()) {
-        elements.emplace_back(CS.getType(element),
-                              CS.getConstraintLocator(element));
+      if (auto *SVE = expr->getSingleValueStmtExpr()) {
+        // If we have a SingleValueStmtExpr, form a join of the branch types.
+        SmallVector<Expr *, 4> scratch;
+        auto branches = SVE->getSingleExprBranches(scratch);
+        for (auto idx : indices(branches)) {
+          auto *eltLoc = CS.getConstraintLocator(
+              SVE, {LocatorPathElt::SingleValueStmtBranch(idx)});
+          elements.emplace_back(CS.getType(branches[idx]), eltLoc);
+        }
+      } else {
+        for (auto *element : expr->getElements()) {
+          elements.emplace_back(CS.getType(element),
+                                CS.getConstraintLocator(element));
+        }
       }
 
-      auto resultTy = CS.getType(expr->getVar());
+      Type resultTy;
+
+      if (auto *var = expr->getVar()) {
+        resultTy = CS.getType(var);
+      } else {
+        resultTy = expr->getType();
+      }
+
+      assert(resultTy);
+
+      // If we have a single branch of a SingleValueStmtExpr, we want a
+      // conversion of the result, not a join, which would skip the conversion.
+      // This is needed to ensure we apply the Void/Never conversions.
+      if (elements.size() == 1 && expr->getSingleValueStmtExpr()) {
+        auto &elt = elements[0];
+        CS.addConstraint(ConstraintKind::Conversion, elt.first,
+                         resultTy, elt.second);
+        return resultTy;
+      }
+
       // The type of a join expression is obtained by performing
       // a "join-meet" operation on deduced types of its elements
       // and the underlying variable.
@@ -3760,10 +3795,11 @@ namespace {
     /// Lookup all macros with the given macro name.
     SmallVector<OverloadChoice, 1>
     lookupMacros(Identifier macroName, SourceLoc loc,
-                 FunctionRefKind functionRefKind) {
+                 FunctionRefKind functionRefKind,
+                 MacroRoles roles) {
       SmallVector<OverloadChoice, 1> choices;
       auto results = TypeChecker::lookupMacros(
-          CurDC, DeclNameRef(macroName), loc, MacroRole::Expression);
+          CurDC, DeclNameRef(macroName), loc, roles);
       for (const auto &result : results) {
         OverloadChoice choice = OverloadChoice(Type(), result, functionRefKind);
         choices.push_back(choice);
@@ -3782,19 +3818,14 @@ namespace {
       auto &ctx = CS.getASTContext();
       auto locator = CS.getConstraintLocator(expr);
 
-      // For calls, set up the argument list.
-      bool isCall = expr->getArgs() != nullptr;
-      if (isCall) {
-        CS.associateArgumentList(locator, expr->getArgs());
-      }
+      CS.associateArgumentList(locator, expr->getArgs());
 
       // Look up the macros with this name.
       auto macroIdent = expr->getMacroName().getBaseIdentifier();
-      FunctionRefKind functionRefKind = isCall ? FunctionRefKind::SingleApply
-                                               : FunctionRefKind::Unapplied;
+      FunctionRefKind functionRefKind = FunctionRefKind::SingleApply;
       auto macros = lookupMacros(
           macroIdent, expr->getMacroNameLoc().getBaseNameLoc(),
-          functionRefKind);
+          functionRefKind, expr->getMacroRoles());
       if (macros.empty()) {
         ctx.Diags.diagnose(expr->getMacroNameLoc(), diag::macro_undefined,
                            macroIdent)
@@ -3814,11 +3845,7 @@ namespace {
           return Type();
       }
 
-      // For non-calls, the type variable is the result.
-      if (!isCall)
-        return macroRefType;
-
-      // For calls, form the applicable-function constraint. The result type
+      // Form the applicable-function constraint. The result type
       // is the result of that call.
       SmallVector<AnyFunctionType::Param, 8> params;
       getMatchingParams(expr->getArgs(), params);
@@ -3991,6 +4018,12 @@ namespace {
 
       if (CS.isArgumentIgnoredForCodeCompletion(expr)) {
         CG.setTypeForArgumentIgnoredForCompletion(expr);
+        return Action::SkipChildren(expr);
+      }
+
+      if (auto *SVE = dyn_cast<SingleValueStmtExpr>(expr)) {
+        if (CS.generateConstraints(SVE))
+          return Action::Stop();
         return Action::SkipChildren(expr);
       }
 
@@ -4440,8 +4473,14 @@ bool ConstraintSystem::generateConstraints(
     // constraint.
     if (Type convertType = target.getExprConversionType()) {
       ContextualTypePurpose ctp = target.getExprContextualTypePurpose();
-      auto *convertTypeLocator =
-          getConstraintLocator(expr, LocatorPathElt::ContextualType(ctp));
+
+      // If a custom locator wasn't specified, create a locator anchored on
+      // the expression itself.
+      auto *convertTypeLocator = target.getExprConvertTypeLocator();
+      if (!convertTypeLocator) {
+        convertTypeLocator =
+            getConstraintLocator(expr, LocatorPathElt::ContextualType(ctp));
+      }
 
       auto getLocator = [&](Type ty) -> ConstraintLocator * {
         // If we have a placeholder originating from a PlaceholderTypeRepr,
@@ -4479,7 +4518,8 @@ bool ConstraintSystem::generateConstraints(
         });
       }
 
-      addContextualConversionConstraint(expr, convertType, ctp);
+      addContextualConversionConstraint(expr, convertType, ctp,
+                                        convertTypeLocator);
     }
 
     // For an initialization target, generate constraints for the pattern.

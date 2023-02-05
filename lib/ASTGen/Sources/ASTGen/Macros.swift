@@ -106,11 +106,13 @@ fileprivate struct ThrownErrorDiagnostic: DiagnosticMessage {
   }
 }
 
-@_cdecl("swift_ASTGen_evaluateMacro")
+@_cdecl("swift_ASTGen_expandFreestandingMacro")
 @usableFromInline
-func evaluateMacro(
+func expandFreestandingMacro(
   diagEnginePtr: UnsafeMutablePointer<UInt8>,
   macroPtr: UnsafeRawPointer,
+  discriminatorText: UnsafePointer<UInt8>,
+  discriminatorTextLength: Int,
   sourceFilePtr: UnsafeRawPointer,
   sourceLocationPtr: UnsafePointer<UInt8>?,
   expandedSourcePointer: UnsafeMutablePointer<UnsafePointer<UInt8>?>,
@@ -144,7 +146,13 @@ func evaluateMacro(
   let sourceManager = SourceManager(cxxDiagnosticEngine: diagEnginePtr)
   sourceManager.insert(sourceFilePtr)
 
-  let context = sourceManager.createMacroExpansionContext()
+  let discriminatorBuffer = UnsafeBufferPointer(
+    start: discriminatorText, count: discriminatorTextLength
+  )
+  let discriminator = String(decoding: discriminatorBuffer, as: UTF8.self)
+  let context = sourceManager.createMacroExpansionContext(
+    discriminator: discriminator
+  )
 
   guard let parentSyntax = token.parent else {
     print("not on a macro expansion node: \(token.recursiveDescription)")
@@ -173,7 +181,7 @@ func evaluateMacro(
       ) throws -> ExprSyntax {
         return try exprMacro.expansion(
           of: sourceManager.detach(
-            node, in: context,
+            node,
             foldingWith: OperatorTable.standardOperators
           ),
           in: context
@@ -191,11 +199,14 @@ func evaluateMacro(
         print("not on a macro expansion node: \(token.recursiveDescription)")
         return -1
       }
+      macroName = parentExpansion.macro.text
       let decls = try declMacro.expansion(
-        of: sourceManager.detach(parentExpansion, in: context),
+        of: sourceManager.detach(
+          parentExpansion,
+          foldingWith: OperatorTable.standardOperators
+        ),
         in: context
       )
-      macroName = parentExpansion.macro.text
       evaluatedSyntax = Syntax(CodeBlockItemListSyntax(
         decls.map { CodeBlockItemSyntax(item: .decl($0)) }))
 
@@ -205,11 +216,12 @@ func evaluateMacro(
     }
   } catch {
     // Record the error
-    context.diagnose(
-      Diagnostic(
+    sourceManager.diagnose(
+      diagnostic: Diagnostic(
         node: parentSyntax,
         message: ThrownErrorDiagnostic(message: String(describing: error))
-      )
+      ),
+      messageSuffix: " (from macro '\(macroName)')"
     )
     return -1
   }
@@ -339,8 +351,11 @@ func expandAttachedMacro(
     switch (macro, macroRole) {
     case (let attachedMacro as AccessorMacro.Type, .Accessor):
       let accessors = try attachedMacro.expansion(
-        of: context.detach(customAttrNode),
-        providingAccessorsOf: context.detach(declarationNode),
+        of: sourceManager.detach(
+          customAttrNode,
+          foldingWith: OperatorTable.standardOperators
+        ),
+        providingAccessorsOf: sourceManager.detach(declarationNode),
         in: context
       )
 
@@ -368,11 +383,12 @@ func expandAttachedMacro(
         _ node: Node
       ) throws -> [AttributeSyntax] {
         return try attachedMacro.expansion(
-          of: context.detach(customAttrNode),
-          attachedTo: sourceManager.detach(node, in: context),
-          providingAttributesFor: sourceManager.detach(
-            declarationNode, in: context
+          of: sourceManager.detach(
+            customAttrNode,
+            foldingWith: OperatorTable.standardOperators
           ),
+          attachedTo: sourceManager.detach(node),
+          providingAttributesFor: sourceManager.detach(declarationNode),
           in: context
         )
       }
@@ -398,8 +414,11 @@ func expandAttachedMacro(
         _ node: Node
       ) throws -> [DeclSyntax] {
         return try attachedMacro.expansion(
-          of: sourceManager.detach(customAttrNode, in: context),
-          providingMembersOf: sourceManager.detach(node, in: context),
+          of: sourceManager.detach(
+            customAttrNode,
+            foldingWith: OperatorTable.standardOperators
+          ),
+          providingMembersOf: sourceManager.detach(node),
           in: context
         )
       }
@@ -418,11 +437,12 @@ func expandAttachedMacro(
   } catch {
     // Record the error
     // FIXME: Need to decide where to diagnose the error:
-    context.diagnose(
-      Diagnostic(
+    sourceManager.diagnose(
+      diagnostic: Diagnostic(
         node: Syntax(declarationNode),
         message: ThrownErrorDiagnostic(message: String(describing: error))
-      )
+      ),
+      messageSuffix: " (from macro '\(macroName)')"
     )
 
     return 1

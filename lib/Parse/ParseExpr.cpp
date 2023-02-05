@@ -525,6 +525,20 @@ ParserResult<Expr> Parser::parseExprUnary(Diag<> Message, bool isExprBasic) {
     return makeParserResult(expansion);
   }
 
+  // Try parse an 'if' or 'switch' as an expression. Note we do this here in
+  // parseExprUnary as we don't allow postfix syntax to hang off such
+  // expressions to avoid ambiguities such as postfix '.member', which can
+  // currently be parsed as a static dot member for a result builder.
+  if (Tok.isAny(tok::kw_if, tok::kw_switch)) {
+    auto Result = parseStmt();
+    Expr *E = nullptr;
+    if (Result.isNonNull()) {
+      E = SingleValueStmtExpr::createWithWrappedBranches(
+          Context, Result.get(), CurDeclContext, /*mustBeExpr*/ true);
+    }
+    return makeParserResult(ParserStatus(Result), E);
+  }
+
   switch (Tok.getKind()) {
   default:
     // If the next token is not an operator, just parse this as expr-postfix.
@@ -1053,6 +1067,10 @@ static bool isValidTrailingClosure(bool isExprBasic, Parser &P){
   // If this is the start of a get/set accessor, then it isn't a trailing
   // closure.
   if (P.isStartOfGetSetAccessor())
+    return false;
+
+  // If this is the start of a switch body, this isn't a trailing closure.
+  if (P.peekToken().is(tok::kw_case))
     return false;
 
   // If this is a normal expression (not an expr-basic) then trailing closures
@@ -1806,7 +1824,7 @@ ParserResult<Expr> Parser::parseExprPrimary(Diag<> ID, bool isExprBasic) {
   // Eat an invalid token in an expression context.  Error tokens are diagnosed
   // by the lexer, so there is no reason to emit another diagnostic.
   case tok::unknown:
-    if (Tok.getText().startswith("\"\"\"")) {
+    if (startsWithMultilineStringDelimiter(Tok)) {
       // This was due to unterminated multi-line string.
       IsInputIncomplete = true;
     }
@@ -3367,7 +3385,8 @@ ParserResult<Expr> Parser::parseExprMacroExpansion(bool isExprBasic) {
       status,
       new (Context) MacroExpansionExpr(
           CurDeclContext, poundLoc, macroNameRef, macroNameLoc, leftAngleLoc,
-          Context.AllocateCopy(genericArgs), rightAngleLoc, argList));
+          Context.AllocateCopy(genericArgs), rightAngleLoc, argList,
+          MacroRole::Expression));
 }
 
 /// parseExprCollection - Parse a collection literal expression.

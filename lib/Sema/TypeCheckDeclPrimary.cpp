@@ -32,6 +32,7 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/AccessNotes.h"
 #include "swift/AST/AccessScope.h"
+#include "swift/AST/Attr.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/DeclContext.h"
 #include "swift/AST/DiagnosticsSema.h"
@@ -1992,12 +1993,7 @@ public:
     checkAccessControl(PGD);
   }
 
-  void visitMissingDecl(MissingDecl *missing) {
-    // FIXME: Expanded attribute lists should be type checked against
-    // the real declaration they will be attached to. Attempting to
-    // type check a missing decl should produce an error.
-    TypeChecker::checkDeclAttributes(missing);
-  }
+  void visitMissingDecl(MissingDecl *missing) {  }
 
   void visitMissingMemberDecl(MissingMemberDecl *MMD) {
     llvm_unreachable("should always be type-checked already");
@@ -2184,6 +2180,21 @@ public:
     VD->visitEmittedAccessors([&](AccessorDecl *accessor) {
       visit(accessor);
     });
+
+    // If this var decl is a no implicit copy varDecl, error if its type is a
+    // move only type. No implicit copy is redundant.
+    //
+    // NOTE: We do this here instead of TypeCheckAttr since types are not
+    // completely type checked at that point.
+    if (auto attr = VD->getAttrs().getAttribute<NoImplicitCopyAttr>()) {
+      if (auto *nom = VD->getType()->getCanonicalType()->getNominalOrBoundGenericNominal()) {
+        if (nom->isMoveOnly()) {
+          DE.diagnose(attr->getLocation(),
+                      diag::noimplicitcopy_attr_not_allowed_on_moveonlytype)
+            .fixItRemove(attr->getRange());
+        }
+      }
+    }
   }
 
   void visitPatternBindingDecl(PatternBindingDecl *PBD) {
@@ -2566,6 +2577,7 @@ public:
       }
     }
 
+    // FIXME(kavon): see if these can be integrated into other parts of Sema
     diagnoseCopyableTypeContainingMoveOnlyType(ED);
     diagnoseMoveOnlyNominalDeclDoesntConformToProtocols(ED);
 
@@ -2574,6 +2586,20 @@ public:
     TypeChecker::checkDeclCircularity(ED);
 
     TypeChecker::checkConformancesInContext(ED);
+
+    // If our enum is marked as move only, it cannot be indirect or have any
+    // indirect cases.
+    if (ED->getAttrs().hasAttribute<MoveOnlyAttr>()) {
+      if (ED->isIndirect())
+        ED->diagnose(diag::moveonly_enums_do_not_support_indirect,
+                     ED->getBaseIdentifier());
+      for (auto *elt : ED->getAllElements()) {
+        if (elt->isIndirect()) {
+          elt->diagnose(diag::moveonly_enums_do_not_support_indirect,
+                        ED->getBaseIdentifier());
+        }
+      }
+    }
   }
 
   void visitStructDecl(StructDecl *SD) {
@@ -2720,6 +2746,12 @@ public:
       return;
 
     for (auto *prot : nomDecl->getLocalProtocols()) {
+      // Permit conformance to marker protocol Sendable.
+      if (prot->isSpecificProtocol(KnownProtocolKind::Sendable)) {
+        assert(prot->isMarkerProtocol());
+        continue;
+      }
+
       nomDecl->diagnose(diag::moveonly_cannot_conform_to_protocol_with_name,
                         nomDecl->getDescriptiveKind(),
                         nomDecl->getBaseName(), prot->getBaseName());
@@ -3360,6 +3392,8 @@ public:
       ED->diagnose(diag::moveonly_cannot_conform_to_protocol,
                    nominal->getDescriptiveKind(), nominal->getBaseName());
     }
+
+    TypeChecker::checkReflectionMetadataAttributes(ED);
   }
 
   void visitTopLevelCodeDecl(TopLevelCodeDecl *TLCD) {
@@ -3656,6 +3690,17 @@ void TypeChecker::checkParameterList(ParameterList *params,
         if (!isa<ParamDecl>(auxiliaryDecl))
           DeclChecker(param->getASTContext(), SF).visitBoundVariable(auxiliaryDecl);
       });
+    }
+
+    // If we have a noimplicitcopy parameter, make sure that the underlying type
+    // is not move only. It is redundant.
+    if (auto attr = param->getAttrs().getAttribute<NoImplicitCopyAttr>()) {
+      if (auto *nom = param->getType()->getCanonicalType()->getNominalOrBoundGenericNominal()) {
+        if (nom->isMoveOnly()) {
+          param->diagnose(diag::noimplicitcopy_attr_not_allowed_on_moveonlytype)
+            .fixItRemove(attr->getRange());
+        }
+      }
     }
   }
 

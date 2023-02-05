@@ -1804,6 +1804,23 @@ TypeVariableType *ConstraintSystem::openGenericParameter(
   assert(result.second);
   (void)result;
 
+  // When move-only types are available, add a constraint to force generic
+  // parameters to conform to a "Copyable" protocol.
+  if (getASTContext().LangOpts.hasFeature(Feature::MoveOnly)) {
+    ProtocolDecl *copyable = TypeChecker::getProtocol(
+        getASTContext(), SourceLoc(), KnownProtocolKind::Copyable);
+
+    // FIXME(kavon): there's a dependency ordering issues here with the
+    // protocol being defined in the stdlib, because when trying to build
+    // the stdlib itself, or a Swift program with -parse-stdlib, we can't
+    // load the protocol to add this constraint. (rdar://104898230)
+    assert(copyable && "stdlib is missing _Copyable protocol!");
+    addConstraint(
+        ConstraintKind::ConformsTo, typeVar,
+        copyable->getDeclaredInterfaceType(),
+        locator.withPathElement(LocatorPathElt::GenericParameter(parameter)));
+  }
+
   return typeVar;
 }
 
@@ -3590,29 +3607,9 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
     if (auto macro = dyn_cast<MacroDecl>(decl)) {
       // Macro can only be used in an expansion. If we end up here, it's
       // because we found a macro but are missing the leading '#'.
-      if (!(locator->isForMacroExpansion() || locator->getAnchor().isImplicit())) {
+      if (!locator->isForMacroExpansion()) {
         // Record a fix here
         (void)recordFix(MacroMissingPound::create(*this, macro, locator));
-      }
-
-      // If the macro has parameters but wasn't provided with any arguments,
-      // introduce a fix to add the arguments.
-      bool isCall;
-      switch (choice.getFunctionRefKind()) {
-      case FunctionRefKind::SingleApply:
-      case FunctionRefKind::DoubleApply:
-        isCall = true;
-        break;
-
-      case FunctionRefKind::Unapplied:
-      case FunctionRefKind::Compound:
-        // Note: macros don't have compound name references.
-        isCall = false;
-        break;
-      }
-      if (macro->parameterList && !isCall) {
-        // Record a fix here
-        (void)recordFix(MacroMissingArguments::create(*this, macro, locator));
       }
     }
   }
@@ -5451,6 +5448,16 @@ void constraints::simplifyLocator(ASTNode &anchor,
       continue;
     }
 
+    case ConstraintLocator::SingleValueStmtBranch: {
+      auto branchElt = path[0].castTo<LocatorPathElt::SingleValueStmtBranch>();
+      auto exprIdx = branchElt.getExprBranchIndex();
+      auto *SVE = castToExpr<SingleValueStmtExpr>(anchor);
+      SmallVector<Expr *, 4> scratch;
+      anchor = SVE->getSingleExprBranches(scratch)[exprIdx];
+      path = path.slice(1);
+      continue;
+    }
+
     case ConstraintLocator::KeyPathDynamicMember:
     case ConstraintLocator::ImplicitDynamicMemberSubscript: {
       // Key path dynamic member lookup should be completely transparent.
@@ -6427,7 +6434,8 @@ void SolutionApplicationTargetsKey::dump(raw_ostream &OS) const {
 
 SolutionApplicationTarget::SolutionApplicationTarget(
     Expr *expr, DeclContext *dc, ContextualTypePurpose contextualPurpose,
-    TypeLoc convertType, bool isDiscarded) {
+    TypeLoc convertType, ConstraintLocator *convertTypeLocator,
+    bool isDiscarded) {
   // Verify that a purpose was specified if a convertType was.  Note that it is
   // ok to have a purpose without a convertType (which is used for call
   // return types).
@@ -6450,6 +6458,7 @@ SolutionApplicationTarget::SolutionApplicationTarget(
   expression.dc = dc;
   expression.contextualPurpose = contextualPurpose;
   expression.convertType = convertType;
+  expression.convertTypeLocator = convertTypeLocator;
   expression.pattern = nullptr;
   expression.propertyWrapper.wrappedVar = nullptr;
   expression.propertyWrapper.innermostWrappedValueInit = nullptr;
@@ -6558,7 +6567,7 @@ SolutionApplicationTarget SolutionApplicationTarget::forInitialization(
 
   SolutionApplicationTarget target(
       initializer, dc, CTP_Initialization, contextualType,
-      /*isDiscarded=*/false);
+      /*convertTypeLocator*/ nullptr, /*isDiscarded=*/false);
   target.expression.pattern = pattern;
   target.expression.bindPatternVarsOneWay = bindPatternVarsOneWay;
   target.maybeApplyPropertyWrapper();
@@ -6673,6 +6682,7 @@ bool SolutionApplicationTarget::contextualTypeIsOnlyAHint() const {
   case CTP_ComposedPropertyWrapper:
   case CTP_CannotFail:
   case CTP_ExprPattern:
+  case CTP_SingleValueStmtBranch:
     return false;
   }
   llvm_unreachable("invalid contextual type");
@@ -7143,7 +7153,13 @@ bool ConstraintSystem::participatesInInference(ClosureExpr *closure) const {
 
   // If body is nested in a parent that has a function builder applied,
   // let's prevent inference until result builders.
-  return !isInResultBuilderContext(closure);
+  if (Options.contains(
+          ConstraintSystemFlags::
+              ClosuresInResultBuildersDontParticipateInInference)) {
+    return !isInResultBuilderContext(closure);
+  } else {
+    return true;
+  }
 }
 
 TypeVarBindingProducer::TypeVarBindingProducer(BindingSet &bindings)

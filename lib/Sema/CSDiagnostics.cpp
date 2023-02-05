@@ -738,6 +738,7 @@ Optional<Diag<Type, Type>> GenericArgumentsMismatchFailure::getDiagnosticFor(
   case CTP_CalleeResult:
   case CTP_EnumCaseRawValue:
   case CTP_ExprPattern:
+  case CTP_SingleValueStmtBranch:
     break;
   }
   return None;
@@ -2488,7 +2489,10 @@ bool ContextualFailure::diagnoseAsError() {
     diagnostic = diag::ternary_expr_cases_mismatch;
     break;
   }
-
+  case ConstraintLocator::SingleValueStmtBranch: {
+    diagnostic = diag::single_value_stmt_branches_mismatch;
+    break;
+  }
   case ConstraintLocator::ContextualType: {
     if (diagnoseConversionToBool())
       return true;
@@ -2688,6 +2692,7 @@ getContextualNilDiagnostic(ContextualTypePurpose CTP) {
   case CTP_WrappedProperty:
   case CTP_ComposedPropertyWrapper:
   case CTP_ExprPattern:
+  case CTP_SingleValueStmtBranch:
     return None;
 
   case CTP_EnumCaseRawValue:
@@ -3441,6 +3446,9 @@ ContextualFailure::getDiagnosticFor(ContextualTypePurpose context,
 
   case CTP_WrappedProperty:
     return diag::wrapped_value_mismatch;
+
+  case CTP_SingleValueStmtBranch:
+    return diag::cannot_convert_initializer_value;
 
   case CTP_CaseStmt:
   case CTP_ThrowStmt:
@@ -4634,7 +4642,8 @@ ASTNode MissingArgumentsFailure::getAnchor() const {
 }
 
 SourceLoc MissingArgumentsFailure::getLoc() const {
-  if (auto *argList = getArgumentListFor(getLocator()))
+  auto *argList = getArgumentListFor(getLocator());
+  if (argList && !argList->isImplicit())
     return argList->getLoc();
   return FailureDiagnostic::getLoc();
 }
@@ -4729,17 +4738,25 @@ bool MissingArgumentsFailure::diagnoseAsError() {
 
   // TODO(diagnostics): We should be able to suggest this fix-it
   // unconditionally.
-  if (args && args->empty()) {
-    SmallString<32> scratch;
-    llvm::raw_svector_ostream fixIt(scratch);
+  SmallString<32> scratch;
+  llvm::raw_svector_ostream fixIt(scratch);
+  auto appendMissingArgsToFix = [&]() {
     interleave(
         SynthesizedArgs,
         [&](const SynthesizedArg &arg) {
           forFixIt(fixIt, arg.param);
         },
         [&] { fixIt << ", "; });
+  };
 
+  if (args && args->empty() && !args->isImplicit()) {
+    appendMissingArgsToFix();
     diag.fixItInsertAfter(args->getLParenLoc(), fixIt.str());
+  } else if (isExpr<MacroExpansionExpr>(getRawAnchor())) {
+    fixIt << "(";
+    appendMissingArgsToFix();
+    fixIt << ")";
+    diag.fixItInsertAfter(getRawAnchor().getEndLoc(), fixIt.str());
   }
 
   diag.flush();
@@ -5810,6 +5827,11 @@ bool ExtraneousReturnFailure::diagnoseAsError() {
 
 bool NotCompileTimeConstFailure::diagnoseAsError() {
   emitDiagnostic(diag::expect_compile_time_const);
+  return true;
+}
+
+bool NotCopyableFailure::diagnoseAsError() {
+  emitDiagnostic(diag::moveonly_generics, noncopyableTy);
   return true;
 }
 
@@ -8520,35 +8542,6 @@ bool ConflictingPatternVariables::diagnoseAsError() {
 bool AddMissingMacroPound::diagnoseAsError() {
   emitDiagnostic(diag::macro_expansion_missing_pound, macro->getName())
     .fixItInsert(getLoc(), "#");
-  return true;
-}
-
-bool AddMissingMacroArguments::diagnoseAsError() {
-  std::string argumentString;
-  {
-    llvm::raw_string_ostream out(argumentString);
-    out << "(";
-    llvm::interleave(
-        macro->parameterList->begin(), macro->parameterList->end(),
-        [&](ParamDecl *param) {
-          if (!param->getArgumentName().empty()) {
-            out << param->getArgumentName() << ": ";
-          }
-
-          out << "<#" << param->getInterfaceType().getString() << "#" << ">";
-        },
-        [&] {
-          out << ", ";
-        });
-    out << ")";
-  }
-
-  auto insertLoc = getRawAnchor().getEndLoc();
-  emitDiagnostic(diag::macro_expansion_missing_arguments, macro->getName())
-    .fixItInsertAfter(insertLoc, argumentString);
-  macro->diagnose(
-      diag::kind_declname_declared_here, macro->getDescriptiveKind(),
-      macro->getName());
   return true;
 }
 

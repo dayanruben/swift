@@ -186,9 +186,9 @@ extern "C" int swift_ASTGen_roundTripCheck(void *sourceFile);
 
 /// Emit parser diagnostics for given source file.. Returns non-zero if any
 /// diagnostics were emitted.
-extern "C" int swift_ASTGen_emitParserDiagnostics(
-    void *diagEngine, void *sourceFile
-);
+extern "C" int swift_ASTGen_emitParserDiagnostics(void *diagEngine,
+                                                  void *sourceFile,
+                                                  int emitOnlyErrors);
 
 // Build AST nodes for the top-level entities in the syntax.
 extern "C" void swift_ASTGen_buildTopLevelASTNodes(void *sourceFile,
@@ -274,8 +274,12 @@ void Parser::parseTopLevelItems(SmallVectorImpl<ASTNode> &items) {
       diagnose(loc, diag::parser_round_trip_error);
     } else if (Context.LangOpts.hasFeature(Feature::ParserValidation) &&
                !Context.Diags.hadAnyError() &&
-               swift_ASTGen_emitParserDiagnostics(
-                   &Context.Diags, SF.exportedSourceFile)) {
+               swift_ASTGen_emitParserDiagnostics(&Context.Diags,
+                                                  SF.exportedSourceFile,
+                                                  /*emitOnlyErrors=*/true)) {
+      // We might have emitted warnings in the C++ parser but no errors, in
+      // which case we still have `hadAnyError() == false`. To avoid emitting
+      // the same warnings from SwiftParser, only emit errors from SwiftParser
       SourceLoc loc;
       if (auto bufferID = SF.getBufferID()) {
         loc = Context.SourceMgr.getLocForBufferStart(*bufferID);
@@ -318,7 +322,7 @@ Parser::parseSourceFileViaASTGen(SmallVectorImpl<ASTNode> &items,
          Context.LangOpts.hasFeature(Feature::ParserASTGen)) &&
         !suppressDiagnostics &&
         swift_ASTGen_emitParserDiagnostics(
-            &Context.Diags, SF.exportedSourceFile) &&
+            &Context.Diags, SF.exportedSourceFile, /*emitOnlyErrors=*/false) &&
         Context.Diags.hadAnyError() &&
         !Context.LangOpts.hasFeature(Feature::ParserASTGen)) {
       // Errors were emitted, and we're still using the C++ parser, so
@@ -1961,14 +1965,14 @@ ParserStatus Parser::parsePlatformVersionInList(StringRef AttrName,
   return makeParserSuccess();
 }
 
-bool Parser::parseBackDeployAttribute(DeclAttributes &Attributes,
-                                      StringRef AttrName, SourceLoc AtLoc,
-                                      SourceLoc Loc) {
+bool Parser::parseBackDeployedAttribute(DeclAttributes &Attributes,
+                                        StringRef AttrName, SourceLoc AtLoc,
+                                        SourceLoc Loc) {
   std::string AtAttrName = (llvm::Twine("@") + AttrName).str();
   auto LeftLoc = Tok.getLoc();
   if (!consumeIf(tok::l_paren)) {
     diagnose(Loc, diag::attr_expected_lparen, AtAttrName,
-             DeclAttribute::isDeclModifier(DAK_BackDeploy));
+             DeclAttribute::isDeclModifier(DAK_BackDeployed));
     return false;
   }
 
@@ -2019,9 +2023,9 @@ bool Parser::parseBackDeployAttribute(DeclAttributes &Attributes,
   assert(!PlatformAndVersions.empty());
   auto AttrRange = SourceRange(Loc, Tok.getLoc());
   for (auto &Item : PlatformAndVersions) {
-    Attributes.add(new (Context)
-                       BackDeployAttr(AtLoc, AttrRange, Item.first, Item.second,
-                                      /*IsImplicit*/ false));
+    Attributes.add(new (Context) BackDeployedAttr(AtLoc, AttrRange, Item.first,
+                                                  Item.second,
+                                                  /*IsImplicit*/ false));
   }
   return true;
 }
@@ -2063,6 +2067,7 @@ bool Parser::parseDocumentationAttributeArgument(Optional<StringRef> &Metadata,
       llvm::StringSwitch<Optional<AccessLevel>>(ArgumentValue)
         .Case("open", AccessLevel::Open)
         .Case("public", AccessLevel::Public)
+        .Case("package", AccessLevel::Package)
         .Case("internal", AccessLevel::Internal)
         .Case("private", AccessLevel::Private)
         .Case("fileprivate", AccessLevel::FilePrivate)
@@ -2724,6 +2729,7 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
       .Case("private", AccessLevel::Private)
       .Case("fileprivate", AccessLevel::FilePrivate)
       .Case("internal", AccessLevel::Internal)
+      .Case("package", AccessLevel::Package)
       .Case("public", AccessLevel::Public)
       .Case("open", AccessLevel::Open);
 
@@ -3366,8 +3372,8 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
         message, AtLoc, SourceRange(Loc, Tok.getLoc()), false));
     break;
   }
-  case DAK_BackDeploy: {
-    if (!parseBackDeployAttribute(Attributes, AttrName, AtLoc, Loc))
+  case DAK_BackDeployed: {
+    if (!parseBackDeployedAttribute(Attributes, AttrName, AtLoc, Loc))
       return false;
     break;
   }
@@ -4157,6 +4163,33 @@ ParserStatus Parser::parseTypeAttribute(TypeAttributes &Attributes,
                          beginLoc);
     } else {
       diagnose(Tok, diag::opened_attribute_expected_lparen);
+    }
+
+    break;
+  }
+
+  case TAK_pack_element: {
+    if (!isInSILMode()) {
+      diagnose(AtLoc, diag::only_allowed_in_sil, "pack_element");
+      return makeParserSuccess();
+    }
+
+    // Parse the opened ID string in parens
+    SourceLoc beginLoc = Tok.getLoc(), idLoc, endLoc;
+    if (consumeIfNotAtStartOfLine(tok::l_paren)) {
+      idLoc = Tok.getLoc();
+      UUID id;
+      if (!parseUUIDString(id, diag::opened_attribute_id_value))
+        Attributes.OpenedID = id;
+
+      // TODO: allow more information so that these can be parsed
+      // prior to the open instruction.
+
+      parseMatchingToken(tok::r_paren, endLoc,
+                         diag::opened_attribute_expected_rparen,
+                         beginLoc);
+    } else {
+      diagnose(Tok, diag::pack_element_attribute_expected_lparen);
     }
 
     break;

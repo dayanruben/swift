@@ -5,11 +5,16 @@
 // Diagnostics testing
 // RUN: %target-typecheck-verify-swift -enable-experimental-feature Macros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir -module-name MacroUser -DTEST_DIAGNOSTICS
 
-// RUN: not %target-swift-frontend -typecheck -enable-experimental-feature Macros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir -module-name MacroUser -DTEST_DIAGNOSTICS -serialize-diagnostics-path %t/macro_expand.dia %s -emit-macro-expansion-files no-diagnostics
+// RUN: not %target-swift-frontend -typecheck -enable-experimental-feature Macros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir -module-name MacroUser -DTEST_DIAGNOSTICS -serialize-diagnostics-path %t/macro_expand.dia %s -emit-macro-expansion-files no-diagnostics > %t/macro-printing.txt
 // RUN: c-index-test -read-diagnostics %t/macro_expand.dia 2>&1 | %FileCheck -check-prefix CHECK-DIAGS %s
+
+// RUN: %FileCheck %s  --check-prefix CHECK-MACRO-PRINTED < %t/macro-printing.txt
 
 // Debug info SIL testing
 // RUN: %target-swift-frontend -emit-sil -enable-experimental-feature Macros -enable-experimental-feature Macros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir %s -module-name MacroUser -o - -g | %FileCheck --check-prefix CHECK-SIL %s
+
+// Debug info IR testing
+// RUN: %target-swift-frontend -emit-ir -enable-experimental-feature Macros -enable-experimental-feature Macros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir %s -module-name MacroUser -o - -g | %FileCheck --check-prefix CHECK-IR %s
 
 // Execution testing
 // RUN: %target-build-swift -g -enable-experimental-feature Macros -enable-experimental-feature Macros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir -L %swift-host-lib-dir %s -o %t/main -module-name MacroUser
@@ -19,17 +24,18 @@
 // FIXME: Swift parser is not enabled on Linux CI yet.
 // REQUIRES: OS=macosx
 
-@freestanding(expression) macro customFileID: String = #externalMacro(module: "MacroDefinition", type: "FileIDMacro")
+@freestanding(expression) macro customFileID() -> String = #externalMacro(module: "MacroDefinition", type: "FileIDMacro")
 @freestanding(expression) macro stringify<T>(_ value: T) -> (T, String) = #externalMacro(module: "MacroDefinition", type: "StringifyMacro")
-@freestanding(expression) macro fileID<T: ExpressibleByStringLiteral>: T = #externalMacro(module: "MacroDefinition", type: "FileIDMacro")
+@freestanding(expression) macro fileID<T: ExpressibleByStringLiteral>() -> T = #externalMacro(module: "MacroDefinition", type: "FileIDMacro")
 @freestanding(expression) macro recurse(_: Bool) = #externalMacro(module: "MacroDefinition", type: "RecursiveMacro")
 
 func testFileID(a: Int, b: Int) {
   // CHECK: MacroUser/macro_expand.swift
   print("Result is \(#customFileID)")
-  // CHECK-SIL: sil_scope [[MACRO_SCOPE:[0-9]+]] { loc "{{.*}}":1:1 parent @customFileID {{.*}} }
+  // CHECK-SIL: sil_scope [[MACRO_SCOPE:[0-9]+]] { loc "{{.*}}":1:1 parent @$s9MacroUser10testFileID1a1bySi_SitF06customdE0fMf_ {{.*}} }
   // CHECK-SIL: sil_scope [[SRC_SCOPE:[0-9]+]] { loc "{{.*}}macro_expand.swift":[[@LINE-2]]
   // CHECK-SIL: sil_scope {{[0-9]+}} { loc "{{.*}}":1:1 parent [[MACRO_SCOPE]] inlined_at [[SRC_SCOPE]] }
+  // CHECK-IR: !DISubprogram(name: "customFileID", linkageName: "$s9MacroUser10testFileID1a1bySi_SitF06customdE0fMf_"
 
 
   // CHECK: Builtin result is MacroUser/macro_expand.swift
@@ -115,8 +121,20 @@ func testAddBlocker(a: Int, b: Int, c: Int, oa: OnlyAdds) {
 #endif
 }
 
+@freestanding(expression) macro leftHandOperandFinder<T>(_ value: T) -> T = #externalMacro(module: "MacroDefinition", type: "LeftHandOperandFinderMacro")
+
+
+// Test source location information.
+func testSourceLocations(x: Int, yolo: Int, zulu: Int) {
+  // CHECK-MACRO-PRINTED: Source range for LHS is MacroUser/macro_expand.swift: [[@LINE+3]]:5-[[@LINE+3]]:13
+  // CHECK-MACRO-PRINTED: Source range for LHS is MacroUser/macro_expand.swift: [[@LINE+2]]:5-[[@LINE+2]]:6
+  _ = #leftHandOperandFinder(
+    x + yolo + zulu
+  )
+}
+
 // Make sure we don't crash with declarations produced by expansions.
-@freestanding(expression) macro nestedDeclInExpr: () -> Void = #externalMacro(module: "MacroDefinition", type: "NestedDeclInExprMacro")
+@freestanding(expression) macro nestedDeclInExpr() -> () -> Void = #externalMacro(module: "MacroDefinition", type: "NestedDeclInExprMacro")
 
 func testNestedDeclInExpr() {
   let _: () -> Void = #nestedDeclInExpr
@@ -134,6 +152,7 @@ func testFreestandingMacroExpansion() {
   struct Foo {
     #bitwidthNumberedStructs("MyIntOne")
   }
+
   // CHECK: MyIntOne8
   print(Foo.MyIntOne8.self)
   // CHECK: MyIntOne16
@@ -154,6 +173,17 @@ func testFreestandingMacroExpansion() {
   print(Foo2.MyIntTwo32.self)
   // CHECK: MyIntTwo64
   print(Foo2.MyIntTwo64.self)
+
+  #if TEST_DIAGNOSTICS
+  struct Foo3 {
+#bitwidthNumberedStructs("BUG", blah: false)
+    // expected-note@-1 4{{in expansion of macro 'bitwidthNumberedStructs' here}}
+    // CHECK-DIAGS: CONTENTS OF FILE @__swiftmacro_9MacroUser016testFreestandingA9ExpansionyyF4Foo3L_V23bitwidthNumberedStructsfMf_.swift
+    // CHECK-DIAGS: struct BUG {
+    // CHECK-DIAGS:   func $s9MacroUser016testFreestandingA9ExpansionyyF4Foo3L_V23bitwidthNumberedStructsfMf_6methodfMu_()
+    // CHECK-DIAGS:   func $s9MacroUser016testFreestandingA9ExpansionyyF4Foo3L_V23bitwidthNumberedStructsfMf_6methodfMu0{{_?}}()
+  }
+  #endif
 
   // FIXME: Declaration macro expansions in BraceStmt don't work yet.
 //  HECK: MyIntGlobal8

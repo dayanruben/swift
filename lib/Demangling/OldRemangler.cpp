@@ -1063,8 +1063,37 @@ ManglingError Remangler::mangleMacro(Node *node, unsigned depth) {
   return mangleChildNodes(node, depth + 1);
 }
 
-ManglingError Remangler::mangleMacroExpansion(Node *node, unsigned depth) {
+ManglingError Remangler::mangleFreestandingMacroExpansion(
+    Node *node, unsigned depth) {
   Buffer << "fMf";
+  RETURN_IF_ERROR(mangleIndex(node, depth + 1));
+  return mangleChildNodes(node, depth + 1);
+}
+
+ManglingError Remangler::mangleAccessorAttachedMacroExpansion(
+    Node *node, unsigned depth) {
+  Buffer << "fMa";
+  RETURN_IF_ERROR(mangleIndex(node, depth + 1));
+  return mangleChildNodes(node, depth + 1);
+}
+
+ManglingError Remangler::mangleMemberAttributeAttachedMacroExpansion(
+    Node *node, unsigned depth) {
+  Buffer << "fMA";
+  RETURN_IF_ERROR(mangleIndex(node, depth + 1));
+  return mangleChildNodes(node, depth + 1);
+}
+
+ManglingError Remangler::mangleMemberAttachedMacroExpansion(
+    Node *node, unsigned depth) {
+  Buffer << "fMm";
+  RETURN_IF_ERROR(mangleIndex(node, depth + 1));
+  return mangleChildNodes(node, depth + 1);
+}
+
+ManglingError Remangler::mangleMacroExpansionUniqueName(
+    Node *node, unsigned depth) {
+  Buffer << "fMu";
   RETURN_IF_ERROR(mangleIndex(node, depth + 1));
   return mangleChildNodes(node, depth + 1);
 }

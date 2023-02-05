@@ -2657,10 +2657,10 @@ getActualMacroRole(uint8_t context) {
   CASE(Declaration)
   CASE(Accessor)
   CASE(MemberAttribute)
+  CASE(Member)
 #undef CASE
-  default:
-    return None;
   }
+  return None;
 }
 
 static Optional<swift::MacroIntroducedDeclNameKind>
@@ -5380,18 +5380,17 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
         break;
       }
 
-      case decls_block::BackDeploy_DECL_ATTR: {
+      case decls_block::BackDeployed_DECL_ATTR: {
         bool isImplicit;
         unsigned Platform;
         DEF_VER_TUPLE_PIECES(Version);
-        serialization::decls_block::BackDeployDeclAttrLayout::readRecord(
+        serialization::decls_block::BackDeployedDeclAttrLayout::readRecord(
             scratch, isImplicit, LIST_VER_TUPLE_PIECES(Version), Platform);
         llvm::VersionTuple Version;
         DECODE_VER_TUPLE(Version)
-        Attr = new (ctx) BackDeployAttr(SourceLoc(), SourceRange(),
-                                        (PlatformKind)Platform,
-                                        Version,
-                                        isImplicit);
+        Attr = new (ctx)
+            BackDeployedAttr(SourceLoc(), SourceRange(), (PlatformKind)Platform,
+                             Version, isImplicit);
         break;
       }
 

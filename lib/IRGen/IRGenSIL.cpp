@@ -17,6 +17,7 @@
 
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsIRGen.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/Pattern.h"
@@ -49,8 +50,8 @@
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
@@ -1149,6 +1150,7 @@ public:
   void emitDebugInfoForAllocStack(AllocStackInst *i, const TypeInfo &type,
                                   llvm::Value *addr);
   void visitAllocStackInst(AllocStackInst *i);
+  void visitAllocPackInst(AllocPackInst *i);
   void visitAllocRefInst(AllocRefInst *i);
   void visitAllocRefDynamicInst(AllocRefDynamicInst *i);
   void visitAllocBoxInst(AllocBoxInst *i);
@@ -1324,6 +1326,7 @@ public:
   void visitIsEscapingClosureInst(IsEscapingClosureInst *i);
   void visitDeallocStackInst(DeallocStackInst *i);
   void visitDeallocStackRefInst(DeallocStackRefInst *i);
+  void visitDeallocPackInst(DeallocPackInst *i);
   void visitDeallocBoxInst(DeallocBoxInst *i);
   void visitDeallocRefInst(DeallocRefInst *i);
   void visitDeallocPartialRefInst(DeallocPartialRefInst *i);
@@ -5496,6 +5499,10 @@ void IRGenSILFunction::visitAllocStackInst(swift::AllocStackInst *i) {
   emitDebugInfoForAllocStack(i, type, addr.getAddress());
 }
 
+void IRGenSILFunction::visitAllocPackInst(swift::AllocPackInst *i) {
+  IGM.unimplemented(i->getLoc().getSourceLoc(), "alloc_pack");
+}
+
 static void
 buildTailArrays(IRGenSILFunction &IGF,
                 SmallVectorImpl<std::pair<SILType, llvm::Value *>> &TailArrays,
@@ -5593,6 +5600,10 @@ void IRGenSILFunction::visitDeallocStackRefInst(DeallocStackRefInst *i) {
       Builder.CreateLifetimeEnd(selfValue);
     }
   }
+}
+
+void IRGenSILFunction::visitDeallocPackInst(swift::DeallocPackInst *i) {
+  IGM.unimplemented(i->getLoc().getSourceLoc(), "dealloc_pack");
 }
 
 void IRGenSILFunction::visitDeallocRefInst(swift::DeallocRefInst *i) {
@@ -6863,8 +6874,13 @@ void IRGenSILFunction::visitScalarPackIndexInst(ScalarPackIndexInst *i) {
 void IRGenSILFunction::visitOpenPackElementInst(swift::OpenPackElementInst *i) {
   llvm::Value *index = getLoweredSingletonExplosion(i->getIndexOperand());
 
-  // FIXME: bind the archetypes
-  (void) index;
+  i->getOpenedGenericEnvironment()->forEachPackElementBinding(
+      [&](auto *archetype, auto *pack) {
+        auto *metadata = emitTypeMetadataPackElementRef(
+            *this, CanPackType(pack), index, MetadataState::Complete);
+        this->bindArchetype(CanElementArchetypeType(archetype), metadata,
+                            MetadataState::Complete, {});
+      });
 
   // The result is just used for type dependencies.
 }

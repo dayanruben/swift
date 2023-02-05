@@ -41,10 +41,13 @@ class DiagnosticEmitter {
   /// here.
   SmallPtrSet<MarkMustCheckInst *, 4> valuesWithDiagnostics;
 
-  // Track any violating uses we have emitted a diagnostic for so we don't emit
-  // multiple diagnostics for the same use.
+  /// Track any violating uses we have emitted a diagnostic for so we don't emit
+  /// multiple diagnostics for the same use.
   SmallPtrSet<SILInstruction *, 8> useWithDiagnostic;
 
+  /// A count of the total diagnostics emitted so that callers of routines that
+  /// take a diagnostic emitter can know if the emitter emitted additional
+  /// diagnosics while running a callee.
   unsigned diagnosticCount = 0;
 
 public:
@@ -88,12 +91,20 @@ public:
       TypeTreeLeafTypeRange destructureNeededBits,
       FieldSensitivePrunedLivenessBoundary &boundary);
 
+  void emitObjectInstConsumesValueTwice(MarkMustCheckInst *markedValue,
+                                        Operand *firstConsumingUse,
+                                        Operand *secondConsumingUse);
+  void emitObjectInstConsumesAndUsesValue(MarkMustCheckInst *markedValue,
+                                          Operand *consumingUse,
+                                          Operand *nonConsumingUse);
+
 private:
   /// Emit diagnostics for the final consuming uses and consuming uses needing
   /// copy. If filter is non-null, allow for the caller to pre-process operands
   /// and emit their own diagnostic. If filter returns true, then we assume that
   /// the caller processed it correctly. false, then we continue to process it.
-  void emitObjectDiagnosticsForFoundUses(bool ignorePartialApply = false) const;
+  void
+  emitObjectDiagnosticsForGuaranteedUses(bool ignorePartialApply = false) const;
   void emitObjectDiagnosticsForPartialApplyUses() const;
 
   void registerDiagnosticEmitted(MarkMustCheckInst *value) {
