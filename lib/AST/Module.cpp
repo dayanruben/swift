@@ -598,6 +598,9 @@ void ModuleDecl::updateSourceFileLocationMap() {
   std::sort(sourceFileLocationMap->allSourceFiles.begin(),
             sourceFileLocationMap->allSourceFiles.end(),
             SourceFileRangeComparison{&getASTContext().SourceMgr});
+
+  sourceFileLocationMap->numFiles = files.size();
+  sourceFileLocationMap->numAuxiliaryFiles = AuxiliaryFiles.size();
 }
 
 SourceFile *ModuleDecl::getSourceFileContainingLocation(SourceLoc loc) {
@@ -3467,14 +3470,14 @@ bool FileUnit::walk(ASTWalker &walker) {
     if (SkipInternal) {
       // Ignore if the decl isn't visible
       if (auto *VD = dyn_cast<ValueDecl>(D)) {
-        if (!VD->isAccessibleFrom(nullptr))
+        if (VD->getFormalAccess() < AccessLevel::Public)
           continue;
       }
 
       // Also ignore if the extended nominal isn't visible
       if (auto *ED = dyn_cast<ExtensionDecl>(D)) {
         auto *ND = ED->getExtendedNominal();
-        if (ND && !ND->isAccessibleFrom(nullptr))
+        if (ND && ND->getFormalAccess() < AccessLevel::Public)
           continue;
       }
     }

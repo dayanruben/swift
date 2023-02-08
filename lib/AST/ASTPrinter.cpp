@@ -3169,6 +3169,8 @@ static bool usesFeatureBuiltinMacros(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureImportSymbolicCXXDecls(Decl *decl) { return false; }
+
 static void
 suppressingFeatureNoAsyncAvailability(PrintOptions &options,
                                       llvm::function_ref<void()> action) {
@@ -4373,7 +4375,9 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
              "unexpected convenience initializer");
     }
   } else if (decl->getInitKind() == CtorInitializerKind::Factory) {
-    Printer << "/*not inherited*/ ";
+    if (Options.PrintFactoryInitializerComment) {
+      Printer << "/*not inherited*/ ";
+    }
   }
 
   printContextIfNeeded(decl);
@@ -4600,7 +4604,7 @@ void PrintAST::visitMacroDecl(MacroDecl *decl) {
 }
 
 void PrintAST::visitMacroExpansionDecl(MacroExpansionDecl *decl) {
-  Printer << '#' << decl->getMacro();
+  Printer << '#' << decl->getMacroName();
   if (decl->getArgs()) {
     Printer << '(';
     auto args = decl->getArgs()->getOriginalArgs();

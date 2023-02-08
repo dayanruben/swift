@@ -111,7 +111,7 @@ EXPERIMENTAL_FEATURE(MoveOnlyClasses, true)
 
 EXPERIMENTAL_FEATURE(OneWayClosureParameters, false)
 EXPERIMENTAL_FEATURE(TypeWitnessSystemInference, false)
-EXPERIMENTAL_FEATURE(LayoutPrespecialization, false)
+EXPERIMENTAL_FEATURE(LayoutPrespecialization, true)
 EXPERIMENTAL_FEATURE(ModuleInterfaceExportAs, true)
 
 /// Whether to enable experimental differentiable programming features:
@@ -166,6 +166,11 @@ EXPERIMENTAL_FEATURE(BuiltinMacros, false)
 /// Whether to enable experimental @runtimeMetadata feature which allows to
 /// declare an attribute which is discoverable and constructable at runtime.
 EXPERIMENTAL_FEATURE(RuntimeDiscoverableAttrs, false)
+
+/// Import C++ class templates as semantically-meaningless symbolic
+/// Swift types and C++ methods as symbolic functions with blank
+/// signatures.
+EXPERIMENTAL_FEATURE(ImportSymbolicCXXDecls, false)
 
 #undef EXPERIMENTAL_FEATURE
 #undef UPCOMING_FEATURE
