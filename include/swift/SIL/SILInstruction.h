@@ -4929,6 +4929,19 @@ public:
   }
 };
 
+/// This instruction is inserted by Onone optimizations as a replacement for deleted
+/// instructions to ensure that it's possible to set a breakpoint on its location.
+class DebugStepInst final
+    : public InstructionBase<SILInstructionKind::DebugStepInst, NonValueInstruction> {
+  friend SILBuilder;
+
+  DebugStepInst(SILDebugLocation debugLoc) : InstructionBase(debugLoc) {}
+
+public:
+  ArrayRef<Operand> getAllOperands() const { return {}; }
+  MutableArrayRef<Operand> getAllOperands() { return {}; }
+};
+
 /// Define the start or update to a symbolic variable value (for loadable
 /// types).
 class DebugValueInst final
@@ -7744,6 +7757,53 @@ public:
 
   SILType getElementType() const {
     return getValue()->getType();
+  }
+};
+
+/// Projects a tuple element as appropriate for the given
+/// pack element index.  The pack index must index into a pack with
+/// the same shape as the tuple element type list.
+class TuplePackElementAddrInst final
+  : public InstructionBaseWithTrailingOperands<
+                           SILInstructionKind::TuplePackElementAddrInst,
+                           TuplePackElementAddrInst,
+                           SingleValueInstruction> {
+public:
+  enum {
+    IndexOperand = 0,
+    TupleOperand = 1
+  };
+
+private:
+  friend SILBuilder;
+
+  TuplePackElementAddrInst(SILDebugLocation debugLoc,
+                           ArrayRef<SILValue> allOperands,
+                           SILType elementType)
+      : InstructionBaseWithTrailingOperands(allOperands, debugLoc,
+                                            elementType) {}
+
+  static TuplePackElementAddrInst *create(SILFunction &F,
+                                          SILDebugLocation debugLoc,
+                                          SILValue indexOperand,
+                                          SILValue tupleOperand,
+                                          SILType elementType);
+
+public:
+  SILValue getIndex() const {
+    return getAllOperands()[IndexOperand].get();
+  }
+
+  SILValue getTuple() const {
+    return getAllOperands()[TupleOperand].get();
+  }
+
+  CanTupleType getTupleType() const {
+    return getTuple()->getType().castTo<TupleType>();
+  }
+
+  SILType getElementType() const {
+    return getType();
   }
 };
 

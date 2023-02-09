@@ -985,6 +985,10 @@ public:
                                        bool wasMoved = false,
                                        bool trace = false);
 
+  DebugStepInst *createDebugStep(SILLocation Loc) {
+    return insert(new (getModule()) DebugStepInst(getSILDebugLocation(Loc)));
+  }
+
   /// Create a debug_value according to the type of \p src
   SILInstruction *emitDebugDescription(SILLocation Loc, SILValue src,
                                        SILDebugVariable Var) {
@@ -1989,6 +1993,14 @@ public:
     return insert(new (getModule()) PackElementSetInst(
                               getSILDebugLocation(loc),
                               elementValue, packIndex, pack));
+  }
+
+  TuplePackElementAddrInst *
+  createTuplePackElementAddr(SILLocation loc, SILValue packIndex,
+                             SILValue tupleAddr, SILType elementType) {
+    return insert(TuplePackElementAddrInst::create(getFunction(),
+                              getSILDebugLocation(loc),
+                              packIndex, tupleAddr, elementType));
   }
 
   ProjectBlockStorageInst *createProjectBlockStorage(SILLocation Loc,
