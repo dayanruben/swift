@@ -1714,20 +1714,6 @@ public:
   }
 
   void visitAssignByWrapperInst(AssignByWrapperInst *AI) {
-    {
-      *this << "origin ";
-
-      switch (AI->getOriginator()) {
-      case AssignByWrapperInst::Originator::TypeWrapper:
-        *this << "type_wrapper";
-        break;
-      case AssignByWrapperInst::Originator::PropertyWrapper:
-        *this << "property_wrapper";
-      }
-
-      *this << ", ";
-    }
-
     *this << getIDAndType(AI->getSrc()) << " to ";
     switch (AI->getMode()) {
     case AssignByWrapperInst::Unknown:
@@ -1742,13 +1728,9 @@ public:
       *this << "[assign_wrapped_value] ";
       break;
     }
-
-    *this << getIDAndType(AI->getDest());
-
-    if (AI->getOriginator() == AssignByWrapperInst::Originator::PropertyWrapper)
-      *this << ", init " << getIDAndType(AI->getInitializer());
-
-    *this << ", set " << getIDAndType(AI->getSetter());
+    *this << getIDAndType(AI->getDest())
+          << ", init " << getIDAndType(AI->getInitializer())
+          << ", set " << getIDAndType(AI->getSetter());
   }
 
   void visitMarkUninitializedInst(MarkUninitializedInst *MU) {
@@ -2010,11 +1992,14 @@ public:
     switch (I->getCheckKind()) {
     case CheckKind::Invalid:
       llvm_unreachable("Invalid?!");
-    case CheckKind::NoImplicitCopy:
-      *this << "[no_implicit_copy] ";
+    case CheckKind::ConsumableAndAssignable:
+      *this << "[consumable_and_assignable] ";
       break;
-    case CheckKind::NoCopy:
-      *this << "[no_copy] ";
+    case CheckKind::NoConsumeOrAssign:
+      *this << "[no_consume_or_assign] ";
+      break;
+    case CheckKind::AssignableButNotConsumable:
+      *this << "[assignable_but_not_consumable] ";
       break;
     }
     *this << getIDAndType(I->getOperand());
@@ -4114,7 +4099,9 @@ void SILSpecializeAttr::print(llvm::raw_ostream &OS) const {
           } else {
             Requirement ReqWithDecls(req.getKind(), FirstTy,
                                      req.getLayoutConstraint());
-            ReqWithDecls.print(OS, SubPrinter);
+            auto SubPrinterCopy = SubPrinter;
+            SubPrinterCopy.PrintClassLayoutName = erased;
+            ReqWithDecls.print(OS, SubPrinterCopy);
           }
         },
         [&] { OS << ", "; });

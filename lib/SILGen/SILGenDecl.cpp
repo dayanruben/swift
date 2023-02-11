@@ -380,7 +380,7 @@ public:
     if (Addr->getType().isMoveOnly()) {
       // TODO: Handle no implicit copy here.
       Addr = SGF.B.createMarkMustCheckInst(
-          decl, Addr, MarkMustCheckInst::CheckKind::NoImplicitCopy);
+          decl, Addr, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
     }
 
     // Push a cleanup to destroy the local variable.  This has to be
@@ -580,7 +580,8 @@ public:
       if (value->getType().isPureMoveOnly()) {
         value = SGF.B.createMoveValue(PrologueLoc, value, /*isLexical*/ true);
         return SGF.B.createMarkMustCheckInst(
-            PrologueLoc, value, MarkMustCheckInst::CheckKind::NoImplicitCopy);
+            PrologueLoc, value,
+            MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
       }
 
       // Otherwise, if we don't have a no implicit copy trivial type, just
@@ -594,7 +595,8 @@ public:
           SGF.B.createOwnedCopyableToMoveOnlyWrapperValue(PrologueLoc, value);
       value = SGF.B.createMoveValue(PrologueLoc, value, /*isLexical*/ true);
       return SGF.B.createMarkMustCheckInst(
-          PrologueLoc, value, MarkMustCheckInst::CheckKind::NoImplicitCopy);
+          PrologueLoc, value,
+          MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
     }
 
     // Then if we don't have move only, just perform a lexical borrow if the
@@ -636,7 +638,8 @@ public:
         !value->getType().isMoveOnlyWrapped()) {
       value = SGF.B.createMoveValue(PrologueLoc, value, true /*isLexical*/);
       return SGF.B.createMarkMustCheckInst(
-          PrologueLoc, value, MarkMustCheckInst::CheckKind::NoImplicitCopy);
+          PrologueLoc, value,
+          MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
     }
 
     // Otherwise, if we do not have a no implicit copy variable, just follow
@@ -655,7 +658,8 @@ public:
     value = SGF.B.createCopyValue(PrologueLoc, value);
     value = SGF.B.createOwnedCopyableToMoveOnlyWrapperValue(PrologueLoc, value);
     return SGF.B.createMarkMustCheckInst(
-        PrologueLoc, value, MarkMustCheckInst::CheckKind::NoImplicitCopy);
+        PrologueLoc, value,
+        MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
   }
 
   void bindValue(SILValue value, SILGenFunction &SGF, bool wasPlusOne) {
@@ -1385,69 +1389,6 @@ void SILGenFunction::emitPatternBinding(PatternBindingDecl *PBD,
     bool isLocalVar =
         singleVar && singleVar->getDeclContext()->isLocalContext();
     emitInitializer(Init, singleVar, isLocalVar, initialization);
-  } else if (singleVar &&
-             singleVar->isTypeWrapperLocalStorageForInitializer()) {
-    // If any of the type wrapper managed properties had default initializers
-    // we need to emit them as assignments to `_storage` elements as part
-    // of its initialization.
-
-    auto storageVarType = singleVar->getType()->castTo<TupleType>();
-    auto *wrappedDecl = cast<NominalTypeDecl>(
-        singleVar->getDeclContext()->getInnermostTypeContext());
-
-    SmallVector<std::pair<VarDecl *, Expr *>, 2> fieldsToInitialize;
-    fieldsToInitialize.resize_for_overwrite(storageVarType->getNumElements());
-
-    unsigned numInitializable = 0;
-    for (auto member : wrappedDecl->getMembers()) {
-      auto *PBD = dyn_cast<PatternBindingDecl>(member);
-      // Check every member that is managed by the type wrapper.
-      if (!(PBD && PBD->getSingleVar() &&
-            PBD->getSingleVar()->isAccessedViaTypeWrapper()))
-        continue;
-
-      auto *field = PBD->getSingleVar();
-      auto fieldNo = storageVarType->getNamedElementId(field->getName());
-
-      if (auto *initExpr = PBD->getInit(/*index=*/0)) {
-        fieldsToInitialize[fieldNo] = {PBD->getSingleVar(), initExpr};
-        ++numInitializable;
-      }
-    }
-
-    if (numInitializable == 0) {
-      initialization->finishUninitialized(*this);
-      return;
-    }
-
-    // If there are any initializable fields, let's split _storage into
-    // element initializers and emit initializations for individual fields.
-
-    assert(initialization->canSplitIntoTupleElements());
-
-    SmallVector<InitializationPtr, 4> scratch;
-    auto fieldInits = initialization->splitIntoTupleElements(
-        *this, PBD, storageVarType->getCanonicalType(), scratch);
-
-    for (unsigned i : range(fieldInits.size())) {
-      VarDecl *field;
-      Expr *initExpr;
-
-      std::tie(field, initExpr) = fieldsToInitialize[i];
-
-      auto &fieldInit = fieldInits[i];
-      if (initExpr) {
-        // If there is wrapped value expression, we have to emit a
-        // backing property initializer call, otherwise let's use
-        // default expression (which is just `.init()` call).
-        emitInitializer(initExpr, field, bool(getWrappedValueExpr(field)),
-                        fieldInit);
-      } else {
-        fieldInit->finishUninitialized(*this);
-      }
-    }
-
-    initialization->finishInitialization(*this);
   } else {
     // Otherwise, mark it uninitialized for DI to resolve.
     initialization->finishUninitialized(*this);
