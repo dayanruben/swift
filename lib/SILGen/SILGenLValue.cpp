@@ -36,6 +36,7 @@
 #include "swift/SIL/MemAccessUtils.h"
 #include "swift/SIL/PrettyStackTrace.h"
 #include "swift/SIL/SILArgument.h"
+#include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILUndef.h"
 #include "swift/SIL/TypeLowering.h"
 #include "llvm/ADT/STLExtras.h"
@@ -598,29 +599,31 @@ static SILValue enterAccessScope(SILGenFunction &SGF, SILLocation loc,
                                  SGFAccessKind accessKind,
                                  SILAccessEnforcement enforcement,
                                  Optional<ActorIsolation> actorIso) {
-  auto silAccessKind = isReadAccess(accessKind) ? SILAccessKind::Read
-                                                : SILAccessKind::Modify;
+    auto silAccessKind = SILAccessKind::Modify;
+    if (isReadAccess(accessKind))
+      silAccessKind = SILAccessKind::Read;
+    else if (isConsumeAccess(accessKind))
+      silAccessKind = SILAccessKind::Deinit;
 
-  assert(SGF.isInFormalEvaluationScope() &&
-         "tried to enter access scope without a writeback scope!");
+    assert(SGF.isInFormalEvaluationScope() &&
+           "tried to enter access scope without a writeback scope!");
 
-  ExecutorBreadcrumb prevExecutor =
-      SGF.emitHopToTargetActor(loc, actorIso, base);
+    ExecutorBreadcrumb prevExecutor =
+        SGF.emitHopToTargetActor(loc, actorIso, base);
 
-  // Enter the access.
-  addr = SGF.B.createBeginAccess(loc, addr, silAccessKind, enforcement,
-                                 /*hasNoNestedConflict=*/false,
-                                 /*fromBuiltin=*/false);
+    // Enter the access.
+    addr = SGF.B.createBeginAccess(loc, addr, silAccessKind, enforcement,
+                                   /*hasNoNestedConflict=*/false,
+                                   /*fromBuiltin=*/false);
 
-  // Push a writeback to end it.
-  auto accessedMV = ManagedValue::forLValue(addr);
-  std::unique_ptr<LogicalPathComponent>
-    component(new EndAccessPseudoComponent(typeData,
-                                              std::move(prevExecutor)));
-  pushWriteback(SGF, loc, std::move(component), accessedMV,
-                MaterializedLValue());
+    // Push a writeback to end it.
+    auto accessedMV = ManagedValue::forLValue(addr);
+    std::unique_ptr<LogicalPathComponent> component(
+        new EndAccessPseudoComponent(typeData, std::move(prevExecutor)));
+    pushWriteback(SGF, loc, std::move(component), accessedMV,
+                  MaterializedLValue());
 
-  return addr;
+    return addr;
 }
 
 static ManagedValue enterAccessScope(SILGenFunction &SGF, SILLocation loc,
@@ -784,6 +787,17 @@ namespace {
       SILValue result =
         SGF.B.createRefElementAddr(loc, base.getUnmanagedValue(),
                                    Field, SubstFieldType);
+
+      // If we have a move only type...
+      if (result->getType().isMoveOnly()) {
+        auto checkKind =
+            MarkMustCheckInst::CheckKind::AssignableButNotConsumable;
+        if (isReadAccess(getAccessKind())) {
+          // Add a mark_must_check [no_consume_or_assign].
+          checkKind = MarkMustCheckInst::CheckKind::NoConsumeOrAssign;
+        }
+        result = SGF.B.createMarkMustCheckInst(loc, result, checkKind);
+      }
 
       // Avoid emitting access markers completely for non-accesses or immutable
       // declarations. Access marker verification is aware of these cases.
@@ -2886,6 +2900,8 @@ static AccessKind mapAccessKind(SGFAccessKind accessKind) {
   case SGFAccessKind::Write:
     return AccessKind::Write;
 
+  case SGFAccessKind::OwnedAddressConsume:
+  case SGFAccessKind::OwnedObjectConsume:
   case SGFAccessKind::ReadWrite:
     return AccessKind::ReadWrite;
   }
@@ -2972,6 +2988,14 @@ void LValue::addNonMemberVarComponent(SILGenFunction &SGF, SILLocation loc,
       // The only other case that should get here is a global variable.
       if (!address) {
         address = SGF.emitGlobalVariableRef(Loc, Storage, ActorIso);
+        if (address.getType().isMoveOnly()) {
+            auto checkKind =
+                MarkMustCheckInst::CheckKind::AssignableButNotConsumable;
+            if (isReadAccess(AccessKind)) {
+              checkKind = MarkMustCheckInst::CheckKind::NoConsumeOrAssign;
+            }
+            address = SGF.B.createMarkMustCheckInst(Loc, address, checkKind);
+        }
       } else {
         assert((!ActorIso || Storage->isTopLevelGlobal()) &&
                "local var should not be actor isolated!");
@@ -3648,6 +3672,8 @@ LValue SILGenLValue::visitKeyPathApplicationExpr(KeyPathApplicationExpr *e,
       return true;
 
     case SGFAccessKind::ReadWrite:
+    case SGFAccessKind::OwnedAddressConsume:
+    case SGFAccessKind::OwnedObjectConsume:
       return false;
     }
     llvm_unreachable("bad access kind");
@@ -4735,6 +4761,20 @@ ManagedValue SILGenFunction::emitBorrowedLValue(SILLocation loc,
   // If project() returned an owned value, and the caller cares, borrow it.
   if (value.hasCleanup() && !isIgnored)
     value = value.formalAccessBorrow(*this, loc);
+  return value;
+}
+
+ManagedValue SILGenFunction::emitConsumedLValue(SILLocation loc, LValue &&src,
+                                                TSanKind tsanKind) {
+  assert(isConsumeAccess(src.getAccessKind()));
+
+  ManagedValue base;
+  PathComponent &&component =
+      drillToLastComponent(*this, loc, std::move(src), base, tsanKind);
+
+  auto value =
+      drillIntoComponent(*this, loc, std::move(component), base, tsanKind);
+
   return value;
 }
 

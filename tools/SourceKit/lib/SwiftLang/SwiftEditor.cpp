@@ -945,6 +945,10 @@ public:
     if (AvailableAttr::isUnavailable(D))
       return true;
 
+    // FIXME: Ignore things that don't come from this buffer.
+    if (!SM.getRangeForBuffer(BufferID).contains(Range.getStart()))
+      return true;
+
     auto &SM = D->getASTContext().SourceMgr;
     if (D == D->getASTContext().getOptionalNoneDecl() &&
         SM.extractText(Range, BufferID) == "nil") {
