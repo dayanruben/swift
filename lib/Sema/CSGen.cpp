@@ -1354,6 +1354,13 @@ namespace {
     Type visitDeclRefExpr(DeclRefExpr *E) {
       auto locator = CS.getConstraintLocator(E);
 
+      auto invalidateReference = [&]() -> Type {
+        auto *hole = CS.createTypeVariable(locator, TVO_CanBindToHole);
+        (void)CS.recordFix(AllowRefToInvalidDecl::create(CS, locator));
+        CS.setType(E, hole);
+        return hole;
+      };
+
       Type knownType;
       if (auto *VD = dyn_cast<VarDecl>(E->getDecl())) {
         knownType = CS.getTypeIfAvailable(VD);
@@ -1361,13 +1368,27 @@ namespace {
           knownType = CS.getVarType(VD);
 
         if (knownType) {
+          // An out-of-scope type variable(s) could appear the type of
+          // a declaration only in diagnostic mode when invalid variable
+          // declaration is recursively referenced inside of a multi-statement
+          // closure located somewhere within its initializer e.g.:
+          // `let x = [<call>] { ... print(x) }`. It happens because the
+          // variable assumes the result type of its initializer unless
+          // its specified explicitly.
+          if (isa<ClosureExpr>(CurDC) && knownType->hasTypeVariable()) {
+            if (knownType.findIf([&](Type type) {
+                  auto *typeVar = type->getAs<TypeVariableType>();
+                  if (!typeVar || CS.getFixedType(typeVar))
+                    return false;
+
+                  return !CS.isActiveTypeVariable(typeVar);
+                }))
+              return invalidateReference();
+          }
+
           // If the known type has an error, bail out.
           if (knownType->hasError()) {
-            auto *hole = CS.createTypeVariable(locator, TVO_CanBindToHole);
-            (void)CS.recordFix(AllowRefToInvalidDecl::create(CS, locator));
-            if (!CS.hasType(E))
-              CS.setType(E, hole);
-            return hole;
+            return invalidateReference();
           }
 
           if (!knownType->hasPlaceholder()) {
@@ -1384,10 +1405,7 @@ namespace {
       // (in getTypeOfReference) so we can match non-error param types.
       if (!knownType && E->getDecl()->isInvalid() &&
           !CS.isForCodeCompletion()) {
-        auto *hole = CS.createTypeVariable(locator, TVO_CanBindToHole);
-        (void)CS.recordFix(AllowRefToInvalidDecl::create(CS, locator));
-        CS.setType(E, hole);
-        return hole;
+        return invalidateReference();
       }
 
       // Create an overload choice referencing this declaration and immediately
@@ -2375,6 +2393,12 @@ namespace {
       // function, to set the type of the pattern.
       auto setType = [&](Type type) {
         CS.setType(pattern, type);
+        if (auto PE = dyn_cast<ExprPattern>(pattern)) {
+          // Set the type of the pattern's sub-expression as well, so code
+          // completion can retrieve the expression's type in case it is a code
+          // completion token.
+          CS.setType(PE->getSubExpr(), type);
+        }
         return type;
       };
 
