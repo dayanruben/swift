@@ -1272,16 +1272,20 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
     useState.takeInsts.insert({user, *leafRange});
     return true;
   }
+  
+  auto insertLivenessUseForApply = [&](const Operand &op) -> bool {
+    auto leafRange = TypeTreeLeafTypeRange::get(op.get(), getRootAddress());
+    if (!leafRange)
+      return false;
 
-  if (auto fas = FullApplySite::isa(op->getUser())) {
+    useState.livenessUses.insert({user, *leafRange});
+    return true;
+  };
+
+  if (auto fas = FullApplySite::isa(user)) {
     switch (fas.getArgumentConvention(*op)) {
     case SILArgumentConvention::Indirect_In_Guaranteed: {
-      auto leafRange = TypeTreeLeafTypeRange::get(op->get(), getRootAddress());
-      if (!leafRange)
-        return false;
-
-      useState.livenessUses.insert({user, *leafRange});
-      return true;
+      return insertLivenessUseForApply(*op);
     }
 
     case SILArgumentConvention::Indirect_Inout:
@@ -1298,7 +1302,15 @@ bool GatherUsesVisitor::visitUse(Operand *op, AccessUseType useTy) {
       break;
     }
   }
-
+  
+  if (PartialApplyInst *pas = dyn_cast<PartialApplyInst>(user)) {
+    if (pas->isOnStack()) {
+      // On-stack partial applications are always a liveness use of their
+      // captures.
+      return insertLivenessUseForApply(*op);
+    }
+  }
+  
   // If we don't fit into any of those categories, just track as a liveness
   // use. We assume all such uses must only be reads to the memory. So we assert
   // to be careful.
@@ -1374,7 +1386,7 @@ bool GlobalLivenessChecker::testInstVectorLiveness(
     if (!liveness.isWithinBoundary(takeInstAndValue.first,
                                    takeInstAndValue.second)) {
       // TODO: Today, we don't tell the user the actual field itself where the
-      // violation occured and just instead just shows the two instructions. We
+      // violation occurred and just instead just shows the two instructions. We
       // could be more specific though...
       LLVM_DEBUG(llvm::dbgs() << "        Not within the boundary.\n");
       continue;
