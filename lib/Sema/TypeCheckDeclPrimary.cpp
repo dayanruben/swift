@@ -2019,6 +2019,8 @@ public:
     if (!MD->getAttrs().hasAttribute<MacroRoleAttr>(/*AllowInvalid*/ true))
       MD->diagnose(diag::macro_without_role, MD->getName());
 
+    TypeChecker::checkParameterList(MD->getParameterList(), MD);
+
     // Check the macro definition.
     switch (auto macroDef = MD->getDefinition()) {
     case MacroDefinition::Kind::Undefined:
@@ -2036,10 +2038,8 @@ public:
       ExternalMacroDefinitionRequest request{
         &Ctx, external.moduleName, external.macroTypeName
       };
-      auto externalDef = evaluateOrDefault(
-          Ctx.evaluator, request, ExternalMacroDefinition()
-      );
-      if (!externalDef.opaqueHandle) {
+      auto externalDef = evaluateOrDefault(Ctx.evaluator, request, None);
+      if (!externalDef) {
         MD->diagnose(
             diag::external_macro_not_found,
             external.moduleName.str(),

@@ -415,6 +415,7 @@ public:
   llvm::SmallDenseMap<StackSlotKey, Address, 8> ShadowStackSlots;
   llvm::SmallDenseMap<llvm::Value *, Address, 8> TaskAllocStackSlots;
   llvm::SmallDenseMap<Decl *, Identifier, 8> AnonymousVariables;
+  llvm::SmallDenseSet<llvm::Value *, 4> PackShapeExpressions;
   /// To avoid inserting elements into ValueDomPoints twice.
   llvm::SmallDenseSet<llvm::Value *, 8> ValueVariables;
   /// Holds the DominancePoint of values that are storage for a source variable.
@@ -1097,6 +1098,22 @@ public:
       runtimeTy.visit([&](CanType t) {
         if (auto archetype = dyn_cast<ArchetypeType>(t))
           emitTypeMetadataRef(archetype);
+        else if (auto packArchetype = dyn_cast<PackArchetypeType>(t))
+          emitTypeMetadataRef(packArchetype);
+        else if (auto packtype = dyn_cast<SILPackType>(t)) {
+          llvm::Value *Shape = emitPackShapeExpression(t);
+          if (PackShapeExpressions.insert(Shape).second) {
+              llvm::SmallString<8> Buf;
+              llvm::raw_svector_ostream OS(Buf);
+              unsigned Position = PackShapeExpressions.size();
+              OS << "$pack_count_" << Position;
+              SILDebugVariable Var(OS.str(), true, 0);
+              Shape = emitShadowCopyIfNeeded(Shape, getDebugScope(), Var, false,
+                                             false /*was move*/);
+              if (IGM.DebugInfo)
+                IGM.DebugInfo->emitPackCountParameter(*this, Shape, Var);
+          }
+        }
       });
   }
   
@@ -2731,7 +2748,17 @@ void IRGenSILFunction::visitFunctionRefBaseInst(FunctionRefBaseInst *i) {
   }
   FunctionPointer fp =
       FunctionPointer::forDirect(fpKind, value, secondaryValue, sig);
-
+  // Update the foreign no-throw information if needed.
+  if (const auto *cd = fn->getClangDecl()) {
+    if (auto *cfd = dyn_cast<clang::FunctionDecl>(cd)) {
+      if (auto *cft = cfd->getType()->getAs<clang::FunctionProtoType>()) {
+        if (cft->isNothrow())
+          fp.setForeignNoThrow();
+      }
+    }
+    if (IGM.emittedForeignFunctionThunksWithExceptionTraps.count(fnPtr))
+      fp.setForeignCallCatchesExceptionInThunk();
+  }
   // Store the function as a FunctionPointer so we can avoid bitcasting
   // or thunking if we don't need to.
   setLoweredFunctionPointer(i, fp);
@@ -4677,10 +4704,13 @@ void IRGenSILFunction::visitSetDeallocatingInst(SetDeallocatingInst *i) {
 }
 
 void IRGenSILFunction::visitReleaseValueInst(swift::ReleaseValueInst *i) {
-  Explosion in = getLoweredExplosion(i->getOperand());
-  cast<LoadableTypeInfo>(getTypeInfo(i->getOperand()->getType()))
+  auto operand = i->getOperand();
+  auto ty = operand->getType();
+  Explosion in = getLoweredExplosion(operand);
+  cast<LoadableTypeInfo>(getTypeInfo(ty))
       .consume(*this, in, i->isAtomic() ? irgen::Atomicity::Atomic
-                                        : irgen::Atomicity::NonAtomic);
+                                        : irgen::Atomicity::NonAtomic,
+               ty);
 }
 
 void IRGenSILFunction::visitReleaseValueAddrInst(
@@ -4701,9 +4731,11 @@ void IRGenSILFunction::visitReleaseValueAddrInst(
 }
 
 void IRGenSILFunction::visitDestroyValueInst(swift::DestroyValueInst *i) {
-  Explosion in = getLoweredExplosion(i->getOperand());
-  cast<LoadableTypeInfo>(getTypeInfo(i->getOperand()->getType()))
-      .consume(*this, in, getDefaultAtomicity());
+  auto operand = i->getOperand();
+  auto ty = operand->getType();
+  Explosion in = getLoweredExplosion(operand);
+  cast<LoadableTypeInfo>(getTypeInfo(ty))
+      .consume(*this, in, getDefaultAtomicity(), ty);
 }
 
 void IRGenSILFunction::visitStructInst(swift::StructInst *i) {
@@ -4887,7 +4919,7 @@ void IRGenSILFunction::visitStoreInst(swift::StoreInst *i) {
     typeInfo.initialize(*this, source, dest, false);
     break;
   case StoreOwnershipQualifier::Assign:
-    typeInfo.assign(*this, source, dest, false);
+    typeInfo.assign(*this, source, dest, false, objType);
     break;
   }
 }

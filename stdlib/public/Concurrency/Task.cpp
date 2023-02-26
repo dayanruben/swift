@@ -117,7 +117,6 @@ FutureFragment::Status AsyncTask::waitFuture(AsyncTask *waitingTask,
   // NOTE: this acquire synchronizes with `completeFuture`.
   auto queueHead = fragment->waitQueue.load(std::memory_order_acquire);
   bool contextInitialized = false;
-  auto escalatedPriority = JobPriority::Unspecified;
   while (true) {
     switch (queueHead.getStatus()) {
     case Status::Error:
@@ -192,7 +191,6 @@ FutureFragment::Status AsyncTask::waitFuture(AsyncTask *waitingTask,
 void NullaryContinuationJob::process(Job *_job) {
   auto *job = cast<NullaryContinuationJob>(_job);
 
-  auto *task = job->Task;
   auto *continuation = job->Continuation;
 
   delete job;
@@ -361,6 +359,9 @@ static const unsigned long dispatchSwiftObjectType = 1;
 FullMetadata<DispatchClassMetadata> swift::jobHeapMetadata = {
   {
     {
+      /*type layout*/ nullptr,
+    },
+    {
       &destroyJob
     },
     {
@@ -377,6 +378,9 @@ FullMetadata<DispatchClassMetadata> swift::jobHeapMetadata = {
 /// Heap metadata for an asynchronous task.
 static FullMetadata<DispatchClassMetadata> taskHeapMetadata = {
   {
+    {
+      /*type layout*/ nullptr
+    },
     {
       &destroyTask
     },
@@ -1496,7 +1500,7 @@ swift_task_addCancellationHandlerImpl(
 
   bool fireHandlerNow = false;
 
-  addStatusRecord(record, [&](ActiveTaskStatus oldStatus, ActiveTaskStatus& newStatus) {
+  addStatusRecordToSelf(record, [&](ActiveTaskStatus oldStatus, ActiveTaskStatus& newStatus) {
     if (oldStatus.isCancelled()) {
       fireHandlerNow = true;
       // We don't fire the cancellation handler here since this function needs

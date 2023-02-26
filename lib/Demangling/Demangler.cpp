@@ -76,6 +76,7 @@ static bool isEntity(Node::Kind kind) {
 
 static bool isRequirement(Node::Kind kind) {
   switch (kind) {
+    case Node::Kind::DependentGenericParamPackMarker:
     case Node::Kind::DependentGenericSameTypeRequirement:
     case Node::Kind::DependentGenericSameShapeRequirement:
     case Node::Kind::DependentGenericLayoutRequirement:
@@ -1564,6 +1565,38 @@ NodePointer Demangler::popPack() {
   return createType(Root);
 }
 
+NodePointer Demangler::popSILPack() {
+  NodePointer Root;
+
+  switch (nextChar()) {
+  case 'd':
+    Root = createNode(Node::Kind::SILPackDirect);
+    break;
+
+  case 'i':
+    Root = createNode(Node::Kind::SILPackIndirect);
+    break;
+
+  default:
+    return nullptr;
+  }
+
+  if (!popNode(Node::Kind::EmptyList)) {
+    bool firstElem = false;
+    do {
+      firstElem = (popNode(Node::Kind::FirstElementMarker) != nullptr);
+      NodePointer Ty = popNode(Node::Kind::Type);
+      if (!Ty)
+        return nullptr;
+      Root->addChild(Ty, *this);
+    } while (!firstElem);
+
+    Root->reverseChildren();
+  }
+
+  return createType(Root);
+}
+
 NodePointer Demangler::popTypeList() {
   NodePointer Root = createNode(Node::Kind::TypeList);
 
@@ -2364,6 +2397,8 @@ NodePointer Demangler::demangleArchetype() {
   }
   case 'P':
     return popPack();
+  case 'S':
+    return popSILPack();
   default:
     return nullptr;
   }
@@ -3754,11 +3789,12 @@ NodePointer Demangler::demangleGenericSignature(bool hasParamCounts) {
 }
 
 NodePointer Demangler::demangleGenericRequirement() {
-  
+
   enum { Generic, Assoc, CompoundAssoc, Substitution } TypeKind;
-  enum { Protocol, BaseClass, SameType, SameShape, Layout } ConstraintKind;
+  enum { Protocol, BaseClass, SameType, SameShape, Layout, PackMarker } ConstraintKind;
 
   switch (nextChar()) {
+    case 'v': ConstraintKind = PackMarker; TypeKind = Generic; break;
     case 'c': ConstraintKind = BaseClass; TypeKind = Assoc; break;
     case 'C': ConstraintKind = BaseClass; TypeKind = CompoundAssoc; break;
     case 'b': ConstraintKind = BaseClass; TypeKind = Generic; break;
@@ -3798,6 +3834,9 @@ NodePointer Demangler::demangleGenericRequirement() {
   }
 
   switch (ConstraintKind) {
+  case PackMarker:
+    return createWithChild(
+        Node::Kind::DependentGenericParamPackMarker, ConstrTy);
   case Protocol:
     return createWithChildren(
         Node::Kind::DependentGenericConformanceRequirement, ConstrTy,
@@ -3900,7 +3939,8 @@ static bool isMacroExpansionNodeKind(Node::Kind kind) {
          kind == Node::Kind::MemberAttributeAttachedMacroExpansion ||
          kind == Node::Kind::FreestandingMacroExpansion ||
          kind == Node::Kind::MemberAttachedMacroExpansion ||
-         kind == Node::Kind::PeerAttachedMacroExpansion;
+         kind == Node::Kind::PeerAttachedMacroExpansion ||
+         kind == Node::Kind::ConformanceAttachedMacroExpansion;
 }
 
 NodePointer Demangler::demangleMacroExpansion() {
@@ -3924,6 +3964,10 @@ NodePointer Demangler::demangleMacroExpansion() {
 
   case 'p':
     kind = Node::Kind::PeerAttachedMacroExpansion;
+    break;
+
+  case 'c':
+    kind = Node::Kind::ConformanceAttachedMacroExpansion;
     break;
 
   case 'u':

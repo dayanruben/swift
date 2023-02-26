@@ -243,6 +243,8 @@ public:
                                      Optional<SILLocation> Loc);
   void emitTypeMetadata(IRGenFunction &IGF, llvm::Value *Metadata,
                         unsigned Depth, unsigned Index, StringRef Name);
+  void emitPackCountParameter(IRGenFunction &IGF, llvm::Value *Metadata,
+                              SILDebugVariable VarInfo);
 
   /// Return the DIBuilder.
   llvm::DIBuilder &getBuilder() { return DBuilder; }
@@ -619,7 +621,11 @@ private:
     case DeclContextKind::MacroDecl:
       return getOrCreateContext(DC->getParent());
     case DeclContextKind::GenericTypeDecl: {
+      // The generic signature of this nominal type has no relation to the current
+      // function's generic signature.
       auto *NTD = cast<NominalTypeDecl>(DC);
+      GenericContextScope scope(IGM, NTD->getGenericSignature().getCanonicalSignature());
+
       auto Ty = NTD->getDeclaredInterfaceType();
       // Create a Forward-declared type.
       auto DbgTy = DebugTypeInfo::getForwardDecl(Ty);
@@ -671,9 +677,6 @@ private:
     // The function return type is the first element in the list.
     createParameterType(Parameters, getResultTypeForDebugInfo(IGM, FnTy));
 
-    // Actually, the input type is either a single type or a tuple
-    // type. We currently represent a function with one n-tuple argument
-    // as an n-ary function.
     for (auto Param : FnTy->getParameters())
       createParameterType(
           Parameters, IGM.silConv.getSILType(
@@ -907,11 +910,13 @@ private:
         !Ty->getASTContext().LangOpts.EnableCXXInterop) {
       // Make sure we can reconstruct mangled types for the debugger.
       auto &Ctx = Ty->getASTContext();
-      Type Reconstructed = Demangle::getTypeForMangling(Ctx, Result);
+      Type Reconstructed = Demangle::getTypeForMangling(Ctx, Result, Sig);
       if (!Reconstructed) {
         llvm::errs() << "Failed to reconstruct type for " << Result << "\n";
         llvm::errs() << "Original type:\n";
         Ty->dump(llvm::errs());
+        if (Sig)
+          llvm::errs() << "Generic signature: " << Sig << "\n";
         abort();
       } else if (!Reconstructed->isEqual(Ty) &&
                  // FIXME: Some existential types are reconstructed without
@@ -924,6 +929,8 @@ private:
         Ty->dump(llvm::errs());
         llvm::errs() << "Reconstructed type:\n";
         Reconstructed->dump(llvm::errs());
+        if (Sig)
+          llvm::errs() << "Generic signature: " << Sig << "\n";
         abort();
       }
     }
@@ -1524,11 +1531,16 @@ private:
                                       File, FwdDeclLine, Flags, MangledName);
     }
 
-    case TypeKind::SILPack:
     case TypeKind::Pack:
-    case TypeKind::PackExpansion:
       llvm_unreachable("Unimplemented!");
 
+    case TypeKind::SILPack:
+    case TypeKind::PackExpansion:
+      //assert(SizeInBits == CI.getTargetInfo().getPointerWidth(0));
+      return createPointerSizedStruct(Scope,
+                                      MangledName,
+                                      MainFile, 0, Flags, MangledName);
+      
     case TypeKind::BuiltinTuple:
       llvm_unreachable("BuiltinTupleType should not show up here");
 
@@ -2412,7 +2424,7 @@ IRGenDebugInfoImpl::emitFunction(const SILDebugScope *DS, llvm::Function *Fn,
 
   // Get the throws information.
   llvm::DITypeArray Error = nullptr;
-  if (FnTy)
+  if (FnTy && (Opts.DebugInfoLevel > IRGenDebugInfoLevel::LineTables))
     if (auto ErrorInfo = FnTy->getOptionalErrorResult()) {
       SILType SILTy = IGM.silConv.getSILType(
           *ErrorInfo, FnTy, IGM.getMaximalTypeExpansionContext());
@@ -2973,6 +2985,25 @@ void IRGenDebugInfoImpl::emitTypeMetadata(IRGenFunction &IGF,
                           ArtificialValue);
 }
 
+void IRGenDebugInfoImpl::emitPackCountParameter(IRGenFunction &IGF,
+                                                llvm::Value *Metadata,
+                                                SILDebugVariable VarInfo) {
+  if (Opts.DebugInfoLevel <= IRGenDebugInfoLevel::LineTables)
+    return;
+
+  // Don't emit debug info in transparent functions.
+  auto *DS = IGF.getDebugScope();
+  if (!DS || DS->getInlinedFunction()->isTransparent())
+    return;
+
+  Type IntTy = IGM.Context.getIntType();
+  auto &TI = IGM.getTypeInfoForUnlowered(IntTy);
+  auto DbgTy = *CompletedDebugTypeInfo::getFromTypeInfo(IntTy, TI, IGM);
+  emitVariableDeclaration(
+      IGF.Builder, Metadata, DbgTy, IGF.getDebugScope(), {}, VarInfo,
+      IGF.isAsync() ? CoroDirectValue : DirectValue, ArtificialValue);
+}
+
 SILLocation::FilenameAndLocation
 IRGenDebugInfoImpl::decodeSourceLoc(SourceLoc SL) {
   auto &Cached = FilenameAndLocationCache[SL.getOpaquePointerValue()];
@@ -3102,6 +3133,13 @@ void IRGenDebugInfo::emitTypeMetadata(IRGenFunction &IGF, llvm::Value *Metadata,
                                       StringRef Name) {
   static_cast<IRGenDebugInfoImpl *>(this)->emitTypeMetadata(IGF, Metadata,
                                                             Depth, Index, Name);
+}
+
+void IRGenDebugInfo::emitPackCountParameter(IRGenFunction &IGF,
+                                            llvm::Value *Metadata,
+                                            SILDebugVariable VarInfo) {
+  static_cast<IRGenDebugInfoImpl *>(this)->emitPackCountParameter(IGF, Metadata,
+                                                                  VarInfo);
 }
 
 llvm::DIBuilder &IRGenDebugInfo::getBuilder() {

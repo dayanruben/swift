@@ -13,8 +13,10 @@
 // UNSUPPORTED: back_deployment_runtime
 // UNSUPPORTED: back_deploy_concurrency
 
-// rdar://101077408 – Temporarily disable on watchOS simulator
+// rdar://101077408 – Temporarily disable on watchOS & iOS simulator
 // UNSUPPORTED: DARWIN_SIMULATOR=watchos
+// UNSUPPORTED: DARWIN_SIMULATOR=ios
+// UNSUPPORTED: DARWIN_SIMULATOR=tvos
 
 // REQUIRES: rdar105396748
 
@@ -39,6 +41,13 @@ func expectedBasePri(priority: TaskPriority) -> TaskPriority {
   let basePri = Task.basePriority!
   print("Testing basePri matching expected pri - \(basePri) == \(priority)")
   expectEqual(basePri, priority)
+  Task.withUnsafeCurrentTask { unsafeTask in
+    guard let unsafeTask else {
+      fatalError("Expected to be able to get current task, but could not!")
+    }
+    // The UnsafeCurrentTask must return the same value
+    expectEqual(basePri, unsafeTask.basePriority)
+  }
 
   return basePri
 }

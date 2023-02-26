@@ -1160,6 +1160,15 @@ ManglingError Remangler::mangleDependentGenericSignature(Node *node,
   return ManglingError::Success;
 }
 
+ManglingError Remangler::mangleDependentGenericParamPackMarker(Node *node,
+                                                      unsigned depth) {
+  DEMANGLER_ASSERT(node->getNumChildren() == 1, node);
+  DEMANGLER_ASSERT(node->getChild(0)->getKind() == Node::Kind::Type, node);
+  Buffer << "Rv";
+  mangleDependentGenericParamIndex(node->getChild(0)->getChild(0));
+  return ManglingError::Success;
+}
+
 ManglingError Remangler::mangleDependentGenericType(Node *node,
                                                     unsigned depth) {
   RETURN_IF_ERROR(
@@ -2278,6 +2287,18 @@ ManglingError Remangler::manglePack(Node *node, unsigned depth) {
   return ManglingError::Success;
 }
 
+ManglingError Remangler::mangleSILPackDirect(Node *node, unsigned depth) {
+  RETURN_IF_ERROR(mangleTypeList(node, depth + 1));
+  Buffer << "QSd";
+  return ManglingError::Success;
+}
+
+ManglingError Remangler::mangleSILPackIndirect(Node *node, unsigned depth) {
+  RETURN_IF_ERROR(mangleTypeList(node, depth + 1));
+  Buffer << "QSi";
+  return ManglingError::Success;
+}
+
 ManglingError Remangler::manglePackExpansion(Node *node, unsigned depth) {
   RETURN_IF_ERROR(mangleChildNodes(node, depth + 1));
   Buffer << "Qp";
@@ -2909,6 +2930,14 @@ ManglingError Remangler::manglePeerAttachedMacroExpansion(
   RETURN_IF_ERROR(mangleChildNode(node, 0, depth + 1));
   RETURN_IF_ERROR(mangleChildNode(node, 1, depth + 1));
   Buffer << "fMp";
+  return mangleChildNode(node, 2, depth + 1);
+}
+
+ManglingError Remangler::mangleConformanceAttachedMacroExpansion(
+    Node *node, unsigned depth) {
+  RETURN_IF_ERROR(mangleChildNode(node, 0, depth + 1));
+  RETURN_IF_ERROR(mangleChildNode(node, 1, depth + 1));
+  Buffer << "fMc";
   return mangleChildNode(node, 2, depth + 1);
 }
 
