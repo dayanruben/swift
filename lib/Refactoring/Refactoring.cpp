@@ -2404,6 +2404,10 @@ isApplicable(const ResolvedRangeInfo &Info, DiagnosticEngine &Diag) {
     bool ConditionUseOnlyAllowedFunctions = false;
     StringRef ExpectName;
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     PostWalkResult<Expr *> walkToExprPost(Expr *E) override {
       if (E->getKind() != ExprKind::DeclRef)
         return Action::Continue(E);
@@ -2502,6 +2506,10 @@ bool RefactoringActionConvertToSwitchStmt::performChange() {
   public:
     std::string VarName;
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     PostWalkResult<Expr *> walkToExprPost(Expr *E) override {
       if (E->getKind() != ExprKind::DeclRef)
         return Action::Continue(E);
@@ -2518,6 +2526,10 @@ bool RefactoringActionConvertToSwitchStmt::performChange() {
     ConditionalPatternFinder(SourceManager &SM) : SM(SM) {}
 
     SmallString<64> ConditionalPattern = SmallString<64>();
+
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
 
     PostWalkResult<Expr *> walkToExprPost(Expr *E) override {
       auto *BE = dyn_cast<BinaryExpr>(E);
@@ -3669,6 +3681,10 @@ private:
 public:
   SynthesizedCodablePrinter(ASTPrinter &Printer) : Printer(Printer) {}
 
+  MacroWalking getMacroWalkingBehavior() const override {
+    return MacroWalking::Arguments;
+  }
+
   PreWalkAction walkToDeclPre(Decl *D) override {
     auto *VD = dyn_cast<ValueDecl>(D);
     if (!VD)
@@ -3848,6 +3864,10 @@ static NumberLiteralExpr *getTrailingNumberLiteral(ResolvedCursorInfoPtr Tok) {
     NumberLiteralExpr *found = nullptr;
 
     explicit FindLiteralNumber(Expr *parent) : parent(parent) { }
+
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
 
     PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       if (auto *literal = dyn_cast<NumberLiteralExpr>(expr)) {
@@ -5433,6 +5453,10 @@ private:
       explicit ErrUnwrapFinder(const ParamDecl *ErrParam)
           : ErrParam(ErrParam) {}
       bool foundUnwrap() const { return FoundUnwrap; }
+
+      MacroWalking getMacroWalkingBehavior() const override {
+        return MacroWalking::Arguments;
+      }
 
       PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
         // Don't walk into ternary conditionals as they may have additional
@@ -8523,6 +8547,14 @@ getMacroExpansionBuffers(MacroDecl *macro, const CustomAttr *attr, Decl *decl) {
     auto bufferIDs = evaluateOrDefault(
         ctx.evaluator, ExpandPeerMacroRequest{decl}, { });
     allBufferIDs.append(bufferIDs.begin(), bufferIDs.end());
+  }
+
+  if (roles.contains(MacroRole::Conformance)) {
+    if (auto nominal = dyn_cast<NominalTypeDecl>(decl)) {
+      auto bufferIDs = evaluateOrDefault(
+          ctx.evaluator, ExpandConformanceMacros{nominal}, { });
+      allBufferIDs.append(bufferIDs.begin(), bufferIDs.end());
+    }
   }
 
   // Drop any buffers that come from other macros. We could eliminate this

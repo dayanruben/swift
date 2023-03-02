@@ -154,6 +154,7 @@ static bool areConservativelyCompatibleArgumentLabels(
   case OverloadChoiceKind::DynamicMemberLookup:
   case OverloadChoiceKind::KeyPathDynamicMemberLookup:
   case OverloadChoiceKind::TupleIndex:
+  case OverloadChoiceKind::MaterializePack:
     return true;
   }
 
@@ -8980,6 +8981,15 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
   if (auto baseTuple = baseObjTy->getAs<TupleType>()) {
     if (!memberName.isSpecial()) {
       StringRef nameStr = memberName.getBaseIdentifier().str();
+
+      // Accessing `.element` on an abstract tuple materializes a pack.
+      if (nameStr == "element" && baseTuple->getNumElements() == 1 &&
+          baseTuple->getElementType(0)->is<PackExpansionType>()) {
+        result.ViableCandidates.push_back(
+            OverloadChoice(baseTy, OverloadChoiceKind::MaterializePack));
+        return result;
+      }
+
       int fieldIdx = -1;
       // Resolve a number reference into the tuple type.
       unsigned Value = 0;
@@ -9179,12 +9189,17 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
 
       // Only try and favor monomorphic unary initializers.
       if (!ctor->isGenericContext()) {
-        auto args = ctor->getMethodInterfaceType()
-                        ->castTo<FunctionType>()->getParams();
-        if (args.size() == 1 && !args[0].hasLabel() &&
-            args[0].getPlainType()->isEqual(favoredType)) {
-          if (!isDeclUnavailable(decl, memberLocator))
-            result.FavoredChoice = result.ViableCandidates.size();
+        if (!ctor->getMethodInterfaceType()->hasError()) {
+          // The constructor might have an error type because we don't skip
+          // invalid decls for code completion
+          auto args = ctor->getMethodInterfaceType()
+                          ->castTo<FunctionType>()
+                          ->getParams();
+          if (args.size() == 1 && !args[0].hasLabel() &&
+              args[0].getPlainType()->isEqual(favoredType)) {
+            if (!isDeclUnavailable(decl, memberLocator))
+              result.FavoredChoice = result.ViableCandidates.size();
+          }
         }
       }
     }
@@ -9842,8 +9857,8 @@ static bool inferEnumMemberThroughTildeEqualsOperator(
 
   // Slots for expression and variable are going to be filled via
   // synthesizing ~= operator application.
-  auto *EP = new (ctx) ExprPattern(pattern->getUnresolvedOriginalExpr(),
-                                   /*matchExpr=*/nullptr, /*matchVar=*/nullptr);
+  auto *EP =
+      ExprPattern::createResolved(ctx, pattern->getUnresolvedOriginalExpr());
 
   auto tildeEqualsApplication =
       TypeChecker::synthesizeTildeEqualsOperatorApplication(EP, DC, enumTy);
@@ -14609,6 +14624,12 @@ void ConstraintSystem::addContextualConversionConstraint(
     // In a by-reference yield, we expect the contextual type to be an
     // l-value type, so the result must be bound to that.
     constraintKind = ConstraintKind::Bind;
+    break;
+
+  case CTP_ForgetStmt:
+    // For the 'forget X', we always expect the contextual type to be
+    // equal to the type of 'self'.
+    constraintKind = ConstraintKind::Equal;
     break;
 
   case CTP_ForEachSequence:

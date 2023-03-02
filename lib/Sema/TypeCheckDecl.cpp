@@ -499,6 +499,10 @@ BodyInitKindRequest::evaluate(Evaluator &evaluator,
                                ASTContext &ctx)
         : Decl(decl), ctx(ctx) { }
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Expansion;
+    }
+
     PreWalkAction walkToDeclPre(class Decl *D) override {
       // Don't walk into further nominal decls.
       return Action::SkipChildrenIf(isa<NominalTypeDecl>(D));
@@ -1666,8 +1670,12 @@ SelfAccessKindRequest::evaluate(Evaluator &evaluator, FuncDecl *FD) const {
     return SelfAccessKind::Mutating;
   } else if (FD->getAttrs().hasAttribute<NonMutatingAttr>()) {
     return SelfAccessKind::NonMutating;
+  } else if (FD->getAttrs().hasAttribute<LegacyConsumingAttr>()) {
+    return SelfAccessKind::LegacyConsuming;
   } else if (FD->getAttrs().hasAttribute<ConsumingAttr>()) {
     return SelfAccessKind::Consuming;
+  } else if (FD->getAttrs().hasAttribute<BorrowingAttr>()) {
+    return SelfAccessKind::Borrowing;
   }
 
   if (auto *AD = dyn_cast<AccessorDecl>(FD)) {
@@ -2163,12 +2171,29 @@ ParamSpecifierRequest::evaluate(Evaluator &evaluator,
   auto *dc = param->getDeclContext();
 
   if (param->isSelfParameter()) {
-    auto selfParam = computeSelfParam(cast<AbstractFunctionDecl>(dc),
+    auto afd = cast<AbstractFunctionDecl>(dc);
+    auto selfParam = computeSelfParam(afd,
                                       /*isInitializingCtor*/true,
                                       /*wantDynamicSelf*/false);
-    return (selfParam.getParameterFlags().isInOut()
-            ? ParamSpecifier::InOut
-            : ParamSpecifier::Default);
+    if (auto fd = dyn_cast<FuncDecl>(afd)) {
+      switch (fd->getSelfAccessKind()) {
+      case SelfAccessKind::LegacyConsuming:
+        return ParamSpecifier::LegacyOwned;
+      case SelfAccessKind::Consuming:
+        return ParamSpecifier::Consuming;
+      case SelfAccessKind::Borrowing:
+        return ParamSpecifier::Borrowing;
+      case SelfAccessKind::Mutating:
+        return ParamSpecifier::InOut;
+      case SelfAccessKind::NonMutating:
+        return ParamSpecifier::Default;
+      }
+      llvm_unreachable("nonexhaustive switch");
+    } else {
+      return (selfParam.getParameterFlags().isInOut()
+              ? ParamSpecifier::InOut
+              : ParamSpecifier::Default);
+    }
   }
 
   if (auto *accessor = dyn_cast<AccessorDecl>(dc)) {
@@ -2210,23 +2235,18 @@ ParamSpecifierRequest::evaluate(Evaluator &evaluator,
   if (auto isolated = dyn_cast<IsolatedTypeRepr>(nestedRepr))
     nestedRepr = isolated->getBase();
   
-  if (isa<InOutTypeRepr>(nestedRepr) &&
-      param->isDefaultArgument()) {
-    auto &ctx = param->getASTContext();
-    ctx.Diags.diagnose(param->getStructuralDefaultExpr()->getLoc(),
-                       swift::diag::cannot_provide_default_value_inout,
-                       param->getName());
-    return ParamSpecifier::Default;
+  if (auto ownershipRepr = dyn_cast<OwnershipTypeRepr>(nestedRepr)) {
+    if (ownershipRepr->getSpecifier() == ParamSpecifier::InOut
+        && param->isDefaultArgument()) {
+      auto &ctx = param->getASTContext();
+      ctx.Diags.diagnose(param->getStructuralDefaultExpr()->getLoc(),
+                         swift::diag::cannot_provide_default_value_inout,
+                         param->getName());
+      return ParamSpecifier::Default;
+    }
+    return ownershipRepr->getSpecifier();
   }
-
-  if (isa<InOutTypeRepr>(nestedRepr)) {
-    return ParamSpecifier::InOut;
-  } else if (isa<SharedTypeRepr>(nestedRepr)) {
-    return ParamSpecifier::Shared;
-  } else if (isa<OwnedTypeRepr>(nestedRepr)) {
-    return ParamSpecifier::Owned;
-  }
-
+  
   return ParamSpecifier::Default;
 }
 

@@ -2508,8 +2508,12 @@ getActualSelfAccessKind(uint8_t raw) {
     return swift::SelfAccessKind::NonMutating;
   case serialization::SelfAccessKind::Mutating:
     return swift::SelfAccessKind::Mutating;
+  case serialization::SelfAccessKind::LegacyConsuming:
+    return swift::SelfAccessKind::LegacyConsuming;
   case serialization::SelfAccessKind::Consuming:
     return swift::SelfAccessKind::Consuming;
+  case serialization::SelfAccessKind::Borrowing:
+    return swift::SelfAccessKind::Borrowing;
   }
   return None;
 }
@@ -2524,8 +2528,10 @@ getActualParamDeclSpecifier(serialization::ParamDeclSpecifier raw) {
     return swift::ParamDecl::Specifier::ID;
   CASE(Default)
   CASE(InOut)
-  CASE(Shared)
-  CASE(Owned)
+  CASE(Borrowing)
+  CASE(Consuming)
+  CASE(LegacyShared)
+  CASE(LegacyOwned)
   }
 #undef CASE
   return None;

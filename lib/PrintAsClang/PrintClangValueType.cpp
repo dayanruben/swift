@@ -12,6 +12,7 @@
 
 #include "PrintClangValueType.h"
 #include "ClangSyntaxPrinter.h"
+#include "DeclAndTypePrinter.h"
 #include "OutputLanguageMode.h"
 #include "PrimitiveTypeMapping.h"
 #include "SwiftToClangInteropContext.h"
@@ -81,14 +82,16 @@ printCValueTypeStorageStruct(raw_ostream &os, const NominalTypeDecl *typeDecl,
   os << "};\n\n";
 }
 
-void ClangValueTypePrinter::forwardDeclType(raw_ostream &os,
-                                            const NominalTypeDecl *typeDecl) {
+void ClangValueTypePrinter::forwardDeclType(
+    raw_ostream &os, const NominalTypeDecl *typeDecl,
+    DeclAndTypePrinter &declAndTypePrinter) {
   if (typeDecl->isGeneric()) {
     auto genericSignature =
         typeDecl->getGenericSignature().getCanonicalSignature();
     ClangSyntaxPrinter(os).printGenericSignature(genericSignature);
   }
   os << "class";
+  declAndTypePrinter.printAvailability(os, typeDecl);
   ClangSyntaxPrinter(os).printSymbolUSRAttribute(typeDecl);
   os << ' ';
   ClangSyntaxPrinter(os).printBaseName(typeDecl);
@@ -173,8 +176,8 @@ static void addCppExtensionsToStdlibType(const NominalTypeDecl *typeDecl,
 }
 
 void ClangValueTypePrinter::printValueTypeDecl(
-    const NominalTypeDecl *typeDecl,
-    llvm::function_ref<void(void)> bodyPrinter) {
+    const NominalTypeDecl *typeDecl, llvm::function_ref<void(void)> bodyPrinter,
+    DeclAndTypePrinter &declAndTypePrinter) {
   // FIXME: Add support for generic structs.
   llvm::Optional<IRABIDetailsProvider::SizeAndAlignment> typeSizeAlign;
   Optional<CanGenericSignature> genericSignature;
@@ -191,8 +194,7 @@ void ClangValueTypePrinter::printValueTypeDecl(
   if (typeDecl->isGeneric()) {
     genericSignature = typeDecl->getGenericSignature().getCanonicalSignature();
     // FIXME: Support generic requirements.
-    if (!genericSignature->getRequirements().empty())
-      return;
+    assert(genericSignature->getRequirements().empty());
     // FIXME: Can we make some better layout than opaque layout for generic
     // types.
   } else if (!typeDecl->isResilient()) {
@@ -221,7 +223,9 @@ void ClangValueTypePrinter::printValueTypeDecl(
   printer.printNamespace(cxx_synthesis::getCxxImplNamespaceName(),
                          [&](raw_ostream &os) {
                            printGenericSignature(os);
-                           os << "class ";
+                           os << "class";
+                           declAndTypePrinter.printAvailability(os, typeDecl);
+                           os << ' ';
                            printCxxImplClassName(os, typeDecl);
                            os << ";\n\n";
 
@@ -263,6 +267,7 @@ void ClangValueTypePrinter::printValueTypeDecl(
   // Print out the C++ class itself.
   printGenericSignature(os);
   os << "class";
+  declAndTypePrinter.printAvailability(os, typeDecl);
   ClangSyntaxPrinter(os).printSymbolUSRAttribute(typeDecl);
   os << ' ';
   ClangSyntaxPrinter(os).printBaseName(typeDecl);
@@ -408,7 +413,9 @@ void ClangValueTypePrinter::printValueTypeDecl(
   printer.printNamespace(
       cxx_synthesis::getCxxImplNamespaceName(), [&](raw_ostream &os) {
         printGenericSignature(os);
-        os << "class ";
+        os << "class";
+        declAndTypePrinter.printAvailability(os, typeDecl);
+        os << ' ';
         printCxxImplClassName(os, typeDecl);
         os << " {\n";
         os << "public:\n";
@@ -461,7 +468,7 @@ void ClangValueTypePrinter::printValueTypeDecl(
 
   printTypeGenericTraits(os, typeDecl, typeMetadataFuncName,
                          typeMetadataFuncGenericParams,
-                         typeDecl->getModuleContext());
+                         typeDecl->getModuleContext(), declAndTypePrinter);
 }
 
 void ClangValueTypePrinter::printParameterCxxToCUseScaffold(
@@ -512,8 +519,8 @@ void ClangValueTypePrinter::printValueTypeReturnScaffold(
 }
 
 void ClangValueTypePrinter::printClangTypeSwiftGenericTraits(
-    raw_ostream &os, const TypeDecl *typeDecl,
-    const ModuleDecl *moduleContext) {
+    raw_ostream &os, const TypeDecl *typeDecl, const ModuleDecl *moduleContext,
+    DeclAndTypePrinter &declAndTypePrinter) {
   assert(typeDecl->hasClangNode());
   // Do not reference unspecialized templates.
   if (isa<clang::ClassTemplateDecl>(typeDecl->getClangDecl()))
@@ -522,7 +529,8 @@ void ClangValueTypePrinter::printClangTypeSwiftGenericTraits(
       typeDecl->getDeclaredInterfaceType()->getCanonicalType());
   std::string typeMetadataFuncName = typeMetadataFunc.mangleAsString();
   printTypeGenericTraits(os, typeDecl, typeMetadataFuncName,
-                         /*typeMetadataFuncRequirements=*/{}, moduleContext);
+                         /*typeMetadataFuncRequirements=*/{}, moduleContext,
+                         declAndTypePrinter);
 }
 
 void ClangValueTypePrinter::printTypePrecedingGenericTraits(
@@ -553,7 +561,7 @@ void ClangValueTypePrinter::printTypePrecedingGenericTraits(
 void ClangValueTypePrinter::printTypeGenericTraits(
     raw_ostream &os, const TypeDecl *typeDecl, StringRef typeMetadataFuncName,
     ArrayRef<GenericRequirement> typeMetadataFuncRequirements,
-    const ModuleDecl *moduleContext) {
+    const ModuleDecl *moduleContext, DeclAndTypePrinter &declAndTypePrinter) {
   auto *NTD = dyn_cast<NominalTypeDecl>(typeDecl);
   ClangSyntaxPrinter printer(os);
   // FIXME: avoid popping out of the module's namespace here.
@@ -580,7 +588,9 @@ void ClangValueTypePrinter::printTypeGenericTraits(
   }
   if (!NTD || printer.printNominalTypeOutsideMemberDeclTemplateSpecifiers(NTD))
     os << "template<>\n";
-  os << "struct TypeMetadataTrait<";
+  os << "struct";
+  declAndTypePrinter.printAvailability(os, typeDecl);
+  os << " TypeMetadataTrait<";
   if (typeDecl->hasClangNode()) {
     printer.printClangTypeReference(typeDecl->getClangDecl());
   } else {
@@ -635,7 +645,9 @@ void ClangValueTypePrinter::printTypeGenericTraits(
   if (!typeDecl->hasClangNode() && typeMetadataFuncRequirements.empty()) {
     assert(NTD);
     os << "template<>\n";
-    os << "struct implClassFor<";
+    os << "struct";
+    declAndTypePrinter.printAvailability(os, typeDecl);
+    os << " implClassFor<";
     printer.printBaseName(typeDecl->getModuleContext());
     os << "::";
     printer.printBaseName(typeDecl);

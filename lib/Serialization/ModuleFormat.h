@@ -58,7 +58,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 745; // _lexicalLifetimes attribute
+const uint16_t SWIFTMODULE_VERSION_MINOR = 747; // `consuming` and `borrowing` decl modifiers
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -335,10 +335,12 @@ using CtorInitializerKindField = BCFixed<2>;
 enum class ParamDeclSpecifier : uint8_t {
   Default = 0,
   InOut = 1,
-  Shared = 2,
-  Owned = 3,
+  Borrowing = 2,
+  Consuming = 3,
+  LegacyShared = 4,
+  LegacyOwned = 5,
 };
-using ParamDeclSpecifierField = BCFixed<2>;
+using ParamDeclSpecifierField = BCFixed<3>;
 
 // These IDs must \em not be renumbered or reordered without incrementing
 // the module version.
@@ -403,9 +405,11 @@ using MetatypeRepresentationField = BCFixed<2>;
 enum class SelfAccessKind : uint8_t {
   NonMutating = 0,
   Mutating,
+  LegacyConsuming,
   Consuming,
+  Borrowing
 };
-using SelfAccessKindField = BCFixed<2>;
+using SelfAccessKindField = BCFixed<3>;
   
 /// Translates an operator decl fixity to a Serialization fixity, whose values
 /// are guaranteed to be stable.

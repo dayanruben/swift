@@ -96,6 +96,10 @@ namespace {
     LinkedExprCollector(llvm::SmallVectorImpl<Expr *> &linkedExprs)
         : LinkedExprs(linkedExprs) {}
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       if (isa<ClosureExpr>(expr))
         return Action::SkipChildren(expr);
@@ -158,7 +162,11 @@ namespace {
     
     LinkedExprAnalyzer(LinkedTypeInfo &lti, ConstraintSystem &cs) :
         LTI(lti), CS(cs) {}
-    
+
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       if (isa<LiteralExpr>(expr)) {
         LTI.hasLiteral = true;
@@ -783,7 +791,11 @@ namespace {
     
     ConstraintOptimizer(ConstraintSystem &cs) :
       CS(cs) {}
-    
+
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       if (CS.isArgumentIgnoredForCodeCompletion(expr)) {
         return Action::SkipChildren(expr);
@@ -2931,6 +2943,10 @@ namespace {
 
         bool shouldWalkCaptureInitializerExpressions() override { return true; }
 
+        MacroWalking getMacroWalkingBehavior() const override {
+          return MacroWalking::Arguments;
+        }
+
         PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
           // Retrieve type variables from references to var decls.
           if (auto *declRef = dyn_cast<DeclRefExpr>(expr)) {
@@ -3086,6 +3102,10 @@ namespace {
       OpenPackElementType openPackElement(CS, CS.getConstraintLocator(expr),
                                           PackElementEnvironments.back());
       return openPackElement(packType, /*packRepr*/ nullptr);
+    }
+
+    Type visitMaterializePackExpr(MaterializePackExpr *expr) {
+      llvm_unreachable("MaterializePackExpr already type-checked");
     }
 
     Type visitDynamicTypeExpr(DynamicTypeExpr *expr) {
@@ -3284,10 +3304,21 @@ namespace {
       auto fromType = CS.getType(expr->getSubExpr());
       auto locator = CS.getConstraintLocator(expr);
 
-      // Add a conversion constraint for the direct conversion between
-      // types.
-      CS.addExplicitConversionConstraint(fromType, toType, RememberChoice,
-                                         locator);
+      // Literal initialization (e.g. `UInt32(0)`) doesn't require
+      // a conversion because the literal is supposed to assume the
+      // `to` type.
+      //
+      // `to` type could be a type variable if i.e. the repr is invalid,
+      // in such cases a slower conversion path is a better choice to
+      // let it be inferred from the context and/or from the literal itself.
+      if (expr->isLiteralInit() && !toType->isTypeVariableOrMember()) {
+        CS.addConstraint(ConstraintKind::Equal, fromType, toType, locator);
+      } else {
+        // Add a conversion constraint for the direct conversion between
+        // types.
+        CS.addExplicitConversionConstraint(fromType, toType, RememberChoice,
+                                           locator);
+      }
 
       // If the result type was declared IUO, add a disjunction for
       // bindings for the result of the coercion.
@@ -4037,6 +4068,10 @@ namespace {
   public:
     ConstraintWalker(ConstraintGenerator &CG) : CG(CG) { }
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
+
     PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       auto &CS = CG.getConstraintSystem();
 
@@ -4546,7 +4581,7 @@ bool ConstraintSystem::generateConstraints(
     }
 
     // For an initialization target, generate constraints for the pattern.
-    if (target.getExprContextualTypePurpose() == CTP_Initialization &&
+    if (target.isForInitialization() &&
         generateInitPatternConstraints(*this, target, expr)) {
       return true;
     }

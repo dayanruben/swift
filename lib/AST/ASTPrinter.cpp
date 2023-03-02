@@ -1182,11 +1182,13 @@ void PrintAST::printAttributes(const Decl *D) {
     }
   }
 
-  // We will handle 'mutating' and 'nonmutating' separately.
+  // We will handle ownership specifiers separately.
   if (isa<FuncDecl>(D)) {
     Options.ExcludeAttrList.push_back(DAK_Mutating);
     Options.ExcludeAttrList.push_back(DAK_NonMutating);
+    Options.ExcludeAttrList.push_back(DAK_LegacyConsuming);
     Options.ExcludeAttrList.push_back(DAK_Consuming);
+    Options.ExcludeAttrList.push_back(DAK_Borrowing);
   }
 
   D->getAttrs().print(Printer, Options, D);
@@ -2063,9 +2065,17 @@ void PrintAST::printSelfAccessKindModifiersIfNeeded(const FuncDecl *FD) {
         !Options.excludeAttrKind(DAK_NonMutating))
       Printer.printKeyword("nonmutating", Options, " ");
     break;
+  case SelfAccessKind::LegacyConsuming:
+    if (!Options.excludeAttrKind(DAK_LegacyConsuming))
+      Printer.printKeyword("__consuming", Options, " ");
+    break;
   case SelfAccessKind::Consuming:
     if (!Options.excludeAttrKind(DAK_Consuming))
-      Printer.printKeyword("__consuming", Options, " ");
+      Printer.printKeyword("consuming", Options, " ");
+    break;
+  case SelfAccessKind::Borrowing:
+    if (!Options.excludeAttrKind(DAK_Borrowing))
+      Printer.printKeyword("borrowing", Options, " ");
     break;
   }
 }
@@ -4963,6 +4973,11 @@ void PrintAST::visitPackExpansionExpr(PackExpansionExpr *expr) {
   visit(expr->getPatternExpr());
 }
 
+void PrintAST::visitMaterializePackExpr(MaterializePackExpr *expr) {
+  visit(expr->getFromExpr());
+  Printer << ".element";
+}
+
 void PrintAST::visitPackElementExpr(PackElementExpr *expr) {
   visit(expr->getPackRefExpr());
 }
@@ -5173,6 +5188,11 @@ void PrintAST::visitYieldStmt(YieldStmt *stmt) {
 
 void PrintAST::visitThrowStmt(ThrowStmt *stmt) {
   Printer << tok::kw_throw << " ";
+  visit(stmt->getSubExpr());
+}
+
+void PrintAST::visitForgetStmt(ForgetStmt *stmt) {
+  Printer << "_forget" << " ";
   visit(stmt->getSubExpr());
 }
 

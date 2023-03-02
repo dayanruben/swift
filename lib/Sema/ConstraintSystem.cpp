@@ -687,6 +687,10 @@ static void extendDepthMap(
         llvm::DenseMap<Expr *, std::pair<unsigned, Expr *>> &depthMap)
         : DepthMap(depthMap) {}
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
+
     // For argument lists, bump the depth of the arguments, as they are
     // effectively nested within the argument list. It's debatable whether we
     // should actually do this, as it doesn't reflect the true expression depth,
@@ -1108,7 +1112,9 @@ Type ConstraintSystem::getFixedTypeRecursive(Type type,
     type = type->getRValueType();
 
   if (auto depMemType = type->getAs<DependentMemberType>()) {
-    if (!depMemType->getBase()->isTypeVariableOrMember()) return type;
+    auto baseTy = depMemType->getBase();
+    if (!baseTy->hasTypeVariable() && !baseTy->hasDependentMember())
+      return type;
 
     // FIXME: Perform a more limited simplification?
     Type newType = simplifyType(type);
@@ -1526,22 +1532,27 @@ AnyFunctionType *ConstraintSystem::adjustFunctionTypeForConcurrency(
 /// that declared \p type. This is useful for code completion so we can match
 /// the types we do know instead of bailing out completely because \p type
 /// contains an error type.
-static Type replaceParamErrorTypeByPlaceholder(Type type, ValueDecl *value) {
+static Type replaceParamErrorTypeByPlaceholder(Type type, ValueDecl *value, bool hasAppliedSelf) {
   if (!type->is<AnyFunctionType>() || !isa<AbstractFunctionDecl>(value)) {
     return type;
   }
   auto funcType = type->castTo<AnyFunctionType>();
   auto funcDecl = cast<AbstractFunctionDecl>(value);
 
-  auto declParams = funcDecl->getParameters();
+  SmallVector<ParamDecl *> declParams;
+  if (hasAppliedSelf) {
+    declParams.append(funcDecl->getParameters()->begin(), funcDecl->getParameters()->end());
+  } else {
+    declParams.push_back(funcDecl->getImplicitSelfDecl());
+  }
   auto typeParams = funcType->getParams();
-  assert(declParams->size() == typeParams.size());
+  assert(declParams.size() == typeParams.size());
   SmallVector<AnyFunctionType::Param, 4> newParams;
-  newParams.reserve(declParams->size());
+  newParams.reserve(declParams.size());
   for (auto i : indices(typeParams)) {
     AnyFunctionType::Param param = typeParams[i];
     if (param.getPlainType()->is<ErrorType>()) {
-      auto paramDecl = declParams->get(i);
+      auto paramDecl = declParams[i];
       auto placeholder =
           PlaceholderType::get(paramDecl->getASTContext(), paramDecl);
       newParams.push_back(param.withType(placeholder));
@@ -1549,7 +1560,7 @@ static Type replaceParamErrorTypeByPlaceholder(Type type, ValueDecl *value) {
       newParams.push_back(param);
     }
   }
-  assert(newParams.size() == declParams->size());
+  assert(newParams.size() == declParams.size());
   return FunctionType::get(newParams, funcType->getResult());
 }
 
@@ -1620,7 +1631,7 @@ ConstraintSystem::getTypeOfReference(ValueDecl *value,
     if (isForCodeCompletion() && openedType->hasError()) {
       // In code completion, replace error types by placeholder types so we can
       // match the types we know instead of bailing out completely.
-      openedType = replaceParamErrorTypeByPlaceholder(openedType, value);
+      openedType = replaceParamErrorTypeByPlaceholder(openedType, value, /*hasAppliedSelf=*/true);
     }
 
     // If we opened up any type variables, record the replacements.
@@ -2288,7 +2299,7 @@ Type ConstraintSystem::getMemberReferenceTypeFromOpenedType(
   if (isForCodeCompletion() && type->hasError()) {
     // In code completion, replace error types by placeholder types so we can
     // match the types we know instead of bailing out completely.
-    type = replaceParamErrorTypeByPlaceholder(type, value);
+    type = replaceParamErrorTypeByPlaceholder(type, value, hasAppliedSelf);
   }
 
   return type;
@@ -2567,6 +2578,7 @@ Type ConstraintSystem::getEffectiveOverloadType(ConstraintLocator *locator,
   case OverloadChoiceKind::KeyPathDynamicMemberLookup:
   case OverloadChoiceKind::KeyPathApplication:
   case OverloadChoiceKind::TupleIndex:
+  case OverloadChoiceKind::MaterializePack:
     return Type();
   }
 
@@ -2942,6 +2954,10 @@ FunctionType::ExtInfo ClosureEffectsRequest::evaluate(
     DeclContext *DC;
     bool FoundThrow = false;
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Expansion;
+    }
+
     PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
       // If we've found a 'try', record it and terminate the traversal.
       if (isa<TryExpr>(expr)) {
@@ -3247,6 +3263,7 @@ void ConstraintSystem::bindOverloadType(
   case OverloadChoiceKind::DeclViaBridge:
   case OverloadChoiceKind::DeclViaUnwrappedOptional:
   case OverloadChoiceKind::TupleIndex:
+  case OverloadChoiceKind::MaterializePack:
   case OverloadChoiceKind::KeyPathApplication:
     bindTypeOrIUO(openedType);
     return;
@@ -3487,6 +3504,14 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
     }
     refType = adjustedRefType;
     break;
+
+  case OverloadChoiceKind::MaterializePack: {
+    auto *tuple = choice.getBaseType()->castTo<TupleType>();
+    auto *expansion = tuple->getElementType(0)->castTo<PackExpansionType>();
+    adjustedRefType = expansion->getPatternType();
+    refType = adjustedRefType;
+    break;
+  }
 
   case OverloadChoiceKind::KeyPathApplication: {
     // Key path application looks like a subscript(keyPath: KeyPath<Base, T>).
@@ -3817,7 +3842,7 @@ Type Solution::simplifyTypeForCodeCompletion(Type Ty) const {
 
   // Replace all type variables (which must come from placeholders) by their
   // generic parameters. Because we call into simplifyTypeImpl
-  Ty = CS.simplifyTypeImpl(Ty, [&CS](TypeVariableType *typeVar) -> Type {
+  Ty = CS.simplifyTypeImpl(Ty, [&CS, this](TypeVariableType *typeVar) -> Type {
     // Code completion depends on generic parameter type being represented in
     // terms of `ArchetypeType` since it's easy to extract protocol requirements
     // from it.
@@ -3832,6 +3857,29 @@ Type Solution::simplifyTypeForCodeCompletion(Type Ty) const {
 
     if (auto archetype = getTypeVarAsArchetype(typeVar)) {
       return archetype;
+    }
+
+    // Sometimes the type variable itself doesn't have have an originator that
+    // can be replaced by an archetype but one of its equivalent type variable
+    // does.
+    // Search thorough all equivalent type variables, looking for one that can
+    // be replaced by a generic parameter.
+    std::vector<std::pair<TypeVariableType *, Type>> bindings(
+        typeBindings.begin(), typeBindings.end());
+    // Make sure we iterate the bindings in a deterministic order.
+    llvm::sort(bindings, [](const std::pair<TypeVariableType *, Type> &lhs,
+                            const std::pair<TypeVariableType *, Type> &rhs) {
+      return lhs.first->getID() < rhs.first->getID();
+    });
+    for (auto binding : bindings) {
+      if (auto placeholder = binding.second->getAs<PlaceholderType>()) {
+        if (placeholder->getOriginator().dyn_cast<TypeVariableType *>() ==
+            typeVar) {
+          if (auto archetype = getTypeVarAsArchetype(binding.first)) {
+            return archetype;
+          }
+        }
+      }
     }
 
     // When applying the logic below to get contextual types inside result
@@ -3927,6 +3975,7 @@ DeclName OverloadChoice::getName() const {
     case OverloadChoiceKind::KeyPathDynamicMemberLookup:
       return DeclName(DynamicMember.getPointer());
 
+    case OverloadChoiceKind::MaterializePack:
     case OverloadChoiceKind::TupleIndex:
       llvm_unreachable("no name!");
   }
@@ -5066,6 +5115,10 @@ static void extendPreorderIndexMap(
     explicit RecordingTraversal(llvm::DenseMap<Expr *, unsigned> &indexMap)
       : IndexMap(indexMap) { }
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
+
     PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
       IndexMap[E] = Index;
       ++Index;
@@ -5219,6 +5272,7 @@ bool ConstraintSystem::diagnoseAmbiguity(ArrayRef<Solution> solutions) {
         break;
 
       case OverloadChoiceKind::TupleIndex:
+      case OverloadChoiceKind::MaterializePack:
         // FIXME: Actually diagnose something here.
         break;
       }
@@ -6677,6 +6731,7 @@ bool SolutionApplicationTarget::contextualTypeIsOnlyAHint() const {
   case CTP_YieldByReference:
   case CTP_CaseStmt:
   case CTP_ThrowStmt:
+  case CTP_ForgetStmt:
   case CTP_EnumCaseRawValue:
   case CTP_DefaultParameter:
   case CTP_AutoclosureDefaultParameter:

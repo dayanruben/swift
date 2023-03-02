@@ -1013,18 +1013,12 @@ fillSymbolInfo(CursorSymbolInfo &Symbol, const DeclInfo &DInfo,
   if (AddSymbolGraph) {
     SmallVector<symbolgraphgen::PathComponent, 4> PathComponents;
     SmallVector<symbolgraphgen::FragmentInfo, 8> FragmentInfos;
-    symbolgraphgen::SymbolGraphOptions Options{
-        "",
-        Invoc.getLangOptions().Target,
-        /*PrettyPrint=*/false,
-        AccessLevel::Private,
-        /*EmitSynthesizedMembers=*/false,
-        /*PrintMessages=*/false,
-        /*SkipInheritedDocs=*/false,
-        /*IncludeSPISymbols=*/true,
-        /*IncludeClangDocs=*/true,
-        /*EmitExtensionBlockSymbols=*/false,
-    };
+
+    symbolgraphgen::SymbolGraphOptions Options;
+    Options.Target = Invoc.getLangOptions().Target;
+    Options.MinimumAccessLevel = AccessLevel::Private;
+    Options.IncludeSPISymbols = true;
+    Options.IncludeClangDocs = true;
 
     symbolgraphgen::printSymbolGraphForDecl(DInfo.VD, DInfo.BaseType,
                                             DInfo.InSynthesizedExtension,
@@ -2569,6 +2563,101 @@ void SwiftLangSupport::findRelatedIdentifiersInFile(
   static const char OncePerASTToken = 0;
   const void *Once = CancelOnSubsequentRequest ? &OncePerASTToken : nullptr;
   ASTMgr->processASTAsync(Invok, std::move(Consumer), Once, CancellationToken,
+                          llvm::vfs::getRealFileSystem());
+}
+
+//===----------------------------------------------------------------------===//
+// SwiftLangSupport::findActiveRegionsInFile
+//===----------------------------------------------------------------------===//
+
+namespace {
+class IfConfigScanner : public SourceEntityWalker {
+  SmallVectorImpl<IfConfigInfo> &Infos;
+  SourceManager &SourceMgr;
+  unsigned BufferID = -1;
+  bool Cancelled = false;
+
+public:
+  explicit IfConfigScanner(SourceFile &SrcFile, unsigned BufferID,
+                           SmallVectorImpl<IfConfigInfo> &Infos)
+      : Infos(Infos), SourceMgr(SrcFile.getASTContext().SourceMgr),
+        BufferID(BufferID) {}
+
+private:
+  bool walkToDeclPre(Decl *D, CharSourceRange Range) override {
+    if (Cancelled)
+      return false;
+
+    if (auto *IfDecl = dyn_cast<IfConfigDecl>(D)) {
+      for (auto &Clause : IfDecl->getClauses()) {
+        unsigned Offset = SourceMgr.getLocOffsetInBuffer(Clause.Loc, BufferID);
+        Infos.emplace_back(Offset, Clause.isActive);
+      }
+    }
+
+    return true;
+  }
+};
+
+} // end anonymous namespace
+
+void SwiftLangSupport::findActiveRegionsInFile(
+    StringRef InputFile, ArrayRef<const char *> Args,
+    SourceKitCancellationToken CancellationToken,
+    std::function<void(const RequestResult<ActiveRegionsInfo> &)> Receiver) {
+
+  std::string Error;
+  SwiftInvocationRef Invok =
+      ASTMgr->getTypecheckInvocation(Args, InputFile, Error);
+  if (!Invok) {
+    LOG_WARN_FUNC("failed to create an ASTInvocation: " << Error);
+    Receiver(RequestResult<ActiveRegionsInfo>::fromError(Error));
+    return;
+  }
+
+  class IfConfigConsumer : public SwiftASTConsumer {
+    std::function<void(const RequestResult<ActiveRegionsInfo> &)> Receiver;
+    SwiftInvocationRef Invok;
+
+  public:
+    IfConfigConsumer(
+        std::function<void(const RequestResult<ActiveRegionsInfo> &)> Receiver,
+        SwiftInvocationRef Invok)
+        : Receiver(std::move(Receiver)), Invok(Invok) {}
+
+    void handlePrimaryAST(ASTUnitRef AstUnit) override {
+      auto &SrcFile = AstUnit->getPrimarySourceFile();
+      SmallVector<IfConfigInfo> Configs;
+      auto BufferID = SrcFile.getBufferID();
+      if (!BufferID)
+        return;
+      IfConfigScanner Scanner(SrcFile, *BufferID, Configs);
+      Scanner.walk(SrcFile);
+
+      // Sort by offset so nested decls are reported
+      // in source order (not tree order).
+      llvm::sort(Configs,
+                 [](const IfConfigInfo &LHS, const IfConfigInfo &RHS) -> bool {
+                   return LHS.Offset < RHS.Offset;
+                 });
+      ActiveRegionsInfo Info;
+      Info.Configs = Configs;
+      Receiver(RequestResult<ActiveRegionsInfo>::fromResult(Info));
+    }
+
+    void cancelled() override {
+      Receiver(RequestResult<ActiveRegionsInfo>::cancelled());
+    }
+
+    void failed(StringRef Error) override {
+      LOG_WARN_FUNC("inactive ranges failed: " << Error);
+      Receiver(RequestResult<ActiveRegionsInfo>::fromError(Error));
+    }
+  };
+
+  auto Consumer = std::make_shared<IfConfigConsumer>(Receiver, Invok);
+  ASTMgr->processASTAsync(Invok, std::move(Consumer),
+                          /*OncePerASTToken=*/nullptr, CancellationToken,
                           llvm::vfs::getRealFileSystem());
 }
 

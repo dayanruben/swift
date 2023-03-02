@@ -68,6 +68,19 @@ public struct StringifyMacro: ExpressionMacro {
   }
 }
 
+public struct StringifyAndTryMacro: ExpressionMacro {
+  public static func expansion(
+    of macro: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) -> ExprSyntax {
+    guard let argument = macro.argumentList.first?.expression else {
+      fatalError("boom")
+    }
+
+    return "(try \(argument), \(StringLiteralExprSyntax(content: argument.description)))"
+  }
+}
+
 struct SimpleDiagnosticMessage: DiagnosticMessage {
   let message: String
   let diagnosticID: MessageID
@@ -1020,6 +1033,17 @@ public struct EquatableMacro: ConformanceMacro {
     in context: some MacroExpansionContext
   ) throws -> [(TypeSyntax, GenericWhereClauseSyntax?)] {
     let protocolName: TypeSyntax = "Equatable"
+    return [(protocolName, nil)]
+  }
+}
+
+public struct HashableMacro: ConformanceMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    providingConformancesOf decl: some DeclGroupSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [(TypeSyntax, GenericWhereClauseSyntax?)] {
+    let protocolName: TypeSyntax = "Hashable"
     return [(protocolName, nil)]
   }
 }

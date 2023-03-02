@@ -290,6 +290,10 @@ class FunctionSyntacticDiagnosticWalker : public ASTWalker {
 public:
   FunctionSyntacticDiagnosticWalker(DeclContext *dc) { dcStack.push_back(dc); }
 
+  MacroWalking getMacroWalkingBehavior() const override {
+    return MacroWalking::Expansion;
+  }
+
   PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
     performSyntacticExprDiagnostics(expr, dcStack.back(), /*isExprStmt=*/false);
 
@@ -1158,6 +1162,10 @@ TypeChecker::addImplicitLoadExpr(ASTContext &Context, Expr *expr,
       return Action::Continue(E);
     }
 
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::ArgumentsAndExpansion;
+    }
+
   private:
     LoadExpr *createLoadExpr(Expr *E) {
       auto objectType = getType(E)->getRValueType();
@@ -1286,6 +1294,10 @@ void OverloadChoice::dump(Type adjustedOpenedType, SourceManager *sm,
   case OverloadChoiceKind::TupleIndex:
     out << "tuple " << getBaseType()->getString(PO) << " index "
         << getTupleIndex();
+    break;
+
+  case OverloadChoiceKind::MaterializePack:
+    out << "materialize pack from tuple " << getBaseType()->getString(PO);
     break;
   }
 }
@@ -1587,6 +1599,11 @@ void ConstraintSystem::print(raw_ostream &out) const {
       case OverloadChoiceKind::TupleIndex:
         out << "tuple " << choice.getBaseType()->getString(PO) << " index "
             << choice.getTupleIndex();
+        break;
+
+      case OverloadChoiceKind::MaterializePack:
+        out << "materialize pack from tuple "
+            << choice.getBaseType()->getString(PO);
         break;
       }
       out << " for ";
@@ -2307,6 +2324,10 @@ void ConstraintSystem::forEachExpr(
     ChildWalker(ConstraintSystem &CS,
                 llvm::function_ref<Expr *(Expr *)> callback)
         : CS(CS), callback(callback) {}
+
+    MacroWalking getMacroWalkingBehavior() const override {
+      return MacroWalking::Arguments;
+    }
 
     PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
       auto *NewE = callback(E);
