@@ -55,7 +55,7 @@ static const llvm::opt::OptTable::Info InfoTable[] = {
 // Create OptTable class for parsing actual command line arguments
 class TestOptTable : public llvm::opt::OptTable {
 public:
-  TestOptTable() : OptTable(InfoTable, llvm::array_lengthof(InfoTable)){}
+  TestOptTable() : OptTable(InfoTable, std::size(InfoTable)){}
 };
 
 } // end anonymous namespace
@@ -215,12 +215,16 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       return true;
     }
 
-    case OPT_offset:
-      if (StringRef(InputArg->getValue()).getAsInteger(10, Offset)) {
+    case OPT_offset: {
+      unsigned offset;
+      if (StringRef(InputArg->getValue()).getAsInteger(10, offset)) {
         llvm::errs() << "error: expected integer for 'offset'\n";
         return true;
       }
+
+      Offset = offset;
       break;
+    }
 
     case OPT_length:
       if (StringRef(InputArg->getValue()).getAsInteger(10, Length)) {
@@ -333,6 +337,10 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       SourceFile = InputArg->getValue();
       SourceText = llvm::None;
       Inputs.push_back(InputArg->getValue());
+      break;
+
+    case OPT_primary_file:
+      PrimaryFile = InputArg->getValue();
       break;
 
     case OPT_rename_spec:

@@ -296,13 +296,7 @@ Parser::parseSourceFileViaASTGen(SmallVectorImpl<ASTNode> &items,
                                  bool suppressDiagnostics) {
 #if SWIFT_SWIFT_PARSER
   Optional<DiagnosticTransaction> existingParsingTransaction;
-  if ((Context.LangOpts.hasFeature(Feature::Macros) ||
-       Context.LangOpts.hasFeature(Feature::BuiltinMacros) ||
-       Context.LangOpts.hasFeature(Feature::ParserRoundTrip) ||
-       Context.LangOpts.hasFeature(Feature::ParserDiagnostics) ||
-       Context.LangOpts.hasFeature(Feature::ParserValidation) ||
-       Context.LangOpts.hasFeature(Feature::ParserASTGen)) &&
-      !SourceMgr.hasIDEInspectionTargetBuffer() &&
+  if (!SourceMgr.hasIDEInspectionTargetBuffer() &&
       SF.Kind != SourceFileKind::SIL) {
     StringRef contents =
         SourceMgr.extractText(SourceMgr.getRangeForBuffer(L->getBufferID()));
@@ -4678,6 +4672,7 @@ bool swift::isKeywordPossibleDeclStart(const Token &Tok) {
   case tok::kw_func:
   case tok::kw_import:
   case tok::kw_init:
+  case tok::kw_inout:
   case tok::kw_internal:
   case tok::kw_let:
   case tok::kw_operator:
@@ -5067,11 +5062,11 @@ Parser::parseDecl(ParseDeclOptions Flags,
 
   bool HandlerAlreadyCalled = false;
 
-  auto parseLetOrVar = [&](bool HasLetOrVarKeyword) {
+  auto parseBindingIntroducer = [&](bool HasBindingIntroducerKeyword) {
     // Collect all modifiers into a modifier list.
     llvm::SmallVector<Decl *, 4> Entries;
     DeclResult = parseDeclVar(Flags, Attributes, Entries, StaticLoc,
-                              StaticSpelling, tryLoc, HasLetOrVarKeyword);
+                              StaticSpelling, tryLoc, HasBindingIntroducerKeyword);
     StaticLoc = SourceLoc(); // we handled static if present.
     MayNeedOverrideCompletion = true;
     if ((AttrStatus.hasCodeCompletion() || DeclResult.hasCodeCompletion())
@@ -5096,9 +5091,10 @@ Parser::parseDecl(ParseDeclOptions Flags,
   case tok::kw_extension:
     DeclResult = parseDeclExtension(Flags, Attributes);
     break;
+  case tok::kw_inout:
   case tok::kw_let:
   case tok::kw_var: {
-    parseLetOrVar(/*HasLetOrVarKeyword=*/true);
+    parseBindingIntroducer(/*HasLetOrVarKeyword=*/true);
     break;
   }
   case tok::kw_typealias:
@@ -5239,7 +5235,7 @@ Parser::parseDecl(ParseDeclOptions Flags,
         diagnose(Tok.getLoc(), diag::expected_keyword_in_decl, "var",
                  DescriptiveKind)
             .fixItInsert(Tok.getLoc(), "var ");
-        parseLetOrVar(/*HasLetOrVarKeyword=*/false);
+        parseBindingIntroducer(/*HasLetOrVarKeyword=*/false);
         break;
       }
 
@@ -7136,7 +7132,8 @@ void Parser::parseExpandedAttributeList(SmallVectorImpl<ASTNode> &items) {
 
   // Create a `MissingDecl` as a placeholder for the declaration the
   // macro will attach the attribute list to.
-  MissingDecl *missing = MissingDecl::create(Context, CurDeclContext);
+  MissingDecl *missing =
+      MissingDecl::create(Context, CurDeclContext, Tok.getLoc());
   missing->getAttrs() = attributes;
 
   items.push_back(ASTNode(missing));
@@ -7406,7 +7403,7 @@ void Parser::ParsedAccessors::classify(Parser &P, AbstractStorageDecl *storage,
 }
 
 
-/// Parse a 'var' or 'let' declaration, doing no token skipping on error.
+/// Parse a 'var', 'let', or 'inout' declaration, doing no token skipping on error.
 ParserResult<PatternBindingDecl>
 Parser::parseDeclVar(ParseDeclOptions Flags,
                      DeclAttributes &Attributes,
@@ -7414,7 +7411,7 @@ Parser::parseDeclVar(ParseDeclOptions Flags,
                      SourceLoc StaticLoc,
                      StaticSpellingKind StaticSpelling,
                      SourceLoc TryLoc,
-                     bool HasLetOrVarKeyword) {
+                     bool HasBindingKeyword) {
   assert(StaticLoc.isInvalid() || StaticSpelling != StaticSpellingKind::None);
 
   if (StaticLoc.isValid()) {
@@ -7432,11 +7429,13 @@ Parser::parseDeclVar(ParseDeclOptions Flags,
     }
   }
 
-  bool isLet = HasLetOrVarKeyword && Tok.is(tok::kw_let);
-  assert(!HasLetOrVarKeyword || Tok.getKind() == tok::kw_let ||
-         Tok.getKind() == tok::kw_var);
+  PatternBindingState newBindingContext = PatternBindingState::NotInBinding;
+  if (HasBindingKeyword)
+    newBindingContext = PatternBindingState(Tok);
+  assert(!HasBindingKeyword || Tok.getKind() == tok::kw_let ||
+         Tok.getKind() == tok::kw_var || Tok.getKind() == tok::kw_inout);
 
-  SourceLoc VarLoc = HasLetOrVarKeyword ? consumeToken() : Tok.getLoc();
+  SourceLoc VarLoc = newBindingContext.getIntroducer() ? consumeToken() : Tok.getLoc();
 
   // If this is a var in the top-level of script/repl source file, wrap the
   // PatternBindingDecl in a TopLevelCodeDecl, since it represents executable
@@ -7505,8 +7504,9 @@ Parser::parseDeclVar(ParseDeclOptions Flags,
     Pattern *pattern;
     {
       // In our recursive parse, remember that we're in a var/let pattern.
-      llvm::SaveAndRestore<decltype(InVarOrLetPattern)>
-      T(InVarOrLetPattern, isLet ? IVOLP_InLet : IVOLP_InVar);
+      llvm::SaveAndRestore<decltype(InBindingPattern)> T(
+          InBindingPattern,
+          newBindingContext.getPatternBindingStateForIntroducer(VarDecl::Introducer::Var));
 
       // Track whether we are parsing an 'async let' pattern.
       const auto hasAsyncAttr = Attributes.hasAttribute<AsyncAttr>();
@@ -8193,8 +8193,8 @@ Parser::parseDeclEnumCase(ParseDeclOptions Flags,
       // "case" label.
       {
         CancellableBacktrackingScope backtrack(*this);
-        llvm::SaveAndRestore<decltype(InVarOrLetPattern)>
-        T(InVarOrLetPattern, Parser::IVOLP_InMatchingPattern);
+        llvm::SaveAndRestore<decltype(InBindingPattern)> T(
+            InBindingPattern, PatternBindingState::InMatchingPattern);
         parseMatchingPattern(/*isExprBasic*/false);
 
         // Reset async attribute in parser context.

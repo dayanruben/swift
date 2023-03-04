@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -swift-version 5 -enable-experimental-feature Macros -module-name MacrosTest
+// RUN: %target-typecheck-verify-swift -swift-version 5 -enable-experimental-feature FreestandingMacros -module-name MacrosTest
 
 @expression macro stringify<T>(_ value: T) -> (T, String) = #externalMacro(module: "MacroDefinition", type: "StringifyMacro")
 // expected-note@-1 2{{'stringify' declared here}}
@@ -139,3 +139,17 @@ func testExternalMacroOutOfPlace() {
 public macro macroWithDefaults(_: Int = 17) = #externalMacro(module: "A", type: "B")
 // expected-error@-1{{default arguments are not allowed in macros}}
 // expected-warning@-2{{external macro implementation type 'A.B' could not be found for macro 'macroWithDefaults'}}
+
+// Make sure we don't allow macros to prevent type folding.
+@attached(member)
+public macro MacroOrType() = #externalMacro(module: "A", type: "MacroOrType")
+// expected-warning@-1{{external macro implementation type}}
+
+struct MacroOrType {
+  typealias Nested = Int
+}
+
+func test() {
+  let _: [MacroOrType.Nested] = []
+  _ = [MacroOrType.Nested]()
+}

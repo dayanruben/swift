@@ -421,24 +421,25 @@ struct GenericSignatureLayout {
       PackShapeDescriptors(sig.getGenericPackShapeDescriptors().data()) {
 
 #ifndef NDEBUG
-    unsigned numPacks = 0;
+    unsigned packIdx = 0;
 #endif
 
     for (const auto &gp : sig.getParams()) {
       if (gp.hasKeyArgument()) {
-        ++NumKeyParameters;
-
 #ifndef NDEBUG
         if (gp.getKind() == GenericParamKind::TypePack) {
-          assert(PackShapeDescriptors[numPacks].Kind
+          assert(packIdx < NumPacks);
+          assert(PackShapeDescriptors[packIdx].Kind
                  == GenericPackKind::Metadata);
-          assert(PackShapeDescriptors[numPacks].Index
-                 == NumKeyParameters);
-          assert(PackShapeDescriptors[numPacks].ShapeClass
+          assert(PackShapeDescriptors[packIdx].Index
+                 == NumShapeClasses + NumKeyParameters);
+          assert(PackShapeDescriptors[packIdx].ShapeClass
                  < NumShapeClasses);
-          ++numPacks;
+          ++packIdx;
         }
 #endif
+
+        ++NumKeyParameters;
       }
     }
     for (const auto &reqt : sig.getRequirements()) {
@@ -446,13 +447,14 @@ struct GenericSignatureLayout {
           reqt.getKind() == GenericRequirementKind::Protocol) {
 #ifndef NDEBUG
         if (reqt.getFlags().isPackRequirement()) {
-          assert(PackShapeDescriptors[numPacks].Kind
+          assert(packIdx < NumPacks);
+          assert(PackShapeDescriptors[packIdx].Kind
                  == GenericPackKind::WitnessTable);
-          assert(PackShapeDescriptors[numPacks].Index
-                 == NumKeyParameters + NumWitnessTables);
-          assert(PackShapeDescriptors[numPacks].ShapeClass
+          assert(PackShapeDescriptors[packIdx].Index
+                 == NumShapeClasses + NumKeyParameters + NumWitnessTables);
+          assert(PackShapeDescriptors[packIdx].ShapeClass
                  < NumShapeClasses);
-          ++numPacks;
+          ++packIdx;
         }
 #endif
 
@@ -460,7 +462,7 @@ struct GenericSignatureLayout {
       }
     }
 
-    assert(numPacks == NumPacks);
+    assert(packIdx == NumPacks);
   }
 
   size_t sizeInWords() const {
@@ -492,36 +494,6 @@ struct GenericSignatureLayout {
                          const GenericSignatureLayout<Runtime> &rhs) {
     return !(lhs == rhs);
   }
-
-  int compare(const GenericSignatureLayout<Runtime> &rhs) const {
-    if (auto result = compareIntegers(NumKeyParameters, rhs.NumKeyParameters))
-      return result;
-
-    if (auto result = compareIntegers(NumWitnessTables, rhs.NumWitnessTables))
-      return result;
-
-    if (auto result = compareIntegers(NumShapeClasses, rhs.NumShapeClasses))
-      return result;
-
-    if (auto result = compareIntegers(NumPacks, rhs.NumPacks))
-      return result;
-
-    for (unsigned i = 0; i < NumPacks; ++i) {
-      const auto &lhsElt = PackShapeDescriptors[i];
-      const auto &rhsElt = rhs.PackShapeDescriptors[i];
-
-      if (auto result = compareIntegers(lhsElt.Kind, rhsElt.Kind))
-        return result;
-
-      if (auto result = compareIntegers(lhsElt.Index, rhsElt.Index))
-        return result;
-
-      if (auto result = compareIntegers(lhsElt.ShapeClass, rhsElt.ShapeClass))
-        return result;
-    }
-
-    return 0;
-  }
 };
 
 /// A key value as provided to the concurrent map.
@@ -532,10 +504,10 @@ class MetadataCacheKey {
 
   /// Compare two witness tables, which may involving checking the
   /// contents of their conformance descriptors.
-  static int compareWitnessTables(const WitnessTable *awt,
-                                  const WitnessTable *bwt) {
+  static bool areWitnessTablesEqual(const WitnessTable *awt,
+                                    const WitnessTable *bwt) {
     if (awt == bwt)
-      return 0;
+      return true;
 #if SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
     auto *aDescription = lookThroughOptionalConditionalWitnessTable(
       reinterpret_cast<const RelativeWitnessTable*>(awt))->getDescription();
@@ -545,37 +517,34 @@ class MetadataCacheKey {
     auto *aDescription = awt->getDescription();
     auto *bDescription = bwt->getDescription();
 #endif
-    return compareProtocolConformanceDescriptors(aDescription, bDescription);
+    return areConformanceDescriptorsEqual(aDescription, bDescription);
   }
 
 public:
   /// Compare two conformance descriptors, checking their contents if necessary.
-  static int compareProtocolConformanceDescriptors(
+  static bool areConformanceDescriptorsEqual(
       const ProtocolConformanceDescriptor *aDescription,
       const ProtocolConformanceDescriptor *bDescription) {
     if (aDescription == bDescription)
-      return 0;
+      return true;
 
     if (!aDescription->isSynthesizedNonUnique() ||
         !bDescription->isSynthesizedNonUnique())
-      return comparePointers(aDescription, bDescription);
+      return aDescription == bDescription;
 
     auto aType = aDescription->getCanonicalTypeMetadata();
     auto bType = bDescription->getCanonicalTypeMetadata();
     if (!aType || !bType)
-      return comparePointers(aDescription, bDescription);
+      return aDescription == bDescription;
 
-    if (int result = comparePointers(aType, bType))
-      return result;
-
-    return comparePointers(aDescription->getProtocol(),
-                           bDescription->getProtocol());
+    return (aType == bType &&
+            aDescription->getProtocol() == bDescription->getProtocol());
   }
 
 private:
-  static int compareMetadataPacks(const void *lhsPtr,
-                                  const void *rhsPtr,
-                                  uintptr_t count) {
+  static bool areMetadataPacksEqual(const void *lhsPtr,
+                                    const void *rhsPtr,
+                                    uintptr_t count) {
     MetadataPackPointer lhs(lhsPtr);
     MetadataPackPointer rhs(rhsPtr);
 
@@ -586,16 +555,16 @@ private:
     auto *rhsElt = rhs.getElements();
 
     for (uintptr_t i = 0; i < count; ++i) {
-      if (auto result = comparePointers(lhsElt[i], rhsElt[i]))
-        return result;
+      if (lhsElt[i] != rhsElt[i])
+        return false;
     }
 
-    return 0;
+    return true;
   }
 
-  static int compareWitnessTablePacks(const void *lhsPtr,
-                                      const void *rhsPtr,
-                                      uintptr_t count) {
+  static bool areWitnessTablePacksEqual(const void *lhsPtr,
+                                        const void *rhsPtr,
+                                        uintptr_t count) {
     WitnessTablePackPointer lhs(lhsPtr);
     WitnessTablePackPointer rhs(rhsPtr);
 
@@ -606,74 +575,11 @@ private:
     auto *rhsElt = rhs.getElements();
 
     for (uintptr_t i = 0; i < count; ++i) {
-      if (auto result = compareWitnessTables(lhsElt[i], rhsElt[i]))
-        return result;
+      if (!areWitnessTablesEqual(lhsElt[i], rhsElt[i]))
+        return false;
     }
 
-    return 0;
-  }
-
-  /// Compare the content from two keys.
-  static int compareContent(const void *const *adata, const void *const *bdata,
-                            const GenericSignatureLayout<InProcess> &layout) {
-    const uintptr_t *packCounts = reinterpret_cast<const uintptr_t *>(adata);
-
-    // Compare pack lengths for shape classes.
-    for (unsigned i = 0; i != layout.NumShapeClasses; ++i) {
-      if (auto result = compareIntegers(reinterpret_cast<uintptr_t>(*adata++),
-                                        reinterpret_cast<uintptr_t>(*bdata++)))
-        return result;
-    }
-
-    auto *nextPack = layout.PackShapeDescriptors;
-    unsigned numPacks = 0;
-
-    // Compare generic arguments for key parameters.
-    for (unsigned i = 0; i != layout.NumKeyParameters; ++i) {
-      // Is this entry a metadata pack?
-      if (numPacks < layout.NumPacks &&
-          nextPack->Kind == GenericPackKind::Metadata &&
-          i == nextPack->Index) {
-        assert(nextPack->ShapeClass < layout.NumShapeClasses);
-        uintptr_t count = packCounts[nextPack->ShapeClass];
-        ++numPacks;
-        ++nextPack;
-
-        if (auto result = compareMetadataPacks(*adata++, *bdata++, count))
-          return result;
-
-        continue;
-      }
-
-      if (auto result = comparePointers(*adata++, *bdata++))
-        return result;
-    }
-
-    // Compare witness tables.
-    for (unsigned i = 0; i != layout.NumWitnessTables; ++i) {
-      // Is this entry a witness table pack?
-      if (numPacks < layout.NumPacks &&
-          nextPack->Kind == GenericPackKind::WitnessTable &&
-          i == nextPack->Index) {
-        assert(nextPack->ShapeClass < layout.NumShapeClasses);
-        uintptr_t count = packCounts[nextPack->ShapeClass];
-        ++numPacks;
-        ++nextPack;
-
-        if (auto result = compareWitnessTablePacks(*adata++, *bdata++, count))
-          return result;
-
-        continue;
-      }
-
-      if (auto result =
-              compareWitnessTables((const WitnessTable *)*adata++,
-                                   (const WitnessTable *)*bdata++))
-        return result;
-    }
-
-    assert(numPacks == layout.NumPacks && "Missed a pack");
-    return 0;
+    return true;
   }
 
 public:
@@ -693,20 +599,72 @@ public:
     if (Layout != rhs.Layout) return false;
 
     // Compare the content.
-    return compareContent(begin(), rhs.begin(), Layout) == 0;
-  }
+    auto *adata = begin();
+    auto *bdata = rhs.begin();
+    const uintptr_t *packCounts = reinterpret_cast<const uintptr_t *>(adata);
 
-  int compare(const MetadataCacheKey &rhs) const {
-    // Compare the hashes.
-    if (auto result = compareIntegers(Hash, rhs.Hash))
-      return result;
+    unsigned argIdx = 0;
 
-    // Compare the layouts.
-    if (auto result = Layout.compare(rhs.Layout))
-      return result;
+    // Compare pack lengths for shape classes.
+    for (unsigned i = 0; i != Layout.NumShapeClasses; ++i) {
+      if (adata[argIdx] != bdata[argIdx])
+        return false;
 
-    // Compare the content.
-    return compareContent(begin(), rhs.begin(), Layout);
+      ++argIdx;
+    }
+
+    auto *packs = Layout.PackShapeDescriptors;
+    unsigned packIdx = 0;
+
+    // Compare generic arguments for key parameters.
+    for (unsigned i = 0; i != Layout.NumKeyParameters; ++i) {
+      // Is this entry a metadata pack?
+      if (packIdx < Layout.NumPacks &&
+          packs[packIdx].Kind == GenericPackKind::Metadata &&
+          argIdx == packs[packIdx].Index) {
+        assert(packs[packIdx].ShapeClass < Layout.NumShapeClasses);
+        uintptr_t count = packCounts[packs[packIdx].ShapeClass];
+
+        if (!areMetadataPacksEqual(*adata++, *bdata++, count))
+          return false;
+
+        ++packIdx;
+        ++argIdx;
+        continue;
+      }
+
+      if (adata[argIdx] != bdata[argIdx])
+        return false;
+
+      ++argIdx;
+    }
+
+    // Compare witness tables.
+    for (unsigned i = 0; i != Layout.NumWitnessTables; ++i) {
+      // Is this entry a witness table pack?
+      if (packIdx < Layout.NumPacks &&
+          packs[packIdx].Kind == GenericPackKind::WitnessTable &&
+          argIdx == packs[packIdx].Index) {
+        assert(packs[packIdx].ShapeClass < Layout.NumShapeClasses);
+        uintptr_t count = packCounts[packs[packIdx].ShapeClass];
+
+        if (!areWitnessTablePacksEqual(*adata++, *bdata++, count))
+          return false;
+
+        ++packIdx;
+        ++argIdx;
+        continue;
+      }
+
+      if (!areWitnessTablesEqual((const WitnessTable *)adata[argIdx],
+                                 (const WitnessTable *)bdata[argIdx]))
+        return false;
+
+      ++argIdx;
+    }
+
+    assert(packIdx == Layout.NumPacks && "Missed a pack");
+    return true;
   }
 
   uint32_t hash() const {
@@ -732,25 +690,26 @@ private:
   uint32_t computeHash() const {
     size_t H = 0x56ba80d1u * Layout.NumKeyParameters;
 
-    auto *nextPack = Layout.PackShapeDescriptors;
-    unsigned numPacks = 0;
+    auto *packs = Layout.PackShapeDescriptors;
+    unsigned packIdx = 0;
 
     auto update = [&H](uintptr_t value) {
       H = (H >> 10) | (H << ((sizeof(uintptr_t) * 8) - 10));
       H ^= (value ^ (value >> 19));
     };
 
-    // FIXME: Incorporate NumShapeClasses into the hash
-
-    for (unsigned i = 0; i != Layout.NumKeyParameters; ++i) {
+    // FIXME: The first NumShapeClasses entries are pack counts;
+    // incorporate them into the hash
+    for (unsigned i = Layout.NumShapeClasses,
+                  e = Layout.NumShapeClasses + Layout.NumKeyParameters;
+         i != e; ++i) {
       // Is this entry a metadata pack?
-      if (numPacks < Layout.NumPacks &&
-          nextPack->Kind == GenericPackKind::Metadata &&
-          i == nextPack->Index) {
-        assert(nextPack->ShapeClass < Layout.NumShapeClasses);
-        auto count = reinterpret_cast<uintptr_t>(Data[nextPack->ShapeClass]);
-        ++numPacks;
-        ++nextPack;
+      if (packIdx < Layout.NumPacks &&
+          packs[packIdx].Kind == GenericPackKind::Metadata &&
+          i == packs[packIdx].Index) {
+        assert(packs[packIdx].ShapeClass < Layout.NumShapeClasses);
+        auto count = reinterpret_cast<uintptr_t>(Data[packs[packIdx].ShapeClass]);
+        ++packIdx;
 
         MetadataPackPointer pack(Data[i]);
         for (unsigned j = 0; j < count; ++j)

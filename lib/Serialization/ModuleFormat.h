@@ -58,7 +58,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 747; // `consuming` and `borrowing` decl modifiers
+const uint16_t SWIFTMODULE_VERSION_MINOR = 751; // package only import
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -346,9 +346,10 @@ using ParamDeclSpecifierField = BCFixed<3>;
 // the module version.
 enum class VarDeclIntroducer : uint8_t {
   Let = 0,
-  Var = 1
+  Var = 1,
+  InOut = 2,
 };
-using VarDeclIntroducerField = BCFixed<1>;
+using VarDeclIntroducerField = BCFixed<2>;
 
 // These IDs must \em not be renumbered or reordered without incrementing
 // the module version.
@@ -486,16 +487,6 @@ using ReferenceOwnershipField = BCFixed<2>;
 
 // These IDs must \em not be renumbered or reordered without incrementing
 // the module version.
-enum ValueOwnership : uint8_t {
-  Default = 0,
-  InOut,
-  Shared,
-  Owned
-};
-using ValueOwnershipField = BCFixed<2>;
-
-// These IDs must \em not be renumbered or reordered without incrementing
-// the module version.
 enum class DefaultArgumentKind : uint8_t {
   None = 0,
   Normal,
@@ -593,7 +584,9 @@ enum class ImportControl : uint8_t {
   /// `@_exported import FooKit`
   Exported,
   /// `@_uncheckedImplementationOnly import FooKit`
-  ImplementationOnly
+  ImplementationOnly,
+  /// `package import FooKit`
+  PackageOnly
 };
 using ImportControlField = BCFixed<2>;
 
@@ -1162,7 +1155,7 @@ namespace decls_block {
     BCFixed<1>,          // vararg?
     BCFixed<1>,          // autoclosure?
     BCFixed<1>,          // non-ephemeral?
-    ValueOwnershipField, // inout, shared or owned?
+    ParamDeclSpecifierField, // inout, shared or owned?
     BCFixed<1>,          // isolated
     BCFixed<1>,          // noDerivative?
     BCFixed<1>           // compileTimeConst

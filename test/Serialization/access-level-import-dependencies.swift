@@ -29,7 +29,7 @@ private import HiddenDep
 // RUN:   -enable-library-evolution \
 // RUN:   -enable-experimental-feature AccessLevelOnImport
 // RUN: %target-swift-frontend -emit-module %t/PackageDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution \
+// RUN:   -enable-library-evolution -package-name MyPackage \
 // RUN:   -enable-experimental-feature AccessLevelOnImport
 // RUN: %target-swift-frontend -emit-module %t/InternalDep.swift -o %t -I %t \
 // RUN:   -enable-library-evolution \
@@ -42,14 +42,15 @@ private import HiddenDep
 // RUN:   -enable-experimental-feature AccessLevelOnImport
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfPublic.swift -I %t \
-// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-PACKAGE-DEP %s
-// VISIBLE-PACKAGE-DEP: source: '{{.*}}HiddenDep.swiftmodule'
+// RUN:   -enable-library-evolution -package-name MyOtherPackage \
+// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-HIDDEN-DEP %s
+// VISIBLE-HIDDEN-DEP: source: '{{.*}}HiddenDep.swiftmodule'
 //--- ClientOfPublic.swift
 import PublicDep
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfNonPublic.swift -I %t \
-// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=HIDDEN-PACKAGE-DEP %s
-// HIDDEN-PACKAGE-DEP-NOT: HiddenDep
+// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=HIDDEN-HIDDEN-DEP %s
+// HIDDEN-HIDDEN-DEP-NOT: HiddenDep
 //--- ClientOfNonPublic.swift
 import PackageDep
 import InternalDep
@@ -69,6 +70,6 @@ import PrivateDep
 // RUN:   -enable-experimental-feature AccessLevelOnImport
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfPublic.swift -I %t \
-// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-PACKAGE-DEP %s
+// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-HIDDEN-DEP %s
 // RUN: %target-swift-frontend -typecheck %t/ClientOfNonPublic.swift -I %t \
-// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-PACKAGE-DEP %s
+// RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-HIDDEN-DEP %s

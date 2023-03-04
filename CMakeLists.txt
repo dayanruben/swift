@@ -46,7 +46,7 @@ endif()
 ENABLE_LANGUAGE(C)
 
 # Use C++14.
-set(CMAKE_CXX_STANDARD 14 CACHE STRING "C++ standard to conform to")
+set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 
@@ -55,6 +55,7 @@ include(SwiftUtils)
 include(CheckSymbolExists)
 include(CMakeDependentOption)
 include(CheckLanguage)
+include(GNUInstallDirs)
 
 # Enable Swift for the host compiler build if we have the language. It is
 # optional until we have a bootstrap story.
@@ -323,6 +324,10 @@ if(SWIFT_PROFDATA_FILE AND EXISTS ${SWIFT_PROFDATA_FILE})
   add_definitions("-fprofile-instr-use=${SWIFT_PROFDATA_FILE}")
 endif()
 
+set(SWIFT_TOOLS_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}" CACHE PATH
+  "Path for binary subdirectory to use during installation.
+  Used by add_swift_tool_symlink in AddSwift.cmake so that llvm_install_symlink generates the installation script properly.")
+
 #
 # User-configurable Swift Standard Library specific options.
 #
@@ -569,6 +574,10 @@ option(SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING
 
 option(SWIFT_ENABLE_EXPERIMENTAL_REFLECTION
   "Enable build of the Swift reflection module"
+  FALSE)
+
+option(SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION
+  "Enable build of the Swift observation module"
   FALSE)
 
 option(SWIFT_ENABLE_DISPATCH
@@ -1117,6 +1126,7 @@ if(SWIFT_BUILD_STDLIB OR SWIFT_BUILD_SDK_OVERLAY)
   message(STATUS "String Processing Support:          ${SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING}")
   message(STATUS "Unicode Support:                    ${SWIFT_STDLIB_ENABLE_UNICODE_DATA}")
   message(STATUS "Reflection Support:                 ${SWIFT_ENABLE_EXPERIMENTAL_REFLECTION}")
+  message(STATUS "Observation Support:                ${SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION}")
   message(STATUS "")
 else()
   message(STATUS "Not building Swift standard library, SDK overlays, and runtime")

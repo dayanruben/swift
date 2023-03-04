@@ -811,10 +811,6 @@ ERROR(serialization_module_incompatible_revision,Fatal,
       "compiled module was created by a different version of the compiler '%0'; "
       "rebuild %1 and try again: %2",
       (StringRef, Identifier, StringRef))
-REMARK(serialization_module_problematic_revision, none,
-      "compiled module was created by a different version of the compiler '%0': "
-      "%1",
-      (StringRef, StringRef))
 ERROR(serialization_missing_single_dependency,Fatal,
       "missing required module '%0'", (StringRef))
 ERROR(serialization_missing_dependencies,Fatal,
@@ -1623,6 +1619,8 @@ ERROR(expose_generic_decl_to_cxx,none,
       "generic %0 %1 can not yet be exposed to C++", (DescriptiveDeclKind, ValueDecl *))
 ERROR(expose_generic_requirement_to_cxx,none,
       "generic requirements for %0 %1 can not yet be represented in C++", (DescriptiveDeclKind, ValueDecl *))
+ERROR(expose_throwing_to_cxx,none,
+      "%0 %1 can not yet be represented in C++ as it may throw an error", (DescriptiveDeclKind, ValueDecl *))
 
 ERROR(attr_methods_only,none,
       "only methods can be declared %0", (DeclAttribute))
@@ -2068,6 +2066,9 @@ ERROR(access_level_on_import_unsupported, none,
 ERROR(access_level_conflict_with_exported,none,
       "'%0' is incompatible with %1; it can only be applied to public imports",
       (DeclAttribute, DeclAttribute))
+NOTE(module_imported_here,none,
+     "module %0 imported as '%select{private|fileprivate|internal|package|%ERROR|%ERROR}1' here",
+     (Identifier, AccessLevel))
 
 // Opaque return types
 ERROR(opaque_type_invalid_constraint,none,
@@ -5286,6 +5287,9 @@ ERROR(dot_protocol_on_non_existential,none,
       "cannot use 'Protocol' with non-protocol type %0", (Type))
 ERROR(tuple_single_element,none,
       "cannot create a single-element tuple with an element label", ())
+ERROR(tuple_pack_element_label,none,
+      "cannot use label with pack expansion tuple element",
+      ())
 ERROR(vararg_not_allowed,none,
       "variadic parameter cannot appear outside of a function parameter list",
       ())
@@ -6919,8 +6923,6 @@ NOTE(moveonly_copyable_type_that_contains_moveonly_type_location, none,
 ERROR(moveonly_cannot_conform_to_type, none,
      "move-only %0 %1 cannot conform to %2",
      (DescriptiveDeclKind, DeclName, Type))
-ERROR(moveonly_non_final_class_cannot_contain_moveonly_field, none,
-     "non-final classes containing move only fields is not yet supported", ())
 ERROR(moveonly_parameter_missing_ownership, none,
       "noncopyable parameter must specify its ownership", ())
 NOTE(moveonly_parameter_ownership_suggestion, none,

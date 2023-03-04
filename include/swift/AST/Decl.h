@@ -388,9 +388,9 @@ protected:
     IsStatic : 1
   );
 
-  SWIFT_INLINE_BITFIELD(VarDecl, AbstractStorageDecl, 1+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD(VarDecl, AbstractStorageDecl, 2+1+1+1+1+1,
     /// Encodes whether this is a 'let' binding.
-    Introducer : 1,
+    Introducer : 2,
 
     /// Whether this declaration captures the 'self' param under the same name.
     IsSelfParamCapture : 1,
@@ -892,8 +892,8 @@ public:
 
   /// Retrieve the discriminator for the given custom attribute that names
   /// an attached macro.
-  unsigned getAttachedMacroDiscriminator(
-      MacroRole role, const CustomAttr *attr) const;
+  unsigned getAttachedMacroDiscriminator(DeclBaseName macroName, MacroRole role,
+                                         const CustomAttr *attr) const;
 
   /// Returns the innermost enclosing decl with an availability annotation.
   const Decl *getInnermostDeclWithAvailability() const;
@@ -3331,17 +3331,18 @@ class GenericTypeParamDecl final
   ///
   /// \param name The name of the generic parameter.
   /// \param nameLoc The location of the name.
-  /// \param ellipsisLoc The location of the ellipsis for a type parameter pack.
+  /// \param eachLoc The location of the 'each' keyword for a type parameter
+  ///                pack.
   /// \param depth The generic signature depth.
   /// \param index The index of the parameter in the generic signature.
   /// \param isParameterPack Whether the generic parameter is for a type
-  ///                        parameter pack, denoted by \c <T...>.
+  ///                        parameter pack, denoted by \c <each T>.
   /// \param isOpaqueType Whether the generic parameter is written as an opaque
   ///                     parameter e.g 'some Collection'.
   /// \param opaqueTypeRepr The TypeRepr of an opaque generic parameter.
   ///
   GenericTypeParamDecl(DeclContext *dc, Identifier name, SourceLoc nameLoc,
-                       SourceLoc ellipsisLoc, unsigned depth, unsigned index,
+                       SourceLoc eachLoc, unsigned depth, unsigned index,
                        bool isParameterPack, bool isOpaqueType,
                        TypeRepr *opaqueTypeRepr);
 
@@ -3353,17 +3354,18 @@ class GenericTypeParamDecl final
   ///
   /// \param name The name of the generic parameter.
   /// \param nameLoc The location of the name.
-  /// \param ellipsisLoc The location of the ellipsis for a type parameter pack.
+  /// \param eachLoc The location of the 'each' keyword for a type parameter
+  ///                pack.
   /// \param depth The generic signature depth.
   /// \param index The index of the parameter in the generic signature.
   /// \param isParameterPack Whether the generic parameter is for a type
-  ///                        parameter pack, denoted by \c <T...>.
+  ///                        parameter pack, denoted by \c <each T>.
   /// \param isOpaqueType Whether the generic parameter is written as an opaque
   ///                     parameter e.g 'some Collection'.
   /// \param opaqueTypeRepr The TypeRepr of an opaque generic parameter.
   ///
   static GenericTypeParamDecl *create(DeclContext *dc, Identifier name,
-                                      SourceLoc nameLoc, SourceLoc ellipsisLoc,
+                                      SourceLoc nameLoc, SourceLoc eachLoc,
                                       unsigned depth, unsigned index,
                                       bool isParameterPack, bool isOpaqueType,
                                       TypeRepr *opaqueTypeRepr);
@@ -3374,9 +3376,9 @@ public:
   /// Construct a new generic type parameter. This should only be used by the
   /// ClangImporter, use \c GenericTypeParamDecl::create[...] instead.
   GenericTypeParamDecl(DeclContext *dc, Identifier name, SourceLoc nameLoc,
-                       SourceLoc ellipsisLoc, unsigned depth, unsigned index,
+                       SourceLoc eachLoc, unsigned depth, unsigned index,
                        bool isParameterPack)
-      : GenericTypeParamDecl(dc, name, nameLoc, ellipsisLoc, depth, index,
+      : GenericTypeParamDecl(dc, name, nameLoc, eachLoc, depth, index,
                              isParameterPack, /*isOpaqueType*/ false, nullptr) {
   }
 
@@ -3390,7 +3392,7 @@ public:
   /// \param depth The generic signature depth.
   /// \param index The index of the parameter in the generic signature.
   /// \param isParameterPack Whether the generic parameter is for a type
-  ///                        parameter pack, denoted by \c <T...>.
+  ///                        parameter pack, denoted by \c <each T>.
   /// \param isOpaqueType Whether the generic parameter is written as an opaque
   ///                     parameter e.g 'some Collection'.
   ///
@@ -3406,14 +3408,16 @@ public:
   ///
   /// \param name The name of the generic parameter.
   /// \param nameLoc The location of the name.
-  /// \param ellipsisLoc The location of the ellipsis for a type parameter pack.
+  /// \param eachLoc The location of the 'each' keyword for a type parameter
+  ///                pack.
   /// \param index The index of the parameter in the generic signature.
   /// \param isParameterPack Whether the generic parameter is for a type
-  ///                        parameter pack, denoted by \c <T...>.
+  ///                        parameter pack, denoted by \c <each T>.
   ///
-  static GenericTypeParamDecl *
-  createParsed(DeclContext *dc, Identifier name, SourceLoc nameLoc,
-               SourceLoc ellipsisLoc, unsigned index, bool isParameterPack);
+  static GenericTypeParamDecl *createParsed(DeclContext *dc, Identifier name,
+                                            SourceLoc nameLoc,
+                                            SourceLoc eachLoc, unsigned index,
+                                            bool isParameterPack);
 
   /// Construct a new implicit generic type parameter.
   ///
@@ -3425,19 +3429,19 @@ public:
   /// \param depth The generic signature depth.
   /// \param index The index of the parameter in the generic signature.
   /// \param isParameterPack Whether the generic parameter is for a type
-  ///                        parameter pack, denoted by \c <T...>.
+  ///                        parameter pack, denoted by \c <each T>.
   /// \param isOpaqueType Whether the generic parameter is written as an opaque
   ///                     parameter e.g 'some Collection'.
   /// \param opaqueTypeRepr The TypeRepr of an opaque generic parameter.
   /// \param nameLoc The location of the name.
-  /// \param ellipsisLoc The location of the ellipsis for a type parameter pack.
+  /// \param eachLoc The location of the 'each' keyword for a type parameter
+  ///                pack.
   ///
   static GenericTypeParamDecl *
   createImplicit(DeclContext *dc, Identifier name, unsigned depth,
                  unsigned index, bool isParameterPack = false,
                  bool isOpaqueType = false, TypeRepr *opaqueTypeRepr = nullptr,
-                 SourceLoc nameLoc = SourceLoc(),
-                 SourceLoc ellipsisLoc = SourceLoc());
+                 SourceLoc nameLoc = {}, SourceLoc eachLoc = {});
 
   /// The depth of this generic type parameter, i.e., the number of outer
   /// levels of generic parameter lists that enclose this type parameter.
@@ -3463,8 +3467,8 @@ public:
   /// parameter pack.
   ///
   /// \code
-  /// func foo<T...>(_ : T...) { }
-  /// struct Foo<T...> { }
+  /// func foo<each T>(_ : for each T) { }
+  /// struct Foo<each T> { }
   /// \endcode
   bool isParameterPack() const { return Bits.GenericTypeParamDecl.ParameterPack; }
 
@@ -3504,8 +3508,8 @@ public:
   /// Here 'T' and 'U' have indexes 0 and 1, respectively. 'V' has index 0.
   unsigned getIndex() const { return Bits.GenericTypeParamDecl.Index; }
 
-  /// Retrieve the ellipsis location for a type parameter pack \c T...
-  SourceLoc getEllipsisLoc() const {
+  /// Retrieve the 'each' keyword location for a type parameter pack \c each T
+  SourceLoc getEachLoc() const {
     if (!isParameterPack())
       return SourceLoc();
 
@@ -4009,7 +4013,7 @@ public:
   bool isGlobalActor() const {
     return getGlobalActorInstance() != nullptr;
   }
-  
+
   /// Return the `DestructorDecl` for a struct or enum's `deinit` declaration.
   /// Returns null if the type is a class, or does not have a declared `deinit`.
   DestructorDecl *getValueTypeDestructor();
@@ -5498,7 +5502,8 @@ class VarDecl : public AbstractStorageDecl {
 public:
   enum class Introducer : uint8_t {
     Let = 0,
-    Var = 1
+    Var = 1,
+    InOut = 2,
   };
 
 protected:
@@ -5981,29 +5986,6 @@ public:
   }
 };
 
-/// The various spellings of ownership modifier that can be used in source.
-enum class ParamSpecifier : uint8_t {
-  /// No explicit ownership specifier was provided. The parameter will use the
-  /// default ownership convention for the declaration.
-  Default = 0,
-
-  /// `inout`, indicating exclusive mutable access to the argument for the
-  /// duration of a call.
-  InOut = 1,
-
-  /// `borrowing`, indicating nonexclusive access to the argument for the
-  /// duration of a call.
-  Borrowing = 2,
-  /// `consuming`, indicating ownership transfer of the argument from caller
-  /// to callee.
-  Consuming = 3,
-
-  /// `__shared`, a legacy spelling of `borrowing`.
-  LegacyShared = 4,
-  /// `__owned`, a legacy spelling of `consuming`.
-  LegacyOwned = 5,
-};
-
 /// A function parameter declaration.
 class ParamDecl : public VarDecl {
   friend class DefaultArgumentInitContextRequest;
@@ -6368,6 +6350,16 @@ public:
   /// Get the source code spelling of a parameter specifier value as a string.
   static StringRef getSpecifierSpelling(Specifier spec);
 };
+  
+inline ValueOwnership
+ParameterTypeFlags::getValueOwnership() const {
+  return ParamDecl::getValueOwnershipForSpecifier(getOwnershipSpecifier());
+}
+  
+inline ValueOwnership
+YieldTypeFlags::getValueOwnership() const {
+  return ParamDecl::getValueOwnershipForSpecifier(getOwnershipSpecifier());
+}
   
 /// Describes the kind of subscripting used in Objective-C.
 enum class ObjCSubscriptKind {
@@ -8318,24 +8310,23 @@ public:
 /// is used for parser recovery, e.g. when parsing a floating
 /// attribute list.
 class MissingDecl: public Decl {
-  MissingDecl(DeclContext *DC) : Decl(DeclKind::Missing, DC) {
+  /// The location that the decl would be if it wasn't missing.
+  SourceLoc Loc;
+
+  MissingDecl(DeclContext *DC, SourceLoc loc)
+      : Decl(DeclKind::Missing, DC), Loc(loc) {
     setImplicit();
   }
 
   friend class Decl;
-  SourceLoc getLocFromSource() const {
-    return SourceLoc();
-  }
+  SourceLoc getLocFromSource() const { return Loc; }
 
 public:
-  static MissingDecl *
-  create(ASTContext &ctx, DeclContext *DC) {
-    return new (ctx) MissingDecl(DC);
+  static MissingDecl *create(ASTContext &ctx, DeclContext *DC, SourceLoc loc) {
+    return new (ctx) MissingDecl(DC, loc);
   }
 
-  SourceRange getSourceRange() const {
-    return SourceRange();
-  }
+  SourceRange getSourceRange() const { return SourceRange(Loc); }
 
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::Missing;

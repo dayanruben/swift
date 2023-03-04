@@ -730,27 +730,12 @@ RenameRangeCollector::indexSymbolToRenameLoc(const index::IndexSymbol &symbol,
                    isFunctionLike, isNonProtocolType};
 }
 
-ArrayRef<SourceFile*>
-collectSourceFiles(ModuleDecl *MD, SmallVectorImpl<SourceFile *> &Scratch) {
-  for (auto Unit : MD->getFiles()) {
-    if (auto SF = dyn_cast<SourceFile>(Unit)) {
-      Scratch.push_back(SF);
-    }
-  }
-  return llvm::makeArrayRef(Scratch);
-}
-
-/// Get the source file that contains the given range and belongs to the module.
+/// Get the source file that corresponds to the given buffer.
 SourceFile *getContainingFile(ModuleDecl *M, RangeConfig Range) {
-  SmallVector<SourceFile*, 4> Files;
-  for (auto File : collectSourceFiles(M, Files)) {
-    if (File->getBufferID()) {
-      if (File->getBufferID().value() == Range.BufferId) {
-        return File;
-      }
-    }
-  }
-  return nullptr;
+  auto &SM = M->getASTContext().SourceMgr;
+  // TODO: We should add an ID -> SourceFile mapping.
+  return M->getSourceFileContainingLocation(
+      SM.getRangeForBuffer(Range.BufferID).getStart());
 }
 
 class RefactoringAction {
@@ -888,6 +873,7 @@ static void analyzeRenameScope(ValueDecl *VD, Optional<RenameRefInfo> RefInfo,
   case DeclContextKind::AbstractClosureExpr:
   case DeclContextKind::Initializer:
   case DeclContextKind::SerializedLocal:
+  case DeclContextKind::Package:
   case DeclContextKind::Module:
   case DeclContextKind::FileUnit:
   case DeclContextKind::MacroDecl:
@@ -1085,6 +1071,7 @@ ExtractCheckResult checkExtractConditions(const ResolvedRangeInfo &RangeInfo,
     break;
 
   case swift::DeclContextKind::SerializedLocal:
+  case swift::DeclContextKind::Package:
   case swift::DeclContextKind::Module:
   case swift::DeclContextKind::FileUnit:
   case swift::DeclContextKind::GenericTypeDecl:
@@ -8802,7 +8789,7 @@ getDescriptiveRefactoringKindName(RefactoringKind Kind) {
   }
 
 SourceLoc swift::ide::RangeConfig::getStart(SourceManager &SM) {
-  return SM.getLocForLineCol(BufferId, Line, Column);
+  return SM.getLocForLineCol(BufferID, Line, Column);
 }
 
 SourceLoc swift::ide::RangeConfig::getEnd(SourceManager &SM) {

@@ -86,6 +86,14 @@ bool GenericTypeParamType::isParameterPack() const {
          GenericTypeParamType::TYPE_SEQUENCE_BIT;
 }
 
+PackType *TypeBase::getPackSubstitutionAsPackType() {
+  if (auto pack = getAs<PackType>()) {
+    return pack;
+  } else {
+    return PackType::getSingletonPackExpansion(this);
+  }
+}
+
 /// G<{X1, ..., Xn}, {Y1, ..., Yn}>... => {G<X1, Y1>, ..., G<Xn, Yn>}...
 PackExpansionType *PackExpansionType::expand() {
   auto countType = getCountType();
@@ -158,7 +166,7 @@ bool TupleType::containsPackExpansionType() const {
 }
 
 /// (W, {X, Y}..., Z) => (W, X, Y, Z)
-TupleType *TupleType::flattenPackTypes() {
+Type TupleType::flattenPackTypes() {
   bool anyChanged = false;
   SmallVector<TupleTypeElt, 4> elts;
 
@@ -192,6 +200,15 @@ TupleType *TupleType::flattenPackTypes() {
 
   if (!anyChanged)
     return this;
+
+  // If pack substitution yields a single-element tuple, the tuple
+  // structure is flattened to produce the element type.
+  if (elts.size() == 1) {
+    auto type = elts.front().getType();
+    if (!type->is<PackExpansionType>() && !type->is<TypeVariableType>()) {
+      return type;
+    }
+  }
 
   return TupleType::get(elts, getASTContext());
 }

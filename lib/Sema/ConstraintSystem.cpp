@@ -1075,15 +1075,6 @@ FunctionType *ConstraintSystem::openFunctionType(
   return funcType->castTo<FunctionType>();
 }
 
-Optional<Type> ConstraintSystem::isArrayType(Type type) {
-  if (auto boundStruct = type->getAs<BoundGenericStructType>()) {
-    if (boundStruct->getDecl() == type->getASTContext().getArrayDecl())
-      return boundStruct->getGenericArgs()[0];
-  }
-
-  return None;
-}
-
 Optional<std::pair<Type, Type>> ConstraintSystem::isDictionaryType(Type type) {
   if (auto boundStruct = type->getAs<BoundGenericStructType>()) {
     if (boundStruct->getDecl() == type->getASTContext().getDictionaryDecl()) {
@@ -1125,6 +1116,16 @@ Type ConstraintSystem::getFixedTypeRecursive(Type type,
     flags |= TMF_GenerateConstraints;
 
     return getFixedTypeRecursive(newType, flags, wantRValue);
+  }
+
+  // Tuple types can lose their tuple structure under substitution
+  // when a parameter pack is substituted with one element.
+  if (auto tuple = type->getAs<TupleType>()) {
+    auto simplified = simplifyType(type);
+    if (simplified.getPointer() == type.getPointer())
+      return type;
+
+    return getFixedTypeRecursive(simplified, flags, wantRValue);
   }
 
   if (auto typeVar = type->getAs<TypeVariableType>()) {
@@ -3710,6 +3711,20 @@ Type ConstraintSystem::simplifyTypeImpl(Type type,
   return type.transform([&](Type type) -> Type {
     if (auto tvt = dyn_cast<TypeVariableType>(type.getPointer()))
       return getFixedTypeFn(tvt);
+
+    if (auto tuple = dyn_cast<TupleType>(type.getPointer())) {
+      if (tuple->getNumElements() == 1) {
+        auto element = tuple->getElement(0);
+        auto elementType = simplifyTypeImpl(element.getType(), getFixedTypeFn);
+
+        // Flatten single-element tuples containing type variables that cannot
+        // bind to packs.
+        auto typeVar = elementType->getAs<TypeVariableType>();
+        if (!element.hasName() && typeVar && !typeVar->getImpl().canBindToPack()) {
+          return typeVar;
+        }
+      }
+    }
 
     // If this is a dependent member type for which we end up simplifying
     // the base to a non-type-variable, perform lookup.

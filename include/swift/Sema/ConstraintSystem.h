@@ -4735,10 +4735,6 @@ public:
                        bool updateState = true,
                        bool notifyBindingInference = true);
 
-  /// Determine if the type in question is an Array<T> and, if so, provide the
-  /// element type of the array.
-  static Optional<Type> isArrayType(Type type);
-
   /// Determine whether the given type is a dictionary and, if so, provide the
   /// key and value types for the dictionary.
   static Optional<std::pair<Type, Type>> isDictionaryType(Type type);
@@ -5112,7 +5108,7 @@ public:
   /// Generate constraints for the given solution target.
   ///
   /// \returns true if an error occurred, false otherwise.
-  LLVM_NODISCARD
+  [[nodiscard]]
   bool generateConstraints(SolutionApplicationTarget &target,
                            FreeTypeVariableBinding allowFreeTypeVariables =
                                FreeTypeVariableBinding::Disallow);
@@ -5124,7 +5120,7 @@ public:
   /// used for constraint generation.
   ///
   /// \returns \c true if constraint generation failed, \c false otherwise
-  LLVM_NODISCARD
+  [[nodiscard]]
   bool generateConstraints(AnyFunctionRef fn, BraceStmt *body);
 
   /// Generate constraints for a given SingleValueStmtExpr.
@@ -5135,7 +5131,7 @@ public:
   /// Generate constraints for the given (unchecked) expression.
   ///
   /// \returns a possibly-sanitized expression, or null if an error occurred.
-  LLVM_NODISCARD
+  [[nodiscard]]
   Expr *generateConstraints(Expr *E, DeclContext *dc,
                             bool isInputExpression = true);
 
@@ -5143,7 +5139,7 @@ public:
   /// value of the given expression.
   ///
   /// \returns a possibly-sanitized initializer, or null if an error occurred.
-  LLVM_NODISCARD
+  [[nodiscard]]
   Type generateConstraints(Pattern *P, ConstraintLocatorBuilder locator,
                            bool bindPatternVarsOneWay,
                            PatternBindingDecl *patternBinding,
@@ -5153,7 +5149,7 @@ public:
   ///
   /// \returns true if there was an error in constraint generation, false
   /// if generation succeeded.
-  LLVM_NODISCARD
+  [[nodiscard]]
   bool generateConstraints(StmtCondition condition, DeclContext *dc);
 
   /// Generate constraints for a case statement.
@@ -5163,7 +5159,7 @@ public:
   ///
   /// \returns true if there was an error in constraint generation, false
   /// if generation succeeded.
-  LLVM_NODISCARD
+  [[nodiscard]]
   bool generateConstraints(CaseStmt *caseStmt, DeclContext *dc,
                            Type subjectType, ConstraintLocator *locator);
 
@@ -5207,7 +5203,7 @@ public:
   /// \param propertyType The type of the wrapped property.
   ///
   /// \returns true if there is an error.
-  LLVM_NODISCARD
+  [[nodiscard]]
   bool generateWrappedPropertyTypeConstraints(VarDecl *wrappedVar,
                                               Type initializerType,
                                               Type propertyType);

@@ -2021,8 +2021,6 @@ public:
     TypeChecker::checkDeclAttributes(MD);
     checkAccessControl(MD);
 
-    if (!Ctx.LangOpts.hasFeature(Feature::Macros))
-      MD->diagnose(diag::macro_experimental);
     if (!MD->getDeclContext()->isModuleScopeContext())
       MD->diagnose(diag::macro_in_nested, MD->getName());
     if (!MD->getAttrs().hasAttribute<MacroRoleAttr>(/*AllowInvalid*/ true))
@@ -2976,15 +2974,6 @@ public:
 
     diagnoseIncompatibleProtocolsForMoveOnlyType(CD);
 
-    // Ban non-final classes from having move only fields.
-    if (!CD->isFinal()) {
-      for (auto *field : CD->getStoredProperties()) {
-        if (field->getType()->isPureMoveOnly()) {
-          field->diagnose(
-              diag::moveonly_non_final_class_cannot_contain_moveonly_field);
-        }
-      }
-    }
   }
 
   void visitProtocolDecl(ProtocolDecl *PD) {
