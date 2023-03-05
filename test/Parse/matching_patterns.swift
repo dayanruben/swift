@@ -32,16 +32,12 @@ case let a:
   a = 1         // expected-error {{cannot assign}}
 case inout a:
   a = 1
-case var var a: // expected-error {{'var' cannot appear nested inside another 'var', 'let', or 'inout' pattern}}
+case var var a: // expected-error {{'var' cannot appear nested inside another 'var' or 'let' pattern}}
   a += 1
-case var let a: // expected-error {{'let' cannot appear nested inside another 'var', 'let', or 'inout' pattern}}
+case var let a: // expected-error {{'let' cannot appear nested inside another 'var' or 'let' pattern}}
   print(a, terminator: "")
 case var (var b): // expected-error {{'var' cannot appear nested inside another 'var'}}
   b += 1
-case var inout a: // expected-error {{'inout' cannot appear nested inside another 'var', 'let', or 'inout' pattern}}
-  break
-case inout (inout b): // expected-error {{'inout' cannot appear nested inside another 'var', 'let', or 'inout' pattern}}
-  break
 // 'Any' pattern.
 case _:
   ()

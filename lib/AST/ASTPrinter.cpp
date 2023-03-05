@@ -489,8 +489,10 @@ ASTPrinter &operator<<(ASTPrinter &printer, tok keyword) {
 }
 
 /// Determine whether to escape the given keyword in the given context.
-static bool escapeKeywordInContext(StringRef keyword, PrintNameContext context){
-
+bool swift::escapeKeywordInContext(
+    StringRef keyword,
+    PrintNameContext context
+) {
   bool isKeyword = llvm::StringSwitch<bool>(keyword)
 #define KEYWORD(KW) \
       .Case(#KW, true)
@@ -3218,6 +3220,11 @@ suppressingFeatureNoAsyncAvailability(PrintOptions &options,
   llvm::SaveAndRestore<PrintOptions> orignalOptions(options);
   options.SuppressNoAsyncAvailabilityAttr = true;
   action();
+}
+
+static bool usesFeatureReferenceBindings(Decl *decl) {
+  auto *vd = dyn_cast<VarDecl>(decl);
+  return vd && vd->getIntroducer() == VarDecl::Introducer::InOut;
 }
 
 /// Suppress the printing of a particular feature.

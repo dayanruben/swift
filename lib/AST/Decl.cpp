@@ -413,6 +413,16 @@ void Decl::visitAuxiliaryDecls(AuxiliaryDeclCallback callback) const {
     }
   }
 
+  else if (auto *med = dyn_cast<MacroExpansionDecl>(mutableThis)) {
+    if (auto bufferID = evaluateOrDefault(
+            ctx.evaluator, ExpandMacroExpansionDeclRequest{med}, {})) {
+      auto startLoc = sourceMgr.getLocForBufferStart(*bufferID);
+      auto *sourceFile = moduleDecl->getSourceFileContainingLocation(startLoc);
+      for (auto *decl : sourceFile->getTopLevelDecls())
+        callback(decl);
+    }
+  }
+
   // FIXME: fold VarDecl::visitAuxiliaryDecls into this.
 }
 
@@ -1915,7 +1925,9 @@ StringRef PatternBindingEntry::getInitStringRepresentation(
 
 SourceRange PatternBindingDecl::getSourceRange() const {
   SourceLoc startLoc = getStartLoc();
-  SourceLoc endLoc = getPatternList().back().getSourceRange().End;
+  SourceLoc endLoc = getPatternList().empty()
+      ? SourceLoc()
+      : getPatternList().back().getSourceRange().End;
   if (startLoc.isValid() != endLoc.isValid()) return SourceRange();
   return { startLoc, endLoc };
 }
@@ -9893,7 +9905,7 @@ StringRef swift::getMacroRoleString(MacroRole role) {
     return "expression";
 
   case MacroRole::Declaration:
-    return "freestanding";
+    return "declaration";
 
   case MacroRole::Accessor:
     return "accessor";
@@ -9974,6 +9986,28 @@ MacroRoles swift::getAttachedMacroRoles() {
   return attachedMacroRoles;
 }
 
+void
+MissingDecl::forEachExpandedPeer(ExpandedPeerCallback callback) {
+  auto *macro = unexpandedPeer.macroAttr;
+  auto *attachedTo = unexpandedPeer.attachedTo;
+  if (!macro || !attachedTo)
+    return;
+
+  attachedTo->visitAuxiliaryDecls(
+      [&](Decl *auxiliaryDecl) {
+        auto *sf = auxiliaryDecl->getInnermostDeclContext()->getParentSourceFile();
+        auto *macroAttr = sf->getAttachedMacroAttribute();
+        if (macroAttr != unexpandedPeer.macroAttr)
+          return;
+
+        auto *value = dyn_cast<ValueDecl>(auxiliaryDecl);
+        if (!value)
+          return;
+
+        callback(value);
+      });
+}
+
 MacroDecl::MacroDecl(
     SourceLoc macroLoc, DeclName name, SourceLoc nameLoc,
     GenericParamList *genericParams,
@@ -10027,7 +10061,71 @@ const MacroRoleAttr *MacroDecl::getMacroRoleAttr(MacroRole role) const {
   for (auto attr : getAttrs().getAttributes<MacroRoleAttr>())
     if (attr->getMacroRole() == role)
       return attr;
-  llvm_unreachable("Macro role not declared for this MacroDecl");
+
+  return nullptr;
+}
+
+void MacroDecl::getIntroducedNames(MacroRole role, ValueDecl *attachedTo,
+                                   SmallVectorImpl<DeclName> &names) const {
+  ASTContext &ctx = getASTContext();
+  auto *attr = getMacroRoleAttr(role);
+  if (!attr)
+    return;
+
+  for (auto expandedName : attr->getNames()) {
+    switch (expandedName.getKind()) {
+    case MacroIntroducedDeclNameKind::Named: {
+      names.push_back(DeclName(expandedName.getIdentifier()));
+      break;
+    }
+
+    case MacroIntroducedDeclNameKind::Overloaded: {
+      if (!attachedTo)
+        break;
+
+      names.push_back(attachedTo->getBaseName());
+      break;
+    }
+
+    case MacroIntroducedDeclNameKind::Prefixed: {
+      if (!attachedTo)
+        break;
+
+      auto baseName = attachedTo->getBaseName();
+      std::string prefixedName;
+      {
+        llvm::raw_string_ostream out(prefixedName);
+        out << expandedName.getIdentifier();
+        out << baseName.getIdentifier();
+      }
+
+      Identifier nameId = ctx.getIdentifier(prefixedName);
+      names.push_back(DeclName(nameId));
+      break;
+    }
+
+    case MacroIntroducedDeclNameKind::Suffixed: {
+      if (!attachedTo)
+        break;
+
+      auto baseName = attachedTo->getBaseName();
+      std::string suffixedName;
+      {
+        llvm::raw_string_ostream out(suffixedName);
+        out << baseName.getIdentifier();
+        out << expandedName.getIdentifier();
+      }
+
+      Identifier nameId = ctx.getIdentifier(suffixedName);
+      names.push_back(DeclName(nameId));
+      break;
+    }
+
+    case MacroIntroducedDeclNameKind::Arbitrary:
+      names.push_back(MacroDecl::getArbitraryName());
+      break;
+    }
+  }
 }
 
 MacroDefinition MacroDecl::getDefinition() const {
@@ -10071,13 +10169,6 @@ unsigned MacroExpansionDecl::getDiscriminator() const {
 
   assert(getRawDiscriminator() != InvalidDiscriminator);
   return getRawDiscriminator();
-}
-
-ArrayRef<Decl *> MacroExpansionDecl::getRewritten() const {
-  auto mutableThis = const_cast<MacroExpansionDecl *>(this);
-  return evaluateOrDefault(
-      getASTContext().evaluator,
-      ExpandMacroExpansionDeclRequest{mutableThis}, {});
 }
 
 NominalTypeDecl *

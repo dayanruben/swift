@@ -1786,12 +1786,20 @@ void CompletionLookup::addMacroExpansion(const MacroDecl *MD,
       MD->shouldHideFromEditor())
     return;
 
+  // If this is the wrong kind of macro, we don't need it.
+  bool wantAttachedMacro =
+      expectedTypeContext.getExpectedCustomAttributeKinds()
+        .contains(CustomAttributeKind::Macro);
+  if ((wantAttachedMacro && !isAttachedMacro(MD->getMacroRoles())) ||
+      (!wantAttachedMacro && !isFreestandingMacro(MD->getMacroRoles())))
+    return;
+
   CodeCompletionResultBuilder Builder(
       Sink, CodeCompletionResultKind::Declaration,
       getSemanticContext(MD, Reason, DynamicLookupInfo()));
   Builder.setAssociatedDecl(MD);
 
-  if (NeedLeadingMacroPound) {
+  if (NeedLeadingMacroPound && !wantAttachedMacro) {
     Builder.addTextChunk("#");
   }
 

@@ -8804,12 +8804,28 @@ ConstraintSystem::simplifyPackElementOfConstraint(Type first, Type second,
 
   // This constraint only exists to vend bindings.
   auto *packEnv = DC->getGenericEnvironmentOfContext();
-  if ((!elementType->hasElementArchetype() && packType->isEqual(elementType)) ||
-      packType->isEqual(packEnv->mapElementTypeIntoPackContext(elementType))) {
-    return SolutionKind::Solved;
-  } else {
-    return SolutionKind::Error;
+
+  // Map element archetypes to the pack context to check for equality.
+  if (elementType->hasElementArchetype()) {
+    auto mappedPack = packEnv->mapElementTypeIntoPackContext(elementType);
+    return (packType->isEqual(mappedPack) ?
+            SolutionKind::Solved : SolutionKind::Error);
   }
+
+  // Pack expansions can have concrete pattern types. In this case, the pack
+  // type and element type will be equal.
+  if (packType->isEqual(elementType)) {
+    return SolutionKind::Solved;
+  }
+
+  if (shouldAttemptFixes()) {
+    auto *loc = getConstraintLocator(locator);
+    auto *fix = AllowInvalidPackElement::create(*this, packType, loc);
+    if (!recordFix(fix))
+      return SolutionKind::Solved;
+  }
+
+  return SolutionKind::Error;
 }
 
 static bool isForKeyPathSubscript(ConstraintSystem &cs,
@@ -14020,6 +14036,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::NotCompileTimeConst:
   case FixKind::RenameConflictingPatternVariables:
   case FixKind::MustBeCopyable:
+  case FixKind::AllowInvalidPackElement:
   case FixKind::MacroMissingPound:
   case FixKind::AllowGlobalActorMismatch: {
     return recordFix(fix) ? SolutionKind::Error : SolutionKind::Solved;

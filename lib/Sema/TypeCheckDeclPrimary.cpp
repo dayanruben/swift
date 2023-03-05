@@ -2063,12 +2063,7 @@ public:
   void visitMacroExpansionDecl(MacroExpansionDecl *MED) {
     // Assign a discriminator.
     (void)MED->getDiscriminator();
-
-    auto rewritten = evaluateOrDefault(
-        Ctx.evaluator, ExpandMacroExpansionDeclRequest{MED}, {});
-
-    for (auto *decl : rewritten)
-      visit(decl);
+    // Expansion already visited as auxiliary decls.
   }
 
   void visitBoundVariable(VarDecl *VD) {
@@ -3608,6 +3603,16 @@ public:
       addDelayedFunction(CD);
     }
 
+    // a move-only / noncopyable type cannot have a failable initializer, since
+    // that would require the ability to wrap one inside an optional
+    if (CD->isFailable()) {
+      if (auto *nom = CD->getDeclContext()->getSelfNominalTypeDecl()) {
+        if (nom->isMoveOnly()) {
+          CD->diagnose(diag::moveonly_failable_init);
+        }
+      }
+    }
+
     checkDefaultArguments(CD->getParameters());
     checkVariadicParameters(CD->getParameters(), CD);
   }
@@ -3763,7 +3768,7 @@ void TypeChecker::checkParameterList(ParameterList *params,
   }
 }
 
-ArrayRef<Decl *>
+Optional<unsigned>
 ExpandMacroExpansionDeclRequest::evaluate(Evaluator &evaluator,
                                           MacroExpansionDecl *MED) const {
   auto &ctx = MED->getASTContext();
@@ -3785,8 +3790,5 @@ ExpandMacroExpansionDeclRequest::evaluate(Evaluator &evaluator,
   MED->setMacroRef(macro);
 
   // Expand the macro.
-  SmallVector<Decl *, 2> expandedTemporary;
-  if (!expandFreestandingDeclarationMacro(MED, expandedTemporary))
-    return {};
-  return ctx.AllocateCopy(expandedTemporary);
+  return expandFreestandingDeclarationMacro(MED);
 }

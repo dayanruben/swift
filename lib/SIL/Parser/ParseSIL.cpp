@@ -1287,7 +1287,12 @@ lookupTopDecl(Parser &P, DeclBaseName Name, bool typeLookup) {
   auto descriptor = UnqualifiedLookupDescriptor(DeclNameRef(Name), &P.SF);
   auto lookup = evaluateOrDefault(ctx.evaluator,
                                   UnqualifiedLookupRequest{descriptor}, {});
+  lookup.filter([](LookupResultEntry entry, bool isOuter) -> bool {
+    return !isa<MacroDecl>(entry.getValueDecl());
+  });
+
   assert(lookup.size() == 1);
+
   return lookup.back().getValueDecl();
 }
 
@@ -3698,6 +3703,35 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
       return true;
 
     auto *MVI = B.createMarkMustCheckInst(InstLoc, Val, CKind);
+    ResultVal = MVI;
+    break;
+  }
+
+  case SILInstructionKind::MarkUnresolvedReferenceBindingInst: {
+    StringRef AttrName;
+    if (!parseSILOptional(AttrName, *this)) {
+      auto diag = diag::sil_markuncheckedreferencebinding_requires_attribute;
+      P.diagnose(InstLoc.getSourceLoc(), diag);
+      return true;
+    }
+
+    using Kind = MarkUnresolvedReferenceBindingInst::Kind;
+    Kind CKind = llvm::StringSwitch<Kind>(AttrName)
+                     .Case("inout", Kind::InOut)
+                     .Default(Kind::Invalid);
+
+    if (CKind == Kind::Invalid) {
+      auto diag = diag::sil_markuncheckedreferencebinding_invalid_attribute;
+      P.diagnose(InstLoc.getSourceLoc(), diag, AttrName);
+      return true;
+    }
+
+    if (parseTypedValueRef(Val, B))
+      return true;
+    if (parseSILDebugLocation(InstLoc, B))
+      return true;
+
+    auto *MVI = B.createMarkUnresolvedReferenceBindingInst(InstLoc, Val, CKind);
     ResultVal = MVI;
     break;
   }

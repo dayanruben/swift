@@ -70,6 +70,7 @@ func typeReprPacks<each T>(_ t: repeat each T) where each T: ExpressibleByIntege
 
   _ = Array<each T>() // expected-error {{pack reference 'T' can only appear in pack expansion or generic requirement}}
   _ = 1 as each T // expected-error {{pack reference 'T' can only appear in pack expansion or generic requirement}}
+  repeat Invalid<String, each T>("") // expected-error {{cannot find 'Invalid' in scope}}
 }
 
 func sameShapeDiagnostics<each T, each U>(t: repeat each T, u: repeat each U) {
@@ -104,4 +105,23 @@ func tupleExpansion<each T, each U>(
 
   _ = zip(repeat each tuple1.element, with: repeat each tuple2.element)
   // expected-error@-1 {{global function 'zip(_:with:)' requires the type packs 'U' and 'T' have the same shape}}
+}
+
+protocol Generatable {
+  static func generate() -> Self
+}
+
+func generateTuple<each T : Generatable>() -> (repeat each T) {
+  (each T).generate()
+  // expected-error@-1 {{pack reference 'T' can only appear in pack expansion or generic requirement}}
+
+  return (repeat (each T).generate())
+}
+
+func packElementInvalidBinding<each T>(_ arg: repeat each T) {
+  _ = (repeat print(each arg))
+
+  let x = 1
+  repeat print(each x)
+  // expected-error@-1 {{'each' cannot be applied to non-pack type 'Int'}}
 }
