@@ -2246,7 +2246,7 @@ static uint8_t getRawStableMacroRole(swift::MacroRole context) {
   }
 #undef CASE
   llvm_unreachable("bad result declaration macro kind");
-  }
+}
 
 static uint8_t getRawStableMacroIntroducedDeclNameKind(
     swift::MacroIntroducedDeclNameKind kind) {
@@ -4972,7 +4972,7 @@ public:
   void visitPackType(const PackType *packTy) {
     using namespace decls_block;
     unsigned abbrCode = S.DeclTypeAbbrCodes[PackTypeLayout::Code];
-    TupleTypeLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode);
+    PackTypeLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode);
 
     abbrCode = S.DeclTypeAbbrCodes[PackTypeEltLayout::Code];
     for (auto elt : packTy->getElementTypes()) {
@@ -6133,7 +6133,7 @@ void Serializer::writeAST(ModuleOrSourceFile DC) {
 
     // FIXME: Switch to a visitor interface?
     SmallVector<Decl *, 32> fileDecls;
-    nextFile->getTopLevelDecls(fileDecls);
+    nextFile->getTopLevelDeclsWithAuxiliaryDecls(fileDecls);
 
     for (auto D : fileDecls) {
       if (isa<ImportDecl>(D) || isa<IfConfigDecl>(D) ||

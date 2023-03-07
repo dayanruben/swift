@@ -93,7 +93,7 @@ struct S4 { }
 // CURSOR_MACRONAME-LABEL: SYMBOL GRAPH BEGIN
 // CURSOR_MACRONAME: "identifier": {
 // CURSOR_MACRONAME-NEXT:   "interfaceLanguage": "swift",
-// CURSOR_MACRONAME-NEXT:   "precise": "s:9MacroUser9stringifyyx_SStxcfm"
+// CURSOR_MACRONAME-NEXT:   "precise": "s:9MacroUser9stringifyyx_SStxclufm"
 // CURSOR_MACRONAME-NEXT: },
 // CURSOR_MACRONAME-NEXT: "kind": {
 // CURSOR_MACRONAME-NEXT:   "displayName": "Macro",
@@ -139,7 +139,8 @@ struct S4 { }
 // ATTACHED_EXPAND-NEXT: source.edit.kind.active:
 // ATTACHED_EXPAND-NEXT: 24:3-24:3 (@__swiftmacro_9MacroUser1SV13myTypeWrapperfMA0_.swift) "@accessViaStorage "
 // ATTACHED_EXPAND-NEXT: source.edit.kind.active:
-// ATTACHED_EXPAND-NEXT: 22:11-22:11 (@__swiftmacro_9MacroUser1SV13myTypeWrapperfMm_.swift) "
+// ATTACHED_EXPAND-NEXT: 25:1-25:1 (@__swiftmacro_9MacroUser1SV13myTypeWrapperfMm_.swift) "
+// ATTACHED_EXPAND-EMPTY:
 // ATTACHED_EXPAND-NEXT: private var _storage = _Storage()
 // ATTACHED_EXPAND-NEXT: "
 // ATTACHED_EXPAND-NEXT: source.edit.kind.active:

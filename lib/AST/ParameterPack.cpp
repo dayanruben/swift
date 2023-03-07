@@ -165,6 +165,15 @@ bool TupleType::containsPackExpansionType() const {
   return false;
 }
 
+bool CanTupleType::containsPackExpansionTypeImpl(CanTupleType tuple) {
+  for (auto eltType : tuple.getElementTypes()) {
+    if (isa<PackExpansionType>(eltType))
+      return true;
+  }
+
+  return false;
+}
+
 /// (W, {X, Y}..., Z) => (W, X, Y, Z)
 Type TupleType::flattenPackTypes() {
   bool anyChanged = false;
@@ -464,4 +473,11 @@ bool SILPackType::containsPackExpansionType() const {
   }
 
   return false;
+}
+
+CanPackType
+CanTupleType::getInducedPackTypeImpl(CanTupleType tuple, unsigned start, unsigned count) {
+  assert(start + count <= tuple->getNumElements() && "range out of range");
+  auto &ctx = tuple->getASTContext();
+  return CanPackType::get(ctx, tuple.getElementTypes().slice(start, count));
 }

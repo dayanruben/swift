@@ -57,7 +57,7 @@ namespace constraints {
   enum class ConstraintKind : char;
   class ConstraintSystem;
   class Solution;
-  class SolutionApplicationTarget;
+  class SyntacticElementTarget;
   class SolutionResult;
 }
 
@@ -604,12 +604,12 @@ Type typeCheckExpression(Expr *&expr, DeclContext *dc,
                          constraints::ContextualTypeInfo contextualInfo = {},
                          TypeCheckExprOptions options = TypeCheckExprOptions());
 
-Optional<constraints::SolutionApplicationTarget>
-typeCheckExpression(constraints::SolutionApplicationTarget &target,
+Optional<constraints::SyntacticElementTarget>
+typeCheckExpression(constraints::SyntacticElementTarget &target,
                     TypeCheckExprOptions options = TypeCheckExprOptions());
 
-Optional<constraints::SolutionApplicationTarget>
-typeCheckTarget(constraints::SolutionApplicationTarget &target,
+Optional<constraints::SyntacticElementTarget>
+typeCheckTarget(constraints::SyntacticElementTarget &target,
                 TypeCheckExprOptions options = TypeCheckExprOptions());
 
 /// Return the type of operator function for specified LHS, or a null
@@ -636,7 +636,7 @@ void filterSolutionsForCodeCompletion(
 /// \returns `true` if target was applicable and it was possible to infer
 /// types for code completion, `false` otherwise.
 bool typeCheckForCodeCompletion(
-    constraints::SolutionApplicationTarget &target, bool needsPrecheck,
+    constraints::SyntacticElementTarget &target, bool needsPrecheck,
     llvm::function_ref<void(const constraints::Solution &)> callback);
 
 /// Check the key-path expression.
@@ -651,6 +651,12 @@ Optional<Type> checkObjCKeyPathExpr(DeclContext *dc, KeyPathExpr *expr,
 /// \param decl The declaration to be type-checked. This process will not
 /// modify the declaration.
 void checkDeclCircularity(NominalTypeDecl *decl);
+
+/// Type check whether an extension matches its Objective-C interface, if it
+/// has one.
+///
+/// \param ED The extension to check.
+void checkObjCImplementation(ExtensionDecl *ED);
 
 /// Type check whether the given switch statement exhaustively covers
 /// its domain.

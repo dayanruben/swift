@@ -764,7 +764,7 @@ public struct AddCompletionHandler: PeerMacro {
   }
 }
 
-public struct InvalidMacro: PeerMacro {
+public struct InvalidMacro: PeerMacro, DeclarationMacro {
   public static func expansion(
     of node: AttributeSyntax,
     providingPeersOf declaration: some DeclSyntaxProtocol,
@@ -792,6 +792,15 @@ public struct InvalidMacro: PeerMacro {
       "typealias _ColorLiteralType = Void",
       "typealias _ImageLiteralType = Void",
       "typealias _FileReferenceLiteralType = Void",
+    ]
+  }
+
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    return [
+      "var value: Int"
     ]
   }
 }
@@ -1145,5 +1154,54 @@ public struct ExtendableEnum: MemberMacro {
     func unknown() -> Int { 34 } // or something like: `case unknown`
     """
     return [unknownDecl]
+  }
+}
+
+public struct DefineStructWithUnqualifiedLookupMacro: DeclarationMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    return ["""
+    struct StructWithUnqualifiedLookup {
+      let hello = 1
+
+      func foo() -> Int {
+        hello + world // looks up "world" in the parent scope
+      }
+    }
+    """]
+  }
+}
+
+public struct DefineAnonymousTypesMacro: DeclarationMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    guard let body = node.trailingClosure else {
+      throw CustomError.message("#anonymousTypes macro requires a trailing closure")
+    }
+    return [
+      """
+
+      class \(context.createUniqueName("name")) {
+        func hello() -> String {
+          \(body.statements)
+        }
+      }
+      """,
+      """
+
+      enum \(context.createUniqueName("name")) {
+        case apple
+        case banana
+
+        func hello() -> String {
+          \(body.statements)
+        }
+      }
+      """
+    ]
   }
 }

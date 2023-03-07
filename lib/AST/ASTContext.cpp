@@ -1133,6 +1133,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   case KnownProtocolKind::CxxConvertibleToCollection:
   case KnownProtocolKind::CxxDictionary:
   case KnownProtocolKind::CxxPair:
+  case KnownProtocolKind::CxxOptional:
   case KnownProtocolKind::CxxRandomAccessCollection:
   case KnownProtocolKind::CxxSet:
   case KnownProtocolKind::CxxSequence:
@@ -3302,6 +3303,12 @@ CanPackType CanPackType::get(const ASTContext &C, ArrayRef<CanType> elements) {
   return CanPackType(PackType::get(C, ncElements));
 }
 
+CanPackType CanPackType::get(const ASTContext &C,
+                             CanTupleEltTypeArrayRef elements) {
+  SmallVector<Type, 8> ncElements(elements.begin(), elements.end());
+  return CanPackType(PackType::get(C, ncElements));
+}
+
 PackType *PackType::get(const ASTContext &C, ArrayRef<Type> elements) {
   RecursiveTypeProperties properties;
   bool isCanonical = true;
@@ -4342,20 +4349,27 @@ SILFunctionType::SILFunctionType(
   if (coroutineKind == SILCoroutineKind::None) {
     assert(yields.empty());
     NumAnyResults = normalResults.size();
-    NumAnyIndirectFormalResults =
-      std::count_if(normalResults.begin(), normalResults.end(),
-                    [](const SILResultInfo &resultInfo) {
-                      return resultInfo.isFormalIndirect();
-                    });
+    NumAnyIndirectFormalResults = 0;
+    NumPackResults = 0;
+    for (auto &resultInfo : normalResults) {
+      if (resultInfo.isFormalIndirect())
+        NumAnyIndirectFormalResults++;
+      if (resultInfo.isPack())
+        NumPackResults++;
+    }
     memcpy(getMutableResults().data(), normalResults.data(),
            normalResults.size() * sizeof(SILResultInfo));
   } else {
-    assert(normalResults.empty());    
+    assert(normalResults.empty());
     NumAnyResults = yields.size();
-    NumAnyIndirectFormalResults = std::count_if(
-        yields.begin(), yields.end(), [](const SILYieldInfo &yieldInfo) {
-          return yieldInfo.isFormalIndirect();
-        });
+    NumAnyIndirectFormalResults = 0;
+    NumPackResults = 0;
+    for (auto &yieldInfo : yields) {
+      if (yieldInfo.isFormalIndirect())
+        NumAnyIndirectFormalResults++;
+      if (yieldInfo.isPack())
+        NumPackResults++;
+    }
     memcpy(getMutableYields().data(), yields.data(),
            yields.size() * sizeof(SILYieldInfo));
   }
@@ -5139,6 +5153,7 @@ GenericEnvironment::forOpenedElement(GenericSignature signature,
   if (found != openedElementEnvironments.end()) {
     auto *existingEnv = found->second;
     assert(existingEnv->getGenericSignature().getPointer() == signature.getPointer());
+    assert(existingEnv->getOpenedElementShapeClass()->isEqual(shapeClass));
     assert(existingEnv->getOpenedElementUUID() == uuid);
 
     return existingEnv;
@@ -6241,9 +6256,10 @@ void ASTContext::loadCompilerPlugins() {
                      err.message());
       continue;
     }
-    if (auto error = getPluginRegistry()->loadLibraryPlugin(resolvedPath)) {
+    auto loaded = getPluginRegistry()->loadLibraryPlugin(resolvedPath);
+    if (!loaded) {
       Diags.diagnose(SourceLoc(), diag::compiler_plugin_not_loaded, path,
-                     llvm::toString(std::move(error)));
+                     llvm::toString(loaded.takeError()));
     }
   }
 

@@ -49,18 +49,26 @@ enable_language(CXX)
 # On Windows, use MASM or MARMASM
 set(SWIFT_ASM_DIALECT ASM)
 set(SWIFT_ASM_EXT S)
+set(SWIFT_ASM_AVAILABLE YES)
 if(CMAKE_SYSTEM_NAME STREQUAL Windows)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64")
-    set(SWIFT_ASM_DIALECT ASM_MARMASM)
+    if(CMAKE_VERSION VERSION_LESS "3.26")
+      message(warning "We can't build assembly language for ARM64 until CMake 3.26")
+      set(SWIFT_ASM_AVAILABLE NO)
+    else()
+      set(SWIFT_ASM_DIALECT ASM_MARMASM)
+    endif()
   else()
     set(SWIFT_ASM_DIALECT ASM_MASM)
   endif()
   set(SWIFT_ASM_EXT asm)
 endif()
 
-enable_language(${SWIFT_ASM_DIALECT})
+if(SWIFT_ASM_AVAILABLE)
+  enable_language(${SWIFT_ASM_DIALECT})
+endif()
 
-# Use C++14.
+# Use C++17.
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
@@ -1144,12 +1152,23 @@ if(SWIFT_BUILD_STDLIB OR SWIFT_BUILD_SDK_OVERLAY)
   message(STATUS "Concurrency Support:                ${SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY}")
   message(STATUS "Distributed Support:                ${SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED}")
   message(STATUS "String Processing Support:          ${SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING}")
+  message(STATUS "Backtracing Support:                ${SWIFT_ENABLE_BACKTRACING}")
   message(STATUS "Unicode Support:                    ${SWIFT_STDLIB_ENABLE_UNICODE_DATA}")
   message(STATUS "Reflection Support:                 ${SWIFT_ENABLE_EXPERIMENTAL_REFLECTION}")
   message(STATUS "Observation Support:                ${SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION}")
   message(STATUS "")
 else()
   message(STATUS "Not building Swift standard library, SDK overlays, and runtime")
+  message(STATUS "")
+endif()
+
+if(SWIFT_BUILD_LIBEXEC)
+  message(STATUS "Building Swift auxiliary executables for SDKs: ${SWIFT_SDKS}")
+  message(STATUS "")
+endif()
+
+if(SWIFT_BUILD_REMOTE_MIRROR)
+  message(STATUS "Building Swift Remote Mirror for SDKs: ${SWIFT_SDKS}")
   message(STATUS "")
 endif()
 
@@ -1237,6 +1256,19 @@ else()
   # so ensure we build that when building tools.
   if(SWIFT_INCLUDE_TOOLS)
     add_subdirectory(stdlib/public/SwiftShims/swift/shims)
+  endif()
+
+  # We might want to build Remote Mirror separately
+  if(SWIFT_BUILD_REMOTE_MIRROR)
+    add_subdirectory(stdlib/public/LLVMSupport)
+    add_subdirectory(stdlib/public/Demangling)
+    add_subdirectory(stdlib/public/Reflection)
+    add_subdirectory(stdlib/public/SwiftRemoteMirror)
+  endif()
+
+  # We might also want to build the things in libexec seaprately
+  if(SWIFT_BUILD_LIBEXEC)
+    add_subdirectory(stdlib/public/libexec)
   endif()
 endif()
 

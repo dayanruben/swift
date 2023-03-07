@@ -584,6 +584,29 @@ Type GenericEnvironment::mapTypeIntoContext(GenericTypeParamType *type) const {
 }
 
 Type
+GenericEnvironment::mapContextualPackTypeIntoElementContext(Type type) const {
+  if (!type->hasArchetype()) return type;
+
+  // FIXME: this is potentially wrong if there are multiple
+  // openings in play at once, because we really shouldn't touch
+  // other element archetypes.
+  return mapPackTypeIntoElementContext(type->mapTypeOutOfContext());
+}
+
+CanType
+GenericEnvironment::mapContextualPackTypeIntoElementContext(CanType type) const {
+  if (!type->hasArchetype()) return type;
+
+  // FIXME: this is potentially wrong if there are multiple
+  // openings in play at once, because we really shouldn't touch
+  // other element archetypes.
+  // FIXME: if we do this properly, there's no way for this rewrite
+  // to produce a non-canonical type.
+  return mapPackTypeIntoElementContext(type->mapTypeOutOfContext())
+           ->getCanonicalType();
+}
+
+Type
 GenericEnvironment::mapPackTypeIntoElementContext(Type type) const {
   assert(getKind() == Kind::OpenedElement);
   assert(!type->hasArchetype());
@@ -681,10 +704,37 @@ GenericEnvironment::mapElementTypeIntoPackContext(Type type) const {
   }, LookUpConformanceInSignature(sig.getPointer()));
 }
 
+namespace {
+/// A function suitable for use as a \c TypeSubstitutionFn that produces
+/// correct forwarding substitutions for a generic environment.
+///
+/// This differs from QueryInterfaceTypeSubstitutions only in that it
+/// always produces PackTypes for pack parameters.
+class BuildForwardingSubstitutions {
+  QueryInterfaceTypeSubstitutions Query;
+
+public:
+  BuildForwardingSubstitutions(const GenericEnvironment *self)
+    : Query(self) { }
+
+  Type operator()(SubstitutableType *type) const;
+};
+} // end anonymous namespace
+
+Type BuildForwardingSubstitutions::operator()(SubstitutableType *type) const {
+  if (auto resultType = Query(type)) {
+    auto param = type->castTo<GenericTypeParamType>();
+    if (!param->isParameterPack())
+      return resultType;
+    return PackType::getSingletonPackExpansion(resultType);
+  }
+  return Type();
+}
+
 SubstitutionMap GenericEnvironment::getForwardingSubstitutionMap() const {
   auto genericSig = getGenericSignature();
   return SubstitutionMap::get(genericSig,
-                              QueryInterfaceTypeSubstitutions(this),
+                              BuildForwardingSubstitutions(this),
                               MakeAbstractConformanceForGenericType());
 }
 

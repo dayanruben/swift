@@ -263,6 +263,18 @@ static llvm::Value *bindWitnessTableAtIndex(IRGenFunction &IGF,
   return wtable;
 }
 
+/// Find the pack archetype for the given interface type in the given
+/// opened element context, which is known to be a forwarding context.
+static CanPackArchetypeType
+getMappedPackArchetypeType(const OpenedElementContext &context, CanType ty) {
+  auto packType = cast<PackType>(
+    context.environment->maybeApplyOuterContextSubstitutions(ty)
+        ->getCanonicalType());
+  auto archetype = getForwardedPackArchetypeType(packType);
+  assert(archetype);
+  return archetype;
+}
+
 static void bindElementSignatureRequirementsAtIndex(
     IRGenFunction &IGF, OpenedElementContext const &context, llvm::Value *index,
     DynamicMetadataRequest request) {
@@ -275,9 +287,7 @@ static void bindElementSignatureRequirementsAtIndex(
           break;
         case GenericRequirement::Kind::MetadataPack: {
           auto ty = requirement.getTypeParameter();
-          auto patternPackArchetype = cast<PackArchetypeType>(
-              context.environment->maybeApplyOuterContextSubstitutions(ty)
-                  ->getCanonicalType());
+          auto patternPackArchetype = getMappedPackArchetypeType(context, ty);
           auto response =
               IGF.emitTypeMetadataRef(patternPackArchetype, request);
           auto elementArchetype =
@@ -295,9 +305,7 @@ static void bindElementSignatureRequirementsAtIndex(
         case GenericRequirement::Kind::WitnessTablePack: {
           auto ty = requirement.getTypeParameter();
           auto proto = requirement.getProtocol();
-          auto patternPackArchetype = cast<PackArchetypeType>(
-              context.environment->maybeApplyOuterContextSubstitutions(ty)
-                  ->getCanonicalType());
+          auto patternPackArchetype = getMappedPackArchetypeType(context, ty);
           auto elementArchetype =
               context.environment
                   ->mapPackTypeIntoElementContext(
@@ -328,8 +336,7 @@ static llvm::Value *emitPackExpansionElementMetadata(
   // Replace pack archetypes with element archetypes in the pattern type.
   auto instantiatedPatternTy =
       context.environment
-          ->mapPackTypeIntoElementContext(patternTy->mapTypeOutOfContext())
-          ->getCanonicalType();
+          ->mapContextualPackTypeIntoElementContext(patternTy);
 
   // Emit the element metadata.
   auto element = IGF.emitTypeMetadataRef(instantiatedPatternTy, request)
@@ -505,9 +512,7 @@ static llvm::Value *emitPackExpansionElementWitnessTable(
 
   // Replace pack archetypes with element archetypes in the pattern type.
   auto instantiatedPatternTy =
-      context.environment
-          ->mapPackTypeIntoElementContext(patternTy->mapTypeOutOfContext())
-          ->getCanonicalType();
+      context.environment->mapContextualPackTypeIntoElementContext(patternTy);
   auto instantiatedConformance =
       context.environment->getGenericSignature()->lookupConformance(
           instantiatedPatternTy, conformance.getRequirement());

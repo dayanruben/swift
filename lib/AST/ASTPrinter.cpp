@@ -3142,6 +3142,10 @@ static bool usesFeatureLayoutStringValueWitnesses(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureLayoutStringValueWitnessesInstantiation(Decl *decl) {
+  return false;
+}
+
 static bool usesFeatureModuleInterfaceExportAs(Decl *decl) {
   return false;
 }
@@ -3159,8 +3163,27 @@ static bool usesFeatureFlowSensitiveConcurrencyCaptures(Decl *decl) {
 }
 
 static bool usesFeatureMoveOnly(Decl *decl) {
-  if (auto nominal = dyn_cast<NominalTypeDecl>(decl))
-    return nominal->isMoveOnly();
+  if (auto *extension = dyn_cast<ExtensionDecl>(decl)) {
+    if (auto *nominal = extension->getSelfNominalTypeDecl())
+      if (nominal->isMoveOnly())
+        return true;
+  }
+
+  if (auto value = dyn_cast<ValueDecl>(decl)) {
+      if (value->isMoveOnly())
+        return true;
+
+    // Check for move-only types in the types of this declaration.
+    if (Type type = value->getInterfaceType()) {
+      bool hasMoveOnly = type.findIf([](Type type) {
+        return type->isPureMoveOnly();
+      });
+
+      if (hasMoveOnly)
+        return true;
+    }
+  }
+
   return false;
 }
 
@@ -4660,20 +4683,18 @@ void PrintAST::visitMacroDecl(MacroDecl *decl) {
 
 void PrintAST::visitMacroExpansionDecl(MacroExpansionDecl *decl) {
   Printer << '#' << decl->getMacroName();
-  if (decl->getArgs()) {
-    Printer << '(';
-    auto args = decl->getArgs()->getOriginalArgs();
-    bool isFirst = true;
-    // FIXME: handle trailing closures.
-    for (auto arg : *args) {
-      if (!isFirst) {
-        Printer << ", ";
-      }
-      printArgument(arg);
-      isFirst = false;
+  Printer << '(';
+  auto args = decl->getArgs()->getOriginalArgs();
+  bool isFirst = true;
+  // FIXME: handle trailing closures.
+  for (auto arg : *args) {
+    if (!isFirst) {
+      Printer << ", ";
     }
-    Printer << ')';
+    printArgument(arg);
+    isFirst = false;
   }
+  Printer << ')';
 }
 
 void PrintAST::visitIntegerLiteralExpr(IntegerLiteralExpr *expr) {

@@ -56,12 +56,20 @@ func outerArchetype<each T, U>(t: repeat each T, u: U) where each T: P {
 }
 
 func sameElement<each T, U>(t: repeat each T, u: U) where each T: P, each T == U {
+// expected-error@-1{{same-element requirements are not yet supported}}
+
+  // FIXME: Opened element archetypes in diagnostics
   let _: repeat each T = repeat (each t).f(u)
+  // expected-error@-1 {{cannot convert value of type 'U' to expected argument type 'τ_1_0'}}
 }
 
 func forEachEach<each C, U>(c: repeat each C, function: (U) -> Void)
     where each C: Collection, each C.Element == U {
+    // expected-error@-1{{same-element requirements are not yet supported}}
+
+  // FIXME: Opened element archetypes in diagnostics
   _ = repeat (each c).forEach(function)
+  // expected-error@-1 {{cannot convert value of type '(U) -> Void' to expected argument type '(τ_1_0.Element) throws -> Void'}}
 }
 
 func typeReprPacks<each T>(_ t: repeat each T) where each T: ExpressibleByIntegerLiteral {
@@ -124,4 +132,15 @@ func packElementInvalidBinding<each T>(_ arg: repeat each T) {
   let x = 1
   repeat print(each x)
   // expected-error@-1 {{'each' cannot be applied to non-pack type 'Int'}}
+}
+
+func copyIntoTuple<each T>(_ arg: repeat each T) -> (repeat each T) {
+  return (repeat each arg)
+}
+func callCopyAndBind<T>(_ arg: repeat each T) {
+  // expected-error@-1 {{'each' cannot be applied to non-pack type 'T'}}
+  // expected-error@-2 {{variadic expansion 'T' must contain at least one variadic generic parameter}}
+
+  // Don't propagate errors for invalid declaration reference
+  let result = copyIntoTuple(repeat each arg)
 }

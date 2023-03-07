@@ -343,23 +343,31 @@ func expandFreestandingMacroInProcess(
     // Handle declaration macro. The resulting decls are wrapped in a
     // `CodeBlockItemListSyntax`.
     case let declMacro as DeclarationMacro.Type:
-      guard let parentExpansion = macroSyntax.as(MacroExpansionDeclSyntax.self) else {
-        print("not on a macro expansion node: \(macroSyntax.recursiveDescription)")
+      guard let parentExpansion = macroSyntax.asProtocol(
+        FreestandingMacroExpansionSyntax.self
+      ) else {
+        print("not on a macro expansion decl: \(macroSyntax.recursiveDescription)")
         return nil
       }
       macroName = parentExpansion.macro.text
-      let decls = try declMacro.expansion(
-        of: sourceManager.detach(
-          parentExpansion,
-          foldingWith: OperatorTable.standardOperators
-        ),
-        in: context
-      )
+
+      func expandDeclarationMacro<Node: FreestandingMacroExpansionSyntax>(
+        _ node: Node
+      ) throws -> [DeclSyntax] {
+        return try declMacro.expansion(
+          of: sourceManager.detach(
+            node,
+            foldingWith: OperatorTable.standardOperators
+          ),
+          in: context
+        )
+      }
+      let decls = try _openExistential(parentExpansion, do: expandDeclarationMacro)
       evaluatedSyntax = Syntax(CodeBlockItemListSyntax(
         decls.map { CodeBlockItemSyntax(item: .decl($0)) }))
 
     default:
-      print("not an expression macro or a freestanding declaration macro")
+      print("not an expression macro or a declaration macro")
       return nil
     }
   } catch {
@@ -515,22 +523,7 @@ func expandAttachedMacro(
   }
 
   // Fixup the source.
-  var expandedSource: String
-  switch MacroRole(rawValue: rawMacroRole)! {
-  case .Accessor:
-    expandedSource = expandedSources.joined(separator: "\n\n")
-  case .Member:
-    expandedSource = expandedSources.joined(separator: "\n\n")
-  case .MemberAttribute:
-    expandedSource = expandedSources.joined(separator: " ")
-  case .Peer:
-    expandedSource = expandedSources.joined(separator: "\n\n")
-  case .Conformance:
-    expandedSource = expandedSources.joined(separator: "\n\n")
-  case .Expression,
-      .FreestandingDeclaration:
-    fatalError("unreachable")
-  }
+  var expandedSource: String = collapse(expansions: expandedSources, for: MacroRole(rawValue: rawMacroRole)!, attachedTo: declarationNode)
 
   // Form the result buffer for our caller.
   expandedSource.withUTF8 { utf8 in
@@ -828,4 +821,45 @@ func expandAttachedMacroInProcess(
   }
 
   return expandedSources
+}
+
+fileprivate func collapse<Node: SyntaxProtocol>(
+  expansions: [String],
+  for role: MacroRole,
+  attachedTo declarationNode: Node
+) -> String {
+  var separator: String = "\n\n"
+  var prefix: String = ""
+  var suffix: String = ""
+
+  switch role {
+  case .Accessor:
+    if let varDecl = declarationNode.as(VariableDeclSyntax.self),
+       let binding = varDecl.bindings.first,
+       binding.accessor == nil {
+      prefix = "{\n"
+      suffix = "\n}"
+    }
+  case .Member:
+    prefix = "\n\n"
+    suffix = "\n"
+  case .MemberAttribute:
+    separator = " "
+    suffix = " "
+  case .Peer:
+    prefix = "\n\n"
+    suffix = "\n"
+  case .Conformance:
+    prefix = "\n\n"
+    suffix = "\n"
+  case .Expression,
+      .FreestandingDeclaration:
+    fatalError("unreachable")
+  }
+
+  let separated = expansions.joined(separator: separator)
+  if separated.isEmpty {
+    return separated
+  }
+  return prefix + separated + suffix
 }

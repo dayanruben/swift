@@ -4687,6 +4687,7 @@ bool swift::isKeywordPossibleDeclStart(const LangOptions &options,
   case tok::kw_subscript:
   case tok::kw_typealias:
   case tok::kw_var:
+  case tok::pound:
   case tok::pound_if:
   case tok::pound_warning:
   case tok::pound_error:
@@ -4796,6 +4797,12 @@ bool Parser::isStartOfSwiftDecl(bool allowPoundIfAttributes) {
       return true;
 
     return isStartOfSwiftDecl(allowPoundIfAttributes);
+  }
+
+  if (Tok.is(tok::pound) && peekToken().is(tok::identifier)) {
+    // Macro expansions at the top level are declarations.
+    return !isInSILMode() && SF.Kind != SourceFileKind::Interface &&
+        CurDeclContext->isModuleScopeContext() && !allowTopLevelCode();
   }
 
   // Skip a #if that contains only attributes in all branches. These will be
@@ -6384,6 +6391,14 @@ ParserResult<TypeDecl> Parser::parseDeclAssociatedType(Parser::ParseDeclOptions 
     AssociatedTypeLoc = consumeToken(tok::kw_associatedtype);
   }
 
+  // Reject variadic associated types with a specific error.
+  if (Context.LangOpts.hasFeature(Feature::VariadicGenerics) &&
+      Tok.isContextualKeyword("each")) {
+    const auto EachLoc = consumeToken();
+    diagnose(EachLoc, diag::associatedtype_cannot_be_variadic)
+        .fixItRemoveChars(EachLoc, Tok.getLoc());
+  }
+
   Status = parseIdentifierDeclName(
       *this, Id, IdLoc, "associatedtype",
       [](const Token &next) { return next.isAny(tok::colon, tok::equal); });
@@ -6401,12 +6416,13 @@ ParserResult<TypeDecl> Parser::parseDeclAssociatedType(Parser::ParseDeclOptions 
     }
   }
 
-  // Reject variadic associated types with a specific error.
+  // Reject (early syntax) variadic associated types with a specific error.
   if (Context.LangOpts.hasFeature(Feature::VariadicGenerics) &&
       startsWithEllipsis(Tok)) {
-    auto Ellipsis = consumeStartingEllipsis();
-    diagnose(Ellipsis, diag::associatedtype_cannot_be_variadic)
-      .fixItRemoveChars(Ellipsis, Tok.getLoc());
+    const auto EllipsisLoc = consumeStartingEllipsis();
+    const auto EllipsisEnd = Lexer::getLocForEndOfToken(SourceMgr, EllipsisLoc);
+    diagnose(EllipsisLoc, diag::associatedtype_cannot_be_variadic)
+        .fixItRemoveChars(EllipsisLoc, EllipsisEnd);
   }
 
   // Parse optional inheritance clause.
@@ -7091,11 +7107,13 @@ void Parser::parseTopLevelAccessors(
     staticLoc = binding->getStaticLoc();
   }
 
+  bool hadLBrace = consumeIf(tok::l_brace);
+
   ParserStatus status;
   ParsedAccessors accessors;
   bool hasEffectfulGet = false;
   bool parsingLimitedSyntax = false;
-  while (!Tok.is(tok::eof)) {
+  while (!Tok.isAny(tok::r_brace, tok::eof)) {
     DeclAttributes attributes;
     AccessorKind kind = AccessorKind::Get;
     SourceLoc loc;
@@ -7107,6 +7125,10 @@ void Parser::parseTopLevelAccessors(
         loc, kind, accessors, hasEffectfulGet, indices, parsingLimitedSyntax,
         attributes, PD_Default, storage, staticLoc, status
     );
+  }
+
+  if (hadLBrace && Tok.is(tok::r_brace)) {
+    consumeToken(tok::r_brace);
   }
 
   // Consume remaining tokens.
@@ -9040,13 +9062,14 @@ parseDeclDeinit(ParseDeclOptions Flags, DeclAttributes &Attributes) {
 
   DD->getAttrs() = Attributes;
 
-  // Reject 'destructor' functions outside of structs, enums, and classes.
+  // Reject 'destructor' functions outside of structs, enums, classes, and
+  // @objcImplementation extensions.
   //
   // Later in the type checker, we validate that structs/enums only do this if
-  // they are move only.
-  auto *nom = dyn_cast<NominalTypeDecl>(CurDeclContext);
-  if (!nom ||
-      (!isa<StructDecl>(nom) && !isa<EnumDecl>(nom) && !isa<ClassDecl>(nom))) {
+  // they are move only, and that @objcImplementations are main-body.
+  auto *ED = dyn_cast<ExtensionDecl>(CurDeclContext);
+  if (!(isa<StructDecl>(CurDeclContext) || isa<EnumDecl>(CurDeclContext) ||
+        isa<ClassDecl>(CurDeclContext) || (ED && ED->isObjCImplementation()))) {
     diagnose(DestructorLoc, diag::destructor_decl_outside_class);
 
     // Tell the type checker not to touch this destructor.

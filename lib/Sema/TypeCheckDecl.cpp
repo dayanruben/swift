@@ -1617,9 +1617,12 @@ TypeChecker::lookupMacros(DeclContext *dc, DeclNameRef macroName,
       ctx.evaluator, UnqualifiedLookupRequest{descriptor}, {});
   for (const auto &found : lookup.allResults()) {
     if (auto macro = dyn_cast<MacroDecl>(found.getValueDecl())) {
-      auto foundRoles = macro->getMacroRoles();
-      if (foundRoles && roles.contains(foundRoles))
+      auto candidateRoles = macro->getMacroRoles();
+      if ((candidateRoles && roles.contains(candidateRoles)) ||
+          // FIXME: `externalMacro` should have all roles.
+          macro->getBaseIdentifier().str() == "externalMacro") {
         choices.push_back(macro);
+      }
     }
   }
   return choices;
@@ -2595,8 +2598,15 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
 
     SmallVector<AnyFunctionType::Param, 4> paramTypes;
     macro->parameterList->getParams(paramTypes);
-    FunctionType::ExtInfo info;
-    return FunctionType::get(paramTypes, resultType, info);
+
+    if (auto genericSig = macro->getGenericSignature()) {
+      GenericFunctionType::ExtInfo info;
+      return GenericFunctionType::get(
+          genericSig, paramTypes, resultType, info);
+    } else {
+      FunctionType::ExtInfo info;
+      return FunctionType::get(paramTypes, resultType, info);
+    }
   }
   }
   llvm_unreachable("invalid decl kind");
