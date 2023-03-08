@@ -95,19 +95,18 @@ static bool isExpressionResultTypeUnconstrained(const Solution &S, Expr *E) {
       return true;
     }
   }
-  auto targetIt = S.targets.find(E);
-  if (targetIt == S.targets.end()) {
+  auto target = S.getTargetFor(E);
+  if (!target)
     return false;
-  }
-  auto target = targetIt->second;
-  assert(target.kind == SyntacticElementTarget::Kind::expression);
-  switch (target.getExprContextualTypePurpose()) {
+
+  assert(target->kind == SyntacticElementTarget::Kind::expression);
+  switch (target->getExprContextualTypePurpose()) {
   case CTP_Unused:
     // If we aren't using the contextual type, its unconstrained by definition.
     return true;
   case CTP_Initialization: {
     // let x = <expr> is unconstrained
-    auto contextualType = target.getExprContextualType();
+    auto contextualType = target->getExprContextualType();
     return !contextualType || contextualType->is<UnresolvedType>();
   }
   default:
@@ -351,6 +350,13 @@ void ArgumentTypeCheckCompletionCallback::deliverResults(
   }
 
   if (shouldPerformGlobalCompletion) {
+    llvm::SmallDenseMap<const VarDecl *, Type> SolutionSpecificVarTypes;
+    if (!Results.empty()) {
+      SolutionSpecificVarTypes = Results[0].SolutionSpecificVarTypes;
+    }
+
+    WithSolutionSpecificVarTypesRAII VarTypes(SolutionSpecificVarTypes);
+
     for (auto &Result : Results) {
       ExpectedTypes.push_back(Result.ExpectedType);
       Lookup.setSolutionSpecificVarTypes(Result.SolutionSpecificVarTypes);
