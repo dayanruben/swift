@@ -58,19 +58,25 @@ if (SWIFT_SWIFT_PARSER)
        ${CMAKE_SHARED_LIBRARY_SUFFIX}
        OUTPUT_VARIABLE SWIFT_SYNTAX_SHARED_LIBRARIES)
 
-  # The complete set of files that get installed.
-  set(SWIFT_SYNTAX_DEST_FILES)
+  # Interface library to collect swiftinterfaces and swiftmodules from
+  # SwiftSyntax
+  add_library(swiftSyntaxLibraries INTERFACE)
 
   # Copy over all of the shared libraries from earlyswiftsyntax so they can
   # be found via RPATH.
   foreach (sharedlib ${SWIFT_SYNTAX_SHARED_LIBRARIES})
     add_custom_command(
-      OUTPUT ${SWIFT_HOST_LIBRARIES_DEST_DIR}/${sharedlib}
+      OUTPUT "${SWIFT_HOST_LIBRARIES_DEST_DIR}/${sharedlib}"
+      DEPENDS "${SWIFT_SYNTAX_LIBRARIES_SOURCE_DIR}/${sharedlib}"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SWIFT_SYNTAX_LIBRARIES_SOURCE_DIR}/${sharedlib} ${SWIFT_HOST_LIBRARIES_DEST_DIR}/${sharedlib}
+    )
+
+    add_custom_target(copy_swiftSyntaxLibrary_${sharedlib}
+      DEPENDS "${SWIFT_HOST_LIBRARIES_DEST_DIR}/${sharedlib}"
       COMMENT "Copying ${sharedlib}"
     )
 
-    list(APPEND SWIFT_SYNTAX_DEST_FILES ${SWIFT_HOST_LIBRARIES_DEST_DIR}/${sharedlib})
+    add_dependencies(swiftSyntaxLibraries copy_swiftSyntaxLibrary_${sharedlib})
   endforeach()
 
   # Copy all of the Swift modules from earlyswiftsyntax so they can be found
@@ -78,6 +84,7 @@ if (SWIFT_SWIFT_PARSER)
   # toolchain.
   list(TRANSFORM SWIFT_SYNTAX_MODULES APPEND ".swiftmodule"
        OUTPUT_VARIABLE SWIFT_SYNTAX_MODULE_DIRS)
+
   foreach(module_dir ${SWIFT_SYNTAX_MODULE_DIRS})
     # Find all of the source module files.
     file(GLOB module_files
@@ -93,17 +100,18 @@ if (SWIFT_SWIFT_PARSER)
 
     add_custom_command(
       OUTPUT ${dest_module_files}
+      DEPENDS ${module_files}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${SWIFT_HOST_LIBRARIES_DEST_DIR}/${module_dir}
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${module_files} ${SWIFT_HOST_LIBRARIES_DEST_DIR}/${module_dir}/
+    )
+
+    add_custom_target(copy_swiftSyntaxModule_${module_dir}
+      DEPENDS ${dest_module_files}
       COMMENT "Copying ${module_dir}"
     )
 
-    list(APPEND SWIFT_SYNTAX_DEST_FILES ${dest_module_files})
+    add_dependencies(swiftSyntaxLibraries copy_swiftSyntaxModule_${module_dir})
   endforeach()
-
-  # Add a custom target to copy over the SwiftSyntax build products into
-  # their final places.
-  add_custom_target(swiftSyntaxLibraries DEPENDS ${SWIFT_SYNTAX_DEST_FILES})
 endif()
 
 # Workaround a cmake bug, see the corresponding function in swift-syntax
@@ -151,8 +159,15 @@ endfunction()
 # STATIC
 #   Build a static library.
 #
-# LLVM_LINK_COMPONENTS
-#   LLVM components this library depends on.
+# EMIT_MODULE
+#   Emit '.swiftmodule' to
+#
+# DEPENDENCIES
+#   Target names to pass target_link_library
+#
+# SWIFT_DEPENDENCIES
+#   Target names to pass force_target_link_library.
+#   TODO: Remove this and use DEPENDENCIES when CMake is fixed
 #
 # source1 ...
 #   Sources to add into this library.
@@ -165,10 +180,12 @@ function(add_pure_swift_host_library name)
   # Option handling
   set(options
         SHARED
-        STATIC)
+        STATIC
+        EMIT_MODULE)
   set(single_parameter_options)
   set(multiple_parameter_options
-        DEPENDENCIES)
+        DEPENDENCIES
+        SWIFT_DEPENDENCIES)
 
   cmake_parse_arguments(APSHL
                         "${options}"
@@ -192,15 +209,13 @@ function(add_pure_swift_host_library name)
   # Avoid introducing an implicit dependency on the string-processing library.
   if(SWIFT_SUPPORTS_DISABLE_IMPLICIT_STRING_PROCESSING_MODULE_IMPORT)
     target_compile_options(${name} PRIVATE
-      $<$<COMPILE_LANGUAGE:Swift>:-Xfrontend>
-      $<$<COMPILE_LANGUAGE:Swift>:-disable-implicit-string-processing-module-import>)
+      "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -disable-implicit-string-processing-module-import>")
   endif()
 
   # Same for backtracing
   if (SWIFT_SUPPORTS_DISABLE_IMPLICIT_BACKTRACING_MODULE_IMPORT)
     target_compile_options(${name} PRIVATE
-      $<$<COMPILE_LANGUAGE:Swift>:-Xfrontend>
-      $<$<COMPILE_LANGUAGE:Swift>:-disable-implicit-backtracing-module-import>)
+      "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -disable-implicit-backtracing-module-import>")
   endif()
 
   # The compat56 library is not available in current toolchains. The stage-0
@@ -254,10 +269,50 @@ function(add_pure_swift_host_library name)
   target_link_libraries(${name} PUBLIC
     ${APSHL_DEPENDENCIES}
   )
+  # TODO: Change to target_link_libraries when cmake is fixed
+  force_target_link_libraries(${name} PUBLIC
+    ${APSHL_SWIFT_DEPENDENCIES}
+  )
 
   # Make sure we can use the host libraries.
   target_include_directories(${name} PUBLIC
     ${SWIFT_HOST_LIBRARIES_DEST_DIR})
+
+  if(APSHL_EMIT_MODULE)
+    # Determine where Swift modules will be built and installed.
+
+    set(module_triple ${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${SWIFT_HOST_VARIANT_ARCH}_MODULE})
+    set(module_dir ${SWIFT_HOST_LIBRARIES_DEST_DIR})
+    set(module_base "${module_dir}/${name}.swiftmodule")
+    set(module_file "${module_base}/${module_triple}.swiftmodule")
+    set(module_interface_file "${module_base}/${module_triple}.swiftinterface")
+    set(module_sourceinfo_file "${module_base}/${module_triple}.swiftsourceinfo")
+
+    set_target_properties(${name} PROPERTIES
+        # Set the default module name to the target name.
+        Swift_MODULE_NAME ${name}
+        # Install the Swift module into the appropriate location.
+        Swift_MODULE_DIRECTORY ${module_dir}
+        # NOTE: workaround for CMake not setting up include flags.
+        INTERFACE_INCLUDE_DIRECTORIES ${module_dir})
+
+    # Create the module directory.
+    add_custom_command(
+        TARGET ${name}
+        PRE_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory ${module_base}
+        COMMENT "Generating module directory for ${name}")
+
+    # Configure the emission of the Swift module files.
+    target_compile_options("${name}" PRIVATE
+        $<$<COMPILE_LANGUAGE:Swift>:
+        -module-name;$<TARGET_PROPERTY:${name},Swift_MODULE_NAME>;
+        -enable-library-evolution;
+        -emit-module-path;${module_file};
+        -emit-module-source-info-path;${module_sourceinfo_file};
+        -emit-module-interface-path;${module_interface_file}
+        >)
+  endif()
 
   # Export this target.
   set_property(GLOBAL APPEND PROPERTY SWIFT_EXPORTS ${name})

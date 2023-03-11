@@ -163,6 +163,10 @@ swift::cxx_translation::getNameForCxx(const ValueDecl *VD,
   if (customNamesOnly)
     return StringRef();
 
+  if (auto *mod = dyn_cast<ModuleDecl>(VD)) {
+    if (mod->isStdlibModule())
+      return "swift";
+  }
   if (VD->getModuleContext()->isStdlibModule()) {
     // Incorporate argument labels into Stdlib API names.
     // FIXME: This should be done more broadly.
@@ -238,6 +242,10 @@ bool swift::cxx_translation::isVisibleToCxx(const ValueDecl *VD,
                                             AccessLevel minRequiredAccess,
                                             bool checkParent) {
   if (VD->isObjC())
+    return false;
+  // Do not expose anything from _Concurrency module yet.
+  if (VD->getModuleContext()->ValueDecl::getName().getBaseIdentifier() ==
+      VD->getASTContext().Id_Concurrency)
     return false;
   if (VD->getFormalAccess() >= minRequiredAccess) {
     return true;

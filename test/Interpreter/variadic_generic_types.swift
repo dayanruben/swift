@@ -1,6 +1,8 @@
 // RUN: %target-run-simple-swift(-enable-experimental-feature VariadicGenerics -Xfrontend -disable-concrete-type-metadata-mangled-name-accessors)
+// RUN: %target-run-simple-swift(-enable-experimental-feature VariadicGenerics)
 
-// FIXME: Get it to build without -disable-concrete-type-metadata-mangled-name-accessors and test both
+// FIXME: Fix the optimizer
+// REQUIRES: swift_test_mode_optimize_none
 
 // REQUIRES: executable_test
 
@@ -14,17 +16,14 @@ import StdlibUnittest
 
 var types = TestSuite("VariadicGenericTypes")
 
-public struct Outer<each U>
-    where each U: Equatable {
+//
+// Metadata instantiation tests
+//
 
-  public struct Inner<each V>
-      where each V: Equatable {
-  }
+public struct Outer<each U> {
+  public struct Inner<each V> {}
 
-  public struct InnerSameShape<each V>
-      where each V: Equatable,
-            (repeat (each U, each V)): Any {
-  }
+  public struct InnerSameShape<each V> where (repeat (each U, each V)): Any {}
 }
 
 types.test("Outer") {
@@ -61,6 +60,59 @@ types.test("Outer.InnerSameShape") {
   expectEqual("main.Outer<Pack{Swift.Int}>.InnerSameShape<Pack{Swift.Bool}>", _typeName(Outer<Int>.InnerSameShape<Bool>.self))
   expectEqual("main.Outer<Pack{Swift.Int, Swift.String}>.InnerSameShape<Pack{Swift.Bool, Swift.Double}>", _typeName(Outer<Int, String>.InnerSameShape<Bool, Double>.self))
   expectEqual("main.Outer<Pack{Swift.Int, Swift.String, Swift.Float}>.InnerSameShape<Pack{Swift.Bool, Swift.Double, Swift.Character}>", _typeName(Outer<Int, String, Float>.InnerSameShape<Bool, Double, Character>.self))
+}
+
+public struct ConformanceReq<each T: Equatable> {}
+
+types.test("ConformanceReq") {
+  expectEqual("main.ConformanceReq<Pack{}>", _typeName(ConformanceReq< >.self))
+  expectEqual("main.ConformanceReq<Pack{Swift.Int}>", _typeName(ConformanceReq<Int>.self))
+  expectEqual("main.ConformanceReq<Pack{Swift.Int, Swift.String}>", _typeName(ConformanceReq<Int, String>.self))
+  expectEqual("main.ConformanceReq<Pack{Swift.Int, Swift.String, Swift.Float}>", _typeName(ConformanceReq<Int, String, Float>.self))
+}
+
+// FIXME: Test superclass, layout and same-type pack requirements once more stuff is plumbed through
+
+//
+// Stored property layout tests
+//
+
+public struct FancyTuple<each T> {
+  private var x: (repeat each T)
+}
+
+public func returnSize<T>(_: T.Type) -> Int {
+  return MemoryLayout<T>.size
+}
+
+types.test("FancyTuple") {
+  expectEqual(returnSize(FancyTuple< >.self),
+              returnSize(Void.self))
+  expectEqual(returnSize(FancyTuple<Int8>.self),
+              returnSize((Int8).self))
+  expectEqual(returnSize(FancyTuple<Int8, Int16>.self),
+              returnSize((Int8, Int16).self))
+  expectEqual(returnSize(FancyTuple<Int8, Int16, Int32>.self),
+              returnSize((Int8, Int16, Int32).self))
+  expectEqual(returnSize(FancyTuple<Int8, Int16, Int32, Int64>.self),
+              returnSize((Int8, Int16, Int32, Int64).self))
+}
+
+public struct SequenceElementTuple<each T: Sequence> {
+  private var x: (repeat (each T).Element)
+}
+
+types.test("SequenceElementTuple") {
+  expectEqual(returnSize(SequenceElementTuple< >.self),
+              returnSize(Void.self))
+  expectEqual(returnSize(SequenceElementTuple<Array<Int8>>.self),
+              returnSize((Int8).self))
+  expectEqual(returnSize(SequenceElementTuple<Array<Int8>, Array<Int16>>.self),
+              returnSize((Int8, Int16).self))
+  expectEqual(returnSize(SequenceElementTuple<Array<Int8>, Array<Int16>, Array<Int32>>.self),
+              returnSize((Int8, Int16, Int32).self))
+  expectEqual(returnSize(SequenceElementTuple<Array<Int8>, Array<Int16>, Array<Int32>, Array<Int64>>.self),
+              returnSize((Int8, Int16, Int32, Int64).self))
 }
 
 runAllTests()

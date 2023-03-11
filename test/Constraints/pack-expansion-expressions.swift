@@ -99,9 +99,13 @@ func returnRepeatTuple<each T>(_ t: repeat each T) -> (repeat T) { // expected-e
   fatalError()
 }
 
-func paremeterAsPackTypeWithoutExpansion<each T>(_ t: T) -> repeat each T { // expected-error {{variadic expansion 'T' cannot appear outside of a function parameter list, function result, tuple element or generic argument list}}
+func parameterAsPackTypeWithoutExpansion<each T>(_ t: T) -> repeat each T { // expected-error {{variadic expansion 'T' cannot appear outside of a function parameter list, function result, tuple element or generic argument list}}
   fatalError()
 }
+
+func expansionOfNonPackType<T>(_ t: repeat each T) {}
+// expected-error@-1 {{'each' cannot be applied to non-pack type 'T'}}{{29-29=each }}
+// expected-error@-2 {{variadic expansion 'T' must contain at least one variadic generic parameter}}
 
 func tupleExpansion<each T, each U>(
   _ tuple1: (repeat each T),
@@ -143,4 +147,52 @@ func callCopyAndBind<T>(_ arg: repeat each T) {
 
   // Don't propagate errors for invalid declaration reference
   let result = copyIntoTuple(repeat each arg)
+}
+
+do {
+  struct TestArgMatching {
+    subscript<each T>(data arg: repeat each T) -> Int {
+      get { 42 }
+      set {}
+    }
+  }
+
+  func test_that_variadic_generics_claim_unlabeled_arguments<each T>(_ args: repeat each T, test: inout TestArgMatching) {
+    func testLabeled<each U>(data: repeat each U) {}
+    func testUnlabeled<each U>(_: repeat each U) {}
+    func testInBetween<each U>(_: repeat each U, other: String) {}
+
+    testLabeled(data: repeat each args) // Ok
+    testLabeled(data: repeat each args, 1) // Ok
+    testLabeled(data: repeat each args, 1, 2, 3) // Ok
+
+    testUnlabeled(repeat each args) // Ok
+    testUnlabeled(repeat each args, 1) // Ok
+    testUnlabeled(repeat each args, 1, 2, 3) // Ok
+
+    testInBetween(repeat each args, 1, 2.0, other: "") // Ok
+
+    _ = test[data: repeat each args]
+    _ = test[data: repeat each args, 0, ""]
+
+    test[data: repeat each args, "", 42] = 0
+  }
+}
+
+func test_pack_expansion_materialization_from_lvalue_base() {
+  struct Data<Value> {}
+
+  struct Test<each T> {
+    var data: (repeat Data<each T>)
+
+    init() {
+      self.data = (repeat Data<each T>())
+      _ = (repeat each data.element) // Ok
+
+      var tmp = (repeat Data<each T>()) // expected-warning {{never mutated}}
+      _ = (repeat each tmp.element) // Ok
+
+      // TODO: Add subscript test-case when syntax is supported.
+    }
+  }
 }

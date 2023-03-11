@@ -2111,6 +2111,11 @@ ERROR(access_level_conflict_with_exported,none,
 NOTE(module_imported_here,none,
      "module %0 imported as '%select{private|fileprivate|internal|package|%ERROR|%ERROR}1' here",
      (Identifier, AccessLevel))
+NOTE(decl_import_via_here,none,
+     "%0 %1 imported as "
+     "'%select{private|fileprivate|internal|package|%ERROR|%ERROR}2' "
+     "from %3 here",
+     (DescriptiveDeclKind, DeclName, AccessLevel, Identifier))
 
 // Opaque return types
 ERROR(opaque_type_invalid_constraint,none,
@@ -4188,7 +4193,8 @@ ERROR(value_of_module_type,none,
       "expected module member name after module name", ())
 
 ERROR(value_of_metatype_type,none,
-      "expected member name or constructor call after type name", ())
+      "expected member name or constructor call after type name%select{|; this "
+      "will be an error in Swift 6}0", (bool))
 
 NOTE(add_parens_to_type,none,
      "add arguments after the type to construct a value of the type", ())

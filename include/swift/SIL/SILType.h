@@ -405,6 +405,12 @@ public:
   bool hasOpenedExistential() const {
     return getASTType()->hasOpenedExistential();
   }
+
+  /// Returns true if the referenced type is expressed in terms of one
+  /// or more local archetypes.
+  bool hasLocalArchetype() const {
+    return getASTType()->hasLocalArchetype();
+  }
   
   /// Returns the representation used by an existential type. If the concrete
   /// type is provided, this may return a specialized representation kind that
@@ -529,6 +535,14 @@ public:
   /// category as the base type.
   SILType getTupleElementType(unsigned index) const {
     return SILType(castTo<TupleType>().getElementType(index), getCategory());
+  }
+
+  /// Given that this is a pack expansion type, return the lowered type
+  /// of the pattern type.  The result will have the same value category
+  /// as the base type.
+  SILType getPackExpansionPatternType() const {
+    return SILType(castTo<PackExpansionType>().getPatternType(),
+                   getCategory());
   }
 
   /// Return the immediate superclass type of this type, or null if

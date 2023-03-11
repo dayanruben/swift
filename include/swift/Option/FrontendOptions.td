@@ -308,6 +308,10 @@ def enable_experimental_eager_clang_module_diagnostics :
   Flag<["-"], "enable-experimental-eager-clang-module-diagnostics">,
   HelpText<"Enable experimental eager diagnostics reporting on the importability of all referenced C, C++, and Objective-C libraries">;
 
+def enable_import_objc_forward_declarations :
+  Flag<["-"], "enable-import-objc-forward-declarations">,
+  HelpText<"Attempt to import Objective-C forward declarations">;
+
 def enable_experimental_pairwise_build_block :
   Flag<["-"], "enable-experimental-pairwise-build-block">,
   HelpText<"Enable experimental pairwise 'buildBlock' for result builders">;
@@ -1101,6 +1105,12 @@ def clang_header_expose_decls:
   HelpText<"Which declarations should be exposed in the generated clang header.">,
   Flags<[FrontendOption, HelpHidden]>,
   MetaVarName<"all-public|has-expose-attr">;
+
+def clang_header_expose_module:
+  Separate<["-"], "clang-header-expose-module">,
+  HelpText<"Allow the compiler to assume that APIs from the specified module are exposed to C/C++/Objective-C in another generated header, so that APIs in the current module that depend on declarations from the specified module can be exposed in the generated header.">,
+  Flags<[FrontendOption, HelpHidden]>,
+  MetaVarName<"<imported-module-name>=<generated-header-name>">;
 
 def weak_link_at_target :
   Flag<["-"], "weak-link-at-target">,

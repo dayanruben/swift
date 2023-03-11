@@ -1280,7 +1280,9 @@ static bool ValidateModulesOnceOptions(const ClangImporterOptions &Opts,
 static bool ParseClangImporterArgs(ClangImporterOptions &Opts,
                                    ArgList &Args,
                                    DiagnosticEngine &Diags,
-                                   StringRef workingDirectory) {
+                                   StringRef workingDirectory,
+                                   const LangOptions &LangOpts,
+                                   const FrontendOptions &FrontendOpts) {
   using namespace options;
 
   if (const Arg *a = Args.getLastArg(OPT_tools_directory)) {
@@ -1347,6 +1349,15 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts,
   }
 
   Opts.DumpClangDiagnostics |= Args.hasArg(OPT_dump_clang_diagnostics);
+
+  // When the repl is invoked directly (ie. `lldb --repl="..."`) the action
+  // type seems to be NoneAction.
+  if (FrontendOpts.RequestedAction != FrontendOptions::ActionType::REPL &&
+      FrontendOpts.RequestedAction != FrontendOptions::ActionType::NoneAction &&
+      (Args.hasArg(OPT_enable_import_objc_forward_declarations) ||
+       LangOpts.isSwiftVersionAtLeast(6))) {
+    Opts.ImportForwardDeclarations = true;
+  }
 
   if (Args.hasArg(OPT_embed_bitcode))
     Opts.Mode = ClangImporterOptions::Modes::EmbedBitcode;
@@ -1493,6 +1504,15 @@ static bool ParseSearchPathArgs(SearchPathOptions &Opts,
 
   if (const Arg *A = Args.getLastArg(OPT_sdk))
     Opts.setSDKPath(A->getValue());
+
+  if (const Arg *A = Args.getLastArg(OPT_windows_sdk_root))
+    Opts.setWinSDKRoot(A->getValue());
+  if (const Arg *A = Args.getLastArg(OPT_windows_sdk_version))
+    Opts.setWinSDKVersion(A->getValue());
+  if (const Arg *A = Args.getLastArg(OPT_visualc_tools_root))
+    Opts.setVCToolsRoot(A->getValue());
+  if (const Arg *A = Args.getLastArg(OPT_visualc_tools_version))
+    Opts.setVCToolsVersion(A->getValue());
 
   if (const Arg *A = Args.getLastArg(OPT_resource_dir))
     Opts.RuntimeResourcePath = A->getValue();
@@ -2747,7 +2767,7 @@ bool CompilerInvocation::parseArgs(
   }
 
   if (ParseClangImporterArgs(ClangImporterOpts, ParsedArgs, Diags,
-                             workingDirectory)) {
+                             workingDirectory, LangOpts, FrontendOpts)) {
     return true;
   }
 

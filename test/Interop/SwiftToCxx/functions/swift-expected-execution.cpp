@@ -2,7 +2,7 @@
 
 // RUN: %target-swift-frontend %S/swift-functions-errors.swift -typecheck -module-name Functions -Xcc -fno-exceptions -enable-experimental-cxx-interop -clang-header-expose-decls=has-expose-attr-or-stdlib -enable-experimental-feature GenerateBindingsForThrowingFunctionsInCXX -emit-clang-header-path %t/functions.h
 
-// RUN: %target-interop-build-clangxx -c %s -I %t -fno-exceptions -o %t/swift-expected-execution.o
+// RUN: %target-interop-build-clangxx -c %s -I %t -fno-exceptions -o %t/swift-expected-execution.o -DSWIFT_CXX_INTEROP_EXPERIMENTAL_SWIFT_ERROR
 // RUN: %target-interop-build-swift %S/swift-functions-errors.swift -o %t/swift-expected-execution -Xlinker %t/swift-expected-execution.o -module-name Functions -Xfrontend -entry-point-function-name -Xfrontend swiftMain -enable-experimental-feature GenerateBindingsForThrowingFunctionsInCXX
 
 // RUN: %target-codesign %t/swift-expected-execution
@@ -22,14 +22,14 @@
 int main() {
 
   // Test Empty Constructor
-  auto testIntEmpty = Swift::Expected<int>();
+  auto testIntEmpty = swift::Expected<int>();
 
   // Test Error Constructor
-  Swift::Error e;
-  auto testIntError = Swift::Expected<int>(e);
+  swift::Error e;
+  auto testIntError = swift::Expected<int>(e);
 
   // Test Value Constructor
-  auto testIntValue = Swift::Expected<int>(42);
+  auto testIntValue = swift::Expected<int>(42);
 
   // Test Copy Constructor
   auto testCopy = testIntEmpty;
@@ -37,9 +37,9 @@ int main() {
   // TODO: Test Move Constructor
 
   // Test Destructor
-  auto testDestEmpty = Swift::Expected<int>();
-  auto testDestInt = Swift::Expected<int>(42);
-  auto testDestError = Swift::Expected<int>(e);
+  auto testDestEmpty = swift::Expected<int>();
+  auto testDestInt = swift::Expected<int>(42);
+  auto testDestError = swift::Expected<int>(e);
   testDestEmpty.~Expected();
   testDestInt.~Expected();
   testDestError.~Expected();

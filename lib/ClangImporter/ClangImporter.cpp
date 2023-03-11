@@ -774,6 +774,23 @@ importer::addCommonInvocationArguments(
     invocationArgStrs.push_back("-mcx16");
   }
 
+  if (llvm::Optional<StringRef> R = ctx.SearchPathOpts.getWinSDKRoot()) {
+    invocationArgStrs.emplace_back("-Xmicrosoft-windows-sdk-root");
+    invocationArgStrs.emplace_back(*R);
+  }
+  if (llvm::Optional<StringRef> V = ctx.SearchPathOpts.getWinSDKVersion()) {
+    invocationArgStrs.emplace_back("-Xmicrosoft-windows-sdk-version");
+    invocationArgStrs.emplace_back(*V);
+  }
+  if (llvm::Optional<StringRef> R = ctx.SearchPathOpts.getVCToolsRoot()) {
+    invocationArgStrs.emplace_back("-Xmicrosoft-visualc-tools-root");
+    invocationArgStrs.emplace_back(*R);
+  }
+  if (llvm::Optional<StringRef> V = ctx.SearchPathOpts.getVCToolsVersion()) {
+    invocationArgStrs.emplace_back("-Xmicrosoft-visualc-tools-version");
+    invocationArgStrs.emplace_back(*V);
+  }
+
   if (!importerOpts.Optimization.empty()) {
     invocationArgStrs.push_back(importerOpts.Optimization);
   }
@@ -1102,8 +1119,25 @@ ClangImporter::create(ASTContext &ctx,
   auto fileMapping = getClangInvocationFileMapping(ctx);
   // Wrap Swift's FS to allow Clang to override the working directory
   llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS =
-      llvm::vfs::RedirectingFileSystem::create(fileMapping, true,
-                                               *ctx.SourceMgr.getFileSystem());
+      llvm::vfs::RedirectingFileSystem::create(
+          fileMapping.redirectedFiles, true, *ctx.SourceMgr.getFileSystem());
+  if (!fileMapping.overridenFiles.empty()) {
+    llvm::IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> overridenVFS =
+        new llvm::vfs::InMemoryFileSystem();
+    for (const auto &file : fileMapping.overridenFiles) {
+      auto contents = ctx.Allocate<char>(file.second.size() + 1);
+      std::copy(file.second.begin(), file.second.end(), contents.begin());
+      // null terminate the buffer.
+      contents[contents.size() - 1] = '\0';
+      overridenVFS->addFile(file.first, 0,
+                            llvm::MemoryBuffer::getMemBuffer(
+                                StringRef(contents.begin(), contents.size() - 1)));
+    }
+    llvm::IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> overlayVFS =
+        new llvm::vfs::OverlayFileSystem(VFS);
+    VFS = overlayVFS;
+    overlayVFS->pushOverlay(overridenVFS);
+  }
 
   // Create a new Clang compiler invocation.
   {
@@ -6209,7 +6243,15 @@ void ClangImporter::diagnoseTopLevelValue(const DeclName &name) {
 
 void ClangImporter::diagnoseMemberValue(const DeclName &name,
                                         const Type &baseType) {
-  if (!baseType->getAnyNominal())
+
+  // Return early for any type that namelookup::extractDirectlyReferencedNominalTypes
+  // does not know how to handle.
+  if (!(baseType->getAnyNominal() ||
+        baseType->is<ExistentialType>() ||
+        baseType->is<UnboundGenericType>() ||
+        baseType->is<ArchetypeType>() ||
+        baseType->is<ProtocolCompositionType>() ||
+        baseType->is<TupleType>()))
     return;
 
   SmallVector<NominalTypeDecl *, 4> nominalTypesToLookInto;
@@ -6220,6 +6262,41 @@ void ClangImporter::diagnoseMemberValue(const DeclName &name,
     if (clangContainerDecl && isa<clang::DeclContext>(clangContainerDecl)) {
       Impl.diagnoseMemberValue(name,
                                cast<clang::DeclContext>(clangContainerDecl));
+    }
+
+    if (Impl.ImportForwardDeclarations) {
+      const clang::Decl *clangContainerDecl = containerDecl->getClangDecl();
+      if (const clang::ObjCInterfaceDecl *objCInterfaceDecl =
+              llvm::dyn_cast_or_null<clang::ObjCInterfaceDecl>(
+                  clangContainerDecl); objCInterfaceDecl && !objCInterfaceDecl->hasDefinition()) {
+        // Emit a diagnostic about how the base type represents a forward
+        // declared ObjC interface and is in all likelihood missing members.
+        // We only attach this diagnostic in diagnoseMemberValue rather than
+        // in SwiftDeclConverter because it is only relevant when the user
+        // tries to access an unavailable member.
+        Impl.addImportDiagnostic(
+            objCInterfaceDecl,
+            Diagnostic(
+                diag::
+                    placeholder_for_forward_declared_interface_member_access_failure,
+                objCInterfaceDecl->getName()),
+            objCInterfaceDecl->getSourceRange().getBegin());
+        // Emit any diagnostics attached to the source Clang node (ie. forward
+        // declaration here note)
+        Impl.diagnoseTargetDirectly(clangContainerDecl);
+      } else if (const clang::ObjCProtocolDecl *objCProtocolDecl =
+                     llvm::dyn_cast_or_null<clang::ObjCProtocolDecl>(
+                         clangContainerDecl); objCProtocolDecl && !objCProtocolDecl->hasDefinition()) {
+        // Same as above but for protocols
+        Impl.addImportDiagnostic(
+            objCProtocolDecl,
+            Diagnostic(
+                diag::
+                    placeholder_for_forward_declared_protocol_member_access_failure,
+                objCProtocolDecl->getName()),
+            objCProtocolDecl->getSourceRange().getBegin());
+        Impl.diagnoseTargetDirectly(clangContainerDecl);
+      }
     }
   }
 }
@@ -6233,6 +6310,19 @@ static bool hasImportAsRefAttr(const clang::RecordDecl *decl) {
                     swiftAttr->getAttribute() == "import_as_ref";
            return false;
          });
+}
+
+// Is this a pointer to a foreign reference type.
+static bool isForeignReferenceType(const clang::QualType type) {
+  if (!type->isPointerType())
+    return false;
+
+  auto pointeeType =
+      dyn_cast<clang::RecordType>(type->getPointeeType().getCanonicalType());
+  if (pointeeType == nullptr)
+    return false;
+
+  return hasImportAsRefAttr(pointeeType->getDecl());
 }
 
 static bool hasOwnedValueAttr(const clang::RecordDecl *decl) {
@@ -6397,14 +6487,16 @@ CxxRecordSemanticsKind
 CxxRecordSemantics::evaluate(Evaluator &evaluator,
                              CxxRecordSemanticsDescriptor desc) const {
   const auto *decl = desc.decl;
+  auto &clangSema = desc.ctx.getClangModuleLoader()->getClangSema();
 
   if (hasImportAsRefAttr(decl)) {
     return CxxRecordSemanticsKind::Reference;
   }
 
   auto cxxDecl = dyn_cast<clang::CXXRecordDecl>(decl);
-  if (!cxxDecl)
+  if (!cxxDecl) {
     return CxxRecordSemanticsKind::Trivial;
+  }
 
   if (!hasRequiredValueTypeOperations(cxxDecl)) {
     if (hasUnsafeAPIAttr(cxxDecl))
@@ -6446,58 +6538,52 @@ CxxRecordSemantics::evaluate(Evaluator &evaluator,
 bool IsSafeUseOfCxxDecl::evaluate(Evaluator &evaluator,
                                   SafeUseOfCxxDeclDescriptor desc) const {
   const clang::Decl *decl = desc.decl;
-  const clang::CXXRecordDecl *recordDecl = nullptr;
-  bool cxxMethodIsSafe = true;
 
   if (auto method = dyn_cast<clang::CXXMethodDecl>(decl)) {
+    // The user explicitly asked us to import this method.
     if (hasUnsafeAPIAttr(method))
       return true;
 
+    // If it's a static method, it cannot project anything. It's fine.
     if (method->isOverloadedOperator() || method->isStatic() ||
         isa<clang::CXXConstructorDecl>(decl))
       return true;
 
+    if (isForeignReferenceType(method->getReturnType()))
+      return true;
+
+    // If it returns a pointer or reference, that's a projection.
     if (method->getReturnType()->isPointerType() ||
         method->getReturnType()->isReferenceType())
-      cxxMethodIsSafe = false;
+      return false;
 
+    // Try to figure out the semantics of the return type. If it's a
+    // pointer/iterator, it's unsafe.
     if (auto returnType = dyn_cast<clang::RecordType>(
             method->getReturnType().getCanonicalType())) {
       if (auto cxxRecordReturnType =
               dyn_cast<clang::CXXRecordDecl>(returnType->getDecl())) {
-        auto semanticsKind = evaluateOrDefault(
-            evaluator, CxxRecordSemantics({cxxRecordReturnType, desc.ctx}), {});
+        if (hasIteratorAPIAttr(cxxRecordReturnType) ||
+            isIterator(cxxRecordReturnType)) {
+          return false;
+        }
 
-        if (semanticsKind == CxxRecordSemanticsKind::UnsafePointerMember ||
-            // Pretend all methods that return iterators are unsafe so protocol
-            // conformances work.
-            semanticsKind == CxxRecordSemanticsKind::Iterator)
-          cxxMethodIsSafe = false;
+        // Mark this as safe to help our diganostics down the road.
+        if (!cxxRecordReturnType->getDefinition()) {
+          return true;
+        }
+
+        if (!cxxRecordReturnType->hasUserDeclaredCopyConstructor() &&
+            !cxxRecordReturnType->hasUserDeclaredMoveConstructor() &&
+            hasPointerInSubobjects(cxxRecordReturnType)) {
+          return false;
+        }
       }
     }
-
-    recordDecl = method->getParent();
-  } else if (auto cxxRecordDecl = dyn_cast<clang::CXXRecordDecl>(decl)) {
-    recordDecl = cxxRecordDecl;
-  } else {
-    llvm_unreachable("decl must be a C++ method or C++ record.");
   }
 
-  auto semanticsKind = evaluateOrDefault(
-      evaluator, CxxRecordSemantics({recordDecl, desc.ctx}), {});
-
-  // Always unsafe.
-  if (semanticsKind == CxxRecordSemanticsKind::MissingLifetimeOperation)
-    return false;
-
-  // Always OK.
-  if (semanticsKind == CxxRecordSemanticsKind::Reference)
-    return true;
-
-
-  // All other record semantics kinds are some varient of an "owned" type, so
-  // dis-allow potential projections.
-  return cxxMethodIsSafe;
+  // Otherwise, it's safe.
+  return true;
 }
 
 void swift::simple_display(llvm::raw_ostream &out,
