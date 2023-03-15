@@ -377,6 +377,7 @@ llvm::Constant *IRGenModule::getAddrOfStringForTypeRef(
 
   case MangledTypeRefRole::Metadata:
   case MangledTypeRefRole::Reflection:
+  case MangledTypeRefRole::FieldMetadata:
     break;
   }
 
@@ -1995,6 +1996,7 @@ namespace {
     }
     INTERNAL_ONLY_TYPE(SILBlockStorage)
     INTERNAL_ONLY_TYPE(BuiltinDefaultActorStorage)
+    INTERNAL_ONLY_TYPE(BuiltinNonDefaultDistributedActorStorage)
 #undef INTERNAL_ONLY_TYPE
 
     MetadataResponse visitSILBoxType(CanSILBoxType type,

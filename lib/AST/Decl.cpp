@@ -1126,6 +1126,14 @@ bool Decl::isAlwaysWeakImported() const {
   if (getAttrs().hasAttribute<WeakLinkedAttr>())
     return true;
 
+  // Declarations that are unavailable should be weak linked since they are
+  // meant to be unreachable at runtime and their removal should not affect
+  // clients. However, make an exception for unavailable declarations with
+  // explicit introduction versions, which are considered required ABI.
+  if (getSemanticUnavailableAttr() &&
+      getAvailabilityForLinkage().isAlwaysAvailable())
+    return true;
+
   if (auto *accessor = dyn_cast<AccessorDecl>(this))
     return accessor->getStorage()->isAlwaysWeakImported();
 
@@ -3773,6 +3781,10 @@ static AccessLevel getAdjustedFormalAccess(const ValueDecl *VD,
   }
 
   if (useDC) {
+    // If the use site decl context is PackageUnit, just return
+    // the access level that's passed in
+    if (auto usePkg = useDC->getPackageContext())
+      return access;
     // Check whether we need to modify the access level based on
     // @testable/@_private import attributes.
     auto *useSF = dyn_cast<SourceFile>(useDC->getModuleScopeContext());
@@ -3883,13 +3895,11 @@ getAccessScopeForFormalAccess(const ValueDecl *VD,
   while (!resultDC->isModuleScopeContext()) {
     if (isa<TopLevelCodeDecl>(resultDC)) {
       return AccessScope(resultDC->getModuleScopeContext(),
-                         access == AccessLevel::Private
-                             ? AccessLimitKind::Private
-                             : AccessLimitKind::None);
+                         access == AccessLevel::Private);
     }
 
     if (resultDC->isLocalContext() || access == AccessLevel::Private)
-      return AccessScope(resultDC, AccessLimitKind::Private);
+      return AccessScope(resultDC, /*private*/ true);
 
     if (auto enclosingNominal = dyn_cast<GenericTypeDecl>(resultDC)) {
       auto enclosingAccess =
@@ -3920,13 +3930,17 @@ getAccessScopeForFormalAccess(const ValueDecl *VD,
   case AccessLevel::Private:
   case AccessLevel::FilePrivate:
     assert(resultDC->isModuleScopeContext());
-    return AccessScope(resultDC, access == AccessLevel::Private
-                                     ? AccessLimitKind::Private
-                                     : AccessLimitKind::None);
+    return AccessScope(resultDC, access == AccessLevel::Private);
   case AccessLevel::Internal:
     return AccessScope(resultDC->getParentModule());
-  case AccessLevel::Package:
-    return AccessScope::getPackage();
+  case AccessLevel::Package: {
+    auto pkg = resultDC->getPackageContext(/*lookupIfNotCurrent*/ true);
+    if (!pkg) {
+      auto &d = VD->getASTContext().Diags;
+      d.diagnose(VD->getLoc(), diag::access_control_requires_package_name);
+    }
+    return AccessScope(pkg);
+  }
   case AccessLevel::Public:
   case AccessLevel::Open:
     return AccessScope::getPublic();
@@ -3948,7 +3962,34 @@ ValueDecl::getFormalAccessScope(const DeclContext *useDC,
 /// Whenever the enclosing context of \p VD is usable from \p useDC, this
 /// should compute the same result as checkAccess, below, but more slowly.
 ///
-/// See ValueDecl::isAccessibleFrom for a description of \p forConformance.
+/// Here's an example while typechecking a file with the following code.
+///
+/// ```
+/// import OtherModule
+///
+/// // `Foo` is a `public` struct defined in `OtherModule`
+/// public func myFunc(_ arg: OtherModule.Foo) {}
+/// ```
+///
+/// The use site of `Foo`is a function `myFunc`, and its DeclContext (useDC)
+/// is FileUnit. The call \c getAccessScopeForFormalAccess inside this function
+/// to get the access scope of`Foo` returns a public scope based on its `public`
+/// access level, which is a wrapper around a nullptr DeclContext. Note that the
+/// useDC is still non-null (FileUnit) even though the use site itself also has
+/// a `public` acess level.
+///
+/// The `isChildOf` call compares the DeclContext hierarchy of the use site
+/// (useDC) and the decl (VD) site, and returns true in this case, since
+/// FileUnit is a child of nullptr based on the DeclContext hierarchy. The
+/// hierarchy is created when subclasses of DeclContext such as FileUnit or
+/// ModuleDecl are constructed. For example, a top ClassDecl ctor takes FileUnit
+/// as its parent DeclContext and FileUnit ctor takes ModuleDecl as its parent
+/// DeclContext. There's an exception, however, for the case of PackageUnit.
+/// \see PackageUnit for details on how the hierachy between that and ModuleDecl
+///      is created.
+/// \see DeclContext::ASTHierarchy
+/// \see AccessScope::getAccessScopeForFormalAccess
+/// \see ValueDecl::isAccessibleFrom for a description of \p forConformance.
 static bool checkAccessUsingAccessScopes(const DeclContext *useDC,
                                          const ValueDecl *VD,
                                          AccessLevel access,
@@ -3964,10 +4005,6 @@ static bool checkAccessUsingAccessScopes(const DeclContext *useDC,
 
   // useDC is null only when caller wants to skip non-public type checks.
   if (!useDC) return true;
-
-  // Check package access; accessing package decl should not be allowed if package names are different
-  if (accessScope.isPackage())
-    return VD->getDeclContext()->getParentModule()->getPackageName() == useDC->getParentModule()->getPackageName();
 
   // Check SPI access
   if (!VD->isSPI()) return true;
@@ -4083,7 +4120,11 @@ static bool checkAccess(const DeclContext *useDC, const ValueDecl *VD,
     auto *useSF = dyn_cast<SourceFile>(useFile);
     return useSF && useSF->hasTestableOrPrivateImport(access, sourceModule);
   }
-  case AccessLevel::Package:
+  case AccessLevel::Package: {
+    auto srcPkg = sourceDC->getPackageContext(/*lookupIfNotCurrent*/ true);
+    auto usePkg = useDC->getPackageContext(/*lookupIfNotCurrent*/ true);
+    return usePkg->isSamePackageAs(srcPkg);
+  }
   case AccessLevel::Public:
   case AccessLevel::Open:
     return true;
@@ -5273,10 +5314,8 @@ synthesizeEmptyFunctionBody(AbstractFunctionDecl *afd, void *context) {
 
 DestructorDecl *
 GetDestructorRequest::evaluate(Evaluator &evaluator, ClassDecl *CD) const {
-  auto dc = CD->getImplementationContext();
-
   auto &ctx = CD->getASTContext();
-  auto *DD = new (ctx) DestructorDecl(CD->getLoc(), dc->getAsGenericContext());
+  auto *DD = new (ctx) DestructorDecl(CD->getLoc(), CD);
 
   DD->setImplicit();
 
@@ -9565,6 +9604,15 @@ bool ClassDecl::isRootDefaultActor(ModuleDecl *M,
   auto superclass = getSuperclassDecl();
   return (!superclass || superclass->isNSObject());
 }
+
+bool ClassDecl::isNonDefaultExplicitDistributedActor() const {
+  return isNonDefaultExplicitDistributedActor(getModuleContext(), ResilienceExpansion::Maximal);
+}
+bool ClassDecl::isNonDefaultExplicitDistributedActor(ModuleDecl *M,
+                                                     ResilienceExpansion expansion) const {
+  return !isDefaultActor(M, expansion) && isExplicitDistributedActor();
+}
+
 
 bool ClassDecl::isNativeNSObjectSubclass() const {
   // @objc actors implicitly inherit from NSObject.

@@ -215,7 +215,6 @@ cmake ^
   -D SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING=YES ^
-  -D SWIFT_ENABLE_EXPERIMENTAL_REFLECTION=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION=YES ^
 
   -D LLVM_EXTERNAL_SWIFT_SOURCE_DIR="%SourceRoot%\swift" ^
@@ -258,7 +257,6 @@ cmake ^
   -D SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING=YES ^
-  -D SWIFT_ENABLE_EXPERIMENTAL_REFLECTION=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION=YES ^
 
   -G Ninja ^
@@ -940,8 +938,7 @@ msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\sdk.wixproj ^
   -p:OutputPath=%PackageRoot%\sdk\ ^
   -p:IntermediateOutputPath=%PackageRoot%\sdk\ ^
   -p:PLATFORM_ROOT=%PlatformRoot%\ ^
-  -p:SDK_ROOT=%SDKInstallRoot%\ ^
-  -p:SWIFT_SOURCE_DIR=%SourceRoot%\swift\
+  -p:SDK_ROOT=%SDKInstallRoot%\
 :: TODO(compnerd) actually perform the code-signing
 :: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\sdk\sdk.msi
 

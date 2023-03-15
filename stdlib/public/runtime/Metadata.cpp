@@ -75,6 +75,19 @@ extern "C" void _objc_setClassCopyFixupHandler(void (* _Nonnull newFixupHandler)
 using namespace swift;
 using namespace metadataimpl;
 
+#if defined(__APPLE__)
+// Binaries using noncopyable types check the address of the symbol
+// `swift_runtimeSupportsNoncopyableTypes` before exposing any noncopyable
+// type metadata through in-process reflection, to prevent existing code
+// that expects all types to be copyable from crashing or causing bad behavior
+// by copying noncopyable types. The runtime does not yet support noncopyable
+// types, so we explicitly define this symbol to be zero for now. Binaries
+// weak-import this symbol so they will resolve it to a zero address on older
+// runtimes as well.
+__asm__("  .globl _swift_runtimeSupportsNoncopyableTypes\n");
+__asm__(".set _swift_runtimeSupportsNoncopyableTypes, 0\n");
+#endif
+
 // GenericParamDescriptor is a single byte, so while it's difficult to
 // imagine needing even a quarter this many generic params, there's very
 // little harm in doing it.
@@ -1023,8 +1036,8 @@ namespace {
       // If there isn't one there, optimistically create an entry and
       // try to swap it in.
       if (!existingEntry) {
-        auto allocatedEntry =
-          new SingletonMetadataCacheEntry(std::forward<ArgTys>(args)...);
+        auto allocatedEntry = swift_cxx_newObject<SingletonMetadataCacheEntry>(
+            std::forward<ArgTys>(args)...);
         if (cache.Private.compare_exchange_strong(existingEntry,
                                                   allocatedEntry,
                                                   std::memory_order_acq_rel,
@@ -3303,12 +3316,12 @@ initGenericObjCClass(ClassMetadata *self, size_t numFields,
     if (!_globalIvarOffsets) {
       if (numFields <= NumInlineGlobalIvarOffsets) {
         _globalIvarOffsets = _inlineGlobalIvarOffsets;
+        // Make sure all the entries start out null.
+        memset(_globalIvarOffsets, 0, sizeof(size_t *) * numFields);
       } else {
-        _globalIvarOffsets = new size_t*[numFields];
+        _globalIvarOffsets =
+            static_cast<size_t **>(calloc(sizeof(size_t *), numFields));
       }
-
-      // Make sure all the entries start out null.
-      memset(_globalIvarOffsets, 0, sizeof(size_t*) * numFields);
     }
     return _globalIvarOffsets;
   };
@@ -3368,7 +3381,7 @@ initGenericObjCClass(ClassMetadata *self, size_t numFields,
 
     // Free the out-of-line if we allocated one.
     if (_globalIvarOffsets != _inlineGlobalIvarOffsets) {
-      delete [] _globalIvarOffsets;
+      free(_globalIvarOffsets);
     }
   }
 
@@ -5676,7 +5689,6 @@ swift::swift_getWitnessTable(const ProtocolConformanceDescriptor *conformance,
   return uniqueForeignWitnessTableRef(result.second);
 }
 
-#if SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
 namespace {
 
 /// A cache-entry type suitable for use with LockingConcurrentMap.
@@ -5974,7 +5986,6 @@ swift::swift_getWitnessTableRelative(const ProtocolConformanceDescriptor *confor
   return reinterpret_cast<RelativeWitnessTable*>(((uintptr_t)table) |
                                                  (uintptr_t)0x1);
 }
-#endif
 
 /// Find the name of the associated type with the given descriptor.
 static StringRef findAssociatedTypeName(const ProtocolDescriptor *protocol,
@@ -6196,7 +6207,6 @@ RelativeWitnessTable *swift::lookThroughOptionalConditionalWitnessTable(
   return table;
 }
 
-#if SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
 SWIFT_CC(swift)
 static MetadataResponse
 swift_getAssociatedTypeWitnessRelativeSlowImpl(
@@ -6251,7 +6261,8 @@ swift_getAssociatedTypeWitnessRelativeSlowImpl(
   auto result = swift_getTypeByMangledName(
       request, mangledName, substitutions.getGenericArgs(),
       [&substitutions](unsigned depth, unsigned index) {
-        return substitutions.getMetadata(depth, index);
+        // FIXME: Variadic generics
+        return substitutions.getMetadata(depth, index).getMetadata();
       },
       [&substitutions](const Metadata *type, unsigned index) {
         return substitutions.getWitnessTable(type, index);
@@ -6293,7 +6304,6 @@ swift::swift_getAssociatedTypeWitnessRelative(MetadataRequest request,
                                                     conformingType, reqBase,
                                                     assocType);
 }
-#endif
 
 using AssociatedConformanceWitness = std::atomic<void *>;
 
@@ -6438,7 +6448,6 @@ const WitnessTable *swift::swift_getAssociatedConformanceWitness(
                                                    assocConformance);
 }
 
-#if SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
 SWIFT_CC(swift)
 static const RelativeWitnessTable *swift_getAssociatedConformanceWitnessRelativeSlowImpl(
                                   RelativeWitnessTable *wtable,
@@ -6527,7 +6536,6 @@ const RelativeWitnessTable *swift::swift_getAssociatedConformanceWitnessRelative
                                                    assocType, reqBase,
                                                    assocConformance);
 }
-#endif
 
 bool swift::swift_compareProtocolConformanceDescriptors(
     const ProtocolConformanceDescriptor *lhs,

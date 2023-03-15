@@ -1637,10 +1637,6 @@ public:
   /// \c isObjCImplementation() returns \c true.
   Optional<Identifier> getCategoryNameForObjCImplementation() const;
 
-  /// If this extension represents an imported Objective-C category, returns the
-  /// category's name. Otherwise returns the empty identifier.
-  Identifier getObjCCategoryName() const;
-
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::Extension;
@@ -4502,6 +4498,10 @@ public:
   /// i.e. the first class in its hierarchy that is a default actor.
   bool isRootDefaultActor() const;
   bool isRootDefaultActor(ModuleDecl *M, ResilienceExpansion expansion) const;
+
+  /// It is a `distributed actor` with a custom executor.
+  bool isNonDefaultExplicitDistributedActor() const;
+  bool isNonDefaultExplicitDistributedActor(ModuleDecl *M, ResilienceExpansion expansion) const;
 
   /// Whether the class was explicitly declared with the `actor` keyword.
   bool isExplicitActor() const { return Bits.ClassDecl.IsActor; }

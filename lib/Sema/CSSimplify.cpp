@@ -3007,12 +3007,9 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
         return getTypeMatchFailure(locator);
     }
 
-    bool forClosureInArgumentPosition = false;
-    if (auto last = locator.last()) {
-      forClosureInArgumentPosition =
-          last->is<LocatorPathElt::ApplyArgToParam>() &&
-          isa<ClosureExpr>(locator.trySimplifyToExpr());
-    }
+    bool forClosureInArgumentPosition =
+        locator.endsWith<LocatorPathElt::ApplyArgToParam>() &&
+        isa<ClosureExpr>(locator.trySimplifyToExpr());
 
     // Since it's possible to infer `async` from the body of a
     // closure, score for sync -> async mismatch is increased
@@ -4255,12 +4252,10 @@ ConstraintSystem::matchTypesBindTypeVar(
   // to a particular type e.g. `l-value` or `inout`.
   auto fixReferenceMismatch = [&](TypeVariableType *typeVar,
                                   Type type) -> bool {
-    if (auto last = locator.last()) {
-      if (last->is<LocatorPathElt::ContextualType>()) {
-        auto *fix = IgnoreContextualType::create(*this, typeVar, type,
-                                                 getConstraintLocator(locator));
-        return !recordFix(fix);
-      }
+    if (locator.endsWith<LocatorPathElt::ContextualType>()) {
+      auto *fix = IgnoreContextualType::create(*this, typeVar, type,
+                                               getConstraintLocator(locator));
+      return !recordFix(fix);
     }
 
     return false;
@@ -4561,8 +4556,7 @@ repairViaOptionalUnwrap(ConstraintSystem &cs, Type fromType, Type toType,
   // `let _: Bool = try? foo()` and `foo()` produces `Int`
   // we should diagnose it as type mismatch instead of missing unwrap.
   bool possibleContextualMismatch = [&]() {
-    auto last = locator.last();
-    if (!(last && last->is<LocatorPathElt::ContextualType>()))
+    if (!locator.endsWith<LocatorPathElt::ContextualType>())
       return false;
 
     // If the contextual type is optional as well, it's definitely a
@@ -4695,8 +4689,7 @@ repairViaOptionalUnwrap(ConstraintSystem &cs, Type fromType, Type toType,
   // variable e.g. `T?`, there can be no optional mismatch
   // because `T` could be bound to an optional of any depth.
   if (isa<OptionalEvaluationExpr>(anchor) && toUnwraps > 0) {
-    auto last = locator.last();
-    if (last && last->is<LocatorPathElt::ContextualType>() &&
+    if (locator.endsWith<LocatorPathElt::ContextualType>() &&
         toObjectType->is<TypeVariableType>())
       return false;
   }
@@ -6664,13 +6657,11 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
       // producing diagnostics for both missing conformance and
       // invalid element type.
       if (shouldAttemptFixes()) {
-        if (auto last = locator.last()) {
-          if (last->is<LocatorPathElt::SequenceElementType>() &&
-              desugar1->is<DependentMemberType>() &&
-              !desugar1->hasTypeVariable()) {
-            recordPotentialHole(typeVar2);
-            return getTypeMatchSuccess();
-          }
+        if (locator.endsWith<LocatorPathElt::SequenceElementType>() &&
+            desugar1->is<DependentMemberType>() &&
+            !desugar1->hasTypeVariable()) {
+          recordPotentialHole(typeVar2);
+          return getTypeMatchSuccess();
         }
       }
 
@@ -6911,35 +6902,33 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
         ConstraintLocatorBuilder location{locator};
         // Look through all value-to-optional promotions to allow
         // conversions like Double -> CGFloat?? and vice versa.
-        if (auto last = location.last()) {
-          // T -> Optional<T>
-          if (last->is<LocatorPathElt::OptionalPayload>()) {
-            SmallVector<LocatorPathElt, 4> path;
-            auto anchor = location.getLocatorParts(path);
+        // T -> Optional<T>
+        if (location.endsWith<LocatorPathElt::OptionalPayload>()) {
+          SmallVector<LocatorPathElt, 4> path;
+          auto anchor = location.getLocatorParts(path);
 
-            // An attempt at Double/CGFloat conversion through
-            // optional chaining. This is not supported at the
-            // moment because solution application doesn't know
-            // how to map Double to/from CGFloat through optionals.
-            if (isExpr<OptionalEvaluationExpr>(anchor)) {
-              if (!shouldAttemptFixes())
-                return getTypeMatchFailure(locator);
+          // An attempt at Double/CGFloat conversion through
+          // optional chaining. This is not supported at the
+          // moment because solution application doesn't know
+          // how to map Double to/from CGFloat through optionals.
+          if (isExpr<OptionalEvaluationExpr>(anchor)) {
+            if (!shouldAttemptFixes())
+              return getTypeMatchFailure(locator);
 
-              conversionsOrFixes.push_back(ContextualMismatch::create(
-                  *this, nominal1, nominal2, getConstraintLocator(locator)));
-              break;
-            }
-
-            // Drop all of the applied `value-to-optional` promotions.
-            path.erase(llvm::remove_if(
-                           path,
-                           [](const LocatorPathElt &elt) {
-                             return elt.is<LocatorPathElt::OptionalPayload>();
-                           }),
-                       path.end());
-
-            location = getConstraintLocator(anchor, path);
+            conversionsOrFixes.push_back(ContextualMismatch::create(
+                *this, nominal1, nominal2, getConstraintLocator(locator)));
+            break;
           }
+
+          // Drop all of the applied `value-to-optional` promotions.
+          path.erase(llvm::remove_if(
+                         path,
+                         [](const LocatorPathElt &elt) {
+                           return elt.is<LocatorPathElt::OptionalPayload>();
+                         }),
+                     path.end());
+
+          location = getConstraintLocator(anchor, path);
         }
 
         // Support implicit Double<->CGFloat conversions only for
@@ -7400,6 +7389,14 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
                 if (type1->isArrayType()) {
                   conversionsOrFixes.push_back(
                       ConversionRestrictionKind::ArrayToPointer);
+
+                  // If regular array-to-pointer conversion doesn't work,
+                  // let's try C pointer conversion that has special semantics
+                  // for imported declarations.
+                  if (isArgumentOfImportedDecl(locator)) {
+                    conversionsOrFixes.push_back(
+                        ConversionRestrictionKind::ArrayToCPointer);
+                  }
                 }
 
                 // The pointer can be converted from a string, if the element
@@ -8122,12 +8119,10 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
       // as well, and if so, avoid producing a fix here, because
       // contextual mismatch mentions the source/destination
       // types of the assignment.
-      if (auto last = locator.last()) {
-        if (last->is<LocatorPathElt::FunctionResult>() &&
-            hasFixFor(getConstraintLocator(anchor,
-                                           LocatorPathElt::FunctionArgument())))
-          return SolutionKind::Solved;
-      }
+      if (locator.endsWith<LocatorPathElt::FunctionResult>() &&
+          hasFixFor(
+              getConstraintLocator(anchor, LocatorPathElt::FunctionArgument())))
+        return SolutionKind::Solved;
 
       auto srcType = getType(assignment->getSrc());
       auto dstType = getType(assignment->getDest());
@@ -8450,9 +8445,7 @@ static ConstraintFix *maybeWarnAboutExtraneousCast(
     SmallVector<Type, 4> toOptionals,
     ConstraintSystem::TypeMatchOptions flags,
     ConstraintLocatorBuilder locator) {
-
-  auto last = locator.last();
-  if (last && last->is<LocatorPathElt::GenericArgument>())
+  if (locator.endsWith<LocatorPathElt::GenericArgument>())
     return nullptr;
 
   // Both types have to be fixed.
@@ -9972,17 +9965,13 @@ static bool inferEnumMemberThroughTildeEqualsOperator(
   if (!pattern->hasUnresolvedOriginalExpr())
     return true;
 
-  auto *DC = pattern->getDeclContext();
   auto &ctx = cs.getASTContext();
 
   // Retrieve a corresponding ExprPattern which we can solve with ~=.
   auto *EP =
       llvm::cantFail(ctx.evaluator(EnumElementExprPatternRequest{pattern}));
 
-  // result of ~= operator is always a `Bool`.
-  auto *matchCall = EP->getMatchExpr();
-  auto target = SyntacticElementTarget::forExprPattern(
-      matchCall, DC, EP, ctx.getBoolDecl()->getDeclaredInterfaceType());
+  auto target = SyntacticElementTarget::forExprPattern(EP);
 
   DiagnosticTransaction diagnostics(ctx.Diags);
   {
@@ -11906,11 +11895,9 @@ ConstraintSystem::simplifyKeyPathApplicationConstraint(
 
   // When locator points to a KeyPathDynamicMemberLookup, reject the
   // key path application.
-  auto last = locator.last();
-  if (last && last->isKeyPathDynamicMember()) {
+  if (locator.endsWith<LocatorPathElt::KeyPathDynamicMember>())
     return SolutionKind::Error;
-  }
-  
+
   if (keyPathTy->isAnyKeyPath()) {
     // Read-only keypath, whose projected value is upcast to `Any?`.
     // The root type can be anything.
@@ -13457,6 +13444,31 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
   case ConversionRestrictionKind::PointerToCPointer:
     return simplifyPointerToCPointerRestriction(type1, type2, flags, locator);
 
+  case ConversionRestrictionKind::ArrayToCPointer: {
+    auto ptr2 = type2->getDesugaredType()->lookThroughAllOptionalTypes();
+
+    PointerTypeKind pointerKind;
+    auto cPtr = ptr2->getAnyPointerElementType(pointerKind);
+
+    // If the parameter is a raw pointer or its element type is not a
+    // supported (un-)signed integer it implies a regular ArrayToPointer
+    // conversion.
+    if (isRawPointerKind(pointerKind) ||
+        !(cPtr->isInt()   || cPtr->isUInt()   ||
+          cPtr->isInt8()  || cPtr->isUInt8()  ||
+          cPtr->isInt16() || cPtr->isUInt16() ||
+          cPtr->isInt32() || cPtr->isUInt32() ||
+          cPtr->isInt64() || cPtr->isUInt64())) {
+      return SolutionKind::Error;
+    }
+
+    increaseScore(SK_ValueToPointerConversion);
+
+    type1 = getFixedTypeRecursive(type1->getInOutObjectType()->isArrayType(),
+                                  /*wantRValue=*/false);
+    LLVM_FALLTHROUGH;
+  }
+
   case ConversionRestrictionKind::InoutToCPointer: {
     SmallVector<Type, 2> optionals;
 
@@ -13720,12 +13732,7 @@ ConstraintSystem::simplifyPointerToCPointerRestriction(
     Type type1, Type type2, TypeMatchOptions flags,
     ConstraintLocatorBuilder locator) {
   bool inCorrectPosition = isArgumentOfImportedDecl(locator);
-
-  if (inCorrectPosition) {
-    // Make sure that solutions with implicit pointer conversions
-    // are always worse than the ones without them.
-    increaseScore(SK_ImplicitValueConversion);
-  } else {
+  if (!inCorrectPosition) {
     // If this is not an imported function, let's not proceed with
     // the conversion, unless in diagnostic mode.
     if (!shouldAttemptFixes())
@@ -13746,6 +13753,10 @@ ConstraintSystem::simplifyPointerToCPointerRestriction(
   assert(cPtr);
 
   auto markSupported = [&]() -> SolutionKind {
+    // Make sure that solutions with implicit pointer conversions
+    // are always worse than the ones without them.
+    increaseScore(SK_ImplicitValueConversion);
+
     if (inCorrectPosition)
       return SolutionKind::Solved;
 
@@ -13756,6 +13767,23 @@ ConstraintSystem::simplifyPointerToCPointerRestriction(
 
     return recordFix(fix) ? SolutionKind::Error : SolutionKind::Solved;
   };
+
+  auto elementLoc = locator.withPathElement(LocatorPathElt::GenericArgument(0));
+
+  if (swiftPtr->isTypeVariableOrMember()) {
+    // Inference between the equivalent pointer kinds is
+    // handled by regular pointer conversions.
+    if (swiftPtrKind == cPtrKind)
+      return SolutionKind::Error;
+
+    addConstraint(ConstraintKind::BindToPointerType, swiftPtr, cPtr,
+                  elementLoc);
+    return markSupported();
+  }
+
+  // If pointers have the same element type there is nothing to do.
+  if (swiftPtr->isEqual(cPtr))
+    return markSupported();
 
   // Unsafe[Mutable]RawPointer -> Unsafe[Mutable]Pointer<[U]Int8>
   if (swiftPtrKind == PTK_UnsafeRawPointer ||
@@ -13768,18 +13796,12 @@ ConstraintSystem::simplifyPointerToCPointerRestriction(
     // Unsafe[Mutable]Pointer<T> -> Unsafe[Mutable]Pointer<[U]Int8>
     if (cPtr->isInt8() || cPtr->isUInt8()) {
       // <T> can default to the type of C pointer.
-      addConstraint(
-          ConstraintKind::Defaultable, swiftPtr, cPtr,
-          locator.withPathElement(LocatorPathElt::GenericArgument(0)));
+      addConstraint(ConstraintKind::Defaultable, swiftPtr, cPtr, elementLoc);
       return markSupported();
     }
 
-    auto elementLoc =
-        locator.withPathElement(LocatorPathElt::GenericArgument(0));
-
     // Unsafe[Mutable]Pointer<Int{8, 16, ...}> <->
     // Unsafe[Mutable]Pointer<UInt{8, 16, ...}>
-
     if (swiftPtr->isInt() || swiftPtr->isUInt()) {
       addConstraint(ConstraintKind::Equal, cPtr,
                     swiftPtr->isUInt() ? ctx.getIntType() : ctx.getUIntType(),
@@ -14157,12 +14179,10 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
     // an l-value, it has to have an increased impact because it's either
     // a function - which is completely incorrect, or it's a get-only
     // subscript, which requires changes to declaration to become mutable.
-    if (auto last = locator.last()) {
-      impact += (last->is<LocatorPathElt::FunctionResult>() ||
-                 last->is<LocatorPathElt::SubscriptMember>())
-                    ? 1
-                    : 0;
-    }
+    impact += (locator.endsWith<LocatorPathElt::FunctionResult>() ||
+               locator.endsWith<LocatorPathElt::SubscriptMember>())
+                  ? 1
+                  : 0;
 
     return recordFix(fix, impact) ? SolutionKind::Error : SolutionKind::Solved;
   }
