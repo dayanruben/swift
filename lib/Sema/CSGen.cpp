@@ -3057,6 +3057,7 @@ namespace {
           CS.getConstraintLocator(expr, ConstraintLocator::PackExpansionPattern);
       auto patternTy = CS.createTypeVariable(patternLoc,
                                              TVO_CanBindToPack |
+                                             TVO_CanBindToNoEscape |
                                              TVO_CanBindToHole);
       auto elementResultType = CS.getType(expr->getPatternExpr());
       CS.addConstraint(ConstraintKind::PackElementOf, elementResultType,
@@ -3306,7 +3307,8 @@ namespace {
       if (repr) CS.setType(repr, toType);
 
       auto fromType = CS.getType(expr->getSubExpr());
-      auto locator = CS.getConstraintLocator(expr);
+      auto locator =
+          CS.getConstraintLocator(expr, ConstraintLocator::CoercionOperand);
 
       // Literal initialization (e.g. `UInt32(0)`) doesn't require
       // a conversion because the literal is supposed to assume the
@@ -3326,8 +3328,11 @@ namespace {
 
       // If the result type was declared IUO, add a disjunction for
       // bindings for the result of the coercion.
-      if (repr && repr->getKind() == TypeReprKind::ImplicitlyUnwrappedOptional)
-        return createTypeVariableAndDisjunctionForIUOCoercion(toType, locator);
+      if (repr &&
+          repr->getKind() == TypeReprKind::ImplicitlyUnwrappedOptional) {
+        return createTypeVariableAndDisjunctionForIUOCoercion(
+            toType, CS.getConstraintLocator(expr));
+      }
 
       return toType;
     }

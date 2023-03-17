@@ -282,6 +282,9 @@ ValueDecl *RequirementFailure::getDeclRef() const {
     return getAffectedDeclFromType(contextualTy);
   }
 
+  if (getLocator()->isFirstElement<LocatorPathElt::CoercionOperand>())
+    return getAffectedDeclFromType(getOwnerType());
+
   if (auto overload = getCalleeOverloadChoiceIfAvailable(getLocator())) {
     // If there is a declaration associated with this
     // failure e.g. an overload choice of the call
@@ -786,7 +789,8 @@ bool GenericArgumentsMismatchFailure::diagnoseAsError() {
   //
   // `value` has to get implicitly wrapped into 2 optionals
   // before pointer types could be compared.
-  auto path = getLocator()->getPath();
+  auto locator = getLocator();
+  auto path = locator->getPath();
   unsigned toDrop = 0;
   for (const auto &elt : llvm::reverse(path)) {
     if (!elt.is<LocatorPathElt::OptionalPayload>())
@@ -802,7 +806,7 @@ bool GenericArgumentsMismatchFailure::diagnoseAsError() {
   if (path.empty()) {
     if (isExpr<AssignExpr>(anchor)) {
       diagnostic = getDiagnosticFor(CTP_AssignSource);
-    } else if (isExpr<CoerceExpr>(anchor)) {
+    } else if (locator->isForCoercion()) {
       diagnostic = getDiagnosticFor(CTP_CoerceOperand);
     } else {
       return false;
@@ -884,6 +888,11 @@ bool GenericArgumentsMismatchFailure::diagnoseAsError() {
 
     case ConstraintLocator::UnresolvedMemberChainResult: {
       diagnostic = diag::cannot_convert_chain_result_type;
+      break;
+    }
+
+    case ConstraintLocator::CoercionOperand: {
+      diagnostic = getDiagnosticFor(CTP_CoerceOperand);
       break;
     }
 
@@ -1217,6 +1226,14 @@ ASTNode InvalidCoercionFailure::getAnchor() const {
   if (auto *assignExpr = getAsExpr<AssignExpr>(anchor))
     return assignExpr->getSrc();
   return anchor;
+}
+
+SourceLoc InvalidCoercionFailure::getLoc() const {
+  if (getLocator()->isForCoercion()) {
+    auto *CE = castToExpr<CoerceExpr>(getRawAnchor());
+    return CE->getAsLoc();
+  }
+  return FailureDiagnostic::getLoc();
 }
 
 bool InvalidCoercionFailure::diagnoseAsError() {
@@ -2487,7 +2504,7 @@ bool ContextualFailure::diagnoseAsError() {
     diagnostic = diag::cannot_convert_condition_value;
     break;
   }
-      
+  case ConstraintLocator::CoercionOperand:
   case ConstraintLocator::InstanceType: {
     if (diagnoseCoercionToUnrelatedType())
       return true;
@@ -2809,7 +2826,7 @@ bool ContextualFailure::diagnoseConversionToNil() const {
         emitDiagnostic(diag::unresolved_nil_literal);
         return true;
       }
-    } else if (isa<CoerceExpr>(parentExpr)) {
+    } else if (locator->isForCoercion()) {
       // `nil` is passed as a left-hand side of the coercion
       // operator e.g. `nil as Foo`
       CTP = CTP_CoerceOperand;
@@ -2891,23 +2908,23 @@ bool ContextualFailure::diagnoseExtraneousAssociatedValues() const {
 }
 
 bool ContextualFailure::diagnoseCoercionToUnrelatedType() const {
-  auto anchor = getAnchor();
-
-  if (auto *coerceExpr = getAsExpr<CoerceExpr>(anchor)) {
-    const auto fromType = getType(coerceExpr->getSubExpr());
-    const auto toType = getType(coerceExpr->getCastTypeRepr());
-
-    auto diagnostic = getDiagnosticFor(CTP_CoerceOperand, toType);
-
-    auto diag = emitDiagnostic(*diagnostic, fromType, toType);
-    diag.highlight(getSourceRange());
-
-    (void)tryFixIts(diag);
-    
-    return true;
+  auto anchor = getRawAnchor();
+  auto *coerceExpr = getAsExpr<CoerceExpr>(anchor);
+  if (!coerceExpr) {
+    return false;
   }
 
-  return false;
+  const auto fromType = getType(coerceExpr->getSubExpr());
+  const auto toType = getType(coerceExpr->getCastTypeRepr());
+
+  auto diagnostic = getDiagnosticFor(CTP_CoerceOperand, toType);
+
+  auto diag = emitDiagnostic(*diagnostic, fromType, toType);
+  diag.highlight(getSourceRange());
+
+  (void)tryFixIts(diag);
+
+  return true;
 }
 
 bool ContextualFailure::diagnoseConversionToBool() const {
@@ -3178,9 +3195,6 @@ bool ContextualFailure::trySequenceSubsequenceFixIts(
   if (getFromType()->isSubstring()) {
     if (getToType()->isString()) {
       auto *anchor = castToExpr(getAnchor())->getSemanticsProvidingExpr();
-      if (auto *CE = dyn_cast<CoerceExpr>(anchor)) {
-        anchor = CE->getSubExpr();
-      }
 
       if (auto *call = dyn_cast<CallExpr>(anchor)) {
         auto *fnExpr = call->getFn();
@@ -3801,6 +3815,131 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
       !isa_and_nonnull<clang::CXXRecordDecl>(
           baseType->getAnyNominal()->getClangDecl()))
     return;
+  
+  if (name.getBaseIdentifier().str() == "getFromPointer" ||
+      name.getBaseIdentifier().str() == "isValid" ||
+      name.getBaseIdentifier().str() == "__dataUnsafe" ||
+      name.getBaseIdentifier().str() == "__getOpaquePointerValueUnsafe" ||
+      name.getBaseIdentifier().str() == "__getStartUnsafe" ||
+      name.getBaseIdentifier().str() == "__c_strUnsafe") {
+    // OK, we did not find a member that we probably should have.
+    // Dump the world.
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+    llvm::dbgs() << "Hello! You have unfortuantly stubled across an interop bug that we have been trying to track down for a while. Please reach out to Zoe Carver and provide a link to this build. You can re-run this build and it should work next time. Sorry for the inconvience.\n\n";
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+    
+    llvm::dbgs() << "THE NAME: "; name.dump();
+    
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+
+    auto cxxRecord = cast<clang::CXXRecordDecl>(baseType->getAnyNominal()->getClangDecl());
+    llvm::dbgs() << "CXX RECORD: "; cxxRecord->dump();
+    
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+
+    auto dumpRedecls = [](const clang::CXXRecordDecl *cxxRecordToDump) {
+      llvm::dbgs() << "REDECLS:\n";
+      unsigned redeclIdx = 0;
+      for (auto redecl : cxxRecordToDump->redecls()) {
+        llvm::dbgs() << "REDECL(" << redeclIdx << "): "; redecl->dump();
+        redeclIdx++;
+      }
+    };
+    
+    dumpRedecls(cxxRecord);
+    
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+    if (name.getBaseIdentifier().str() == "getFromPointer" ||
+        name.getBaseIdentifier().str() == "isValid") {
+      llvm::dbgs() << "LOOKUP UNSAFE VERSION:\n";
+      auto unsafeId =
+          ctx.getIdentifier("__" + name.getBaseIdentifier().str().str() + "Unsafe");
+      for (auto found :
+           baseType->getAnyNominal()->lookupDirect(DeclBaseName(unsafeId))) {
+        llvm::dbgs() << "**FOUND UNSAFE VERSION**\n";
+        llvm::dbgs() << "UNSAFE: ";
+        found->dump();
+
+        if (auto cxxMethod = dyn_cast_or_null<clang::CXXMethodDecl>(found->getClangDecl())) {
+          llvm::dbgs() << "FOUND CXX METHOD.";
+          auto returnType = cxxMethod->getReturnType();
+          llvm::dbgs() << "CXX METHOD RETURN TYPE: ";
+          returnType->dump();
+          
+          llvm::dbgs() << "CAN RETURN TYPE: ";
+          returnType->getCanonicalTypeUnqualified().dump();
+          
+          if (auto recordType = dyn_cast<clang::RecordType>(returnType)) {
+            dumpRedecls(returnType->getAsCXXRecordDecl());
+          } else {
+            llvm::dbgs() << "NOT A RECORD TYPE\n";
+          }
+        }
+      }
+    } else {
+      std::string safeName;
+      if (name.getBaseIdentifier().str() == "__dataUnsafe")
+        safeName = "data";
+      if (name.getBaseIdentifier().str() == "__getOpaquePointerValueUnsafe")
+        safeName = "getOpaquePointerValue";
+      if (name.getBaseIdentifier().str() == "__getStartUnsafe")
+        safeName = "getStart";
+      if (name.getBaseIdentifier().str() == "__c_strUnsafe")
+        safeName = "c_str";
+      
+      auto safeId = ctx.getIdentifier(safeName);
+      for (auto found :
+           baseType->getAnyNominal()->lookupDirect(DeclBaseName(safeId))) {
+        llvm::dbgs() << "**FOUND SAFE VERSION**\n";
+        llvm::dbgs() << "UNSAFE: ";
+        found->dump();
+
+        if (auto cxxMethod = dyn_cast_or_null<clang::CXXMethodDecl>(found->getClangDecl())) {
+          llvm::dbgs() << "FOUND CXX METHOD.";
+          auto returnType = cxxMethod->getReturnType();
+          llvm::dbgs() << "CXX METHOD RETURN TYPE: ";
+          returnType->dump();
+          
+          llvm::dbgs() << "CAN RETURN TYPE: ";
+          returnType->getCanonicalTypeUnqualified().dump();
+          
+          if (auto recordType = dyn_cast<clang::RecordType>(returnType)) {
+            dumpRedecls(returnType->getAsCXXRecordDecl());
+          } else {
+            llvm::dbgs() << "NOT A RECORD TYPE\n";
+          }
+        }
+      }
+    }
+    
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+    llvm::dbgs() << "(IMPORTED) SWIFT TYPE: ";
+    baseType->dump();
+    
+    llvm::dbgs() << "(IMPORTED) SWIFT DECL: ";
+    baseType->getAnyNominal()->dump();
+    
+    // And for my final trick, I will dump the whole lookup table.
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "====================================================\n\n";
+    llvm::dbgs() << "LOOKUP TABLE: ";
+    
+    if (auto clangModule = cxxRecord->getOwningModule()) {
+      dumpSwiftLookupTable(ctx.getClangModuleLoader()->findLookupTable(clangModule));
+    } else {
+      llvm::dbgs() << "NO MODULE\n";
+    }
+    
+    llvm::dbgs() << "====================================================\n";
+    llvm::dbgs() << "DBUG DUMP DONE\n";
+    llvm::dbgs() << "====================================================\n\n";
+  }
 
   auto unsafeId =
       ctx.getIdentifier("__" + name.getBaseIdentifier().str().str() + "Unsafe");
@@ -5735,9 +5874,15 @@ bool ExtraneousArgumentsFailure::diagnoseAsNote() {
 
   auto *decl = overload->choice.getDecl();
   auto numArgs = getTotalNumArguments();
-  emitDiagnosticAt(decl, diag::candidate_with_extraneous_args, ContextualType,
-                   ContextualType->getNumParams(), numArgs, (numArgs == 1),
-                   isExpr<ClosureExpr>(getAnchor()));
+  if (isExpr<ClosureExpr>(getAnchor())) {
+    emitDiagnosticAt(decl, diag::candidate_with_extraneous_args_closure,
+                     ContextualType, ContextualType->getNumParams(), numArgs,
+                     (numArgs == 1));
+  } else {
+    emitDiagnosticAt(decl, diag::candidate_with_extraneous_args,
+                     overload->adjustedOpenedType, numArgs, ContextualType,
+                     ContextualType->getNumParams());
+  }
   return true;
 }
 
@@ -8177,6 +8322,13 @@ bool CouldNotInferPlaceholderType::diagnoseAsError() {
     }
   }
 
+  // When placeholder type appears in an editor placeholder i.e.
+  // `<#T##() -> _#>` we rely on the parser to produce a diagnostic
+  // about editor placeholder and glance over all placeholder type
+  // inference issues.
+  if (isExpr<EditorPlaceholderExpr>(getAnchor()))
+    return true;
+
   return false;
 }
 
@@ -8753,12 +8905,7 @@ GlobalActorFunctionMismatchFailure::getDiagnosticMessage() const {
   auto path = locator->getPath();
 
   if (path.empty()) {
-    auto anchor = getAnchor();
-    if (isExpr<CoerceExpr>(anchor)) {
-      return diag::cannot_convert_global_actor_coercion;
-    } else {
-      return diag::cannot_convert_global_actor;
-    }
+    return diag::cannot_convert_global_actor;
   }
 
   auto last = path.back();
@@ -8775,6 +8922,9 @@ GlobalActorFunctionMismatchFailure::getDiagnosticMessage() const {
   }
   case ConstraintLocator::TernaryBranch: {
     return diag::ternary_expr_cases_global_actor_mismatch;
+  }
+  case ConstraintLocator::CoercionOperand: {
+    return diag::cannot_convert_global_actor_coercion;
   }
   default:
     break;

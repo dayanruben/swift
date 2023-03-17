@@ -5144,7 +5144,8 @@ GenericEnvironment::forOpenedExistential(
 /// Create a new generic environment for an element archetype.
 GenericEnvironment *
 GenericEnvironment::forOpenedElement(GenericSignature signature,
-                                     UUID uuid, CanType shapeClass,
+                                     UUID uuid,
+                                     CanGenericTypeParamType shapeClass,
                                      SubstitutionMap outerSubs) {
   auto &ctx = signature->getASTContext();
 
@@ -5163,10 +5164,12 @@ GenericEnvironment::forOpenedElement(GenericSignature signature,
 
   // Allocate and construct the new environment.
   unsigned numGenericParams = signature.getGenericParams().size();
+  unsigned numOpenedParams = signature.getInnermostGenericParams().size();
   size_t bytes = totalSizeToAlloc<OpaqueEnvironmentData,
                                   OpenedExistentialEnvironmentData,
-                                  OpenedElementEnvironmentData, Type>(
-      0, 0, 1, numGenericParams);
+                                  OpenedElementEnvironmentData,
+                                  Type>(
+      0, 0, 1, numGenericParams + numOpenedParams);
   void *mem = ctx.Allocate(bytes, alignof(GenericEnvironment));
   auto *genericEnv = new (mem) GenericEnvironment(signature,
                                                   uuid, shapeClass,
@@ -5735,7 +5738,7 @@ ASTContext::getOpenedExistentialSignature(Type type, GenericSignature parentSig)
 
 CanGenericSignature
 ASTContext::getOpenedElementSignature(CanGenericSignature baseGenericSig,
-                                      CanType shapeClass) {
+                                      CanGenericTypeParamType shapeClass) {
   auto &sigs = getImpl().ElementSignatures;
   auto key = std::make_pair(shapeClass, baseGenericSig.getPointer());
   auto found = sigs.find(key);
@@ -5774,7 +5777,7 @@ ASTContext::getOpenedElementSignature(CanGenericSignature baseGenericSig,
 
     // Only include opened element parameters for packs in the given
     // shape equivalence class.
-    if (!baseGenericSig->haveSameShape(paramType, shapeClass->mapTypeOutOfContext()))
+    if (!baseGenericSig->haveSameShape(paramType, shapeClass))
       continue;
 
     auto *elementParam = GenericTypeParamType::get(/*isParameterPack*/false,
