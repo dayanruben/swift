@@ -428,6 +428,12 @@ enum class FixKind : uint8_t {
 
   /// Allow 'each' applied to a non-pack type.
   AllowInvalidPackElement,
+
+  /// Allow pack references outside of pack expansions.
+  AllowInvalidPackReference,
+
+  /// Allow pack expansion expressions in a context that does not support them.
+  AllowInvalidPackExpansion,
 };
 
 class ConstraintFix {
@@ -1474,6 +1480,8 @@ public:
   ValueDecl *getMember() const { return Member; }
 
   DeclNameRef getMemberName() const { return Name; }
+
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override;
 };
 
 class AllowMemberRefOnExistential final : public AllowInvalidMemberRef {
@@ -2096,6 +2104,50 @@ public:
 
   static bool classof(const ConstraintFix *fix) {
     return fix->getKind() == FixKind::AllowInvalidPackElement;
+  }
+};
+
+class AllowInvalidPackReference final : public ConstraintFix {
+  Type packType;
+
+  AllowInvalidPackReference(ConstraintSystem &cs, Type packType,
+                            ConstraintLocator *locator)
+      : ConstraintFix(cs, FixKind::AllowInvalidPackReference, locator),
+        packType(packType) {}
+
+public:
+  std::string getName() const override {
+    return "allow pack outside pack expansion";
+  }
+
+  bool diagnose(const Solution &solution, bool asNote = false) const override;
+
+  static AllowInvalidPackReference *create(ConstraintSystem &cs,
+                                           Type packType,
+                                           ConstraintLocator *locator);
+
+  static bool classof(const ConstraintFix *fix) {
+    return fix->getKind() == FixKind::AllowInvalidPackReference;
+  }
+};
+
+class AllowInvalidPackExpansion final : public ConstraintFix {
+  AllowInvalidPackExpansion(ConstraintSystem &cs,
+                            ConstraintLocator *locator)
+      : ConstraintFix(cs, FixKind::AllowInvalidPackExpansion, locator) {}
+
+public:
+  std::string getName() const override {
+    return "allow invalid pack expansion";
+  }
+
+  bool diagnose(const Solution &solution, bool asNote = false) const override;
+
+  static AllowInvalidPackExpansion *create(ConstraintSystem &cs,
+                                           ConstraintLocator *locator);
+
+  static bool classof(const ConstraintFix *fix) {
+    return fix->getKind() == FixKind::AllowInvalidPackExpansion;
   }
 };
 

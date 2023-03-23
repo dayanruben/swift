@@ -14,7 +14,7 @@
 
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBasicBlock.h"
-#include "swift/SIL/SILBridgingUtils.h"
+#include "swift/SIL/SILBridging.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/SILDeclRef.h"
 #include "swift/SIL/SILFunction.h"
@@ -144,13 +144,13 @@ SILFunction::create(SILModule &M, SILLinkage linkage, StringRef name,
 }
 
 static SwiftMetatype functionMetatype;
-static FunctionRegisterFn initFunction = nullptr;
-static FunctionRegisterFn destroyFunction = nullptr;
-static FunctionWriteFn writeFunction = nullptr;
-static FunctionParseFn parseFunction = nullptr;
-static FunctionCopyEffectsFn copyEffectsFunction = nullptr;
-static FunctionGetEffectInfoFn getEffectInfoFunction = nullptr;
-static FunctionGetMemBehviorFn getMemBehvaiorFunction = nullptr;
+static BridgedFunction::RegisterFn initFunction = nullptr;
+static BridgedFunction::RegisterFn destroyFunction = nullptr;
+static BridgedFunction::WriteFn writeFunction = nullptr;
+static BridgedFunction::ParseFn parseFunction = nullptr;
+static BridgedFunction::CopyEffectsFn copyEffectsFunction = nullptr;
+static BridgedFunction::GetEffectInfoFn getEffectInfoFunction = nullptr;
+static BridgedFunction::GetMemBehaviorFn getMemBehvaiorFunction = nullptr;
 
 SILFunction::SILFunction(
     SILModule &Module, SILLinkage Linkage, StringRef Name,
@@ -529,6 +529,13 @@ bool SILFunction::isWeakImported(ModuleDecl *module) const {
 
 SILBasicBlock *SILFunction::createBasicBlock() {
   SILBasicBlock *newBlock = new (getModule()) SILBasicBlock(this);
+  BlockList.push_back(newBlock);
+  return newBlock;
+}
+
+SILBasicBlock *SILFunction::createBasicBlock(llvm::StringRef debugName) {
+  SILBasicBlock *newBlock = new (getModule()) SILBasicBlock(this);
+  newBlock->setDebugName(debugName);
   BlockList.push_back(newBlock);
   return newBlock;
 }
@@ -951,12 +958,12 @@ void SILFunction::forEachSpecializeAttrTargetFunction(
   }
 }
 
-void Function_register(SwiftMetatype metatype,
-            FunctionRegisterFn initFn, FunctionRegisterFn destroyFn,
-            FunctionWriteFn writeFn, FunctionParseFn parseFn,
-            FunctionCopyEffectsFn copyEffectsFn,
-            FunctionGetEffectInfoFn effectInfoFn,
-            FunctionGetMemBehviorFn memBehaviorFn) {
+void BridgedFunction::registerBridging(SwiftMetatype metatype,
+            RegisterFn initFn, RegisterFn destroyFn,
+            WriteFn writeFn, ParseFn parseFn,
+            CopyEffectsFn copyEffectsFn,
+            GetEffectInfoFn effectInfoFn,
+            GetMemBehaviorFn memBehaviorFn) {
   functionMetatype = metatype;
   initFunction = initFn;
   destroyFunction = destroyFn;
@@ -970,8 +977,8 @@ void Function_register(SwiftMetatype metatype,
 std::pair<const char *, int>  SILFunction::
 parseArgumentEffectsFromSource(StringRef effectStr, ArrayRef<StringRef> paramNames) {
   if (parseFunction) {
-    BridgedParsingError error = parseFunction(
-        {this}, effectStr, ParseArgumentEffectsFromSource, -1,
+    auto error = parseFunction(
+        {this}, effectStr, BridgedFunction::ParseEffectsMode::argumentEffectsFromSource, -1,
         {(const unsigned char *)paramNames.data(), paramNames.size()});
     return {(const char *)error.message, (int)error.position};
   }
@@ -981,8 +988,8 @@ parseArgumentEffectsFromSource(StringRef effectStr, ArrayRef<StringRef> paramNam
 std::pair<const char *, int>  SILFunction::
 parseArgumentEffectsFromSIL(StringRef effectStr, int argumentIndex) {
   if (parseFunction) {
-    BridgedParsingError error = parseFunction(
-        {this}, effectStr, ParseArgumentEffectsFromSIL, argumentIndex, {nullptr, 0});
+    auto error = parseFunction(
+        {this}, effectStr, BridgedFunction::ParseEffectsMode::argumentEffectsFromSIL, argumentIndex, {nullptr, 0});
     return {(const char *)error.message, (int)error.position};
   }
   return {nullptr, 0};
@@ -990,8 +997,8 @@ parseArgumentEffectsFromSIL(StringRef effectStr, int argumentIndex) {
 
 std::pair<const char *, int>  SILFunction::parseGlobalEffectsFromSIL(StringRef effectStr) {
   if (parseFunction) {
-    BridgedParsingError error = parseFunction(
-        {this}, effectStr, ParseGlobalEffectsFromSIL, -1, {nullptr, 0});
+    auto error = parseFunction(
+        {this}, effectStr, BridgedFunction::ParseEffectsMode::globalEffectsFromSIL, -1, {nullptr, 0});
     return {(const char *)error.message, (int)error.position};
   }
   return {nullptr, 0};
@@ -1000,8 +1007,8 @@ std::pair<const char *, int>  SILFunction::parseGlobalEffectsFromSIL(StringRef e
 std::pair<const char *, int>  SILFunction::
 parseMultipleEffectsFromSIL(StringRef effectStr) {
   if (parseFunction) {
-    BridgedParsingError error = parseFunction(
-        {this}, effectStr, ParseMultipleEffectsFromSIL, -1, {nullptr, 0});
+    auto error = parseFunction(
+        {this}, effectStr, BridgedFunction::ParseEffectsMode::multipleEffectsFromSIL, -1, {nullptr, 0});
     return {(const char *)error.message, (int)error.position};
   }
   return {nullptr, 0};
@@ -1035,7 +1042,7 @@ visitArgEffects(std::function<void(int, int, bool)> c) const {
   int idx = 0;
   BridgedFunction bridgedFn = {const_cast<SILFunction *>(this)};
   while (true) {
-    BridgedEffectInfo ei = getEffectInfoFunction(bridgedFn, idx);
+    BridgedFunction::EffectInfo ei = getEffectInfoFunction(bridgedFn, idx);
     if (!ei.isValid)
       return;
     if (!ei.isEmpty) {
@@ -1045,10 +1052,10 @@ visitArgEffects(std::function<void(int, int, bool)> c) const {
   }
 }
 
-SILInstruction::MemoryBehavior SILFunction::getMemoryBehavior(bool observeRetains) {
+MemoryBehavior SILFunction::getMemoryBehavior(bool observeRetains) {
   if (!getMemBehvaiorFunction)
-    return SILInstruction::MemoryBehavior::MayHaveSideEffects;
+    return MemoryBehavior::MayHaveSideEffects;
 
   auto b = getMemBehvaiorFunction({this}, observeRetains);
-  return (SILInstruction::MemoryBehavior)b;
+  return (MemoryBehavior)b;
 }

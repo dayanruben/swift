@@ -77,13 +77,6 @@ ASTNode FailureDiagnostic::getAnchor() const {
       return locator->getAnchor();
   }
 
-  // FIXME: Work around an odd locator representation that doesn't separate the
-  // base of a subscript member from the member access.
-  if (locator->isLastElement<LocatorPathElt::SubscriptMember>()) {
-    if (auto subscript = getAsExpr<SubscriptExpr>(anchor))
-      anchor = subscript->getBase();
-  }
-
   return anchor;
 }
 
@@ -1343,6 +1336,15 @@ bool MissingExplicitConversionFailure::diagnoseAsError() {
   }
   diag.fixItInsertAfter(getSourceRange().End, insertAfter);
   return true;
+}
+
+ASTNode MemberReferenceFailure::getAnchor() const {
+  auto anchor = FailureDiagnostic::getAnchor();
+  if (auto base = getBaseExprFor(getAsExpr(anchor))) {
+    return base;
+  } else {
+    return anchor;
+  }
 }
 
 SourceRange MemberAccessOnOptionalBaseFailure::getSourceRange() const {
@@ -3680,6 +3682,15 @@ bool MissingCallFailure::diagnoseAsError() {
   return true;
 }
 
+ASTNode PropertyWrapperReferenceFailure::getAnchor() const {
+  auto anchor = FailureDiagnostic::getAnchor();
+  if (getReferencedMember()) {
+    return getBaseExprFor(getAsExpr(anchor));
+  } else {
+    return anchor;
+  }
+}
+
 bool ExtraneousPropertyWrapperUnwrapFailure::diagnoseAsError() {
   auto newPrefix = usingProjection() ? "$" : "_";
 
@@ -3751,21 +3762,12 @@ bool SubscriptMisuseFailure::diagnoseAsError() {
   auto &sourceMgr = getASTContext().SourceMgr;
 
   auto *memberExpr = castToExpr<UnresolvedDotExpr>(getRawAnchor());
-
-  auto memberRange = getSourceRange();
-
-  {
-    auto rawAnchor = getRawAnchor();
-    auto path = locator->getPath();
-    simplifyLocator(rawAnchor, path, memberRange);
-  }
-
-  auto nameLoc = DeclNameLoc(memberRange.Start);
+  auto *base = memberExpr->getBase();
 
   auto diag = emitDiagnostic(diag::could_not_find_subscript_member_did_you_mean,
-                             getType(getAnchor()));
+                             getType(base));
 
-  diag.highlight(memberRange).highlight(nameLoc.getSourceRange());
+  diag.highlight(memberExpr->getNameLoc().getSourceRange());
 
   if (auto *parentExpr = dyn_cast_or_null<ApplyExpr>(findParentExpr(memberExpr))) {
     auto *args = parentExpr->getArgs();
@@ -3775,7 +3777,7 @@ bool SubscriptMisuseFailure::diagnoseAsError() {
 
     diag.fixItReplace(SourceRange(args->getStartLoc()),
                       getTokenText(tok::l_square));
-    diag.fixItRemove(nameLoc.getSourceRange());
+    diag.fixItRemove(memberExpr->getNameLoc().getSourceRange());
     diag.fixItRemove(SourceRange(memberExpr->getDotLoc()));
 
     if (sourceMgr.extractText(lastArgSymbol) == getTokenText(tok::r_paren))
@@ -3815,131 +3817,6 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
       !isa_and_nonnull<clang::CXXRecordDecl>(
           baseType->getAnyNominal()->getClangDecl()))
     return;
-  
-  if (name.getBaseIdentifier().str() == "getFromPointer" ||
-      name.getBaseIdentifier().str() == "isValid" ||
-      name.getBaseIdentifier().str() == "__dataUnsafe" ||
-      name.getBaseIdentifier().str() == "__getOpaquePointerValueUnsafe" ||
-      name.getBaseIdentifier().str() == "__getStartUnsafe" ||
-      name.getBaseIdentifier().str() == "__c_strUnsafe") {
-    // OK, we did not find a member that we probably should have.
-    // Dump the world.
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-    llvm::dbgs() << "Hello! You have unfortuantly stubled across an interop bug that we have been trying to track down for a while. Please reach out to Zoe Carver and provide a link to this build. You can re-run this build and it should work next time. Sorry for the inconvience.\n\n";
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-    
-    llvm::dbgs() << "THE NAME: "; name.print(llvm::dbgs());
-    
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-
-    auto cxxRecord = cast<clang::CXXRecordDecl>(baseType->getAnyNominal()->getClangDecl());
-    llvm::dbgs() << "CXX RECORD: "; cxxRecord->dump();
-    
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-
-    auto dumpRedecls = [](const clang::CXXRecordDecl *cxxRecordToDump) {
-      llvm::dbgs() << "REDECLS:\n";
-      unsigned redeclIdx = 0;
-      for (auto redecl : cxxRecordToDump->redecls()) {
-        llvm::dbgs() << "REDECL(" << redeclIdx << "): "; redecl->dump();
-        redeclIdx++;
-      }
-    };
-    
-    dumpRedecls(cxxRecord);
-    
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-    if (name.getBaseIdentifier().str() == "getFromPointer" ||
-        name.getBaseIdentifier().str() == "isValid") {
-      llvm::dbgs() << "LOOKUP UNSAFE VERSION:\n";
-      auto unsafeId =
-          ctx.getIdentifier("__" + name.getBaseIdentifier().str().str() + "Unsafe");
-      for (auto found :
-           baseType->getAnyNominal()->lookupDirect(DeclBaseName(unsafeId))) {
-        llvm::dbgs() << "**FOUND UNSAFE VERSION**\n";
-        llvm::dbgs() << "UNSAFE: ";
-        found->dump(llvm::dbgs());
-
-        if (auto cxxMethod = dyn_cast_or_null<clang::CXXMethodDecl>(found->getClangDecl())) {
-          llvm::dbgs() << "FOUND CXX METHOD.";
-          auto returnType = cxxMethod->getReturnType();
-          llvm::dbgs() << "CXX METHOD RETURN TYPE: ";
-          returnType->dump();
-          
-          llvm::dbgs() << "CAN RETURN TYPE: ";
-          returnType->getCanonicalTypeUnqualified().dump();
-          
-          if (auto recordType = dyn_cast<clang::RecordType>(returnType)) {
-            dumpRedecls(returnType->getAsCXXRecordDecl());
-          } else {
-            llvm::dbgs() << "NOT A RECORD TYPE\n";
-          }
-        }
-      }
-    } else {
-      std::string safeName;
-      if (name.getBaseIdentifier().str() == "__dataUnsafe")
-        safeName = "data";
-      if (name.getBaseIdentifier().str() == "__getOpaquePointerValueUnsafe")
-        safeName = "getOpaquePointerValue";
-      if (name.getBaseIdentifier().str() == "__getStartUnsafe")
-        safeName = "getStart";
-      if (name.getBaseIdentifier().str() == "__c_strUnsafe")
-        safeName = "c_str";
-      
-      auto safeId = ctx.getIdentifier(safeName);
-      for (auto found :
-           baseType->getAnyNominal()->lookupDirect(DeclBaseName(safeId))) {
-        llvm::dbgs() << "**FOUND SAFE VERSION**\n";
-        llvm::dbgs() << "UNSAFE: ";
-        found->dump(llvm::dbgs());
-
-        if (auto cxxMethod = dyn_cast_or_null<clang::CXXMethodDecl>(found->getClangDecl())) {
-          llvm::dbgs() << "FOUND CXX METHOD.";
-          auto returnType = cxxMethod->getReturnType();
-          llvm::dbgs() << "CXX METHOD RETURN TYPE: ";
-          returnType->dump();
-          
-          llvm::dbgs() << "CAN RETURN TYPE: ";
-          returnType->getCanonicalTypeUnqualified().dump();
-          
-          if (auto recordType = dyn_cast<clang::RecordType>(returnType)) {
-            dumpRedecls(returnType->getAsCXXRecordDecl());
-          } else {
-            llvm::dbgs() << "NOT A RECORD TYPE\n";
-          }
-        }
-      }
-    }
-    
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-    llvm::dbgs() << "(IMPORTED) SWIFT TYPE: ";
-    baseType->dump(llvm::dbgs());
-    
-    llvm::dbgs() << "(IMPORTED) SWIFT DECL: ";
-    baseType->getAnyNominal()->print(llvm::dbgs());
-    
-    // And for my final trick, I will dump the whole lookup table.
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "====================================================\n\n";
-    llvm::dbgs() << "LOOKUP TABLE: ";
-    
-    if (auto clangModule = cxxRecord->getOwningModule()) {
-      dumpSwiftLookupTable(ctx.getClangModuleLoader()->findLookupTable(clangModule));
-    } else {
-      llvm::dbgs() << "NO MODULE\n";
-    }
-    
-    llvm::dbgs() << "====================================================\n";
-    llvm::dbgs() << "DBUG DUMP DONE\n";
-    llvm::dbgs() << "====================================================\n\n";
-  }
 
   auto unsafeId =
       ctx.getIdentifier("__" + name.getBaseIdentifier().str().str() + "Unsafe");
@@ -3967,6 +3844,10 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
                              ->getAnyNominal()
                              ->getName()
                              .str();
+
+    auto methodClangLoc = cxxMethod->getLocation();
+    auto methodSwiftLoc =
+        ctx.getClangModuleLoader()->importSourceLocation(methodClangLoc);
 
     // Rewrite front() and back() as first and last.
     if ((name.getBaseIdentifier().is("front") ||
@@ -4013,7 +3894,9 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
         ctx.Diags.diagnose(loc, diag::iterator_method_unavailable,
                            name.getBaseIdentifier().str());
         ctx.Diags.diagnose(loc, diag::replace_with_nil)
-            .fixItReplaceChars(loc, callExpr->getArgs()->getEndLoc(), "nil");
+            .fixItReplaceChars(
+                getAnchor().getStartLoc(),
+                callExpr->getArgs()->getEndLoc().getAdvancedLoc(1), "nil");
       } else {
         ctx.Diags.diagnose(loc, diag::iterator_method_unavailable,
                            name.getBaseIdentifier().str());
@@ -4024,8 +3907,11 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
                          name.getBaseIdentifier().str(), returnTypeStr);
       ctx.Diags.diagnose(loc, diag::projection_may_return_interior_ptr,
                          name.getBaseIdentifier().str());
-      ctx.Diags.diagnose(loc, diag::mark_safe_to_import,
-                         name.getBaseIdentifier().str());
+      ctx.Diags
+          .diagnose(methodSwiftLoc, diag::mark_safe_to_import,
+                    name.getBaseIdentifier().str())
+          .fixItInsert(methodSwiftLoc,
+                       " SAFE_TO_IMPORT ");
     } else if (cxxMethod->getReturnType()->isReferenceType()) {
       // Rewrite a call to .at(42) as a subscript.
       if (name.getBaseIdentifier().is("at") &&
@@ -4034,11 +3920,7 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
         auto dotExpr = getAsExpr<UnresolvedDotExpr>(anchor);
         auto callExpr = getAsExpr<CallExpr>(findParentExpr(dotExpr));
 
-        ctx.Diags.diagnose(loc, diag::projection_reference_not_imported,
-                           name.getBaseIdentifier().str(), returnTypeStr);
-        ctx.Diags.diagnose(loc, diag::projection_may_return_interior_ptr,
-                           name.getBaseIdentifier().str());
-        ctx.Diags.diagnose(loc, diag::at_to_subscript)
+        ctx.Diags.diagnose(dotExpr->getDotLoc(), diag::at_to_subscript)
             .fixItRemove(
                 {dotExpr->getDotLoc(), callExpr->getArgs()->getStartLoc()})
             .fixItReplaceChars(
@@ -4047,13 +3929,20 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
             .fixItReplaceChars(
                 callExpr->getArgs()->getEndLoc(),
                 callExpr->getArgs()->getEndLoc().getAdvancedLoc(1), "]");
+        ctx.Diags.diagnose(loc, diag::projection_reference_not_imported,
+                           name.getBaseIdentifier().str(), returnTypeStr);
+        ctx.Diags.diagnose(loc, diag::projection_may_return_interior_ptr,
+                           name.getBaseIdentifier().str());
       } else {
         ctx.Diags.diagnose(loc, diag::projection_reference_not_imported,
                            name.getBaseIdentifier().str(), returnTypeStr);
         ctx.Diags.diagnose(loc, diag::projection_may_return_interior_ptr,
                            name.getBaseIdentifier().str());
-        ctx.Diags.diagnose(loc, diag::mark_safe_to_import,
-                           name.getBaseIdentifier().str());
+        ctx.Diags
+            .diagnose(methodSwiftLoc, diag::mark_safe_to_import,
+                      name.getBaseIdentifier().str())
+            .fixItInsert(methodSwiftLoc,
+                         " SAFE_TO_IMPORT ");
       }
     } else if (cxxMethod->getReturnType()->isRecordType()) {
       if (auto cxxRecord = dyn_cast<clang::CXXRecordDecl>(
@@ -4067,13 +3956,23 @@ void MissingMemberFailure::diagnoseUnsafeCxxMethod(SourceLoc loc,
         } else {
           assert(methodSemantics ==
                  CxxRecordSemanticsKind::UnsafePointerMember);
+
+          auto baseSwiftLoc = ctx.getClangModuleLoader()->importSourceLocation(
+              cxxRecord->getLocation());
+
           ctx.Diags.diagnose(loc, diag::projection_value_not_imported,
                              name.getBaseIdentifier().str(), returnTypeStr);
           ctx.Diags.diagnose(loc, diag::projection_may_return_interior_ptr,
                              name.getBaseIdentifier().str());
-          ctx.Diags.diagnose(loc, diag::mark_safe_to_import,
-                             name.getBaseIdentifier().str());
-          ctx.Diags.diagnose(loc, diag::mark_self_contained, returnTypeStr);
+          ctx.Diags
+              .diagnose(methodSwiftLoc, diag::mark_safe_to_import,
+                        name.getBaseIdentifier().str())
+              .fixItInsert(methodSwiftLoc,
+                           " SAFE_TO_IMPORT ");
+          ctx.Diags
+              .diagnose(baseSwiftLoc, diag::mark_self_contained, returnTypeStr)
+              .fixItInsert(baseSwiftLoc,
+                           "SELF_CONTAINED ");
         }
       }
     }
@@ -6143,6 +6042,26 @@ bool NotCopyableFailure::diagnoseAsError() {
 
 bool InvalidPackElement::diagnoseAsError() {
   emitDiagnostic(diag::each_non_pack, packElementType);
+  return true;
+}
+
+bool InvalidPackReference::diagnoseAsError() {
+  emitDiagnostic(diag::pack_reference_outside_expansion,
+                 packType, /*inExpression*/true);
+  return true;
+}
+
+bool InvalidPackExpansion::diagnoseAsError() {
+  auto *locator = getLocator();
+  if (locator->isLastElement<LocatorPathElt::ApplyArgToParam>()) {
+    if (auto argInfo = getFunctionArgApplyInfo(locator)) {
+      emitDiagnostic(diag::invalid_expansion_argument,
+                     argInfo->getParamInterfaceType());
+      return true;
+    }
+  }
+
+  emitDiagnostic(diag::expansion_expr_not_allowed);
   return true;
 }
 

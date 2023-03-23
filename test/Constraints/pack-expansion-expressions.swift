@@ -39,6 +39,7 @@ func coerceExpansion<each T>(_ value: repeat each T) {
 func localValuePack<each T>(_ t: repeat each T) -> (repeat each T, repeat each T) {
   let local = repeat each t
   let localAnnotated: repeat each T = repeat each t
+  // expected-error@-1{{value pack expansion can only appear inside a function argument list or tuple element}}
 
   return (repeat each local, repeat each localAnnotated)
 }
@@ -52,14 +53,14 @@ protocol P {
 }
 
 func outerArchetype<each T, U>(t: repeat each T, u: U) where each T: P {
-  let _: repeat (each T.A, U) = repeat ((each t).value, u)
+  let _: (repeat (each T.A, U)) = (repeat ((each t).value, u))
 }
 
 func sameElement<each T, U>(t: repeat each T, u: U) where each T: P, each T == U {
 // expected-error@-1{{same-element requirements are not yet supported}}
 
   // FIXME: Opened element archetypes in diagnostics
-  let _: repeat each T = repeat (each t).f(u)
+  let _: (repeat each T) = (repeat (each t).f(u))
   // expected-error@-1 {{cannot convert value of type 'U' to expected argument type 'τ_1_0'}}
 }
 
@@ -68,39 +69,55 @@ func forEachEach<each C, U>(c: repeat each C, function: (U) -> Void)
     // expected-error@-1{{same-element requirements are not yet supported}}
 
   // FIXME: Opened element archetypes in diagnostics
-  _ = repeat (each c).forEach(function)
+  _ = (repeat (each c).forEach(function))
   // expected-error@-1 {{cannot convert value of type '(U) -> Void' to expected argument type '(τ_1_0.Element) throws -> Void'}}
 }
 
 func typeReprPacks<each T>(_ t: repeat each T) where each T: ExpressibleByIntegerLiteral {
-  _ = repeat Array<each T>()
-  _ = repeat 1 as each T
+  _ = (repeat Array<each T>())
+  _ = (repeat 1 as each T)
 
-  _ = Array<each T>() // expected-error {{pack reference 'T' can only appear in pack expansion or generic requirement}}
-  _ = 1 as each T // expected-error {{pack reference 'T' can only appear in pack expansion or generic requirement}}
+  _ = Array<each T>() // expected-error {{pack reference 'T' requires expansion using keyword 'repeat'}}
+  _ = 1 as each T // expected-error {{pack reference 'T' requires expansion using keyword 'repeat'}}
   repeat Invalid<String, each T>("") // expected-error {{cannot find 'Invalid' in scope}}
 }
 
 func sameShapeDiagnostics<each T, each U>(t: repeat each T, u: repeat each U) {
-  _ = repeat (each t, each u) // expected-error {{pack expansion requires that 'U' and 'T' have the same shape}}
-  _ = repeat Array<(each T, each U)>() // expected-error {{pack expansion requires that 'U' and 'T' have the same shape}}
-  _ = repeat (Array<each T>(), each u) // expected-error {{pack expansion requires that 'U' and 'T' have the same shape}}
+  _ = (repeat (each t, each u)) // expected-error {{pack expansion requires that 'U' and 'T' have the same shape}}
+  _ = (repeat Array<(each T, each U)>()) // expected-error {{pack expansion requires that 'U' and 'T' have the same shape}}
+  _ = (repeat (Array<each T>(), each u)) // expected-error {{pack expansion requires that 'U' and 'T' have the same shape}}
 }
 
-func returnPackExpansionType<each T>(_ t: repeat each T) -> repeat each T { // expected-error {{pack expansion 'T' cannot appear outside of a function parameter list, function result, tuple element or generic argument list}}
+func returnPackExpansionType<each T>(_ t: repeat each T) -> repeat each T { // expected-error {{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument list}}
   fatalError()
 }
 
-func returnEachPackReference<each T>(_ t: repeat each T) -> each T { // expected-error {{pack reference 'T' can only appear in pack expansion or generic requirement}}
+func returnEachPackReference<each T>(_ t: repeat each T) -> each T { // expected-error {{pack reference 'T' requires expansion using keyword 'repeat'}}
   fatalError()
 }
 
-func returnRepeatTuple<each T>(_ t: repeat each T) -> (repeat T) { // expected-error {{pack type 'T' must be referenced with 'each'}}
+// expected-error@+1 {{pack type 'T' must be referenced with 'each'}}{{63-63=each }}
+func returnRepeatTuple<each T>(_ t: repeat each T) -> (repeat T) {
   fatalError()
 }
 
-func parameterAsPackTypeWithoutExpansion<each T>(_ t: T) -> repeat each T { // expected-error {{pack expansion 'T' cannot appear outside of a function parameter list, function result, tuple element or generic argument list}}
+// expected-error@+2 {{pack reference 'T' requires expansion using keyword 'repeat'}}
+// expected-error@+1 {{pack type 'T' must be referenced with 'each'}}{{55-55=each }}
+func parameterAsPackTypeWithoutExpansion<each T>(_ t: T) {
+}
+
+// expected-error@+2 {{pack reference 'T' requires expansion using keyword 'repeat'}}
+// expected-error@+1 {{pack type 'T' must be referenced with 'each'}}{{57-57=each }}
+func returnPackReference<each T>(_ t: repeat each T) -> T {
   fatalError()
+}
+
+func packTypeParameterOutsidePackExpansionType<each T>(_ t: T,
+  // expected-error@-1 {{pack reference 'T' requires expansion using keyword 'repeat'}}
+  // expected-error@-2 {{pack type 'T' must be referenced with 'each'}}{{61-61=each }}
+                                                       _ a: Array<T>) {
+  // expected-error@-1 {{pack reference 'T' requires expansion using keyword 'repeat'}}
+  // expected-error@-2 {{pack type 'T' must be referenced with 'each'}}{{67-67=each }}
 }
 
 func expansionOfNonPackType<T>(_ t: repeat each T) {}
@@ -125,7 +142,7 @@ protocol Generatable {
 
 func generateTuple<each T : Generatable>() -> (repeat each T) {
   (each T).generate()
-  // expected-error@-1 {{pack reference 'T' can only appear in pack expansion or generic requirement}}
+  // expected-error@-1 {{pack reference 'T' requires expansion using keyword 'repeat'}}
 
   return (repeat (each T).generate())
 }
@@ -201,4 +218,56 @@ func takesFunctionPack<each T, R>(functions: repeat ((each T) -> R)) {}
 
 func forwardFunctionPack<each T>(functions: repeat (each T) -> Bool) {
   takesFunctionPack(functions: repeat each functions)
+}
+
+func packOutsideExpansion<each T>(_ t: repeat each T) {
+  _ = t
+  // expected-error@-1{{pack reference 'T' can only appear in pack expansion}}
+
+  forward(t)
+  // expected-error@-1{{pack reference 'T' can only appear in pack expansion}}
+
+  _ = each t
+  // expected-error@-1{{pack reference 'T' can only appear in pack expansion}}
+
+  forward(each t)
+  // expected-error@-1{{pack reference 'T' can only appear in pack expansion}}
+
+  let tuple = (repeat each t)
+
+  _ = tuple.element
+  // expected-error@-1{{pack reference 'T' can only appear in pack expansion}}
+
+  _ = each tuple.element
+  // expected-error@-1{{pack reference 'T' can only appear in pack expansion}}
+}
+
+func identity<T>(_ t: T) -> T { t }
+func concrete(_: Int) {}
+
+func invalidRepeat<each T>(t: repeat each T) {
+  _ = repeat each t
+  // expected-error@-1 {{value pack expansion can only appear inside a function argument list or tuple element}}
+
+  let _: Int = repeat each t
+  // expected-error@-1 {{value pack expansion can only appear inside a function argument list or tuple element}}
+
+  identity(identity(repeat each t))
+  // expected-error@-1 {{cannot pass value pack expansion to non-pack parameter of type 'T'}}
+
+  concrete(repeat each t)
+  // expected-error@-1 {{cannot pass value pack expansion to non-pack parameter of type 'Int'}}
+
+  _ = [repeat each t]
+  // expected-error@-1 {{value pack expansion can only appear inside a function argument list or tuple element}}
+}
+
+func test_pack_expansions_with_closures() {
+  func takesVariadicFunction<each T>(function: (repeat each T) -> Int) {}
+
+  func test(fn: (Int, String) -> Int, x: Int) {
+    takesVariadicFunction { fn(x, "") } // Ok
+    takesVariadicFunction { y in fn(x, y) } // Ok
+    takesVariadicFunction { y, z in fn(y, z) } // Ok
+  }
 }

@@ -107,6 +107,9 @@ public:
     bool isImplementationOnly() const {
       return Core.isImplementationOnly();
     }
+    bool isInternalOrBelow() const {
+      return Core.isInternalOrBelow();
+    }
     bool isPackageOnly() const {
       return Core.isPackageOnly();
     }
@@ -645,6 +648,10 @@ public:
   /// compiled for a different OS.
   Status associateWithFileContext(FileUnit *file, SourceLoc diagLoc,
                                   bool recoverFromIncompatibility);
+
+  /// How should \p dependency be loaded for a transitive import via \c this?
+  ModuleLoadingBehavior
+  getTransitiveLoadingBehavior(const Dependency &dependency) const;
 
   /// Returns `true` if there is a buffer that might contain source code where
   /// other parts of the compiler could have emitted diagnostics, to indicate

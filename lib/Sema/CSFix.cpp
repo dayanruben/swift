@@ -947,6 +947,21 @@ bool AllowMemberRefOnExistential::diagnose(const Solution &solution,
   return failure.diagnose(asNote);
 }
 
+bool AllowInvalidMemberRef::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+  auto *primaryFix =
+      static_cast<const AllowInvalidMemberRef *>(commonFixes.front().second);
+
+  Type baseTy = primaryFix->getBaseType();
+  for (const auto &entry : commonFixes) {
+    auto *memberFix = static_cast<const AllowInvalidMemberRef *>(entry.second);
+    if (!baseTy->isEqual(memberFix->getBaseType()))
+      return false;
+  }
+
+  return diagnose(*commonFixes.front().first);
+}
+
 bool AllowTypeOrInstanceMember::diagnose(const Solution &solution,
                                          bool asNote) const {
   AllowTypeOrInstanceMemberFailure failure(solution, getBaseType(), getMember(),
@@ -1399,6 +1414,31 @@ AllowInvalidPackElement::create(ConstraintSystem &cs,
                                 ConstraintLocator *locator) {
   return new (cs.getAllocator())
       AllowInvalidPackElement(cs, packElementType, locator);
+}
+
+bool AllowInvalidPackReference::diagnose(const Solution &solution,
+                                         bool asNote) const {
+  InvalidPackReference failure(solution, packType, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowInvalidPackReference *
+AllowInvalidPackReference::create(ConstraintSystem &cs, Type packType,
+                                  ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      AllowInvalidPackReference(cs, packType, locator);
+}
+
+bool AllowInvalidPackExpansion::diagnose(const Solution &solution,
+                                         bool asNote) const {
+  InvalidPackExpansion failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+AllowInvalidPackExpansion *
+AllowInvalidPackExpansion::create(ConstraintSystem &cs,
+                                  ConstraintLocator *locator) {
+  return new (cs.getAllocator()) AllowInvalidPackExpansion(cs, locator);
 }
 
 bool CollectionElementContextualMismatch::diagnose(const Solution &solution,

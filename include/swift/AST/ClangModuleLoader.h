@@ -27,6 +27,7 @@ class Preprocessor;
 class Sema;
 class TargetInfo;
 class Type;
+class SourceLocation;
 } // namespace clang
 
 namespace swift {
@@ -40,8 +41,6 @@ class EffectiveClangContext;
 class SwiftLookupTable;
 class ValueDecl;
 class VisibleDeclConsumer;
-
-void dumpSwiftLookupTable(SwiftLookupTable *table);
 
 /// Represents the different namespaces for types in C.
 ///
@@ -294,6 +293,8 @@ public:
 
   virtual const clang::TypedefType *
   getTypeDefForCXXCFOptionsDefinition(const clang::Decl *candidateDecl) = 0;
+
+  virtual SourceLoc importSourceLocation(clang::SourceLocation loc) = 0;
 };
 
 /// Describes a C++ template instantiation error.

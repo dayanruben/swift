@@ -2545,7 +2545,7 @@ public:
                     SI->getSrc()->getType(),
                     "Store operand type and dest type mismatch");
 
-    SSAPrunedLiveness scopedAddressLiveness;
+    SSAPrunedLiveness scopedAddressLiveness(SI->getFunction());
     ScopedAddressValue scopedAddress(SI);
     // FIXME: Reenable @test_load_borrow_store_borrow_nested in
     // store_borrow_verify_errors once computeLivess can successfully handle a
@@ -6272,22 +6272,7 @@ public:
 
       // Otherwise, we're allowed to re-enter a scope only if
       // the scope is an ancestor of the scope we're currently leaving.
-      auto isAncestorScope = [](const SILDebugScope *Cur,
-                                const SILDebugScope *Previous) {
-        assert(Cur && "null current scope queried");
-        assert(Previous && "null previous scope queried");
-        const SILDebugScope *Tmp = Previous;
-        while (Tmp) {
-          auto Parent = Tmp->Parent;
-          auto *ParentScope = Parent.dyn_cast<const SILDebugScope *>();
-          if (ParentScope == Cur)
-            return true;
-          Tmp = ParentScope;
-        }
-        return false;
-      };
-
-      if (isAncestorScope(DS, LastSeenScope)) {
+      if (DS->isAncestor(LastSeenScope)) {
         LastSeenScope = DS;
         LastSeenScopeInst = &SI;
         continue;

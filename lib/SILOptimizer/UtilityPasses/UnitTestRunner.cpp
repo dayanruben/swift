@@ -181,8 +181,7 @@ struct DumpFunction : UnitTest {
 struct FunctionGetSelfArgumentIndex : UnitTest {
   FunctionGetSelfArgumentIndex(UnitTestRunner *pass) : UnitTest(pass) {}
   void invoke(Arguments &arguments) override {
-    auto index =
-        SILFunction_getSelfArgumentIndex(BridgedFunction{getFunction()});
+    auto index = BridgedFunction{getFunction()}.getSelfArgumentIndex();
     llvm::errs() << "self argument index = " << index << "\n";
   }
 };
@@ -319,7 +318,7 @@ struct SSALivenessTest : UnitTest {
     llvm::outs() << "SSA lifetime analysis: " << value;
 
     SmallVector<SILBasicBlock *, 8> discoveredBlocks;
-    SSAPrunedLiveness liveness(&discoveredBlocks);
+    SSAPrunedLiveness liveness(value->getFunction(), &discoveredBlocks);
     liveness.initializeDef(value);
     LiveRangeSummary summary = liveness.computeSimple();
     if (summary.innerBorrowKind == InnerBorrowKind::Reborrowed)
@@ -354,7 +353,7 @@ struct ScopedAddressLivenessTest : UnitTest {
     assert(scopedAddress);
 
     SmallVector<SILBasicBlock *, 8> discoveredBlocks;
-    SSAPrunedLiveness liveness(&discoveredBlocks);
+    SSAPrunedLiveness liveness(value->getFunction(), &discoveredBlocks);
     scopedAddress.computeTransitiveLiveness(liveness);
     liveness.print(llvm::outs());
 
@@ -410,7 +409,7 @@ struct CanonicalizeOSSALifetimeTest : UnitTest {
     auto respectAccessScopes = arguments.takeBool();
     InstructionDeleter deleter;
     CanonicalizeOSSALifetime canonicalizer(
-        pruneDebug, maximizeLifetimes,
+        pruneDebug, maximizeLifetimes, getFunction(),
         respectAccessScopes ? accessBlockAnalysis : nullptr, domTree, deleter);
     auto value = arguments.takeValue();
     canonicalizer.canonicalizeValueLifetime(value);
@@ -429,7 +428,7 @@ struct CanonicalizeBorrowScopeTest : UnitTest {
     auto borrowedValue = BorrowedValue(value);
     assert(borrowedValue && "specified value isn't a BorrowedValue!?");
     InstructionDeleter deleter;
-    CanonicalizeBorrowScope canonicalizer(deleter);
+    CanonicalizeBorrowScope canonicalizer(value->getFunction(), deleter);
     canonicalizer.canonicalizeBorrowScope(borrowedValue);
     getFunction()->dump();
   }

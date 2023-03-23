@@ -55,7 +55,11 @@ public:
   SILGenBuilder(SILGenBuilder &builder, SILBasicBlock *insertBB)
       : SILBuilder(insertBB, builder.getCurrentDebugScope(),
                    builder.getBuilderContext()),
-        SGF(builder.SGF) {}
+        SGF(builder.SGF) {
+#ifndef NDEBUG
+    EnableDIHoleVerification = true;
+#endif
+  }
 
   SILGenModule &getSILGenModule() const;
   SILGenFunction &getSILGenFunction() const { return SGF; }
@@ -230,7 +234,7 @@ public:
   ManagedValue createInputFunctionArgument(
       SILType type, ValueDecl *decl, bool isNoImplicitCopy = false,
       LifetimeAnnotation lifetimeAnnotation = LifetimeAnnotation::None,
-      bool isClosureCapture = false);
+      bool isClosureCapture = false, bool isFormalParameterPack = false);
 
   /// Create a SILArgument for an input parameter. Uses \p loc to create any
   /// copies necessary. Asserts if used to create a function argument for an out

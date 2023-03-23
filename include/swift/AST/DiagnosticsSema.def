@@ -764,6 +764,8 @@ ERROR(expect_compile_time_const,none,
 
 ERROR(sema_no_import,Fatal,
       "no such module '%0'", (StringRef))
+NOTE(did_you_mean_cxxstdlib,none,
+      "did you mean 'CxxStdlib'?'", ())
 ERROR(sema_no_import_target,Fatal,
       "could not find module '%0' for target '%1'; "
       "found: %2, at: %3", (StringRef, StringRef, StringRef, StringRef))
@@ -1004,6 +1006,11 @@ ERROR(module_not_testable,Fatal,
 
 ERROR(module_not_compiled_for_private_import,none,
       "module %0 was not compiled for private import", (Identifier))
+
+ERROR(in_package_module_not_compiled_from_source,Fatal,
+      "module %0 is in package '%1' but was built from interface '%2'; "
+      "modules of the same package can only be loaded if built from source",
+      (Identifier, StringRef, StringRef))
 
 ERROR(import_restriction_conflict,none,
       "module %0 cannot be both "
@@ -5312,17 +5319,27 @@ ERROR(vararg_not_allowed,none,
       "variadic parameter cannot appear outside of a function parameter list",
       ())
 ERROR(expansion_not_allowed,none,
-      "pack expansion %0 cannot appear outside of a function parameter list, "
-      "function result, tuple element or generic argument list", (Type))
+      "pack expansion %0 can only appear in a function parameter list, "
+      "tuple element, or generic argument list", (Type))
+ERROR(expansion_expr_not_allowed,none,
+      "value pack expansion can only appear inside a function argument list "
+      "or tuple element", ())
+ERROR(invalid_expansion_argument,none,
+      "cannot pass value pack expansion to non-pack parameter of type %0",
+      (Type))
 ERROR(expansion_not_variadic,none,
       "pack expansion %0 must contain at least one pack reference", (Type))
 ERROR(pack_reference_outside_expansion,none,
-      "pack reference %0 can only appear in pack expansion or generic requirement",
-      (Type))
+      "pack reference %0 can only appear in pack expansion "
+      "%select{or generic requirement|}1",
+      (Type, /*inExpression*/ bool))
 ERROR(each_non_pack,none,
       "'each' cannot be applied to non-pack type %0",
       (Type))
-ERROR(pack_expansion_missing_pack_reference,none,
+ERROR(pack_reference_must_be_in_expansion,none,
+      "pack reference %0 requires expansion using keyword 'repeat'",
+      (TypeRepr*))
+ERROR(pack_type_requires_keyword_each,none,
       "pack type %0 must be referenced with 'each'",
       (TypeRepr*))
 ERROR(tuple_duplicate_label,none,
@@ -5984,10 +6001,6 @@ NOTE(note_deprecated_rename, none,
 ERROR(availability_decl_more_than_enclosing, none,
       "%0 cannot be more available than enclosing scope",
       (DescriptiveDeclKind))
-
-WARNING(availability_decl_more_than_unavailable_enclosing, none,
-        "%0 cannot be more available than unavailable enclosing scope",
-        (DescriptiveDeclKind))
 
 NOTE(availability_implicit_decl_here, none,
      "%0 implicitly declared here with availability of %1 %2 or newer",

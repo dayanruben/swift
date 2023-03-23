@@ -4294,6 +4294,40 @@ ConstraintSystem::matchTypesBindTypeVar(
     }
   }
 
+  // If we're attempting to bind a PackType or PackArchetypeType to a type
+  // variable that doesn't support it, we have a pack reference outside of a
+  // pack expansion expression.
+  if (!typeVar->getImpl().canBindToPack() &&
+      (type->is<PackArchetypeType>() || type->is<PackType>())) {
+    if (shouldAttemptFixes()) {
+      auto *fix = AllowInvalidPackReference::create(*this, type,
+                                                    getConstraintLocator(locator));
+      if (!recordFix(fix)) {
+        recordPotentialHole(typeVar);
+        return getTypeMatchSuccess();
+      }
+    }
+
+    return getTypeMatchFailure(locator);
+  }
+
+  // Binding to a pack expansion type is always an error. This indicates
+  // that a pack expansion expression was used in a context that doesn't
+  // support it.
+  if (type->is<PackExpansionType>()) {
+    if (!shouldAttemptFixes())
+      return getTypeMatchFailure(locator);
+
+    auto *fix =
+        AllowInvalidPackExpansion::create(*this, getConstraintLocator(locator));
+    if (recordFix(fix))
+      return getTypeMatchFailure(locator);
+
+    // Don't allow the pack expansion type to propagate to other
+    // bindings.
+    type = PlaceholderType::get(typeVar->getASTContext(), typeVar);
+  }
+
   // We do not allow keypaths to go through AnyObject. Let's create a fix
   // so this can be diagnosed later.
   if (auto loc = typeVar->getImpl().getLocator()) {
@@ -7135,6 +7169,22 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
                                      locator);
     }
     }
+  }
+
+  // Matching types where one side is a pack expansion and the other is not
+  // means a pack expansion was used where it isn't supported.
+  if (type1->is<PackExpansionType>() != type2->is<PackExpansionType>()) {
+    if (!shouldAttemptFixes())
+      return getTypeMatchFailure(locator);
+
+    if (type1->isPlaceholder() || type2->isPlaceholder())
+      return getTypeMatchSuccess();
+
+    auto *loc = getConstraintLocator(locator);
+    if (recordFix(AllowInvalidPackExpansion::create(*this, loc)))
+      return getTypeMatchFailure(locator);
+
+    return getTypeMatchSuccess();
   }
 
   if (kind >= ConstraintKind::Conversion) {
@@ -10538,7 +10588,9 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
         // let's return, otherwise let's fall-through and report
         // this problem as a missing member.
         if (result == SolutionKind::Solved)
-          return recordFix(InsertExplicitCall::create(*this, locator))
+          return recordFix(InsertExplicitCall::create(
+                     *this, getConstraintLocator(
+                                locator, ConstraintLocator::MemberRefBase)))
                      ? SolutionKind::Error
                      : SolutionKind::Solved;
       }
@@ -10966,6 +11018,11 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
     // We need to wait until contextual type
     // is fully resolved before binding it.
     if (contextualTy->isTypeVariableOrMember())
+      return false;
+
+    // Cannot propagate pack expansion type from context,
+    // it has to be handled by type matching logic.
+    if (contextualTy->is<PackExpansionType>())
       return false;
 
     // If contextual type has an error, let's wait for inference,
@@ -14151,6 +14208,8 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::RenameConflictingPatternVariables:
   case FixKind::MustBeCopyable:
   case FixKind::AllowInvalidPackElement:
+  case FixKind::AllowInvalidPackReference:
+  case FixKind::AllowInvalidPackExpansion:
   case FixKind::MacroMissingPound:
   case FixKind::AllowGlobalActorMismatch:
   case FixKind::GenericArgumentsMismatch: {

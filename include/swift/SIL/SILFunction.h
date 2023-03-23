@@ -1091,7 +1091,7 @@ public:
   void copyEffects(SILFunction *from);
   bool hasArgumentEffects() const;
   void visitArgEffects(std::function<void(int, int, bool)> c) const;
-  SILInstruction::MemoryBehavior getMemoryBehavior(bool observeRetains);
+  MemoryBehavior getMemoryBehavior(bool observeRetains);
 
   Purpose getSpecialPurpose() const { return specialPurpose; }
 
@@ -1273,6 +1273,7 @@ public:
   const SILBasicBlock *getEntryBlock() const { return &front(); }
 
   SILBasicBlock *createBasicBlock();
+  SILBasicBlock *createBasicBlock(llvm::StringRef debugName);
   SILBasicBlock *createBasicBlockAfter(SILBasicBlock *afterBB);
   SILBasicBlock *createBasicBlockBefore(SILBasicBlock *beforeBB);
 
