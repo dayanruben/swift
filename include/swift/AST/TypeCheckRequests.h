@@ -4166,11 +4166,52 @@ public:
   bool isCached() const { return true; }
 };
 
+/// Checks that all of a class's \c \@objcImplementation extensions provide
+/// complete and correct implementations for their corresponding interfaces.
+/// This is done on all of a class's implementations at once to improve diagnostics.
+class TypeCheckObjCImplementationRequest
+    : public SimpleRequest<TypeCheckObjCImplementationRequest,
+                           evaluator::SideEffect(ExtensionDecl *),
+                           RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  // Evaluation.
+  evaluator::SideEffect
+  evaluate(Evaluator &evaluator, ExtensionDecl *ED) const;
+
+public:
+  // Separate caching.
+  bool isCached() const { return true; }
+};
+
 void simple_display(llvm::raw_ostream &out, ASTNode node);
 void simple_display(llvm::raw_ostream &out, Type value);
 void simple_display(llvm::raw_ostream &out, const TypeRepr *TyR);
 void simple_display(llvm::raw_ostream &out, ImplicitMemberAction action);
 void simple_display(llvm::raw_ostream &out, ResultBuilderBodyPreCheck pck);
+
+/// Computes whether a module is part of the stdlib or contained within the
+/// SDK. If no SDK was specified, falls back to whether the module was
+/// specified as a system module (ie. it's on the system search path).
+class IsNonUserModuleRequest
+    : public SimpleRequest<IsNonUserModuleRequest,
+                           bool(ModuleDecl *),
+                           RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  bool evaluate(Evaluator &evaluator, ModuleDecl *mod) const;
+
+public:
+  bool isCached() const { return true; }
+};
 
 #define SWIFT_TYPEID_ZONE TypeChecker
 #define SWIFT_TYPEID_HEADER "swift/AST/TypeCheckerTypeIDZone.def"

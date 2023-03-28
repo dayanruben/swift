@@ -1007,10 +1007,15 @@ ERROR(module_not_testable,Fatal,
 ERROR(module_not_compiled_for_private_import,none,
       "module %0 was not compiled for private import", (Identifier))
 
-ERROR(in_package_module_not_compiled_from_source,Fatal,
-      "module %0 is in package '%1' but was built from interface '%2'; "
-      "modules of the same package can only be loaded if built from source",
+ERROR(in_package_module_not_compiled_from_source,none,
+      "module %0 is in package '%1' but was built from interface; "
+      "modules of the same package can only be loaded if built from source: %2",
       (Identifier, StringRef, StringRef))
+
+WARNING(in_package_module_not_compiled_locally,none,
+        "module %0 is in package %1 but was loaded from SDK; "
+        "modules of the same package should be built locally from source only: %2",
+        (Identifier, Identifier, StringRef))
 
 ERROR(import_restriction_conflict,none,
       "module %0 cannot be both "
@@ -1036,6 +1041,11 @@ REMARK(module_loaded,none,
        "%select{| (overlay for a clang dependency)}1"
        "; source: '%2', loaded: '%3'",
        (Identifier, unsigned, StringRef, StringRef))
+
+REMARK(transitive_dependency_behavior,none,
+       "%1 has %select{a required|an optional|an ignored}2 "
+       "transitive dependency on '%0'",
+       (StringRef, Identifier, unsigned))
        
 REMARK(explicit_interface_build_skipped,none,
        "Skipped rebuilding module at %0 - up-to-date",
@@ -1597,13 +1607,55 @@ ERROR(member_of_objc_implementation_not_objc_or_final,none,
       "%0 %1 does not match any %0 declared in the headers for %2; did you use "
       "the %0's Swift name?",
       (DescriptiveDeclKind, ValueDecl *, ValueDecl *))
-NOTE(fixit_add_objc_for_objc_implementation,none,
-     "add '@objc' to define an Objective-C-compatible %0 not declared in "
-     "the header",
+NOTE(fixit_add_private_for_objc_implementation,none,
+     "add 'private' or 'fileprivate' to define an Objective-C-compatible %0 "
+     "not declared in the header",
      (DescriptiveDeclKind))
 NOTE(fixit_add_final_for_objc_implementation,none,
      "add 'final' to define a Swift %0 that cannot be overridden",
      (DescriptiveDeclKind))
+
+ERROR(objc_implementation_wrong_category,none,
+      "%0 %1 should be implemented in extension for "
+      "%select{main class interface|category %2}2, not "
+      "%select{main class interface|category %3}3",
+      (DescriptiveDeclKind, ValueDecl *, Identifier, Identifier))
+
+ERROR(objc_implementation_wrong_objc_name,none,
+      "selector %0 for %1 %2 not found in header; did you mean %3?",
+      (ObjCSelector, DescriptiveDeclKind, ValueDecl *, ObjCSelector))
+
+ERROR(objc_implementation_wrong_swift_name,none,
+      "selector %0 used in header by an %1 with a different name; did you "
+      "mean %2?",
+      (ObjCSelector, DescriptiveDeclKind, DeclName))
+
+ERROR(objc_implementation_missing_impl,none,
+      "extension for %select{main class interface|category %0}0 should "
+      "provide implementation for %1 %2",
+      (Identifier, DescriptiveDeclKind, ValueDecl *))
+
+ERROR(objc_implementation_class_or_instance_mismatch,none,
+      "%0 %1 does not match %2 declared in header",
+      (DescriptiveDeclKind, ValueDecl *, DescriptiveDeclKind))
+
+ERROR(objc_implementation_multiple_matching_candidates,none,
+      "found multiple implementations that could match %0 %1 with selector %2",
+      (DescriptiveDeclKind, ValueDecl *, ObjCSelector))
+NOTE(objc_implementation_candidate_impl_here,none,
+     "%0 %1 is a potential match%select{|; insert '@objc(%3)' to use it}2",
+     (DescriptiveDeclKind, ValueDecl *, bool, StringRef))
+NOTE(objc_implementation_requirement_here,none,
+     "%0 %1 declared in header here",
+     (DescriptiveDeclKind, ValueDecl *))
+
+ERROR(objc_implementation_multiple_matching_requirements,none,
+      "%0 %1 could match several different members declared in the header",
+      (DescriptiveDeclKind, ValueDecl *))
+NOTE(objc_implementation_one_matched_requirement,none,
+     "%0 %1 (with selector %2) is a potential match%select{|; insert "
+     "'@objc(%4)' to use it}3",
+     (DescriptiveDeclKind, ValueDecl *, ObjCSelector, bool, StringRef))
 
 ERROR(cdecl_not_at_top_level,none,
       "@_cdecl can only be applied to global functions", ())
@@ -6965,8 +7017,6 @@ ERROR(macro_definition_unsupported,none,
 ERROR(external_macro_arg_not_type_name,none,
       "argument to `#externalMacro` must be a string literal naming "
       "the external macro's %select{module|type}0", (unsigned))
-ERROR(attached_declaration_macro_not_supported,none,
-      "attached declaration macros are not yet supported", ())
 ERROR(invalid_decl_in_macro_expansion,none,
       "macro expansion cannot introduce %0",
       (DescriptiveDeclKind))

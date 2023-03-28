@@ -172,9 +172,19 @@ do {
       get { 42 }
       set {}
     }
+
+    subscript<each T>(simpleTuple args: (repeat each T)) -> Int {
+      get { return 0 }
+      set {}
+    }
+
+    subscript<each T>(compoundTuple args: (String, repeat each T)) -> Int {
+      get { return 0 }
+      set {}
+    }
   }
 
-  func test_that_variadic_generics_claim_unlabeled_arguments<each T>(_ args: repeat each T, test: inout TestArgMatching) {
+  func test_that_variadic_generics_claim_unlabeled_arguments<each T>(_ args: repeat each T, test: inout TestArgMatching, extra: String) {
     func testLabeled<each U>(data: repeat each U) {}
     func testUnlabeled<each U>(_: repeat each U) {}
     func testInBetween<each U>(_: repeat each U, other: String) {}
@@ -193,6 +203,31 @@ do {
     _ = test[data: repeat each args, 0, ""]
 
     test[data: repeat each args, "", 42] = 0
+
+    do {
+      let first = ""
+      let second = ""
+      let third = 42
+
+      _ = test[simpleTuple: (repeat each args)]
+      _ = test[simpleTuple: (repeat each args, extra)]
+      _ = test[simpleTuple: (first, second)]
+      _ = test[compoundTuple: (first, repeat each args)]
+      _ = test[compoundTuple: (first, repeat each args, extra)]
+      _ = test[compoundTuple: (first, second, third)]
+    }
+
+    do {
+      func testRef<each T>() -> (repeat each T, String) { fatalError() }
+      func testResult<each T>() -> (repeat each T) { fatalError() }
+
+      func experiment1<each U>() -> (repeat each U, String) {
+        testResult() // Ok
+      }
+
+      func experiment2<each U>(_: () -> (repeat each U)) -> (repeat each U) { fatalError() }
+      let _: (Int, String) = experiment2(testRef) // Ok
+    }
   }
 }
 
@@ -260,6 +295,27 @@ func invalidRepeat<each T>(t: repeat each T) {
 
   _ = [repeat each t]
   // expected-error@-1 {{value pack expansion can only appear inside a function argument list or tuple element}}
+}
+
+// Make sure that single parameter initializers are handled correctly because
+// the have special type-checking rules in Swift < 6.
+func test_init_refs_with_single_pack_expansion_param() {
+  struct Data<each V> {
+    init(_: repeat each V) {}
+  }
+
+  _ = Data() // Ok
+  _ = Data(42) // Ok
+  _ = Data(42, "") // Ok
+
+  struct EmptyAmbiguous<each V> {
+    init(_: repeat each V) {} // expected-note {{found this candidate}}
+    init(x: repeat each V) {} // expected-note {{found this candidate}}
+  }
+
+  _ = EmptyAmbiguous() // expected-error {{ambiguous use of 'init'}}
+  _ = EmptyAmbiguous(x: 42)
+  _ = EmptyAmbiguous(x: (42, "")) // Ok
 }
 
 func test_pack_expansions_with_closures() {

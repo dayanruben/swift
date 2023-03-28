@@ -1231,46 +1231,6 @@ static void checkDynamicSelfType(ValueDecl *decl, Type type) {
   }
 }
 
-/// Check that, if this declaration is a member of an `@_objcImplementation`
-/// extension, it is either `final` or `@objc` (which may have been inferred by
-/// checking whether it shadows an imported declaration).
-static void checkObjCImplementationMemberAvoidsVTable(ValueDecl *VD) {
-  // We check the properties instead of their accessors.
-  if (isa<AccessorDecl>(VD))
-    return;
-
-  // Are we in an @_objcImplementation extension?
-  auto ED = dyn_cast<ExtensionDecl>(VD->getDeclContext());
-  if (!ED || !ED->isObjCImplementation())
-    return;
-
-  assert(ED->getSelfClassDecl() &&
-         !ED->getSelfClassDecl()->hasKnownSwiftImplementation() &&
-         "@_objcImplementation on non-class or Swift class?");
-
-  if (!VD->isObjCMemberImplementation())
-    return;
-
-  if (VD->isObjC()) {
-    assert(isa<DestructorDecl>(VD) || VD->isDynamic() &&
-           "@objc decls in @_objcImplementations should be dynamic!");
-    return;
-  }
-
-  auto &diags = VD->getASTContext().Diags;
-  diags.diagnose(VD, diag::member_of_objc_implementation_not_objc_or_final,
-                 VD->getDescriptiveKind(), VD, ED->getExtendedNominal());
-
-  if (canBeRepresentedInObjC(VD))
-    diags.diagnose(VD, diag::fixit_add_objc_for_objc_implementation,
-                   VD->getDescriptiveKind())
-        .fixItInsert(VD->getAttributeInsertionLoc(false), "@objc ");
-
-  diags.diagnose(VD, diag::fixit_add_final_for_objc_implementation,
-                 VD->getDescriptiveKind())
-      .fixItInsert(VD->getAttributeInsertionLoc(true), "final ");
-}
-
 /// Build a default initializer string for the given pattern.
 ///
 /// This string is suitable for display in diagnostics.
@@ -1915,10 +1875,6 @@ public:
       (void) VD->isObjC();
       (void) VD->isDynamic();
 
-      // If this is in an `@_objcImplementation` extension, check whether it's
-      // valid there.
-      checkObjCImplementationMemberAvoidsVTable(VD);
-
       // Check for actor isolation of top-level and local declarations.
       // Declarations inside types are handled in checkConformancesInContext()
       // to avoid cycles involving associated type inference.
@@ -1960,9 +1916,25 @@ public:
     // diagnostics.
     (void)ID->getDecls();
 
+    auto target = ID->getModule();
+    if (!getASTContext().LangOpts.PackageName.empty() &&
+        getASTContext().LangOpts.PackageName == target->getPackageName().str() &&
+        !target->isNonSwiftModule() && // target is a Swift module
+        target->isNonUserModule()) { // target module is in distributed SDK
+      // If reached here, a binary module (.swiftmodule) instead of interface of the
+      // target was loaded for the main module, where both belong to the same package;
+      // this is an expected behavior, but it should have been loaded from the local
+      // build directory, not from distributed SDK. In such case, we show a warning.
+      auto &diags = ID->getASTContext().Diags;
+      diags.diagnose(ID,
+                     diag::in_package_module_not_compiled_locally,
+                     target->getBaseIdentifier(),
+                     target->getPackageName(),
+                     target->getModuleFilename());
+    }
+
     // Report the public import of a private module.
     if (ID->getASTContext().LangOpts.LibraryLevel == LibraryLevel::API) {
-      auto target = ID->getModule();
       auto importer = ID->getModuleContext();
       if (target &&
           !ID->getAttrs().hasAttribute<ImplementationOnlyAttr>() &&
@@ -2027,6 +1999,7 @@ public:
       MD->diagnose(diag::macro_without_role, MD->getName());
 
     TypeChecker::checkParameterList(MD->getParameterList(), MD);
+    checkDefaultArguments(MD->getParameterList());
 
     // Check the macro definition.
     switch (auto macroDef = MD->getDefinition()) {
@@ -3427,6 +3400,8 @@ public:
       // FIXME: Should we duplicate any other logic from visitClassDecl()?
     }
 
+    TypeChecker::checkObjCImplementation(ED);
+
     for (Decl *Member : ED->getMembers())
       visit(Member);
 
@@ -3628,7 +3603,8 @@ public:
     // Only check again for destructor decl outside of a class if our destructor
     // is not marked as invalid.
     if (!DD->isInvalid()) {
-      auto *nom = dyn_cast<NominalTypeDecl>(DD->getDeclContext());
+      auto *nom = dyn_cast<NominalTypeDecl>(
+                             DD->getDeclContext()->getImplementedObjCContext());
       if (!nom || (!isa<ClassDecl>(nom) && !nom->isMoveOnly())) {
         DD->diagnose(diag::destructor_decl_outside_class_or_noncopyable);
       }

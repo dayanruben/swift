@@ -3307,9 +3307,8 @@ TypeRepr *ValueDecl::getOpaqueResultTypeRepr() const {
   if (returnRepr && returnRepr->hasOpaque()) {
     return returnRepr;
   } else if (returnRepr && ctx.LangOpts.hasFeature(Feature::ImplicitSome)) {
-    auto opaqueReprs = collectOpaqueReturnTypeReprs(returnRepr,
-                                                    getASTContext(),
-                                                    getDeclContext());
+    auto opaqueReprs =
+        collectOpaqueTypeReprs(returnRepr, getASTContext(), getDeclContext());
     return opaqueReprs.empty() ? nullptr : returnRepr;
   } else {
     return nullptr;
@@ -5351,8 +5350,10 @@ synthesizeEmptyFunctionBody(AbstractFunctionDecl *afd, void *context) {
 
 DestructorDecl *
 GetDestructorRequest::evaluate(Evaluator &evaluator, ClassDecl *CD) const {
+  auto dc = CD->getImplementationContext();
+
   auto &ctx = CD->getASTContext();
-  auto *DD = new (ctx) DestructorDecl(CD->getLoc(), CD);
+  auto *DD = new (ctx) DestructorDecl(CD->getLoc(), dc->getAsGenericContext());
 
   DD->setImplicit();
 

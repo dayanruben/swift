@@ -115,7 +115,7 @@ struct CanonicalDefWorklist {
         }
       }
       if (!canonicalizeBorrows) {
-        ownedValues.insert(def);
+        recordOwnedValue(def);
         return;
       }
       // Look through hoistable owned forwarding instructions on the
@@ -134,7 +134,7 @@ struct CanonicalDefWorklist {
       // Add any forwarding uses of this owned def. This may include uses that
       // we looked through above, but may also include other uses.
       addForwardingUses(def);
-      ownedValues.insert(def);
+      recordOwnedValue(def);
       return;
     }
   }
@@ -167,6 +167,24 @@ struct CanonicalDefWorklist {
       borrowedValues.remove(result);
     }
     ownedForwards.remove(i);
+  }
+
+private:
+  void recordOwnedValue(SILValue def) {
+    ownedValues.insert(def);
+    // Direct copies of owned lexical values are not themselves lexical and
+    // consequently need to be canonicalized separately because the
+    // canonicalization of the canonical def will respect deinit barriers
+    // but canonicalization of the copies should not.
+    //
+    // Add these copies to the worklist _after_ the canonical def because the
+    // worklist is drained backwards and canonicalizing the copies first
+    // enables the canonical lexical defs to be further canonicalized.
+    if (def->isLexical()) {
+      for (auto *cvi : def->getUsersOfType<CopyValueInst>()) {
+        ownedValues.insert(cvi);
+      }
+    }
   }
 };
 
@@ -432,6 +450,7 @@ void CopyPropagation::run() {
   auto *postOrderAnalysis = getAnalysis<PostOrderAnalysis>();
   auto *accessBlockAnalysis = getAnalysis<NonLocalAccessBlockAnalysis>();
   auto *dominanceAnalysis = getAnalysis<DominanceAnalysis>();
+  auto *calleeAnalysis = getAnalysis<BasicCalleeAnalysis>();
   DominanceInfo *domTree = dominanceAnalysis->get(f);
 
   // Label for unit testing with debug output.
@@ -475,9 +494,7 @@ void CopyPropagation::run() {
   // don't need to explicitly check for changes.
   CanonicalizeOSSALifetime canonicalizer(
       pruneDebug, /*maximizeLifetime=*/!getFunction()->shouldOptimize(),
-      getFunction(), accessBlockAnalysis, domTree, deleter);
-  auto *calleeAnalysis = getAnalysis<BasicCalleeAnalysis>();
-
+      getFunction(), accessBlockAnalysis, domTree, calleeAnalysis, deleter);
   // NOTE: We assume that the function is in reverse post order so visiting the
   //       blocks and pushing begin_borrows as we see them and then popping them
   //       off the end will result in shrinking inner borrow scopes first.

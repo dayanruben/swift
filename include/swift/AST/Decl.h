@@ -630,7 +630,7 @@ protected:
     HasAnyUnavailableValues : 1
   );
 
-  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD(ModuleDecl, TypeDecl, 1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,
     /// If the module is compiled as static library.
     StaticLibrary : 1,
 
@@ -680,11 +680,7 @@ protected:
 
     /// If the map from @objc provided name to top level swift::Decl in this
     /// module is populated
-    ObjCNameLookupCachePopulated : 1,
-
-    /// Whether the module is contained in the SDK or stdlib, or its a system
-    /// module and no SDK was specified.
-    IsNonUserModule : 1
+    ObjCNameLookupCachePopulated : 1
   );
 
   SWIFT_INLINE_BITFIELD(PrecedenceGroupDecl, Decl, 1+2,
@@ -1640,6 +1636,10 @@ public:
   /// attribute, or \c None if the name is invalid. Do not call unless
   /// \c isObjCImplementation() returns \c true.
   Optional<Identifier> getCategoryNameForObjCImplementation() const;
+
+  /// If this extension represents an imported Objective-C category, returns the
+  /// category's name. Otherwise returns the empty identifier.
+  Identifier getObjCCategoryName() const;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) {

@@ -186,9 +186,10 @@ extern "C" int swift_ASTGen_roundTripCheck(void *sourceFile);
 
 /// Emit parser diagnostics for given source file.. Returns non-zero if any
 /// diagnostics were emitted.
-extern "C" int swift_ASTGen_emitParserDiagnostics(void *diagEngine,
-                                                  void *sourceFile,
-                                                  int emitOnlyErrors);
+extern "C" int
+swift_ASTGen_emitParserDiagnostics(void *diagEngine, void *sourceFile,
+                                   int emitOnlyErrors,
+                                   int downgradePlaceholderErrorsToWarnings);
 
 // Build AST nodes for the top-level entities in the syntax.
 extern "C" void swift_ASTGen_buildTopLevelASTNodes(void *sourceFile,
@@ -274,9 +275,12 @@ void Parser::parseTopLevelItems(SmallVectorImpl<ASTNode> &items) {
       diagnose(loc, diag::parser_round_trip_error);
     } else if (Context.LangOpts.hasFeature(Feature::ParserValidation) &&
                !Context.Diags.hadAnyError() &&
-               swift_ASTGen_emitParserDiagnostics(&Context.Diags,
-                                                  SF.exportedSourceFile,
-                                                  /*emitOnlyErrors=*/true)) {
+               swift_ASTGen_emitParserDiagnostics(
+                   &Context.Diags, SF.exportedSourceFile,
+                   /*emitOnlyErrors=*/true,
+                   /*downgradePlaceholderErrorsToWarnings=*/
+                       Context.LangOpts.Playground ||
+                       Context.LangOpts.WarnOnEditorPlaceholder)) {
       // We might have emitted warnings in the C++ parser but no errors, in
       // which case we still have `hadAnyError() == false`. To avoid emitting
       // the same warnings from SwiftParser, only emit errors from SwiftParser
@@ -316,7 +320,10 @@ Parser::parseSourceFileViaASTGen(SmallVectorImpl<ASTNode> &items,
          Context.LangOpts.hasFeature(Feature::ParserASTGen)) &&
         !suppressDiagnostics &&
         swift_ASTGen_emitParserDiagnostics(
-            &Context.Diags, SF.exportedSourceFile, /*emitOnlyErrors=*/false) &&
+            &Context.Diags, SF.exportedSourceFile, /*emitOnlyErrors=*/false,
+            /*downgradePlaceholderErrorsToWarnings=*/
+                Context.LangOpts.Playground ||
+                Context.LangOpts.WarnOnEditorPlaceholder) &&
         Context.Diags.hadAnyError() &&
         !Context.LangOpts.hasFeature(Feature::ParserASTGen)) {
       // Errors were emitted, and we're still using the C++ parser, so
@@ -850,7 +857,8 @@ bool Parser::parseSpecializeAttributeArguments(
               loc, diag::attr_specialize_expected_function,
               DeclNameFlag::AllowZeroArgCompoundNames |
                   DeclNameFlag::AllowKeywordsUsingSpecialNames |
-                  DeclNameFlag::AllowOperators);
+                  DeclNameFlag::AllowOperators |
+                  DeclNameFlag::AllowLowercaseAndUppercaseSelf);
         }
       }
       if (ParamLabel == "spiModule") {
@@ -1137,10 +1145,11 @@ Parser::parseImplementsAttribute(SourceLoc AtLoc, SourceLoc Loc) {
     }
 
     if (!Status.isErrorOrHasCompletion()) {
-      MemberName = parseDeclNameRef(MemberNameLoc,
-          diag::attr_implements_expected_member_name,
+      MemberName = parseDeclNameRef(
+          MemberNameLoc, diag::attr_implements_expected_member_name,
           DeclNameFlag::AllowZeroArgCompoundNames |
-          DeclNameFlag::AllowOperators);
+              DeclNameFlag::AllowOperators |
+              DeclNameFlag::AllowLowercaseAndUppercaseSelf);
       if (!MemberName) {
         Status.setIsParseError();
       }
@@ -1505,7 +1514,8 @@ static bool parseQualifiedDeclName(Parser &P, Diag<> nameParseError,
         original.Loc, nameParseError,
         Parser::DeclNameFlag::AllowZeroArgCompoundNames |
             Parser::DeclNameFlag::AllowKeywordsUsingSpecialNames |
-            Parser::DeclNameFlag::AllowOperators);
+            Parser::DeclNameFlag::AllowOperators |
+            Parser::DeclNameFlag::AllowLowercaseAndUppercaseSelf);
     // The base type is optional, but the final unqualified declaration name is
     // not. If name could not be parsed, return true for error.
     if (!original.Name)
@@ -3207,11 +3217,12 @@ bool Parser::parseNewDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
       consumeToken(tok::colon);
       {
         DeclNameLoc loc;
-        replacedFunction = parseDeclNameRef(loc,
-            diag::attr_dynamic_replacement_expected_function,
+        replacedFunction = parseDeclNameRef(
+            loc, diag::attr_dynamic_replacement_expected_function,
             DeclNameFlag::AllowZeroArgCompoundNames |
-            DeclNameFlag::AllowKeywordsUsingSpecialNames |
-            DeclNameFlag::AllowOperators);
+                DeclNameFlag::AllowKeywordsUsingSpecialNames |
+                DeclNameFlag::AllowOperators |
+                DeclNameFlag::AllowLowercaseAndUppercaseSelf);
       }
     }
 
@@ -3920,8 +3931,9 @@ bool Parser::parseConventionAttributeInternal(
     }
 
     DeclNameLoc unusedLoc;
-    convention.WitnessMethodProtocol = parseDeclNameRef(unusedLoc,
-        diag::convention_attribute_witness_method_expected_protocol, {});
+    convention.WitnessMethodProtocol = parseDeclNameRef(
+        unusedLoc, diag::convention_attribute_witness_method_expected_protocol,
+        DeclNameFlag::AllowLowercaseAndUppercaseSelf);
   }
   
   // Parse the ')'.  We can't use parseMatchingToken if we're in
@@ -9595,9 +9607,10 @@ ParserResult<MacroDecl> Parser::parseDeclMacro(DeclAttributes &attributes) {
   DeclName macroFullName;
 
   // Parameter list.
+  DefaultArgumentInfo defaultArgs;
   SmallVector<Identifier, 2> namePieces;
   auto parameterResult = parseSingleParameterClause(
-      ParameterContextKind::Macro, &namePieces, nullptr);
+      ParameterContextKind::Macro, &namePieces, &defaultArgs);
   status |= parameterResult;
   parameterList = parameterResult.getPtrOrNull();
 
@@ -9639,6 +9652,8 @@ ParserResult<MacroDecl> Parser::parseDeclMacro(DeclAttributes &attributes) {
     }
     status |= whereStatus;
   }
+
+  defaultArgs.setFunctionContext(macro, macro->getParameterList());
 
   return dcc.fixupParserResult(status, macro);
 }
