@@ -3176,7 +3176,13 @@ static bool usesFeatureVariadicGenerics(Decl *decl) {
 }
 
 static bool usesFeatureLayoutPrespecialization(Decl *decl) {
-  return false;
+  auto &attrs = decl->getAttrs();
+  return std::any_of(attrs.begin(), attrs.end(), [](auto *attr) {
+    if (auto *specialize = dyn_cast<SpecializeAttr>(attr)) {
+      return !specialize->getTypeErasedParams().empty();
+    }
+    return false;
+  });
 }
 
 static bool usesFeatureLayoutStringValueWitnesses(Decl *decl) {
@@ -3230,6 +3236,21 @@ static bool usesFeatureMoveOnly(Decl *decl) {
 
 static bool usesFeatureMoveOnlyClasses(Decl *decl) {
   return isa<ClassDecl>(decl) && usesFeatureMoveOnly(decl);
+}
+
+static bool usesFeatureNoImplicitCopy(Decl *decl) {
+  return decl->isNoImplicitCopy();
+}
+
+static bool usesFeatureOldOwnershipOperatorSpellings(Decl *decl) {
+  return false;
+}
+
+static bool usesFeatureMoveOnlyEnumDeinits(Decl *decl) {
+  if (auto *ei = dyn_cast<EnumDecl>(decl)) {
+    return usesFeatureMoveOnly(ei) && ei->getValueTypeDestructor();
+  }
+  return false;
 }
 
 static bool usesFeatureOneWayClosureParameters(Decl *decl) {
