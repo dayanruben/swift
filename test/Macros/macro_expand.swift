@@ -1,5 +1,5 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift -swift-version 5 -I %swift-host-lib-dir -L %swift-host-lib-dir -emit-library -o %t/%target-library-name(MacroDefinition) -module-name=MacroDefinition %S/Inputs/syntax_macro_definitions.swift -g -no-toolchain-stdlib-rpath -swift-version 5
+// RUN: %host-build-swift -swift-version 5 -I %swift-host-lib-dir -L %swift-host-lib-dir -emit-library -o %t/%target-library-name(MacroDefinition) -module-name=MacroDefinition %S/Inputs/syntax_macro_definitions.swift -g -no-toolchain-stdlib-rpath -swift-version 5
 // RUNx: %target-swift-frontend -dump-ast -enable-experimental-feature FreestandingMacros -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir %s -module-name MacroUser 2>&1 | %FileCheck --check-prefix CHECK-AST %s
 
 // Diagnostics testing
@@ -39,7 +39,7 @@ struct MemberNotCovered {
   // expected-note@-1 {{in expansion of macro 'NotCovered' here}}
 
   // CHECK-DIAGS: error: declaration name 'value' is not covered by macro 'NotCovered'
-  // CHECK-DIAGS: CONTENTS OF FILE @__swiftmacro_9MacroUser16MemberNotCoveredV0dE0fMf0_.swift
+  // CHECK-DIAGS: CONTENTS OF FILE @__swiftmacro_9MacroUser16MemberNotCoveredV33_4361AD9339943F52AE6186DD51E04E91Ll0dE0fMf0_.swift
   // CHECK-DIAGS: var value: Int
   // CHECK-DIAGS: END CONTENTS OF FILE
 }
@@ -334,6 +334,12 @@ func testFreestandingMacroExpansion() {
   #anonymousTypes { "hello" }
 }
 testFreestandingMacroExpansion()
+
+// Explicit structs to force macros to be parsed as decl.
+struct ContainerOfNumberedStructs {
+  #bitwidthNumberedStructs("MyIntOne")
+  #bitwidthNumberedStructs("MyIntTwo")
+}
 
 // Avoid re-type-checking declaration macro arguments.
 @freestanding(declaration)

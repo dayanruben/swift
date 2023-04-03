@@ -26,10 +26,7 @@ public struct ColorLiteralMacro: ExpressionMacro {
       of: macro.argumentList, with: "_colorLiteralRed"
     )
     let initSyntax: ExprSyntax = ".init(\(argList))"
-    if let leadingTrivia = macro.leadingTrivia {
-      return initSyntax.with(\.leadingTrivia, leadingTrivia)
-    }
-    return initSyntax
+    return initSyntax.with(\.leadingTrivia, macro.leadingTrivia)
   }
 }
 
@@ -48,10 +45,7 @@ public struct FileIDMacro: ExpressionMacro {
     }
 
     let fileLiteral: ExprSyntax = "\(literal: fileID)"
-    if let leadingTrivia = macro.leadingTrivia {
-      return fileLiteral.with(\.leadingTrivia, leadingTrivia)
-    }
-    return fileLiteral
+    return fileLiteral.with(\.leadingTrivia, macro.leadingTrivia)
   }
 }
 
@@ -549,6 +543,37 @@ public struct AddMembers: MemberMacro {
       instanceMethod,
       staticMethod,
       initDecl,
+      classDecl,
+    ]
+  }
+}
+
+public struct AddExtMembers: MemberMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    providingMembersOf decl: some DeclGroupSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    let uniqueClassName = context.createUniqueName("uniqueClass")
+
+    let instanceMethod: DeclSyntax =
+      """
+      func extInstanceMethod() {}
+      """
+
+    let staticMethod: DeclSyntax =
+      """
+      static func extStaticMethod() {}
+      """
+
+    let classDecl: DeclSyntax =
+      """
+      class \(uniqueClassName) { }
+      """
+
+    return [
+      instanceMethod,
+      staticMethod,
       classDecl,
     ]
   }

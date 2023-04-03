@@ -1,6 +1,13 @@
 // RUN: %empty-directory(%t)
-// RUN: %target-build-swift -swift-version 5 -I %swift-host-lib-dir -L %swift-host-lib-dir -emit-library -o %t/%target-library-name(MacroDefinition) -parse-as-library -module-name=MacroDefinition %S/Inputs/syntax_macro_definitions.swift -g -no-toolchain-stdlib-rpath
+// RUN: %host-build-swift -swift-version 5 -I %swift-host-lib-dir -L %swift-host-lib-dir -emit-library -o %t/%target-library-name(MacroDefinition) -parse-as-library -module-name=MacroDefinition %S/Inputs/syntax_macro_definitions.swift -g -no-toolchain-stdlib-rpath
 // RUN: %target-typecheck-verify-swift -swift-version 5 -load-plugin-library %t/%target-library-name(MacroDefinition) -parse-as-library -I %swift-host-lib-dir -disable-availability-checking
+
+// Check with the imported macro library vs. the local declaration of the macro.
+// RUN: %target-swift-frontend -swift-version 5 -emit-module -o %t/macro_library.swiftmodule %S/Inputs/macro_library.swift -module-name macro_library -load-plugin-library %t/%target-library-name(MacroDefinition) -I %swift-host-lib-dir
+
+// RUN: %target-typecheck-verify-swift -swift-version 5 -load-plugin-library %t/%target-library-name(MacroDefinition) -parse-as-library -I %swift-host-lib-dir -disable-availability-checking -DIMPORT_MACRO_LIBRARY -I %t
+
+
 // RUN: %target-swift-frontend -swift-version 5 -typecheck -load-plugin-library %t/%target-library-name(MacroDefinition) -parse-as-library -I %swift-host-lib-dir %s -disable-availability-checking -dump-macro-expansions > %t/expansions-dump.txt 2>&1
 // RUN: %FileCheck -check-prefix=CHECK-DUMP %s < %t/expansions-dump.txt
 
@@ -13,8 +20,12 @@
 // FIXME: Swift parser is not enabled on Linux CI yet.
 // REQUIRES: OS=macosx
 
+#if IMPORT_MACRO_LIBRARY
+import macro_library
+#else
 @attached(peer, names: overloaded)
 macro addCompletionHandler() = #externalMacro(module: "MacroDefinition", type: "AddCompletionHandler")
+#endif
 
 struct S {
   @addCompletionHandler
@@ -36,12 +47,26 @@ struct S {
   }
 }
 
-// CHECK-DUMP: @__swiftmacro_18macro_expand_peers1f1a3for_SSSi_SSSdtYaF20addCompletionHandlerfMp_.swift
-// CHECK-DUMP: func f(a: Int, for b: String, _ value: Double, completionHandler: @escaping (String) -> Void) {
-// CHECK-DUMP:   Task {
-// CHECK-DUMP:     completionHandler(await f(a: a, for: b, value))
-// CHECK-DUMP:   }
-// CHECK-DUMP: }
+extension S {
+  @addCompletionHandler
+  func g(a: Int, for b: String, _ value: Double) async -> String {
+    return b
+  }
+
+  // CHECK-DUMP: @__swiftmacro_18macro_expand_peers1SV1g1a3for_SSSi_SSSdtYaF20addCompletionHandlerfMp_.swift
+  // CHECK-DUMP: func f(a: Int, for b: String, _ value: Double, completionHandler: @escaping (String) -> Void) {
+  // CHECK-DUMP:   Task {
+  // CHECK-DUMP:     completionHandler(await f(a: a, for: b, value))
+  // CHECK-DUMP:   }
+  // CHECK-DUMP: }
+
+}
+
+func useCompletionHandlerG(s: S, _ body: @escaping (String) -> Void) {
+  s.g(a: 1, for: "hahaha local", 2.0) {
+    body($0)
+  }
+}
 
 @addCompletionHandler
 func f(a: Int, for b: String, _ value: Double) async -> String {
