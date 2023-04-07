@@ -240,6 +240,9 @@ def Raccess_note : Separate<["-"], "Raccess-note">,
 def Raccess_note_EQ : Joined<["-"], "Raccess-note=">,
     Alias<Raccess_note>;
 
+def block_list_file
+  : Separate<["-"], "blocklist-file">, MetaVarName<"<path>">,
+    HelpText<"The path to a blocklist configuration file">;
 } // end let Flags = [FrontendOption, NoDriverOption]
 
 def debug_crash_Group : OptionGroup<"<automatic crashing options>">;
@@ -1175,6 +1178,13 @@ def enable_emit_generic_class_ro_t_list :
   Flag<["-"], "enable-emit-generic-class-ro_t-list">,
   HelpText<"Enable emission of a section with references to class_ro_t of "
            "generic class patterns">;
+
+def enable_deterministic_check :
+  Flag<["-"], "enable-deterministic-check">,
+  HelpText<"Check compiler output determinisim by running it twice">;
+def always_compile_output_files :
+  Flag<["-"], "always-compile-output-files">,
+  HelpText<"Always compile output files even it might not change the results">;
 
 def experimental_spi_only_imports :
   Flag<["-"], "experimental-spi-only-imports">,

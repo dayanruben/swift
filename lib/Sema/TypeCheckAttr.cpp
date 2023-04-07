@@ -160,7 +160,6 @@ public:
   IGNORED_ATTR(Preconcurrency)
   IGNORED_ATTR(BackDeployed)
   IGNORED_ATTR(Documentation)
-  IGNORED_ATTR(MacroRole)
   IGNORED_ATTR(LexicalLifetimes)
 #undef IGNORED_ATTR
 
@@ -342,6 +341,8 @@ public:
   void visitSendableAttr(SendableAttr *attr);
 
   void visitRuntimeMetadataAttr(RuntimeMetadataAttr *attr);
+
+  void visitMacroRoleAttr(MacroRoleAttr *attr);
 };
 
 } // end anonymous namespace
@@ -1905,6 +1906,16 @@ void AttributeChecker::visitAvailableAttr(AvailableAttr *attr) {
       !attr->isPackageDescriptionVersionSpecific())
     return;
 
+  // Make sure there isn't a more specific attribute we should be using instead.
+  // findMostSpecificActivePlatform() is O(N), so only do this if we're checking
+  // an iOS attribute while building for macCatalyst.
+  if (attr->Platform == PlatformKind::iOS &&
+      isPlatformActive(PlatformKind::macCatalyst, Ctx.LangOpts)) {
+    if (attr != D->getAttrs().findMostSpecificActivePlatform(Ctx)) {
+      return;
+    }
+  }
+
   SourceLoc attrLoc = attr->getLocation();
   auto versionAvailability = attr->getVersionAvailability(Ctx);
   if (versionAvailability == AvailableVersionComparison::Obsoleted ||
@@ -1930,16 +1941,6 @@ void AttributeChecker::visitAvailableAttr(AvailableAttr *attr) {
   // for specific platforms.
   if (!attr->hasPlatform() || !attr->Introduced.has_value())
     return;
-
-  // Make sure there isn't a more specific attribute we should be using instead.
-  // findMostSpecificActivePlatform() is O(N), so only do this if we're checking
-  // an iOS attribute while building for macCatalyst.
-  if (attr->Platform == PlatformKind::iOS &&
-      isPlatformActive(PlatformKind::macCatalyst, Ctx.LangOpts)) {
-    if (attr != D->getAttrs().findMostSpecificActivePlatform(Ctx)) {
-      return;
-    }
-  }
 
   // Find the innermost enclosing declaration with an availability
   // range annotation and ensure that this attribute's available version range
@@ -4520,6 +4521,24 @@ TypeChecker::diagnosticIfDeclCannotBeUnavailable(const Decl *D) {
     return diag::availability_deinit_no_unavailable;
   }
 
+  if (auto *VD = dyn_cast<VarDecl>(D)) {
+    if (!VD->hasStorageOrWrapsStorage())
+      return None;
+
+    if (parentIsUnavailable(D))
+      return None;
+
+    // Do not permit unavailable script-mode global variables; their initializer
+    // expression is not lazily evaluated, so this would not be safe.
+    if (VD->isTopLevelGlobal())
+      return diag::availability_global_script_no_unavailable;
+
+    // Globals and statics are lazily initialized, so they are safe for
+    // unavailability.
+    if (!VD->isStatic() && !D->getDeclContext()->isModuleScopeContext())
+      return diag::availability_stored_property_no_unavailable;
+  }
+
   return None;
 }
 
@@ -6986,6 +7005,59 @@ void AttributeChecker::visitRuntimeMetadataAttr(RuntimeMetadataAttr *attr) {
     }
 
     attr->setInvalid();
+  }
+}
+
+void AttributeChecker::visitMacroRoleAttr(MacroRoleAttr *attr) {
+  switch (attr->getMacroSyntax()) {
+  case MacroSyntax::Freestanding: {
+    switch (attr->getMacroRole()) {
+    case MacroRole::Expression:
+      if (!attr->getNames().empty())
+        diagnoseAndRemoveAttr(attr, diag::macro_cannot_introduce_names,
+                              getMacroRoleString(attr->getMacroRole()));
+      break;
+    case MacroRole::Declaration:
+      // TODO: Check names
+      break;
+    case MacroRole::CodeItem:
+      if (!attr->getNames().empty())
+        diagnoseAndRemoveAttr(attr, diag::macro_cannot_introduce_names,
+                              getMacroRoleString(attr->getMacroRole()));
+      break;
+    default:
+      diagnoseAndRemoveAttr(attr, diag::invalid_macro_role_for_macro_syntax,
+                            /*freestanding*/0);
+      break;
+    }
+    break;
+  }
+  case MacroSyntax::Attached: {
+    switch (attr->getMacroRole()) {
+    case MacroRole::Accessor:
+      // TODO: Check property observer names?
+      break;
+    case MacroRole::MemberAttribute:
+      if (!attr->getNames().empty())
+        diagnoseAndRemoveAttr(attr, diag::macro_cannot_introduce_names,
+                              getMacroRoleString(attr->getMacroRole()));
+      break;
+    case MacroRole::Member:
+      break;
+    case MacroRole::Peer:
+      break;
+    case MacroRole::Conformance:
+      if (!attr->getNames().empty())
+        diagnoseAndRemoveAttr(attr, diag::macro_cannot_introduce_names,
+                              getMacroRoleString(attr->getMacroRole()));
+      break;
+    default:
+      diagnoseAndRemoveAttr(attr, diag::invalid_macro_role_for_macro_syntax,
+                            /*attached*/1);
+      break;
+    }
+    break;
+  }
   }
 }
 

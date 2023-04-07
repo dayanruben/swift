@@ -1912,11 +1912,14 @@ static ConstraintSystem::TypeMatchResult matchCallArguments(
       }
 
       auto argLabel = argument.getLabel();
-      if (paramInfo.hasExternalPropertyWrapper(argIdx) || argLabel.hasDollarPrefix()) {
-        auto *param = getParameterAt(callee, argIdx);
+      if (paramInfo.hasExternalPropertyWrapper(paramIdx) ||
+          argLabel.hasDollarPrefix()) {
+        auto *param = getParameterAt(callee, paramIdx);
         assert(param);
-        if (cs.applyPropertyWrapperToParameter(paramTy, argTy, const_cast<ParamDecl *>(param),
-                                               argLabel, subKind, loc).isFailure()) {
+        if (cs.applyPropertyWrapperToParameter(paramTy, argTy,
+                                               const_cast<ParamDecl *>(param),
+                                               argLabel, subKind, loc)
+                .isFailure()) {
           return cs.getTypeMatchFailure(loc);
         }
         continue;
@@ -4282,16 +4285,17 @@ ConstraintSystem::matchTypesBindTypeVar(
   // pack expansion expression.
   if (!typeVar->getImpl().canBindToPack() &&
       (type->is<PackArchetypeType>() || type->is<PackType>())) {
-    if (shouldAttemptFixes()) {
-      auto *fix = AllowInvalidPackReference::create(*this, type,
-                                                    getConstraintLocator(locator));
-      if (!recordFix(fix)) {
-        recordPotentialHole(typeVar);
-        return getTypeMatchSuccess();
-      }
-    }
+    if (!shouldAttemptFixes())
+      return getTypeMatchFailure(locator);
 
-    return getTypeMatchFailure(locator);
+    auto *fix = AllowInvalidPackReference::create(
+        *this, type, getConstraintLocator(locator));
+    if (recordFix(fix))
+      return getTypeMatchFailure(locator);
+
+    // Don't allow the invalid pack reference to propagate to other
+    // bindings.
+    type = PlaceholderType::get(typeVar->getASTContext(), typeVar);
   }
 
   // Binding to a pack expansion type is always an error in Swift 6 mode.
@@ -5155,6 +5159,14 @@ bool ConstraintSystem::repairFailures(
 
       if (auto *inoutExpr = dyn_cast<InOutExpr>(AE->getSrc())) {
         auto *loc = getConstraintLocator(inoutExpr);
+
+        // Remove all of the restrictions because none of them
+        // are going to succeed.
+        conversionsOrFixes.erase(
+            llvm::remove_if(
+                conversionsOrFixes,
+                [](const auto &entry) { return bool(entry.getRestriction()); }),
+            conversionsOrFixes.end());
 
         if (hasFixFor(loc, FixKind::RemoveAddressOf))
           return true;
