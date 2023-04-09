@@ -1177,9 +1177,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.DumpTypeWitnessSystems = Args.hasArg(OPT_dump_type_witness_systems);
 
-  for (auto A : Args.getAllArgValues(options::OPT_block_list_file)) {
-    Opts.BlocklistConfigFilePath.push_back(A);
-  }
+  for (auto &block: FrontendOpts.BlocklistConfigFilePaths)
+    Opts.BlocklistConfigFilePaths.push_back(block);
   if (const Arg *A = Args.getLastArg(options::OPT_concurrency_model)) {
     Opts.ActiveConcurrencyModel =
         llvm::StringSwitch<ConcurrencyModel>(A->getValue())
@@ -2675,6 +2674,21 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Args.hasFlag(OPT_enable_relative_protocol_witness_tables,
                  OPT_disable_relative_protocol_witness_tables,
                  Opts.UseRelativeProtocolWitnessTables);
+
+  Opts.EnableLayoutStringValueWitnesses = Args.hasFlag(OPT_enable_layout_string_value_witnesses,
+                                                       OPT_disable_layout_string_value_witnesses,
+                                                       Opts.EnableLayoutStringValueWitnesses);
+
+  Opts.EnableLayoutStringValueWitnessesInstantiation = Args.hasFlag(OPT_enable_layout_string_value_witnesses_instantiation,
+                                      OPT_disable_layout_string_value_witnesses_instantiation,
+                                      Opts.EnableLayoutStringValueWitnessesInstantiation);
+
+  if (Opts.EnableLayoutStringValueWitnessesInstantiation &&
+      !Opts.EnableLayoutStringValueWitnesses) {
+    Diags.diagnose(SourceLoc(), diag::layout_string_instantiation_without_layout_strings);
+    return true;
+  }
+
   return false;
 }
 
