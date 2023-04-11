@@ -2345,6 +2345,16 @@ void AttributeChecker::checkApplicationMainAttribute(DeclAttribute *attr,
     attr->setInvalid();
   }
 
+  diagnose(attr->getLocation(),
+           diag::attr_ApplicationMain_deprecated,
+           applicationMainKind)
+    .warnUntilSwiftVersion(6);
+
+  diagnose(attr->getLocation(),
+           diag::attr_ApplicationMain_deprecated_use_attr_main)
+    .fixItReplace(attr->getRange(), "@main");
+
+
   if (attr->isInvalid())
     return;
 
@@ -2962,22 +2972,27 @@ void AttributeChecker::visitOptimizeAttr(OptimizeAttr *attr) {
 
 void AttributeChecker::visitExclusivityAttr(ExclusivityAttr *attr) {
   if (auto *varDecl = dyn_cast<VarDecl>(D)) {
-    if (!varDecl->hasStorage()) {
-      diagnose(attr->getLocation(), diag::exclusivity_on_computed_property);
-      attr->setInvalid();
-      return;
+    auto *DC = D->getDeclContext();
+    auto *parentSF = DC->getParentSourceFile();
+
+    if (parentSF && parentSF->Kind != SourceFileKind::Interface) {
+      if (!varDecl->hasStorage()) {
+        diagnose(attr->getLocation(), diag::exclusivity_on_computed_property);
+        attr->setInvalid();
+        return;
+      }
     }
-  
-    if (isa<ClassDecl>(varDecl->getDeclContext()))
+
+    if (isa<ClassDecl>(DC))
       return;
-    
-    if (varDecl->getDeclContext()->isTypeContext() && !varDecl->isInstanceMember())
+
+    if (DC->isTypeContext() && !varDecl->isInstanceMember())
       return;
-    
-    if (varDecl->getDeclContext()->isModuleScopeContext())
+
+    if (DC->isModuleScopeContext())
       return;
   }
-  diagnose(attr->getLocation(), diag::exclusivity_on_wrong_decl);
+  diagnoseAndRemoveAttr(attr, diag::exclusivity_on_wrong_decl);
   attr->setInvalid();
 }
 
