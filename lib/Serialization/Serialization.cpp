@@ -1219,8 +1219,9 @@ void Serializer::writeInputBlock(const SerializationOptions &options) {
   // distinguish them.
   ImportSet publicImportSet =
       getImportsAsSet(M, ModuleDecl::ImportFilterKind::Exported);
-  ImportSet privateImportSet =
-      getImportsAsSet(M, ModuleDecl::ImportFilterKind::Default);
+  ImportSet defaultImportSet =
+      getImportsAsSet(M, {ModuleDecl::ImportFilterKind::Default,
+                          ModuleDecl::ImportFilterKind::SPIOnly});
   ImportSet packageOnlyImportSet =
       getImportsAsSet(M, ModuleDecl::ImportFilterKind::PackageOnly);
   ImportSet internalOrBelowImportSet =
@@ -1270,7 +1271,7 @@ void Serializer::writeInputBlock(const SerializationOptions &options) {
     // form here.
     if (publicImportSet.count(import))
       stableImportControl = ImportControl::Exported;
-    else if (privateImportSet.count(import))
+    else if (defaultImportSet.count(import))
       stableImportControl = ImportControl::Normal;
     else if (packageOnlyImportSet.count(import))
       stableImportControl = ImportControl::PackageOnly;
@@ -3040,17 +3041,27 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
       auto rawMacroRole =
           getRawStableMacroRole(theAttr->getMacroRole());
       SmallVector<IdentifierID, 4> introducedDeclNames;
-      for (auto name : theAttr->getNames()) {
+      for (auto introducedName : theAttr->getNames()) {
         introducedDeclNames.push_back(IdentifierID(
-            getRawStableMacroIntroducedDeclNameKind(name.getKind())));
-        introducedDeclNames.push_back(
-            S.addDeclBaseNameRef(name.getIdentifier()));
+            getRawStableMacroIntroducedDeclNameKind(introducedName.getKind())));
+
+        auto name = introducedName.getName();
+        introducedDeclNames.push_back(S.addDeclBaseNameRef(name.getBaseName()));
+        if (name.isSimpleName()) {
+          introducedDeclNames.push_back(0);
+          continue;
+        }
+
+        auto argumentLabels = name.getArgumentNames();
+        introducedDeclNames.push_back(argumentLabels.size() + 1);
+        for (auto label : argumentLabels)
+          introducedDeclNames.push_back(S.addDeclBaseNameRef(label));
       }
 
       MacroRoleDeclAttrLayout::emitRecord(
           S.Out, S.ScratchRecord, abbrCode, theAttr->isImplicit(),
           static_cast<uint8_t>(theAttr->getMacroSyntax()),
-          rawMacroRole, theAttr->getNames().size(),
+          rawMacroRole, introducedDeclNames.size(),
           introducedDeclNames);
       return;
     }
