@@ -3529,6 +3529,8 @@ ERROR(lifetime_invalid_global_scope,none, "%0 is only valid on methods",
 ERROR(eagermove_and_lexical_combined,none,
       "@_eagerMove and @_noEagerMove attributes are alternate styles of lifetimes "
       "and can't be combined", ())
+ERROR(eagermove_and_noncopyable_combined,none,
+      "@_eagerMove cannot be applied to NonCopyable types", ())
 
 ERROR(autoclosure_function_type,none,
       "@autoclosure attribute only applies to function types",
@@ -7064,6 +7066,28 @@ ERROR(invalid_macro_role_for_macro_syntax,none,
       (unsigned))
 ERROR(macro_cannot_introduce_names,none,
       "'%0' macros are not allowed to introduce names", (StringRef))
+
+ERROR(macro_resolve_circular_reference, none,
+      "circular reference resolving %select{freestanding|attached}0 macro %1",
+      (bool, DeclName))
+NOTE(macro_resolve_circular_reference_through, none,
+     "while resolving %select{freestanding|attached}0 macro %1",
+     (bool, DeclName))
+
+ERROR(macro_expand_circular_reference, none,
+      "circular reference expanding %0 macro %1", (StringRef, DeclName))
+NOTE(macro_expand_circular_reference_through, none,
+     "circular reference expanding %0 macro %1", (StringRef, DeclName))
+
+ERROR(macro_expand_circular_reference_entity, none,
+      "circular reference expanding %0 macros on %1", (StringRef, DeclName))
+NOTE(macro_expand_circular_reference_entity_through, none,
+     "circular reference expanding %0 macros on %1", (StringRef, DeclName))
+
+ERROR(macro_expand_circular_reference_unnamed, none,
+      "circular reference expanding %0 macros", (StringRef))
+NOTE(macro_expand_circular_reference_unnamed_through, none,
+     "circular reference expanding %0 macros", (StringRef))
 
 //------------------------------------------------------------------------------
 // MARK: Move Only Errors
