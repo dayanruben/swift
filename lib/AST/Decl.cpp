@@ -10149,6 +10149,17 @@ StringRef swift::getMacroRoleString(MacroRole role) {
   }
 }
 
+std::vector<MacroIntroducedDeclNameKind>
+swift::getAllMacroIntroducedDeclNameKinds() {
+  return {
+      MacroIntroducedDeclNameKind::Named,
+      MacroIntroducedDeclNameKind::Overloaded,
+      MacroIntroducedDeclNameKind::Prefixed,
+      MacroIntroducedDeclNameKind::Suffixed,
+      MacroIntroducedDeclNameKind::Arbitrary,
+  };
+}
+
 bool swift::macroIntroducedNameRequiresArgument(
   MacroIntroducedDeclNameKind kind
 ) {
@@ -10541,6 +10552,9 @@ DeclContext *
 MacroDiscriminatorContext::getInnermostMacroContext(DeclContext *dc) {
   switch (dc->getContextKind()) {
   case DeclContextKind::SubscriptDecl:
+    // For a subscript, return its parent context.
+    return getInnermostMacroContext(dc->getParent());
+
   case DeclContextKind::EnumElementDecl:
   case DeclContextKind::AbstractFunctionDecl:
   case DeclContextKind::SerializedLocal:
