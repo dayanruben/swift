@@ -21,6 +21,7 @@
 #include "swift/AST/ASTMangler.h"
 #include "swift/AST/ASTNode.h"
 #include "swift/AST/CASTBridging.h"
+#include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/AST/Expr.h"
 #include "../AST/InlinableText.h"
 #include "swift/AST/MacroDefinition.h"
@@ -75,7 +76,7 @@ extern "C" ptrdiff_t swift_ASTGen_expandAttachedMacro(
     void *parentDeclSourceFile, const void *parentDeclSourceLocation,
     const char **evaluatedSource, ptrdiff_t *evaluatedSourceLength);
 
-extern "C" void swift_ASTGen_initializePlugin(void *handle);
+extern "C" bool swift_ASTGen_initializePlugin(void *handle, void *diagEngine);
 extern "C" void swift_ASTGen_deinitializePlugin(void *handle);
 extern "C" bool swift_ASTGen_pluginServerLoadLibraryPlugin(
     void *handle, const char *libraryPath, const char *moduleName,
@@ -193,6 +194,13 @@ MacroDefinition MacroDefinitionRequest::evaluate(
     free(replacements);
   };
 
+  if (checkResult < 0 && ctx.CompletionCallback) {
+    // If the macro failed to check and we are in code completion mode, pretend
+    // it's an arbitrary macro. This allows us to get call argument completions
+    // inside `#externalMacro`.
+    checkResult = BridgedMacroDefinitionKind::BridgedExpandedMacro;
+  }
+
   if (checkResult < 0)
     return MacroDefinition::forInvalid();
 
@@ -309,7 +317,9 @@ loadExecutablePluginByName(ASTContext &ctx, Identifier moduleName) {
   // But plugin loading is in libAST and it can't link ASTGen symbols.
   if (!executablePlugin->isInitialized()) {
 #if SWIFT_SWIFT_PARSER
-    swift_ASTGen_initializePlugin(executablePlugin);
+    if (!swift_ASTGen_initializePlugin(executablePlugin, &ctx.Diags)) {
+      return nullptr;
+    }
     executablePlugin->setCleanup([executablePlugin] {
       swift_ASTGen_deinitializePlugin(executablePlugin);
     });
@@ -321,7 +331,9 @@ loadExecutablePluginByName(ASTContext &ctx, Identifier moduleName) {
 #if SWIFT_SWIFT_PARSER
     llvm::SmallString<128> resolvedLibraryPath;
     auto fs = ctx.SourceMgr.getFileSystem();
-    if (fs->getRealPath(libraryPath, resolvedLibraryPath)) {
+    if (auto err = fs->getRealPath(libraryPath, resolvedLibraryPath)) {
+      ctx.Diags.diagnose(SourceLoc(), diag::compiler_plugin_not_loaded,
+                         executablePluginPath, err.message());
       return nullptr;
     }
     std::string resolvedLibraryPathStr(resolvedLibraryPath);
@@ -1495,12 +1507,9 @@ swift::expandConformances(CustomAttr *attr, MacroDecl *macro,
   return macroSourceFile->getBufferID();
 }
 
-ConcreteDeclRef
-ResolveMacroRequest::evaluate(Evaluator &evaluator,
-                              UnresolvedMacroReference macroRef,
-                              const Decl *decl) const {
-  auto dc = decl->getDeclContext();
-
+ConcreteDeclRef ResolveMacroRequest::evaluate(Evaluator &evaluator,
+                                              UnresolvedMacroReference macroRef,
+                                              DeclContext *dc) const {
   // Macro expressions and declarations have their own stored macro
   // reference. Use it if it's there.
   if (auto *expr = macroRef.getExpr()) {

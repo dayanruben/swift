@@ -6560,7 +6560,6 @@ CxxRecordSemanticsKind
 CxxRecordSemantics::evaluate(Evaluator &evaluator,
                              CxxRecordSemanticsDescriptor desc) const {
   const auto *decl = desc.decl;
-  auto &clangSema = desc.ctx.getClangModuleLoader()->getClangSema();
 
   if (hasImportAsRefAttr(decl)) {
     return CxxRecordSemanticsKind::Reference;
@@ -6833,4 +6832,16 @@ bool importer::requiresCPlusPlus(const clang::Module *module) {
   return llvm::any_of(module->Requirements, [](clang::Module::Requirement req) {
     return req.first == "cplusplus";
   });
+}
+
+llvm::Optional<clang::QualType>
+importer::getCxxReferencePointeeTypeOrNone(const clang::Type *type) {
+  if (type->isReferenceType())
+    return type->getPointeeType();
+  return {};
+}
+
+bool importer::isCxxConstReferenceType(const clang::Type *type) {
+  auto pointeeType = getCxxReferencePointeeTypeOrNone(type);
+  return pointeeType && pointeeType->isConstQualified();
 }
