@@ -735,7 +735,7 @@ void SILCloner<ImplClass>::clonePhiArgs(SILBasicBlock *oldBB) {
   for (auto *Arg : oldBB->getSILPhiArguments()) {
     SILValue mappedArg = mappedBB->createPhiArgument(
         getOpType(Arg->getType()), Arg->getOwnershipKind(), Arg->getDecl(),
-        Arg->isReborrow(), Arg->isEscaping());
+        Arg->isReborrow(), Arg->hasPointerEscape());
 
     asImpl().mapValue(Arg, mappedArg);
   }
@@ -892,6 +892,14 @@ SILCloner<ImplClass>::visitAllocStackInst(AllocStackInst *Inst) {
   recordClonedInstruction(Inst, NewInst);
 }
 
+template <typename ImplClass>
+void SILCloner<ImplClass>::visitAllocPackMetadataInst(
+    AllocPackMetadataInst *Inst) {
+  getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
+  recordClonedInstruction(Inst, getBuilder().createAllocPackMetadata(
+                                    getOpLocation(Inst->getLoc())));
+}
+
 template<typename ImplClass>
 void
 SILCloner<ImplClass>::visitAllocPackInst(AllocPackInst *Inst) {
@@ -955,11 +963,9 @@ SILCloner<ImplClass>::visitAllocBoxInst(AllocBoxInst *Inst) {
       Inst,
       getBuilder().createAllocBox(
           Loc, this->getOpType(Inst->getType()).template castTo<SILBoxType>(),
-          VarInfo, false, false, false
-#ifndef NDEBUG
-          ,
-          true
-#endif
+          VarInfo, /*hasDynamicLifetime*/ false,
+          /*reflection*/ false,
+          /*usesMoveableValueDebugInfo*/ false, /*skipVarDeclAssert*/ true
           ));
 }
 
@@ -2854,6 +2860,15 @@ SILCloner<ImplClass>::visitDeallocPackInst(DeallocPackInst *Inst) {
   recordClonedInstruction(
       Inst, getBuilder().createDeallocPack(getOpLocation(Inst->getLoc()),
                                            getOpValue(Inst->getOperand())));
+}
+
+template <typename ImplClass>
+void SILCloner<ImplClass>::visitDeallocPackMetadataInst(
+    DeallocPackMetadataInst *Inst) {
+  getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
+  recordClonedInstruction(
+      Inst, getBuilder().createDeallocPackMetadata(
+                getOpLocation(Inst->getLoc()), Inst->getOperand()));
 }
 
 template<typename ImplClass>

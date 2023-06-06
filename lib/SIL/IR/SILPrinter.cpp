@@ -683,7 +683,7 @@ class SILPrinter : public SILInstructionVisitor<SILPrinter> {
     if (i.IsReborrow)
       *this << "@reborrow ";
     if (i.IsEscaping)
-      *this << "@escaping ";
+      *this << "@pointer_escape ";
     if (i.OwnershipKind && *i.OwnershipKind != OwnershipKind::None) {
       *this << "@" << i.OwnershipKind.value() << " ";
     }
@@ -720,7 +720,7 @@ public:
     return {Ctx.getID(arg),          arg->getType(),
             arg->isNoImplicitCopy(), arg->getLifetimeAnnotation(),
             arg->isClosureCapture(), arg->isReborrow(),
-            arg->isEscaping()};
+            arg->hasPointerEscape()};
   }
 
   SILValuePrinterInfo getIDAndTypeAndOwnership(SILValue V) {
@@ -734,11 +734,11 @@ public:
             arg->getLifetimeAnnotation(),
             arg->isClosureCapture(),
             arg->isReborrow(),
-            arg->isEscaping()};
+            arg->hasPointerEscape()};
   }
   SILValuePrinterInfo getIDAndTypeAndOwnership(SILArgument *arg) {
     return {Ctx.getID(arg), arg->getType(), arg->getOwnershipKind(),
-            arg->isReborrow(), arg->isEscaping()};
+            arg->isReborrow(), arg->hasPointerEscape()};
   }
 
   //===--------------------------------------------------------------------===//
@@ -1424,6 +1424,9 @@ public:
   void visitAllocPackInst(AllocPackInst *API) {
     *this << API->getType().getObjectType();
   }
+  void visitAllocPackMetadataInst(AllocPackMetadataInst *APMI) {
+    *this << APMI->getType().getObjectType();
+  }
 
   void printAllocRefInstBase(AllocRefInstBase *ARI) {
     if (ARI->isObjC())
@@ -1455,6 +1458,10 @@ public:
     
     if (ABI->emitReflectionMetadata()) {
       *this << "[reflection] ";
+    }
+
+    if (ABI->hasPointerEscape()) {
+      *this << "[pointer_escape] ";
     }
 
     if (ABI->getUsesMoveableValueDebugInfo() &&
@@ -1673,11 +1680,14 @@ public:
     *this << getIDAndType(LBI->getOperand());
   }
 
-  void visitBeginBorrowInst(BeginBorrowInst *LBI) {
-    if (LBI->isLexical()) {
+  void visitBeginBorrowInst(BeginBorrowInst *BBI) {
+    if (BBI->isLexical()) {
       *this << "[lexical] ";
     }
-    *this << getIDAndType(LBI->getOperand());
+    if (BBI->hasPointerEscape()) {
+      *this << "[pointer_escape] ";
+    }
+    *this << getIDAndType(BBI->getOperand());
   }
 
   void printStoreOwnershipQualifier(StoreOwnershipQualifier Qualifier) {
@@ -2015,6 +2025,8 @@ public:
       *this << "[allows_diagnostics] ";
     if (I->isLexical())
       *this << "[lexical] ";
+    if (I->hasPointerEscape())
+      *this << "[pointer_escape] ";
     *this << getIDAndType(I->getOperand());
   }
 
@@ -2443,6 +2455,9 @@ public:
   }
   void visitDeallocPackInst(DeallocPackInst *DI) {
     *this << getIDAndType(DI->getOperand());
+  }
+  void visitDeallocPackMetadataInst(DeallocPackMetadataInst *DPMI) {
+    *this << getIDAndType(DPMI->getOperand());
   }
   void visitDeallocStackRefInst(DeallocStackRefInst *ESRL) {
     *this << getIDAndType(ESRL->getOperand());
@@ -3153,6 +3168,9 @@ void SILFunction::print(SILPrintContext &PrintCtx) const {
   }
   if (forceEnableLexicalLifetimes()) {
     OS << "[lexical_lifetimes] ";
+  }
+  if (!useStackForPackMetadata()) {
+    OS << "[no_onstack_pack_metadata] ";
   }
 
   if (isExactSelfClass()) {

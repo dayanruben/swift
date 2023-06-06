@@ -10123,6 +10123,11 @@ void swift::simple_display(llvm::raw_ostream &out,
   out << " }";
 }
 
+void swift::simple_display(llvm::raw_ostream &out,
+                           TypeOrExtensionDecl container) {
+  simple_display(out, container.getAsDecl());
+}
+
 void swift::simple_display(llvm::raw_ostream &out, const ValueDecl *decl) {
   if (decl) decl->dumpRef(out);
   else out << "(null)";
@@ -10154,6 +10159,11 @@ SourceLoc swift::extractNearestSourceLoc(const Decl *decl) {
 
   return extractNearestSourceLoc(decl->getDeclContext());
 }
+
+SourceLoc swift::extractNearestSourceLoc(TypeOrExtensionDecl container) {
+  return extractNearestSourceLoc(container.Decl);
+}
+
 
 Optional<BodyAndFingerprint>
 ParseAbstractFunctionBodyRequest::getCachedResult() const {
@@ -10587,37 +10597,27 @@ MacroDefinition MacroDefinition::forExpanded(
                                  ctx.AllocateCopy(replacements)};
 }
 
-MacroExpansionDecl::MacroExpansionDecl(
-    DeclContext *dc, MacroExpansionInfo *info
-) : Decl(DeclKind::MacroExpansion, dc), info(info) {
+MacroExpansionDecl::MacroExpansionDecl(DeclContext *dc,
+                                       MacroExpansionInfo *info)
+    : Decl(DeclKind::MacroExpansion, dc),
+      FreestandingMacroExpansion(FreestandingMacroKind::Decl, info) {
   Bits.MacroExpansionDecl.Discriminator = InvalidDiscriminator;
 }
 
-MacroExpansionDecl::MacroExpansionDecl(
+MacroExpansionDecl *
+MacroExpansionDecl::create(
     DeclContext *dc, SourceLoc poundLoc, DeclNameRef macro,
     DeclNameLoc macroLoc, SourceLoc leftAngleLoc,
     ArrayRef<TypeRepr *> genericArgs, SourceLoc rightAngleLoc,
     ArgumentList *args
-) : Decl(DeclKind::MacroExpansion, dc) {
+) {
   ASTContext &ctx = dc->getASTContext();
-  info = new (ctx) MacroExpansionInfo{
+  MacroExpansionInfo *info = new (ctx) MacroExpansionInfo{
       poundLoc, macro, macroLoc,
       leftAngleLoc, rightAngleLoc, genericArgs,
       args ? args : ArgumentList::createImplicit(ctx, {})
   };
-  Bits.MacroExpansionDecl.Discriminator = InvalidDiscriminator;
-}
-
-SourceRange MacroExpansionDecl::getSourceRange() const {
-  SourceLoc endLoc;
-  if (auto argsEndList = info->ArgList->getEndLoc())
-    endLoc = argsEndList;
-  else if (info->RightAngleLoc.isValid())
-    endLoc = info->RightAngleLoc;
-  else
-    endLoc = info->MacroNameLoc.getEndLoc();
-
-  return SourceRange(info->SigilLoc, endLoc);
+  return new (ctx) MacroExpansionDecl(dc, info);
 }
 
 unsigned MacroExpansionDecl::getDiscriminator() const {
@@ -10761,13 +10761,7 @@ MacroDiscriminatorContext MacroDiscriminatorContext::getParentOf(
 }
 
 MacroDiscriminatorContext
-MacroDiscriminatorContext::getParentOf(MacroExpansionExpr *expansion) {
+MacroDiscriminatorContext::getParentOf(FreestandingMacroExpansion *expansion) {
   return getParentOf(
-      expansion->getLoc(), expansion->getDeclContext());
-}
-
-MacroDiscriminatorContext
-MacroDiscriminatorContext::getParentOf(MacroExpansionDecl *expansion) {
-  return getParentOf(
-      expansion->getLoc(), expansion->getDeclContext());
+      expansion->getPoundLoc(), expansion->getDeclContext());
 }

@@ -30,6 +30,7 @@
 #include "swift/AST/ModuleNameLookup.h"
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/PotentialMacroExpansions.h"
 #include "swift/AST/PropertyWrappers.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/TypeCheckRequests.h"
@@ -1217,15 +1218,27 @@ class swift::MemberLookupTable : public ASTAllocated<swift::MemberLookupTable> {
   /// Lookup table mapping names to the set of declarations with that name.
   LookupTable Lookup;
 
+  /// List of containers that have lazily-loaded members
+  llvm::SmallVector<ExtensionDecl *, 2> ExtensionsWithLazyMembers;
+
   /// The set of names of lazily-loaded members that the lookup table has a
   /// complete accounting of with respect to all known extensions of its
   /// parent nominal type.
   llvm::DenseSet<DeclBaseName> LazilyCompleteNames;
 
-  /// The set of names for which we have expanded relevant macros for in the
-  /// parent nominal type.
-  llvm::DenseSet<DeclName> LazilyCompleteNamesForMacroExpansion;
+  struct {
+    /// Whether we have computed the `containersWithMacroExpansions`.
+    bool ComputedContainersWithMacroExpansions = false;
 
+    /// The nominal type and any extensions that have macro expansions, which
+    /// is used to restrict the set of places one will lookup for a member
+    /// produced by a macro expansion.
+    llvm::SmallVector<TypeOrExtensionDecl, 2> ContainersWithMacroExpansions;
+
+    /// The set of names for which we have expanded relevant macros for in the
+    /// parent nominal type.
+    llvm::DenseSet<DeclName> LazilyCompleteNames;
+  } LazyMacroExpansionState;
 public:
   /// Create a new member lookup table.
   explicit MemberLookupTable(ASTContext &ctx);
@@ -1235,6 +1248,14 @@ public:
 
   /// Add the given members to the lookup table.
   void addMembers(DeclRange members);
+
+  void addExtensionWithLazyMembers(ExtensionDecl *ext) {
+    ExtensionsWithLazyMembers.push_back(ext);
+  }
+
+  ArrayRef<ExtensionDecl *> getExtensionsWithLazyMembers() const {
+    return ExtensionsWithLazyMembers;
+  }
 
   /// Returns \c true if the lookup table has a complete accounting of the
   /// given name.
@@ -1254,6 +1275,39 @@ public:
     LazilyCompleteNames.clear();
   }
 
+  /// Retrieve an array containing the set of containers for this type (
+  /// i.e., the nominal type and any extensions) that can produce members via
+  /// macro expansion.
+  ArrayRef<TypeOrExtensionDecl> getContainersWithMacroExpansions(
+      NominalTypeDecl *nominal) {
+    if (LazyMacroExpansionState.ComputedContainersWithMacroExpansions)
+      return LazyMacroExpansionState.ContainersWithMacroExpansions;
+
+    LazyMacroExpansionState.ComputedContainersWithMacroExpansions = true;
+
+    // Does the type have macro expansions?
+    addContainerWithMacroExpansions(nominal);
+
+    // Check each extension for macro expansions.
+    for (auto ext : nominal->getExtensions())
+      addContainerWithMacroExpansions(ext);
+
+    return LazyMacroExpansionState.ContainersWithMacroExpansions;
+  }
+
+  void addContainerWithMacroExpansions(TypeOrExtensionDecl container){
+    if (LazyMacroExpansionState.ComputedContainersWithMacroExpansions &&
+        evaluateOrDefault(
+                container.getAsDecl()->getASTContext().evaluator,
+                PotentialMacroExpansionsInContextRequest{container}, {}))
+      LazyMacroExpansionState.ContainersWithMacroExpansions.push_back(
+          container);
+  }
+
+  /// Determine whether the given container has any macro-introduced names that
+  /// match the given declaration.
+  bool hasAnyMacroNamesMatching(TypeOrExtensionDecl container, DeclName name);
+
   bool isLazilyCompleteForMacroExpansion(DeclName name) const {
     assert(!MacroDecl::isUniqueMacroName(name.getBaseName()));
     // If we've already expanded macros for a simple name, we must have expanded
@@ -1261,16 +1315,16 @@ public:
     bool isBaseNameComplete = name.isCompoundName() &&
         isLazilyCompleteForMacroExpansion(DeclName(name.getBaseName()));
     return isBaseNameComplete ||
-        LazilyCompleteNamesForMacroExpansion.contains(name);
+        LazyMacroExpansionState.LazilyCompleteNames.contains(name);
   }
 
   void markLazilyCompleteForMacroExpansion(DeclName name) {
     assert(!MacroDecl::isUniqueMacroName(name.getBaseName()));
-    LazilyCompleteNamesForMacroExpansion.insert(name);
+    LazyMacroExpansionState.LazilyCompleteNames.insert(name);
   }
 
   void clearLazilyCompleteForMacroExpansionCache() {
-    LazilyCompleteNamesForMacroExpansion.clear();
+    LazyMacroExpansionState.LazilyCompleteNames.clear();
   }
 
   /// Iterator into the lookup table.
@@ -1392,13 +1446,16 @@ void NominalTypeDecl::addedExtension(ExtensionDecl *ext) {
   auto *table = LookupTable.getPointer();
   assert(table);
 
-  if (ext->hasLazyMembers()) {
+  if (ext->wasDeserialized() || ext->hasClangNode()) {
     table->addMembers(ext->getCurrentMembersWithoutLoading());
     table->clearLazilyCompleteCache();
     table->clearLazilyCompleteForMacroExpansionCache();
+    table->addExtensionWithLazyMembers(ext);
   } else {
     table->addMembers(ext->getMembers());
   }
+
+  table->addContainerWithMacroExpansions(ext);
 }
 
 void NominalTypeDecl::addedMember(Decl *member) {
@@ -1489,6 +1546,9 @@ populateLookupTableEntryFromLazyIDCLoader(ASTContext &ctx,
                                           MemberLookupTable &LookupTable,
                                           DeclBaseName name,
                                           IterableDeclContext *IDC) {
+  if (!IDC->hasLazyMembers())
+    return;
+
   auto ci = ctx.getOrCreateLazyIterableContextData(IDC,
                                                    /*lazyLoader=*/nullptr);
   auto res = ci->loader->loadNamedMembers(IDC, name, ci->memberData);
@@ -1508,7 +1568,7 @@ populateLookupTableEntryFromExtensions(ASTContext &ctx,
   assert(!table.isLazilyComplete(name) &&
          "Should not be searching extensions for complete name!");
 
-  for (auto e : nominal->getExtensions()) {
+  for (auto e : table.getExtensionsWithLazyMembers()) {
     // If there's no lazy members to look at, all the members of this extension
     // are present in the lookup table.
     if (!e->hasLazyMembers()) {
@@ -1587,32 +1647,71 @@ namespace {
   struct MacroIntroducedNameTracker {
     ValueDecl *attachedTo = nullptr;
 
-    llvm::SmallSet<DeclName, 4> allIntroducedNames;
-    bool introducesArbitraryNames = false;
+    PotentialMacroExpansions potentialExpansions;
 
     /// Augment the set of names with those introduced by the given macro.
     void operator()(MacroDecl *macro, const MacroRoleAttr *attr) {
+      potentialExpansions.noteExpandedMacro();
+
       // First check for arbitrary names.
       if (attr->hasNameKind(MacroIntroducedDeclNameKind::Arbitrary)) {
-        introducesArbitraryNames = true;
+        potentialExpansions.noteIntroducesArbitraryNames();
       }
 
       // If this introduces arbitrary names, there's nothing more to do.
-      if (introducesArbitraryNames)
+      if (potentialExpansions.introducesArbitraryNames())
         return;
 
       SmallVector<DeclName, 4> introducedNames;
       macro->getIntroducedNames(
           attr->getMacroRole(), attachedTo, introducedNames);
       for (auto name : introducedNames)
-        allIntroducedNames.insert(name.getBaseName());
+        potentialExpansions.addIntroducedMacroName(name);
     }
 
     bool shouldExpandForName(DeclName name) const {
-      return introducesArbitraryNames ||
-          allIntroducedNames.contains(name.getBaseName());
+      return potentialExpansions.shouldExpandForName(name);
     }
   };
+}
+
+PotentialMacroExpansions PotentialMacroExpansionsInContextRequest::evaluate(
+    Evaluator &evaluator, TypeOrExtensionDecl container) const {
+  /// The implementation here needs to be kept in sync with
+  /// populateLookupTableEntryFromMacroExpansions.
+  MacroIntroducedNameTracker nameTracker;
+
+  // Member macros on the type or extension.
+  auto containerDecl = container.getAsDecl();
+  forEachPotentialAttachedMacro(containerDecl, MacroRole::Member, nameTracker);
+
+  // Peer and freestanding declaration macros.
+  auto dc = container.getAsDeclContext();
+  auto idc = container.getAsIterableDeclContext();
+  for (auto *member : idc->getCurrentMembersWithoutLoading()) {
+    if (auto *med = dyn_cast<MacroExpansionDecl>(member)) {
+      nameTracker.attachedTo = nullptr;
+      forEachPotentialResolvedMacro(
+          dc->getModuleScopeContext(), med->getMacroName(),
+          MacroRole::Declaration, nameTracker);
+    } else if (auto *vd = dyn_cast<ValueDecl>(member)) {
+      nameTracker.attachedTo = dyn_cast<ValueDecl>(member);
+      forEachPotentialAttachedMacro(member, MacroRole::Peer, nameTracker);
+    }
+  }
+
+  nameTracker.attachedTo = nullptr;
+  return nameTracker.potentialExpansions;
+}
+
+bool MemberLookupTable::hasAnyMacroNamesMatching(
+    TypeOrExtensionDecl container, DeclName name) {
+  ASTContext &ctx = container.getAsDecl()->getASTContext();
+  auto potentialExpansions = evaluateOrDefault(
+      ctx.evaluator, PotentialMacroExpansionsInContextRequest{container},
+      PotentialMacroExpansions());
+
+  return potentialExpansions.shouldExpandForName(name);
 }
 
 static void
@@ -1620,6 +1719,12 @@ populateLookupTableEntryFromMacroExpansions(ASTContext &ctx,
                                             MemberLookupTable &table,
                                             DeclName name,
                                             TypeOrExtensionDecl container) {
+  // If there are no macro-introduced names in this container that match the
+  // given name, do nothing. This avoids an expensive walk over the members
+  // and attributes for the common case where there are no macros.
+  if (!table.hasAnyMacroNamesMatching(container, name))
+    return;
+
   // Trigger the expansion of member macros on the container, if any of the
   // names match.
   {
@@ -1699,6 +1804,7 @@ void NominalTypeDecl::prepareLookupTable() {
     // LazyMemberLoader::loadNamedMembers().
     if (e->wasDeserialized() || e->hasClangNode()) {
       table->addMembers(e->getCurrentMembersWithoutLoading());
+      table->addExtensionWithLazyMembers(e);
       continue;
     }
 
@@ -1758,11 +1864,7 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
   const auto flags = desc.Options;
   auto *decl = desc.DC;
 
-  // We only use NamedLazyMemberLoading when a user opts-in and we have
-  // not yet loaded all the members into the IDC list in the first place.
   ASTContext &ctx = decl->getASTContext();
-  const bool useNamedLazyMemberLoading = (ctx.LangOpts.NamedLazyMemberLoading &&
-                                          decl->hasLazyMembers());
   const bool includeAttrImplements =
       flags.contains(NominalTypeDecl::LookupDirectFlags::IncludeAttrImplements);
   const bool excludeMacroExpansions =
@@ -1770,9 +1872,6 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
 
   LLVM_DEBUG(llvm::dbgs() << decl->getNameStr() << ".lookupDirect("
                           << name << ")"
-                          << ", hasLazyMembers()=" << decl->hasLazyMembers()
-                          << ", useNamedLazyMemberLoading="
-                          << useNamedLazyMemberLoading
                           << ", excludeMacroExpansions="
                           << excludeMacroExpansions
                           << "\n");
@@ -1785,15 +1884,7 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
   decl->prepareExtensions();
 
   auto &Table = *decl->getLookupTable();
-  if (!useNamedLazyMemberLoading) {
-    // Make sure we have the complete list of members (in this nominal and in
-    // all extensions).
-    (void)decl->getMembers();
-
-    for (auto E : decl->getExtensions())
-      (void)E->getMembers();
-
-  } else if (!Table.isLazilyComplete(name.getBaseName())) {
+  if (!Table.isLazilyComplete(name.getBaseName())) {
     DeclBaseName baseName(name.getBaseName());
 
     if (isa_and_nonnull<clang::NamespaceDecl>(decl->getClangDecl())) {
@@ -1845,11 +1936,9 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
   DeclName macroExpansionKey = adjustLazyMacroExpansionNameKey(ctx, name);
   if (!excludeMacroExpansions &&
       !Table.isLazilyCompleteForMacroExpansion(macroExpansionKey)) {
-    populateLookupTableEntryFromMacroExpansions(
-        ctx, Table, macroExpansionKey, decl);
-    for (auto ext : decl->getExtensions()) {
+    for (auto container : Table.getContainersWithMacroExpansions(decl)) {
       populateLookupTableEntryFromMacroExpansions(
-          ctx, Table, macroExpansionKey, ext);
+          ctx, Table, macroExpansionKey, container);
     }
     Table.markLazilyCompleteForMacroExpansion(macroExpansionKey);
   }
@@ -3554,6 +3643,28 @@ bool TypeBase::hasDynamicCallableAttribute() {
     HasDynamicCallableAttributeRequest req(decl);
     return evaluateOrDefault(ctx.evaluator, req, false);
   });
+}
+
+ProtocolDecl *ImplementsAttrProtocolRequest::evaluate(
+    Evaluator &evaluator, const ImplementsAttr *attr, DeclContext *dc) const {
+
+  auto typeRepr = attr->getProtocolTypeRepr();
+
+  ASTContext &ctx = dc->getASTContext();
+  DirectlyReferencedTypeDecls referenced =
+    directReferencesForTypeRepr(evaluator, ctx, typeRepr, dc);
+
+  // Resolve those type declarations to nominal type declarations.
+  SmallVector<ModuleDecl *, 2> modulesFound;
+  bool anyObject = false;
+  auto nominalTypes
+    = resolveTypeDeclsToNominal(evaluator, ctx, referenced, modulesFound,
+                                anyObject);
+
+  if (nominalTypes.empty())
+    return nullptr;
+
+  return dyn_cast<ProtocolDecl>(nominalTypes.front());
 }
 
 void FindLocalVal::checkPattern(const Pattern *Pat, DeclVisibilityKind Reason) {

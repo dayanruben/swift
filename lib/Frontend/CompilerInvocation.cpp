@@ -682,8 +682,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                                               /*default*/ false);
   Opts.UseClangFunctionTypes |= Args.hasArg(OPT_use_clang_function_types);
 
-  Opts.NamedLazyMemberLoading &= !Args.hasArg(OPT_disable_named_lazy_member_loading);
-
   if (Args.hasArg(OPT_emit_fine_grained_dependency_sourcefile_dot_files))
     Opts.EmitFineGrainedDependencySourcefileDotFiles = true;
 
@@ -2065,6 +2063,30 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   }
   if (specifiedDestroyHoistingOption)
     Opts.DestroyHoisting = *specifiedDestroyHoistingOption;
+
+  Optional<bool> enablePackMetadataStackPromotionFlag;
+  if (Arg *A = Args.getLastArg(OPT_enable_pack_metadata_stack_promotion)) {
+    enablePackMetadataStackPromotionFlag =
+        llvm::StringSwitch<Optional<bool>>(A->getValue())
+            .Case("true", true)
+            .Case("false", false)
+            .Default(None);
+  }
+  if (Args.getLastArg(OPT_enable_pack_metadata_stack_promotion_noArg)) {
+    if (!enablePackMetadataStackPromotionFlag.value_or(true)) {
+      // Error if pack metadata stack promotion has been disabled via the
+      // meta-var form and enabled via the flag.
+      Diags.diagnose(SourceLoc(), diag::error_invalid_arg_combination,
+                     "enable-pack-metadata-stack-promotion",
+                     "enable-pack-metadata-stack-promotion=false");
+      return true;
+    } else {
+      enablePackMetadataStackPromotionFlag = true;
+    }
+  }
+  if (enablePackMetadataStackPromotionFlag)
+    Opts.EnablePackMetadataStackPromotion =
+        enablePackMetadataStackPromotionFlag.value();
 
   Opts.EnableARCOptimizations &= !Args.hasArg(OPT_disable_arc_opts);
   Opts.EnableOSSAModules |= Args.hasArg(OPT_enable_ossa_modules);

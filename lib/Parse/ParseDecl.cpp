@@ -914,7 +914,7 @@ bool Parser::parseSpecializeAttributeArguments(
         }
       }
       if (ParamLabel == "spi") {
-        if (!Tok.is(tok::identifier)) {
+        if (!Tok.isIdentifierOrUnderscore()) {
           diagnose(Tok.getLoc(), diag::attr_specialize_expected_spi_name);
           consumeToken();
           return false;
@@ -1218,10 +1218,9 @@ Parser::parseImplementsAttribute(SourceLoc AtLoc, SourceLoc Loc) {
   }
 
   // FIXME(ModQual): Reject module qualification on MemberName.
-  auto *TE = new (Context) TypeExpr(ProtocolType.get());
   return ParserResult<ImplementsAttr>(
     ImplementsAttr::create(Context, AtLoc, SourceRange(Loc, rParenLoc),
-                           TE, MemberName.getFullName(),
+                           ProtocolType.get(), MemberName.getFullName(),
                            MemberNameLoc));
 }
 
@@ -2840,7 +2839,7 @@ ParserStatus Parser::parseNewDeclAttribute(DeclAttributes &Attributes,
 
     SmallVector<Identifier, 4> spiGroups;
 
-    if (!Tok.is(tok::identifier) ||
+    if (!Tok.isIdentifierOrUnderscore() ||
         Tok.isContextualKeyword("set")) {
       diagnose(getEndOfPreviousLoc(), diag::attr_access_expected_spi_name);
       consumeToken();
@@ -2849,6 +2848,11 @@ ParserStatus Parser::parseNewDeclAttribute(DeclAttributes &Attributes,
     }
 
     auto text = Tok.getText();
+    // An spi group name can be '_' as in @_spi(_), a specifier for implicit import of the SPI.
+    // '_' in source code is represented as an empty identifier in AST so match the behavior
+    // here for consistency
+    if (Tok.is(tok::kw__))
+      text = StringRef();
     spiGroups.push_back(Context.getIdentifier(text));
     consumeToken();
 
@@ -5158,7 +5162,7 @@ void Parser::recordLocalType(TypeDecl *TD) {
     return;
 
   if (!InInactiveClauseEnvironment)
-    SF.LocalTypeDecls.insert(TD);
+    SF.getOutermostParentSourceFile()->LocalTypeDecls.insert(TD);
 }
 
 /// Set the original declaration in `@differentiable` attributes.
@@ -9911,7 +9915,7 @@ Parser::parseDeclMacroExpansion(ParseDeclOptions flags,
   if (!macroNameRef)
     return status;
 
-  auto *med = new (Context) MacroExpansionDecl(
+  auto *med = MacroExpansionDecl::create(
       CurDeclContext, poundLoc, macroNameRef, macroNameLoc, leftAngleLoc,
       Context.AllocateCopy(genericArgs), rightAngleLoc, argList);
   med->getAttrs() = attributes;
