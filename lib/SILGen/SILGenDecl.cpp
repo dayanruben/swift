@@ -509,6 +509,25 @@ public:
     // The box type's context is lowered in the minimal resilience domain.
     auto instanceType = SGF.SGM.Types.getLoweredRValueType(
         TypeExpansionContext::minimal(), decl->getType());
+
+    // If we have a no implicit copy param decl, make our instance type
+    // @moveOnly.
+    if (!instanceType->isPureMoveOnly()) {
+      if (auto *pd = dyn_cast<ParamDecl>(decl)) {
+        bool isNoImplicitCopy = pd->isNoImplicitCopy();
+        isNoImplicitCopy |= pd->getSpecifier() == ParamSpecifier::Consuming;
+        if (pd->isSelfParameter()) {
+          auto *dc = pd->getDeclContext();
+          if (auto *fn = dyn_cast<FuncDecl>(dc)) {
+            auto accessKind = fn->getSelfAccessKind();
+            isNoImplicitCopy |= accessKind == SelfAccessKind::Consuming;
+          }
+        }
+        if (isNoImplicitCopy)
+          instanceType = SILMoveOnlyWrappedType::get(instanceType);
+      }
+    }
+
     auto boxType = SGF.SGM.Types.getContextBoxTypeForCapture(
         decl, instanceType, SGF.F.getGenericEnvironment(),
         /*mutable*/ !instanceType->isPureMoveOnly() || !decl->isLet());
@@ -1606,11 +1625,13 @@ void SILGenFunction::visitVarDecl(VarDecl *D) {
 }
 
 void SILGenFunction::visitMacroExpansionDecl(MacroExpansionDecl *D) {
-  D->forEachExpandedExprOrStmt([&](ASTNode node) {
+  D->forEachExpandedNode([&](ASTNode node) {
     if (auto *expr = node.dyn_cast<Expr *>())
       emitIgnoredExpr(expr);
     else if (auto *stmt = node.dyn_cast<Stmt *>())
       emitStmt(stmt);
+    else
+      visit(node.get<Decl *>());
   });
 }
 
