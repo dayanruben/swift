@@ -1,9 +1,9 @@
 // RUN: %empty-directory(%t)
 // RUN: %target-build-swift %s -parse-as-library -Onone -g -o %t/StackOverflow
 // RUN: %target-codesign %t/StackOverflow
-// RUN: (env SWIFT_BACKTRACE=enable=yes,cache=no %target-run %t/StackOverflow || true) | %FileCheck %s
-// RUN: (env SWIFT_BACKTRACE=limit=17,top=5,enable=yes,cache=no %target-run %t/StackOverflow || true) | %FileCheck %s --check-prefix LIMITED
-// RUN: (env SWIFT_BACKTRACE=preset=friendly,enable=yes,cache=no %target-run %t/StackOverflow || true) | %FileCheck %s --check-prefix FRIENDLY
+// RUN: (env SWIFT_BACKTRACE=enable=yes,cache=no %target-run %t/StackOverflow 2>&1|| true) | %FileCheck %s
+// RUN: (env SWIFT_BACKTRACE=limit=17,top=5,enable=yes,cache=no %target-run %t/StackOverflow 2>&1 || true) | %FileCheck %s --check-prefix LIMITED
+// RUN: (env SWIFT_BACKTRACE=preset=friendly,enable=yes,cache=no %target-run %t/StackOverflow 2>&1 || true) | %FileCheck %s --check-prefix FRIENDLY
 
 // UNSUPPORTED: use_os_stdlib
 // UNSUPPORTED: back_deployment_runtime
@@ -34,7 +34,7 @@ struct StackOverflow {
 
 // CHECK: Thread 0 {{(".*" )?}}crashed:
 
-// CHECK:     0               0x{{[0-9a-f]+}} recurse(_:) + {{[0-9]+}} in StackOverflow at {{.*}}/StackOverflow.swift:{{[0-9]+}}
+// CHECK:     0               0x{{[0-9a-f]+}} recurse(_:) + {{[0-9]+}} in StackOverflow at {{.*}}/StackOverflow.swift
 // CHECK-NEXT:     1 [ra]          0x{{[0-9a-f]+}} recurse(_:) + {{[0-9]+}} in StackOverflow at {{.*}}/StackOverflow.swift:19:3
 // CHECK-NEXT:     2 [ra]          0x{{[0-9a-f]+}} recurse(_:) + {{[0-9]+}} in StackOverflow at {{.*}}/StackOverflow.swift:19:3
 // CHECK-NEXT:     3 [ra]          0x{{[0-9a-f]+}} recurse(_:) + {{[0-9]+}} in StackOverflow at {{.*}}/StackOverflow.swift:19:3

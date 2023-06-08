@@ -296,6 +296,12 @@ getdents(int fd, void *buf, size_t bufsiz)
   return syscall(SYS_getdents64, fd, buf, bufsiz);
 }
 
+pid_t
+gettid()
+{
+  return (pid_t)syscall(SYS_gettid);
+}
+
 /* Stop all other threads in this process; we do this by establishing a
    signal handler for SIGPROF, then iterating through the threads sending
    SIGPROF.
@@ -617,6 +623,8 @@ const char *backtracer_argv[] = {
   "preset",                     // 26
   "--cache",                    // 27
   "true",                       // 28
+  "--output-to",                // 29
+  "stdout",                     // 30
   NULL
 };
 
@@ -766,6 +774,16 @@ run_backtracer(int memserver_fd)
     break;
   case SanitizePaths::On:
     backtracer_argv[26] = "true";
+    break;
+  }
+
+  switch (_swift_backtraceSettings.outputTo) {
+  case OutputTo::Stdout:
+    backtracer_argv[30] = "stdout";
+    break;
+  case OutputTo::Auto: // Shouldn't happen, but if it does pick stderr
+  case OutputTo::Stderr:
+    backtracer_argv[30] = "stderr";
     break;
   }
 
