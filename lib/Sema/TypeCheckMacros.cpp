@@ -66,7 +66,8 @@ extern "C" ptrdiff_t swift_ASTGen_checkMacroDefinition(
 
 extern "C" ptrdiff_t swift_ASTGen_expandFreestandingMacro(
     void *diagEngine, void *macro, uint8_t externalKind,
-    const char *discriminator, ptrdiff_t discriminatorLength, void *sourceFile,
+    const char *discriminator, ptrdiff_t discriminatorLength,
+    uint8_t rawMacroRole, void *sourceFile,
     const void *sourceLocation, const char **evaluatedSource,
     ptrdiff_t *evaluatedSourceLength);
 
@@ -901,6 +902,13 @@ evaluateFreestandingMacro(FreestandingMacroExpansion *expansion,
 #endif
   });
 
+  // Only one freestanding macro role is permitted, so look at the roles to
+  // figure out which one to use.
+  MacroRole macroRole =
+    macroRoles.contains(MacroRole::Expression) ? MacroRole::Expression
+    : macroRoles.contains(MacroRole::Declaration) ? MacroRole::Declaration
+    : MacroRole::CodeItem;
+
   auto macroDef = macro->getDefinition();
   switch (macroDef.kind) {
   case MacroDefinition::Kind::Undefined:
@@ -961,7 +969,8 @@ evaluateFreestandingMacro(FreestandingMacroExpansion *expansion,
     swift_ASTGen_expandFreestandingMacro(
         &ctx.Diags, externalDef->opaqueHandle,
         static_cast<uint32_t>(externalDef->kind), discriminator->data(),
-        discriminator->size(), astGenSourceFile,
+        discriminator->size(),
+        static_cast<uint32_t>(macroRole), astGenSourceFile,
         expansion->getSourceRange().Start.getOpaquePointerValue(),
         &evaluatedSourceAddress, &evaluatedSourceLength);
     if (!evaluatedSourceAddress)
@@ -1231,6 +1240,50 @@ static SourceFile *evaluateAttachedMacro(MacroDecl *macro, Decl *attachedTo,
   return macroSourceFile;
 }
 
+bool swift::accessorMacroOnlyIntroducesObservers(
+    MacroDecl *macro,
+    const MacroRoleAttr *attr
+) {
+  // Will this macro introduce observers?
+  bool foundObserver = false;
+  for (auto name : attr->getNames()) {
+    if (name.getKind() == MacroIntroducedDeclNameKind::Named &&
+        (name.getName().getBaseName().userFacingName() == "willSet" ||
+         name.getName().getBaseName().userFacingName() == "didSet")) {
+      foundObserver = true;
+    } else {
+      // Introduces something other than an observer.
+      return false;
+    }
+  }
+
+  if (foundObserver)
+    return true;
+
+  // WORKAROUND: Older versions of the Observation library make
+  // `ObservationIgnored` an accessor macro that implies that it makes a
+  // stored property computed. Override that, because we know it produces
+  // nothing.
+  if (macro->getName().getBaseName().userFacingName() == "ObservationIgnored") {
+    return true;
+  }
+
+  return false;
+}
+
+bool swift::accessorMacroIntroducesInitAccessor(
+    MacroDecl *macro, const MacroRoleAttr *attr
+) {
+  for (auto name : attr->getNames()) {
+    if (name.getKind() == MacroIntroducedDeclNameKind::Named &&
+        (name.getName().getBaseName().getKind() ==
+           DeclBaseName::Kind::Constructor))
+      return true;
+  }
+
+  return false;
+}
+
 Optional<unsigned> swift::expandAccessors(
     AbstractStorageDecl *storage, CustomAttr *attr, MacroDecl *macro
 ) {
@@ -1242,28 +1295,52 @@ Optional<unsigned> swift::expandAccessors(
     return None;
 
   PrettyStackTraceDecl debugStack(
-      "type checking expanded declaration macro", storage);
+      "type checking expanded accessor macro", storage);
 
   // Trigger parsing of the sequence of accessor declarations. This has the
   // side effect of registering those accessor declarations with the storage
   // declaration, so there is nothing further to do.
+  bool foundNonObservingAccessor = false;
+  bool foundInitAccessor = false;
   for (auto decl : macroSourceFile->getTopLevelItems()) {
     auto accessor = dyn_cast_or_null<AccessorDecl>(decl.dyn_cast<Decl *>());
     if (!accessor)
       continue;
 
-    if (accessor->isObservingAccessor())
-      continue;
+    if (accessor->isInitAccessor())
+      foundInitAccessor = true;
 
+    if (!accessor->isObservingAccessor())
+      foundNonObservingAccessor = true;
+  }
+
+  auto roleAttr = macro->getMacroRoleAttr(MacroRole::Accessor);
+  bool expectedNonObservingAccessor =
+    !accessorMacroOnlyIntroducesObservers(macro, roleAttr);
+  if (foundNonObservingAccessor) {
     // If any non-observing accessor was added, mark the initializer as
     // subsumed.
     if (auto var = dyn_cast<VarDecl>(storage)) {
       if (auto binding = var->getParentPatternBinding()) {
         unsigned index = binding->getPatternEntryIndexForVarDecl(var);
         binding->setInitializerSubsumed(index);
-        break;
       }
     }
+  }
+
+  // Make sure we got non-observing accessors exactly where we expected to.
+  if (foundNonObservingAccessor != expectedNonObservingAccessor) {
+    storage->diagnose(
+        diag::macro_accessor_missing_from_expansion, macro->getName(),
+        !expectedNonObservingAccessor);
+  }
+
+  // 'init' accessors must be documented in the macro role attribute.
+  if (foundInitAccessor &&
+      !accessorMacroIntroducesInitAccessor(macro, roleAttr)) {
+    storage->diagnose(
+        diag::macro_init_accessor_not_documented, macro->getName());
+    // FIXME: Add the appropriate "names: named(init)".
   }
 
   return macroSourceFile->getBufferID();
