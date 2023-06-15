@@ -28,6 +28,7 @@
 #include "swift/Basic/Range.h"
 #include "swift/Basic/STLExtras.h"
 #include "swift/Demangling/Demangler.h"
+#include "swift/RemoteInspection/GenericMetadataCacheEntry.h"
 #include "swift/Runtime/Casting.h"
 #include "swift/Runtime/EnvironmentVariables.h"
 #include "swift/Runtime/ExistentialContainer.h"
@@ -426,6 +427,16 @@ namespace {
     }
   };
 } // end anonymous namespace
+
+namespace swift {
+  struct StaticAssertGenericMetadataCacheEntryValueOffset {
+    static_assert(
+      offsetof(GenericCacheEntry, Value) ==
+      offsetof(swift::GenericMetadataCacheEntry<InProcess::StoredPointer>,
+               Value),
+      "The generic metadata cache entry layout mismatch");
+  };
+}
 
 namespace {
   class GenericMetadataCache :
@@ -2739,8 +2750,8 @@ void swift::swift_initStructMetadataWithLayoutString(
                                         previousFieldOffset);
   }
 
-  writeBytes(layoutStr, layoutStrOffset, previousFieldOffset);
-  writeBytes(layoutStr, layoutStrOffset, 0);
+  writeBytes(layoutStr, layoutStrOffset, (uint64_t)previousFieldOffset);
+  writeBytes(layoutStr, layoutStrOffset, (uint64_t)0);
 
   // we mask out HasRelativePointers, because at this point they have all been
   // resolved to metadata pointers
