@@ -891,11 +891,9 @@ bool isRuntimeInstatiatedLayoutString(IRGenModule &IGM,
       IGM.Context.LangOpts.hasFeature(
           Feature::LayoutStringValueWitnessesInstantiation) &&
       IGM.getOptions().EnableLayoutStringValueWitnessesInstantiation) {
-    if (auto *enumEntry = typeLayoutEntry->getAsEnum()) {
-      return enumEntry->isMultiPayloadEnum() || enumEntry->isSingleton();
-    }
-    return (typeLayoutEntry->isAlignedGroup() &&
-            !typeLayoutEntry->isFixedSize(IGM));
+    return (
+        (typeLayoutEntry->isAlignedGroup() || typeLayoutEntry->getAsEnum()) &&
+        !typeLayoutEntry->isFixedSize(IGM));
   }
 
   return false;
@@ -1115,7 +1113,29 @@ static void addValueWitness(IRGenModule &IGM, ConstantStructBuilder &B,
     goto standard;
   }
 
-  case ValueWitness::GetEnumTag:
+  case ValueWitness::GetEnumTag: {
+    assert(concreteType.getEnumOrBoundGenericEnum());
+
+    if (IGM.Context.LangOpts.hasFeature(Feature::LayoutStringValueWitnesses) &&
+        IGM.getOptions().EnableLayoutStringValueWitnesses) {
+      auto ty = boundGenericCharacteristics
+                    ? boundGenericCharacteristics->concreteType
+                    : concreteType;
+      auto &typeInfo = boundGenericCharacteristics
+                           ? *boundGenericCharacteristics->TI
+                           : concreteTI;
+      if (auto *typeLayoutEntry = typeInfo.buildTypeLayoutEntry(
+              IGM, ty, /*useStructLayouts*/ true)) {
+        if (auto *enumLayoutEntry = typeLayoutEntry->getAsEnum()) {
+          if (enumLayoutEntry->isMultiPayloadEnum() &&
+              !typeLayoutEntry->isFixedSize(IGM)) {
+            return addFunction(IGM.getMultiPayloadEnumGenericGetEnumTagFn());
+          }
+        }
+      }
+    }
+    goto standard;
+  }
   case ValueWitness::DestructiveProjectEnumData:
   case ValueWitness::DestructiveInjectEnumTag:
     assert(concreteType.getEnumOrBoundGenericEnum());
