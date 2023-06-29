@@ -1,4 +1,4 @@
-// RUN: %target-swift-emit-sil -O -sil-verify-all -verify -enable-experimental-feature NoImplicitCopy -enable-experimental-feature MoveOnlyClasses %s
+// RUN: %target-swift-emit-sil -O -sil-verify-all -verify -enable-experimental-feature MoveOnlyPartialConsumption -enable-experimental-feature NoImplicitCopy -enable-experimental-feature MoveOnlyClasses %s
 
 //////////////////
 // Declarations //
@@ -2474,6 +2474,25 @@ public func addressOnlyGenericAccessConsumeGrandFieldArg4a<T>(_ x2: consuming Ad
     for _ in 0..<1024 {
         consumeVal(x2.moveOnly.copyableK)
     }
+}
+
+public func addressOnlyGenericBorrowingConsume<T>(_ x: borrowing AddressOnlyGeneric<T>) {
+    // expected-error @-1 {{'x' is borrowed and cannot be consumed}}
+    let _ = x // expected-note {{consumed here}}
+}
+
+public func addressOnlyGenericBorrowingConsumeField<T>(_ x: borrowing AddressOnlyGeneric<T>) {
+    // expected-error @-1 {{'x' is borrowed and cannot be consumed}}
+    let _ = x.moveOnly // expected-note {{consumed here}}
+}
+
+public func addressOnlyGenericBorrowingConsumeField2<T>(_ x: borrowing AddressOnlyGeneric<T>) {
+    let _ = x.copyable
+}
+
+public func addressOnlyGenericBorrowingConsumeGrandField<T>(_ x: borrowing AddressOnlyGeneric<T>) {
+    // expected-error @-1 {{'x' is borrowed and cannot be consumed}}
+    let _ = x.moveOnly.k // expected-note {{consumed here}}
 }
 
 extension AddressOnlyGeneric {
