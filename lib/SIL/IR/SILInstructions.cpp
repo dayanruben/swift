@@ -317,11 +317,12 @@ AllocPackInst *AllocPackInst::create(SILDebugLocation loc,
 AllocRefInstBase::AllocRefInstBase(SILInstructionKind Kind,
                                    SILDebugLocation Loc,
                                    SILType ObjectType,
-                                   bool objc, bool canBeOnStack,
+                                   bool objc, bool canBeOnStack, bool isBare,
                                    ArrayRef<SILType> ElementTypes)
     : AllocationInst(Kind, Loc, ObjectType) {
   sharedUInt8().AllocRefInstBase.objC = objc;
   sharedUInt8().AllocRefInstBase.onStack = canBeOnStack;
+  sharedUInt8().AllocRefInstBase.isBare = isBare;
   sharedUInt8().AllocRefInstBase.numTailTypes = ElementTypes.size();
   assert(sharedUInt8().AllocRefInstBase.numTailTypes ==
          ElementTypes.size() && "Truncation");
@@ -330,7 +331,7 @@ AllocRefInstBase::AllocRefInstBase(SILInstructionKind Kind,
 
 AllocRefInst *AllocRefInst::create(SILDebugLocation Loc, SILFunction &F,
                                    SILType ObjectType,
-                                   bool objc, bool canBeOnStack,
+                                   bool objc, bool canBeOnStack, bool isBare,
                                    ArrayRef<SILType> ElementTypes,
                                    ArrayRef<SILValue> ElementCountOperands) {
   assert(ElementTypes.size() == ElementCountOperands.size());
@@ -341,7 +342,7 @@ AllocRefInst *AllocRefInst::create(SILDebugLocation Loc, SILFunction &F,
   auto Size = totalSizeToAlloc<swift::Operand, SILType>(AllOperands.size(),
                                                         ElementTypes.size());
   auto Buffer = F.getModule().allocateInst(Size, alignof(AllocRefInst));
-  return ::new (Buffer) AllocRefInst(Loc, F, ObjectType, objc, canBeOnStack,
+  return ::new (Buffer) AllocRefInst(Loc, F, ObjectType, objc, canBeOnStack, isBare,
                                      ElementTypes, AllOperands);
 }
 
@@ -1018,10 +1019,12 @@ GlobalAddrInst::GlobalAddrInst(SILDebugLocation DebugLoc,
 
 GlobalValueInst::GlobalValueInst(SILDebugLocation DebugLoc,
                                  SILGlobalVariable *Global,
-                                 TypeExpansionContext context)
+                                 TypeExpansionContext context, bool bare)
     : InstructionBase(DebugLoc,
                       Global->getLoweredTypeInContext(context).getObjectType(),
-                      Global) {}
+                      Global) {
+  sharedUInt8().GlobalValueInst.isBare = bare;
+}
 
 const IntrinsicInfo &BuiltinInst::getIntrinsicInfo() const {
   return getModule().getIntrinsicInfo(getName());
@@ -1975,12 +1978,14 @@ SwitchValueInst *SwitchValueInst::create(
   return ::new (buf) SwitchValueInst(Loc, Operand, DefaultBB, Cases, BBs);
 }
 
-template <typename SELECT_ENUM_INST>
-SELECT_ENUM_INST *SelectEnumInstBase::createSelectEnum(
+template <typename SELECT_ENUM_INST, typename BaseTy>
+template <typename... RestTys>
+SELECT_ENUM_INST *
+SelectEnumInstBase<SELECT_ENUM_INST, BaseTy>::createSelectEnum(
     SILDebugLocation Loc, SILValue Operand, SILType Ty, SILValue DefaultValue,
     ArrayRef<std::pair<EnumElementDecl *, SILValue>> DeclsAndValues,
     SILModule &Mod, llvm::Optional<ArrayRef<ProfileCounter>> CaseCounts,
-    ProfileCounter DefaultCount, ValueOwnershipKind forwardingOwnership) {
+    ProfileCounter DefaultCount, RestTys &&...restArgs) {
   // Allocate enough room for the instruction with tail-allocated
   // EnumElementDecl and operand arrays. There are `CaseBBs.size()` decls
   // and `CaseBBs.size() + (DefaultBB ? 1 : 0)` values.
@@ -1999,9 +2004,9 @@ SELECT_ENUM_INST *SelectEnumInstBase::createSelectEnum(
                                                        CaseDecls.size());
   auto Buf = Mod.allocateInst(Size + sizeof(ProfileCounter),
                               alignof(SELECT_ENUM_INST));
-  return ::new (Buf) SELECT_ENUM_INST(Loc, Operand, Ty, bool(DefaultValue),
-                                      CaseValues, CaseDecls, CaseCounts,
-                                      DefaultCount, forwardingOwnership);
+  return ::new (Buf) SELECT_ENUM_INST(
+      Loc, Operand, Ty, bool(DefaultValue), CaseValues, CaseDecls, CaseCounts,
+      DefaultCount, std::forward<RestTys>(restArgs)...);
 }
 
 SelectEnumInst *SelectEnumInst::create(
@@ -2009,9 +2014,8 @@ SelectEnumInst *SelectEnumInst::create(
     ArrayRef<std::pair<EnumElementDecl *, SILValue>> CaseValues, SILModule &M,
     llvm::Optional<ArrayRef<ProfileCounter>> CaseCounts,
     ProfileCounter DefaultCount, ValueOwnershipKind forwardingOwnership) {
-  return createSelectEnum<SelectEnumInst>(Loc, Operand, Type, DefaultValue,
-                                          CaseValues, M, CaseCounts,
-                                          DefaultCount, forwardingOwnership);
+  return createSelectEnum(Loc, Operand, Type, DefaultValue, CaseValues, M,
+                          CaseCounts, DefaultCount, forwardingOwnership);
 }
 
 SelectEnumAddrInst *SelectEnumAddrInst::create(
@@ -2022,71 +2026,8 @@ SelectEnumAddrInst *SelectEnumAddrInst::create(
   // We always pass in false since SelectEnumAddrInst doesn't use ownership. We
   // have to pass something in since SelectEnumInst /does/ need to consider
   // ownership and both use the same creation function.
-  return createSelectEnum<SelectEnumAddrInst>(
-      Loc, Operand, Type, DefaultValue, CaseValues, M, CaseCounts, DefaultCount,
-      ValueOwnershipKind(OwnershipKind::None));
-}
-
-namespace {
-  template <class Inst> EnumElementDecl *
-  getUniqueCaseForDefaultValue(Inst *inst, SILValue enumValue) {
-    assert(inst->hasDefault() && "doesn't have a default");
-    SILType enumType = enumValue->getType();
-
-    EnumDecl *decl = enumType.getEnumOrBoundGenericEnum();
-    assert(decl && "switch_enum operand is not an enum");
-
-    const SILFunction *F = inst->getFunction();
-    if (!decl->isEffectivelyExhaustive(F->getModule().getSwiftModule(),
-                                       F->getResilienceExpansion())) {
-      return nullptr;
-    }
-
-    llvm::SmallPtrSet<EnumElementDecl *, 4> unswitchedElts;
-    for (auto elt : decl->getAllElements())
-      unswitchedElts.insert(elt);
-
-    for (unsigned i = 0, e = inst->getNumCases(); i != e; ++i) {
-      auto Entry = inst->getCase(i);
-      unswitchedElts.erase(Entry.first);
-    }
-
-    if (unswitchedElts.size() == 1)
-      return *unswitchedElts.begin();
-
-    return nullptr;
-  }
-} // end anonymous namespace
-
-NullablePtr<EnumElementDecl> SelectEnumInstBase::getUniqueCaseForDefault() {
-  return getUniqueCaseForDefaultValue(this, getEnumOperand());
-}
-
-NullablePtr<EnumElementDecl> SelectEnumInstBase::getSingleTrueElement() const {
-  auto SEIType = getType().getAs<BuiltinIntegerType>();
-  if (!SEIType)
-    return nullptr;
-  if (SEIType->getWidth() != BuiltinIntegerWidth::fixed(1))
-    return nullptr;
-
-  // Try to find a single literal "true" case.
-  llvm::Optional<EnumElementDecl *> TrueElement;
-  for (unsigned i = 0, e = getNumCases(); i < e; ++i) {
-    auto casePair = getCase(i);
-    if (auto intLit = dyn_cast<IntegerLiteralInst>(casePair.second)) {
-      if (intLit->getValue() == APInt(1, 1)) {
-        if (!TrueElement)
-          TrueElement = casePair.first;
-        else
-          // Use Optional(nullptr) to represent more than one.
-          TrueElement = llvm::Optional<EnumElementDecl *>(nullptr);
-      }
-    }
-  }
-
-  if (!TrueElement || !*TrueElement)
-    return nullptr;
-  return *TrueElement;
+  return createSelectEnum(Loc, Operand, Type, DefaultValue, CaseValues, M,
+                          CaseCounts, DefaultCount);
 }
 
 template <typename BaseTy>
