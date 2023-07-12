@@ -7756,7 +7756,23 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
     if (type1->isPlaceholder() || type2->isPlaceholder())
       return getTypeMatchSuccess();
 
+    // If parameter pack expansion contains more than one element and the other
+    // side is a tuple, record a fix.
     auto *loc = getConstraintLocator(locator);
+    if (loc->isLastElement<LocatorPathElt::ApplyArgToParam>()) {
+      if (auto packExpansion = type2->getAs<PackExpansionType>()) {
+        auto countType = simplifyType(packExpansion->getCountType(), flags);
+        if (auto paramPack = countType->getAs<PackType>()) {
+          if (type1->is<TupleType>() && paramPack->getNumElements() >= 1) {
+            if (recordFix(DestructureTupleToMatchPackExpansionParameter::create(
+                    *this, paramPack, loc))) {
+              return getTypeMatchFailure(loc);
+            }
+            return getTypeMatchSuccess();
+          }
+        }
+      }
+    }
     if (recordFix(AllowInvalidPackExpansion::create(*this, loc)))
       return getTypeMatchFailure(locator);
 
@@ -9660,21 +9676,15 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
             // If name doesn't appear in either `initializes` or `accesses`
             // then it's invalid instance member.
 
-            if (auto *initializesAttr =
-                    accessor->getAttrs().getAttribute<InitializesAttr>()) {
-              isValidReference |= llvm::any_of(
-                  initializesAttr->getProperties(), [&](Identifier name) {
-                    return DeclNameRef(name) == memberName;
-                  });
-            }
+            isValidReference |= llvm::any_of(
+                accessor->getInitializedProperties(), [&](VarDecl *prop) {
+                  return prop->createNameRef() == memberName;
+                });
 
-            if (auto *accessesAttr =
-                    accessor->getAttrs().getAttribute<AccessesAttr>()) {
-              isValidReference |= llvm::any_of(
-                  accessesAttr->getProperties(), [&](Identifier name) {
-                    return DeclNameRef(name) == memberName;
-                  });
-            }
+            isValidReference |= llvm::any_of(
+                accessor->getAccessedProperties(), [&](VarDecl *prop) {
+                  return prop->createNameRef() == memberName;
+                });
 
             if (!isValidReference) {
               result.addUnviable(
@@ -13473,14 +13483,16 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifySameShapeConstraint(
         auto paramPack = type2->castTo<PackType>();
 
         // Tailed diagnostic to explode tuples.
+        // FIXME: This is very similar to
+        // 'cannot_convert_single_tuple_into_multiple_arguments'; can we emit
+        // both of these in the same place?
         if (argPack->getNumElements() == 1) {
-          if (auto *tuple = argPack->getElementType(0)->getAs<TupleType>()) {
-            if (tuple->getNumElements() == paramPack->getNumElements()) {
-              return recordShapeFix(
-                  DestructureTupleToMatchPackExpansionParameter::create(
-                      *this, paramPack, loc),
-                  /*impact=*/2 * paramPack->getNumElements());
-            }
+          if (argPack->getElementType(0)->is<TupleType>() &&
+              paramPack->getNumElements() >= 1) {
+            return recordShapeFix(
+                DestructureTupleToMatchPackExpansionParameter::create(
+                    *this, paramPack, loc),
+                /*impact=*/2 * paramPack->getNumElements());
           }
         }
 
@@ -14609,6 +14621,12 @@ void ConstraintSystem::recordCallAsFunction(UnresolvedDotExpr *root,
 
   associateArgumentList(
       getConstraintLocator(root, ConstraintLocator::ApplyArgument), arguments);
+}
+
+void ConstraintSystem::recordKeyPath(KeyPathExpr *keypath,
+                                     TypeVariableType *root,
+                                     TypeVariableType *value, DeclContext *dc) {
+  KeyPaths.insert(std::make_pair(keypath, std::make_tuple(root, value, dc)));
 }
 
 ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
