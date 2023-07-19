@@ -3480,6 +3480,10 @@ static bool usesFeatureDeferredSendableChecking(Decl *decl) {
   return false;
 }
 
+static bool usesFeaturePlaygroundExtendedCallbacks(Decl *decl) {
+  return false;
+}
+
 /// Suppress the printing of a particular feature.
 static void suppressingFeature(PrintOptions &options, Feature feature,
                                llvm::function_ref<void()> action) {
@@ -6523,6 +6527,9 @@ public:
       Printer << " ";
     }
 
+    if (info.isUnimplementable()) {
+      Printer.printSimpleAttr("@unimplementable") << " ";
+    }
     if (info.isPseudogeneric()) {
       Printer.printSimpleAttr("@pseudogeneric") << " ";
     }
