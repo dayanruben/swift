@@ -3387,7 +3387,7 @@ static bool usesFeatureBuiltinMacros(Decl *decl) {
 }
 
 
-static bool usesFeatureDisableActorInferenceFromPropertyWrapperUsage(Decl *decl) {
+static bool usesFeatureDisableOutwardActorInference(Decl *decl) {
   return false;
 }
 
@@ -3482,6 +3482,10 @@ static bool usesFeatureDeferredSendableChecking(Decl *decl) {
 
 static bool usesFeaturePlaygroundExtendedCallbacks(Decl *decl) {
   return false;
+}
+
+static bool usesFeatureNewCxxMethodSafetyHeuristics(Decl *decl) {
+  return decl->hasClangNode();
 }
 
 /// Suppress the printing of a particular feature.
