@@ -3439,6 +3439,10 @@ static bool usesFeatureBuiltinModule(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureRawLayout(Decl *decl) {
+  return decl->getAttrs().hasAttribute<RawLayoutAttr>();
+}
+
 static bool hasParameterPacks(Decl *decl) {
   if (auto genericContext = decl->getAsGenericContext()) {
     auto sig = genericContext->getGenericSignature();
@@ -3476,7 +3480,7 @@ static bool usesFeatureParameterPacks(Decl *decl) {
   return false;
 }
 
-static bool usesFeatureDeferredSendableChecking(Decl *decl) {
+static bool usesFeatureSendNonSendable(Decl *decl) {
   return false;
 }
 

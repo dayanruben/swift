@@ -2785,15 +2785,26 @@ size_t swift::_swift_refCountBytesForMetatype(const Metadata *type) {
     size_t offset = sizeof(uint64_t);
     return LayoutStringReader{type->getLayoutString(), offset}
         .readBytes<size_t>();
-  } else if (type->isClassObject() || type->isAnyExistentialType()) {
-    return sizeof(uint64_t);
   } else if (auto *tuple = dyn_cast<TupleTypeMetadata>(type)) {
     size_t res = 0;
     for (InProcess::StoredSize i = 0; i < tuple->NumElements; i++) {
       res += _swift_refCountBytesForMetatype(tuple->getElement(i).Type);
     }
     return res;
+  } else if (auto *cls = type->getClassObject()) {
+    if (cls->isTypeMetadata()) {
+      auto *vwt = cls->getValueWitnesses();
+      if (vwt != &VALUE_WITNESS_SYM(Bo) &&
+          vwt != &VALUE_WITNESS_SYM(BO) &&
+          vwt != &VALUE_WITNESS_SYM(Bb)) {
+        goto metadata;
+      }
+    }
+    return sizeof(uint64_t);
+  } else if (type->isAnyExistentialType()) {
+    return sizeof(uint64_t);
   } else {
+  metadata:
     return sizeof(uint64_t) + sizeof(uintptr_t);
   }
 }
@@ -2822,14 +2833,15 @@ void swift::_swift_addRefCountStringForMetatype(LayoutStringWriter &writer,
              reader.layoutStr + layoutStringHeaderSize, fieldRefCountBytes);
 
       if (fieldFlags & LayoutStringFlags::HasRelativePointers) {
-        swift_resolve_resilientAccessors(writer.layoutStr, writer.offset,
-                                         reader.layoutStr, fieldType);
+        swift_resolve_resilientAccessors(
+            writer.layoutStr, writer.offset,
+            reader.layoutStr + layoutStringHeaderSize, fieldType);
       }
 
       if (offset) {
+        LayoutStringReader tagReader {writer.layoutStr, writer.offset};
         auto writerOffsetCopy = writer.offset;
-        reader.offset = layoutStringHeaderSize;
-        auto firstTagAndOffset = reader.readBytes<uint64_t>();
+        auto firstTagAndOffset = tagReader.readBytes<uint64_t>();
         firstTagAndOffset += offset;
         writer.writeBytes(firstTagAndOffset);
         writer.offset = writerOffsetCopy;

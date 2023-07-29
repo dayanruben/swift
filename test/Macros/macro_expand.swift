@@ -76,7 +76,7 @@ macro Invalid() = #externalMacro(module: "MacroDefinition", type: "InvalidMacro"
 
 @Invalid
 struct Bad {}
-// expected-note@-1 18 {{in expansion of macro 'Invalid' here}}
+// expected-note@-2 18 {{in expansion of macro 'Invalid' on struct 'Bad' here}}
 
 // CHECK-DIAGS: error: macro expansion cannot introduce import
 // CHECK-DIAGS: error: macro expansion cannot introduce precedence group
@@ -140,9 +140,9 @@ func testFileID(a: Int, b: Int) {
   // CHECK-AST: macro_expansion_expr type='String'{{.*}}name=line
   print("Builtin result is \(#fileID)")
   print(
-    /// CHECK-IR-DAG: ![[L1:[0-9]+]] = !DILocation(line: [[@LINE+1]], column: 5
+    /// CHECK-IR-DAG: ![[L1:[0-9]+]] = distinct !DILocation(line: [[@LINE+1]], column: 5
     #addBlocker(
-      /// CHECK-IR-DAG: ![[L2:[0-9]+]] = !DILocation({{.*}}inlinedAt: ![[L1]])
+      /// CHECK-IR-DAG: ![[L2:[0-9]+]] = distinct !DILocation({{.*}}inlinedAt: ![[L1]])
       /// CHECK-IR-DAG: ![[L3:[0-9]+]] = !DILocation({{.*}}inlinedAt: ![[L2]])
       #stringify(a - b)
       )
