@@ -2407,13 +2407,20 @@ namespace {
         }
       }
 
+      bool forceMemberwiseInitializer = false;
+      if (cxxRecordDecl && cxxRecordDecl->isInStdNamespace() &&
+          cxxRecordDecl->getIdentifier() &&
+          cxxRecordDecl->getName() == "pair") {
+        forceMemberwiseInitializer = true;
+      }
       // We can assume that it is possible to correctly construct the object by
       // simply initializing its member variables to arbitrary supplied values
       // only when the same is possible in C++. While we could check for that
       // exactly, checking whether the C++ class is an aggregate
       // (C++ [dcl.init.aggr]) has the same effect.
       bool isAggregate = !cxxRecordDecl || cxxRecordDecl->isAggregate();
-      if (hasReferenceableFields && hasMemberwiseInitializer && isAggregate) {
+      if ((hasReferenceableFields && hasMemberwiseInitializer && isAggregate) ||
+          forceMemberwiseInitializer) {
         // The default zero initializer suppresses the implicit value
         // constructor that would normally be formed, so we have to add that
         // explicitly as well.
@@ -2985,7 +2992,7 @@ namespace {
           return nullptr;
 
         // Create the global constant.
-        bool isStatic = enumKind != EnumKind::Unknown && dc->isTypeContext();
+        bool isStatic = dc->isTypeContext();
         auto result = synthesizer.createConstant(
             name, dc, type, clang::APValue(decl->getInitVal()),
             enumKind == EnumKind::Unknown ? ConstantConvertKind::Construction
