@@ -233,6 +233,8 @@ ManagedValue SILGenBuilder::createPhi(SILType type,
     return SGF.emitManagedBorrowedArgumentWithCleanup(arg);
 
   case OwnershipKind::None:
+    return ManagedValue::forObjectRValueWithoutOwnership(arg);
+
   case OwnershipKind::Unowned:
     return ManagedValue::forUnmanaged(arg);
   }
@@ -387,7 +389,7 @@ SILGenBuilder::bufferForExpr(SILLocation loc, SILType ty,
 
   // Add a cleanup for the temporary we allocated.
   if (lowering.isTrivial())
-    return ManagedValue::forUnmanaged(address);
+    return ManagedValue::forTrivialAddressRValue(address);
 
   return SGF.emitManagedBufferWithCleanup(address);
 }
@@ -415,7 +417,7 @@ ManagedValue SILGenBuilder::formalAccessBufferForExpr(
 
   // Add a cleanup for the temporary we allocated.
   if (lowering.isTrivial())
-    return ManagedValue::forUnmanaged(address);
+    return ManagedValue::forTrivialAddressRValue(address);
 
   return SGF.emitFormalAccessManagedBufferWithCleanup(loc, address);
 }
@@ -465,7 +467,7 @@ ManagedValue SILGenBuilder::createLoadTake(SILLocation loc, ManagedValue v,
   SILValue result =
       lowering.emitLoadOfCopy(*this, loc, v.forward(SGF), IsTake);
   if (lowering.isTrivial())
-    return ManagedValue::forUnmanaged(result);
+    return ManagedValue::forObjectRValueWithoutOwnership(result);
   assert((!lowering.isAddressOnly() || !SGF.silConv.useLoweredAddresses()) &&
          "cannot retain an unloadable type");
   return SGF.emitManagedRValueWithCleanup(result, lowering);
@@ -482,7 +484,7 @@ ManagedValue SILGenBuilder::createLoadCopy(SILLocation loc, ManagedValue v,
   SILValue result =
       lowering.emitLoadOfCopy(*this, loc, v.getValue(), IsNotTake);
   if (lowering.isTrivial())
-    return ManagedValue::forUnmanaged(result);
+    return ManagedValue::forObjectRValueWithoutOwnership(result);
   assert((!lowering.isAddressOnly()
           || !SGF.silConv.useLoweredAddresses()) &&
          "cannot retain an unloadable type");
@@ -523,7 +525,8 @@ static ManagedValue createInputFunctionArgument(
     //
     // NOTE: If we have a trivial value, the copy will do nothing, so this is
     // just a convenient way to avoid writing conditional code.
-    return ManagedValue::forUnmanaged(arg).copy(SGF, loc);
+    return ManagedValue::forCopyOwnedObjectRValue(
+        SGF, loc, arg, ManagedValue::ScopeKind::Lexical);
 
   case SILArgumentConvention::Direct_Owned:
     return SGF.emitManagedRValueWithCleanup(arg);
@@ -649,7 +652,7 @@ ManagedValue SILGenBuilder::createManagedOptionalNone(SILLocation loc,
   if (!type.isAddressOnly(getFunction()) ||
       !SGF.silConv.useLoweredAddresses()) {
     SILValue noneValue = createOptionalNone(loc, type);
-    return ManagedValue::forUnmanaged(noneValue);
+    return ManagedValue::forObjectRValueWithoutOwnership(noneValue);
   }
 
   SILValue tempResult = SGF.emitTemporaryAllocation(loc, type);
@@ -704,13 +707,14 @@ ManagedValue SILGenBuilder::createUncheckedBitCast(SILLocation loc,
 
   // If we have a trivial inst, just return early.
   if (isa<UncheckedTrivialBitCastInst>(cast))
-    return ManagedValue::forUnmanaged(cast);
+    return ManagedValue::forObjectRValueWithoutOwnership(cast);
 
   // If we perform an unchecked bitwise case, then we are producing a new RC
   // identity implying that we need a copy of the casted value to be returned so
   // that the inputs/outputs of the case have separate ownership.
   if (isa<UncheckedBitwiseCastInst>(cast)) {
-    return ManagedValue::forUnmanaged(cast).copy(SGF, loc);
+    return ManagedValue::forCopyOwnedObjectRValue(
+        SGF, loc, cast, ManagedValue::ScopeKind::Lexical);
   }
 
   // Otherwise, we forward the cleanup of the input value and place the cleanup
@@ -760,7 +764,7 @@ ManagedValue SILGenBuilder::createOpenExistentialMetatype(SILLocation loc,
                                                           SILType openedType) {
   SILValue result = SILGenBuilder::createOpenExistentialMetatype(
       loc, value.getValue(), openedType);
-  return ManagedValue::forTrivialRValue(result);
+  return ManagedValue::forRValueWithoutOwnership(result);
 }
 
 ManagedValue SILGenBuilder::createStore(SILLocation loc, ManagedValue value,
