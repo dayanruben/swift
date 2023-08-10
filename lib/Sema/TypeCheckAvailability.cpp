@@ -23,6 +23,7 @@
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Initializer.h"
 #include "swift/AST/NameLookup.h"
+#include "swift/AST/PackConformance.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
@@ -597,7 +598,7 @@ private:
     // constrained to the deployment target. There's not much benefit to
     // checking these declarations at a lower availability version floor since
     // neither can be used by API clients.
-    if (D->isSPI() || AvailableAttr::isUnavailable(D))
+    if (D->isSPI() || D->getSemanticUnavailableAttr())
       return true;
 
     return !::isExported(D);
@@ -4011,7 +4012,18 @@ swift::diagnoseConformanceAvailability(SourceLoc loc,
                                        bool useConformanceAvailabilityErrorsOption) {
   assert(!where.isImplicit());
 
-  if (!conformance.isConcrete())
+  if (conformance.isPack()) {
+    bool diagnosed = false;
+    auto *pack = conformance.getPack();
+    for (auto patternConf : pack->getPatternConformances()) {
+      diagnosed |= diagnoseConformanceAvailability(
+          loc, patternConf, where, depTy, replacementTy,
+          useConformanceAvailabilityErrorsOption);
+    }
+    return diagnosed;
+  }
+
+  if (conformance.isInvalid() || conformance.isAbstract())
     return false;
 
   const ProtocolConformance *concreteConf = conformance.getConcrete();
