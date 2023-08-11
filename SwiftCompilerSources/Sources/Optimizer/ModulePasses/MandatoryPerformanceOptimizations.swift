@@ -99,16 +99,14 @@ private func inlineAndDevirtualize(apply: FullApplySite, alreadyInlinedFunctions
     return
   }
 
-  if shouldInline(apply: apply, callee: callee, alreadyInlinedFunctions: &alreadyInlinedFunctions) {
-    simplifyCtxt.inlineFunction(apply: apply, mandatoryInline: true)
-
-    // In OSSA `partial_apply [on_stack]`s are represented as owned values rather than stack locations.
-    // It is possible for their destroys to violate stack discipline.
-    // When inlining into non-OSSA, those destroys are lowered to dealloc_stacks.
-    // This can result in invalid stack nesting.
-    if callee.hasOwnership && !apply.parentFunction.hasOwnership  {
+  if apply.canInline &&
+     shouldInline(apply: apply, callee: callee, alreadyInlinedFunctions: &alreadyInlinedFunctions)
+  {
+    if apply.inliningCanInvalidateStackNesting  {
       simplifyCtxt.notifyInvalidatedStackNesting()
     }
+
+    simplifyCtxt.inlineFunction(apply: apply, mandatoryInline: true)
   }
 }
 
@@ -227,7 +225,7 @@ private extension Value {
     var singleUseValue: any Value = self
     var path = SmallProjectionPath()
     while true {
-      guard let use = singleUseValue.uses.singleNonDebugUse else {
+      guard let use = singleUseValue.uses.singleRelevantUse else {
         return nil
       }
       
@@ -249,6 +247,8 @@ private extension Value {
         default:
           return nil
         }
+      case is PointerToAddressInst, is AddressToPointerInst, is BeginAccessInst:
+        break
       default:
         return nil
       }
@@ -334,5 +334,29 @@ fileprivate struct FunctionWorklist {
     if pushedFunctions.insert(element).inserted {
       functions.append(element)
     }
+  }
+}
+
+private extension UseList {
+  var singleRelevantUse: Operand? {
+    var singleUse: Operand?
+    for use in self {
+      switch use.instruction {
+      case is DebugValueInst,
+           // The initializer value of a global can contain access instructions if it references another
+           // global variable by address, e.g.
+           //   var p = Point(x: 10, y: 20)
+           //   let o = UnsafePointer(&p)
+           // Therefore ignore the `end_access` use of a `begin_access`.
+           is EndAccessInst:
+        continue
+      default:
+        if singleUse != nil {
+          return nil
+        }
+        singleUse = use
+      }
+    }
+    return singleUse
   }
 }

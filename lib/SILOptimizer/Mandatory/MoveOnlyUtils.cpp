@@ -221,6 +221,7 @@ bool noncopyable::memInstMustInitialize(Operand *memOper) {
       // `zeroInitializer` with an address operand zeroes out the address operand
       return true;
     }
+    return false;
   }
 
 #define NEVER_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)             \
@@ -391,8 +392,8 @@ struct SimpleTemporaryAllocStackElimState {
   }
 };
 
-struct SimpleTemporaryAllocStackElimVisitor final
-    : public TransitiveAddressWalker {
+struct SimpleTemporaryAllocStackElimVisitor
+    : public TransitiveAddressWalker<SimpleTemporaryAllocStackElimVisitor> {
   SimpleTemporaryAllocStackElimState &state;
   CopyAddrInst *caiToVisit;
   CopyAddrInst *&nextCAI;
@@ -416,7 +417,7 @@ struct SimpleTemporaryAllocStackElimVisitor final
     return true;
   }
 
-  bool visitUse(Operand *op) override {
+  bool visitUse(Operand *op) {
     LLVM_DEBUG(llvm::dbgs() << "SimpleTemporaryAllocStackElimVisitor visiting: "
                             << *op->getUser());
 
@@ -555,12 +556,13 @@ bool siloptimizer::eliminateTemporaryAllocationsFromLet(
     return false;
 
   StackList<CopyAddrInst *> copiesToVisit(markedInst->getFunction());
-  struct FindCopyAddrWalker final : public TransitiveAddressWalker {
+  struct FindCopyAddrWalker
+      : public TransitiveAddressWalker<FindCopyAddrWalker> {
     StackList<CopyAddrInst *> &copiesToVisit;
     FindCopyAddrWalker(StackList<CopyAddrInst *> &copiesToVisit)
         : TransitiveAddressWalker(), copiesToVisit(copiesToVisit) {}
 
-    bool visitUse(Operand *op) override {
+    bool visitUse(Operand *op) {
       auto *cai = dyn_cast<CopyAddrInst>(op->getUser());
       // We want copy_addr that are not a take of src and are an init of their
       // dest.

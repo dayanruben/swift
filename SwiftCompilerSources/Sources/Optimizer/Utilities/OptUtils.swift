@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import SIL
+import OptimizerBridging
 
 extension Value {
   var nonDebugUses: LazyFilterSequence<UseList> {
@@ -396,3 +397,65 @@ extension Function {
   }
 }
 
+extension FullApplySite {
+  var canInline: Bool {
+    // Some checks which are implemented in C++
+    if !FullApplySite_canInline(bridged) {
+      return false
+    }
+    // Cannot inline a non-inlinable function it an inlinable function.
+    if parentFunction.isSerialized,
+       let calleeFunction = referencedFunction,
+       !calleeFunction.isSerialized {
+      return false
+    }
+    return true
+  }
+
+  var inliningCanInvalidateStackNesting: Bool {
+    guard let calleeFunction = referencedFunction else {
+      return false
+    }
+
+    // In OSSA `partial_apply [on_stack]`s are represented as owned values rather than stack locations.
+    // It is possible for their destroys to violate stack discipline.
+    // When inlining into non-OSSA, those destroys are lowered to dealloc_stacks.
+    // This can result in invalid stack nesting.
+    if calleeFunction.hasOwnership && !parentFunction.hasOwnership {
+      return true
+    }
+    // Inlining of coroutines can result in improperly nested stack allocations.
+    if self is BeginApplyInst {
+      return true
+    }
+    return false
+  }
+}
+
+extension GlobalVariable {
+  /// Removes all `begin_access` and `end_access` instructions from the initializer.
+  ///
+  /// Access instructions are not allowed in the initializer, because the initializer must not contain
+  /// instructions with side effects (initializer instructions are not executed).
+  /// Exclusivity checking does not make sense in the initializer.
+  ///
+  /// The initializer functions of globals, which reference other globals by address, contain access
+  /// instructions. After the initializing code is copied to the global's initializer, those access
+  /// instructions must be stripped.
+  func stripAccessInstructionFromInitializer(_ context: FunctionPassContext) {
+    guard let initInsts = staticInitializerInstructions else {
+      return
+    }
+    for initInst in initInsts {
+      switch initInst {
+      case let beginAccess as BeginAccessInst:
+        beginAccess.uses.replaceAll(with: beginAccess.address, context)
+        context.erase(instruction: beginAccess)
+      case let endAccess as EndAccessInst:
+        context.erase(instruction: endAccess)
+      default:
+        break
+      }
+    }
+  }
+}
