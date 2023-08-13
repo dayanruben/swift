@@ -7082,7 +7082,7 @@ ERROR(attr_incompatible_with_back_deploy,none,
       "'%0' cannot be applied to a back deployed %1",
       (DeclAttribute, DescriptiveDeclKind))
 
-ERROR(backdeployed_opaque_result_not_supported,none,
+WARNING(backdeployed_opaque_result_not_supported,none,
       "'%0' is unsupported on a %1 with a 'some' return type",
       (DeclAttribute, DescriptiveDeclKind))
 
@@ -7154,9 +7154,7 @@ ERROR(macro_undefined,PointsToFirstBadToken,
       "no macro named %0", (Identifier))
 ERROR(external_macro_not_found,none,
       "external macro implementation type '%0.%1' could not be found for "
-      "macro %2; the type must be public and provided by a macro target in a "
-      "Swift package, or via '-plugin-path' or '-load-plugin-library'",
-      (StringRef, StringRef, DeclName))
+      "macro %2", (StringRef, StringRef, DeclName))
 ERROR(macro_must_be_defined,none,
       "macro %0 requires a definition", (DeclName))
 ERROR(external_macro_outside_macro_definition,none,

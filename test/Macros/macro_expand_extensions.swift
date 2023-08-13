@@ -156,3 +156,26 @@ struct TestUndocumentedEncodable {}
 // CHECK-DIAGS: error: conformance to 'Codable' (aka 'Decodable & Encodable') is not covered by macro 'UndocumentedEncodable'
 
 #endif
+
+@attached(extension, conformances: Equatable)
+macro AvailableEquatable() = #externalMacro(module: "MacroDefinition", type: "ConditionallyAvailableConformance")
+
+@available(macOS 99, *)
+@AvailableEquatable
+struct TestAvailability {
+  static let x : any Equatable.Type = TestAvailability.self
+}
+
+protocol P1 {}
+protocol P2 {}
+
+@attached(extension, conformances: P1, P2)
+macro AddAllConformances() = #externalMacro(module: "MacroDefinition", type: "AddAllConformancesMacro")
+
+@AddAllConformances
+struct MultipleConformances {}
+
+// CHECK-DUMP: extension MultipleConformances: P1 {
+// CHECK-DUMP: }
+// CHECK-DUMP: extension MultipleConformances: P2 {
+// CHECK-DUMP: }
