@@ -3369,6 +3369,13 @@ ResolveRawLayoutLikeTypeRequest::evaluate(Evaluator &evaluator,
                                           StructDecl *sd,
                                           RawLayoutAttr *attr) const {
   assert(attr->LikeType);
+
+  // If the attribute has a fixed type representation, then it was likely
+  // deserialized and the type has already been computed.
+  if (auto fixedTy = dyn_cast<FixedTypeRepr>(attr->LikeType)) {
+    return fixedTy->getType();
+  }
+
   // Resolve the like type in the struct's context.
   return TypeResolution::resolveContextualType(
         attr->LikeType, sd, llvm::None,
@@ -4468,11 +4475,9 @@ TypeChecker::diagnosticIfDeclCannotBePotentiallyUnavailable(const Decl *D) {
     // An enum element with an associated value cannot be potentially
     // unavailable.
     if (EED->hasAssociatedValues()) {
-      auto &ctx = DC->getASTContext();
       auto *SF = DC->getParentSourceFile();
 
-      if (SF->Kind == SourceFileKind::Interface ||
-          ctx.LangOpts.WarnOnPotentiallyUnavailableEnumCase) {
+      if (SF->Kind == SourceFileKind::Interface) {
         return diag::availability_enum_element_no_potential_warn;
       } else {
         return diag::availability_enum_element_no_potential;
