@@ -1868,14 +1868,14 @@ void SILGenFunction::emitAssignOrInit(SILLocation loc, ManagedValue selfValue,
   // Emit the init accessor function partially applied to the base.
   SILValue initFRef = emitGlobalFunctionRef(
       loc, getAccessorDeclRef(field->getOpaqueAccessor(AccessorKind::Init)));
+
+  auto initTy = initFRef->getType().castTo<SILFunctionType>();
+
   if (!substitutions.empty()) {
     // If there are substitutions we need to emit partial apply to
     // apply substitutions to the init accessor reference type.
-    auto initTy =
-        initFRef->getType().castTo<SILFunctionType>()->substGenericArgs(
-            SGM.M, substitutions, getTypeExpansionContext());
-
-    SILFunctionConventions setterConv(initTy, SGM.M);
+    initTy = initTy->substGenericArgs(SGM.M, substitutions,
+                                      getTypeExpansionContext());
 
     // Emit partial apply without argument to produce a substituted
     // init accessor reference.
@@ -1883,6 +1883,20 @@ void SILGenFunction::emitAssignOrInit(SILLocation loc, ManagedValue selfValue,
         B.createPartialApply(loc, initFRef, substitutions, ArrayRef<SILValue>(),
                              ParameterConvention::Direct_Guaranteed);
     initFRef = emitManagedRValueWithCleanup(initPAI).getValue();
+  }
+
+  // Check whether value is supposed to be passed indirectly and
+  // materialize if required.
+  {
+    SILFunctionConventions initConv(initTy, SGM.M);
+
+    auto newValueArgIdx = initConv.getSILArgIndexOfFirstParam();
+    // If we need the argument in memory, materialize an address.
+    if (initConv.getSILArgumentConvention(newValueArgIdx)
+            .isIndirectConvention() &&
+        !newValue.getType().isAddress()) {
+      newValue = newValue.materialize(*this, loc);
+    }
   }
 
   SILValue setterFRef;
@@ -1893,7 +1907,20 @@ void SILGenFunction::emitAssignOrInit(SILLocation loc, ManagedValue selfValue,
     setterFRef = SILUndef::get(initFRef->getType(), F);
   }
 
-  B.createAssignOrInit(loc, field, selfValue.getValue(),
+  auto isValueSelf = !selfValue.getType().getASTType()->mayHaveSuperclass();
+  // If we are emitting `assign_or_init` instruction for a value
+  // type, we need to make sure that "self" is always a l-value
+  // reference to "rootself" because `nonmutating set` loads "self"
+  // and referencing `selfValue` in such case is incorrect because
+  // it's a copy which is going to be skipped by DI.
+  auto selfRef = selfValue;
+  if (isValueSelf && !selfRef.isLValue()) {
+    auto *ctor = cast<ConstructorDecl>(FunctionDC->getAsDecl());
+    selfRef = maybeEmitValueOfLocalVarDecl(ctor->getImplicitSelfDecl(),
+                                           AccessKind::ReadWrite);
+  }
+
+  B.createAssignOrInit(loc, field, selfRef.getValue(),
                        newValue.forward(*this), initFRef, setterFRef,
                        AssignOrInitInst::Unknown);
 }

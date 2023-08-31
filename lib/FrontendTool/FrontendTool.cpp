@@ -1359,9 +1359,6 @@ static bool performAction(CompilerInstance &Instance,
     return performParseOnly(*Instance.getMainModule());
   case FrontendOptions::ActionType::ResolveImports:
     return Instance.performParseAndResolveImportsOnly();
-  case FrontendOptions::ActionType::LazyTypecheck:
-    // For now, this action is just an alias of ResolveImports.
-    return Instance.performParseAndResolveImportsOnly();
   case FrontendOptions::ActionType::Typecheck:
     return withSemanticAnalysis(Instance, observer,
                                 [](CompilerInstance &Instance) {
@@ -1911,6 +1908,7 @@ static void emitIndexDataForSourceFile(SourceFile *PrimarySourceFile,
                                  opts.IndexIgnoreStdlib,
                                  opts.IndexIncludeLocals,
                                  isDebugCompilation,
+                                 opts.DisableImplicitModules,
                                  Invocation.getTargetTriple(),
                                  *Instance.getDependencyTracker(),
                                  Invocation.getIRGenOptions().FilePrefixMap);
@@ -1929,6 +1927,7 @@ static void emitIndexDataForSourceFile(SourceFile *PrimarySourceFile,
                                  opts.IndexIgnoreStdlib,
                                  opts.IndexIncludeLocals,
                                  isDebugCompilation,
+                                 opts.DisableImplicitModules,
                                  Invocation.getTargetTriple(),
                                  *Instance.getDependencyTracker(),
                                  Invocation.getIRGenOptions().FilePrefixMap);
