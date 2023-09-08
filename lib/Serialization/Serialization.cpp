@@ -1038,6 +1038,11 @@ void Serializer::writeHeader() {
         HasHermeticSealAtLink.emit(ScratchRecord);
       }
 
+      if (Options.EmbeddedSwiftModule) {
+        options_block::IsEmbeddedSwiftModuleLayout IsEmbeddedSwiftModule(Out);
+        IsEmbeddedSwiftModule.emit(ScratchRecord);
+      }
+
       if (M->isTestingEnabled()) {
         options_block::IsTestableLayout IsTestable(Out);
         IsTestable.emit(ScratchRecord);
@@ -3259,9 +3264,6 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
   size_t addConformances(const IterableDeclContext *declContext,
                          ConformanceLookupKind lookupKind,
                          SmallVectorImpl<TypeID> &data) {
-    // We don't expect to be serializing conformances for skipped decls.
-    assert(!S.shouldSkipDecl(declContext->getDecl()));
-
     size_t count = 0;
     for (auto conformance : declContext->getLocalConformances(lookupKind)) {
       if (S.shouldSkipDecl(conformance->getProtocol()))
@@ -3347,6 +3349,10 @@ public:
         if (isDeserializationSafe(wrapped))
           return true;
     }
+
+    // Paramters don't have meaningful access control.
+    if (isa<ParamDecl>(decl) || isa<GenericTypeParamDecl>(decl))
+      return true;
 
     return false;
   }
@@ -3801,9 +3807,9 @@ public:
   /// Add all of the inherited entries to the result vector.
   ///
   /// \returns the number of entries added.
-  size_t addInherited(ArrayRef<InheritedEntry> inheritedEntries,
+  size_t addInherited(InheritedTypes inheritedEntries,
                       SmallVectorImpl<TypeID> &result) {
-    for (const auto &inherited : inheritedEntries) {
+    for (const auto &inherited : inheritedEntries.getEntries()) {
       assert(!inherited.getType() || !inherited.getType()->hasArchetype());
       TypeID typeRef = S.addTypeRef(inherited.getType());
 
@@ -4218,7 +4224,7 @@ public:
         proto->getInherited(), inheritedAndDependencyTypes);
 
     // Separately collect inherited protocol types as dependencies.
-    for (auto element : proto->getInherited()) {
+    for (auto element : proto->getInherited().getEntries()) {
       auto elementType = element.getType();
       assert(!elementType || !elementType->hasArchetype());
       if (elementType &&
@@ -4892,11 +4898,16 @@ static bool canSkipWhenInvalid(const Decl *D) {
 }
 
 bool Serializer::shouldSkipDecl(const Decl *D) const {
-  if (Options.SerializeExternalDeclsOnly &&
-      !DeclSerializer::isDeserializationSafe(D))
-    return true;
+  // The presence of -experimental-serialize-external-decls-only is the only
+  // reason to omit decls during serialization.
+  if (!Options.SerializeExternalDeclsOnly)
+    return false;
 
-  return false;
+  // For our purposes, "deserialization safe" is the same thing as "external".
+  if (DeclSerializer::isDeserializationSafe(D))
+    return false;
+
+  return true;
 }
 
 void Serializer::writeASTBlockEntity(const Decl *D) {

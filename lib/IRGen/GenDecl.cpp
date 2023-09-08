@@ -536,7 +536,7 @@ void IRGenModule::emitSourceFile(SourceFile &SF) {
   // libraries. This may however cause the library to get pulled in in
   // situations where it isn't useful, such as for dylibs, though this is
   // harmless aside from code size.
-  if (!IRGen.Opts.UseJIT) {
+  if (!IRGen.Opts.UseJIT && !Context.LangOpts.hasFeature(Feature::Embedded)) {
     auto addBackDeployLib = [&](llvm::VersionTuple version,
                                 StringRef libraryName, bool forceLoad) {
       llvm::Optional<llvm::VersionTuple> compatibilityVersion;
@@ -1239,6 +1239,13 @@ void IRGenModule::emitGlobalLists() {
 // Eagerly emit functions that are externally visible. Functions that are
 // dynamic replacements must also be eagerly emitted.
 static bool isLazilyEmittedFunction(SILFunction &f, SILModule &m) {
+  // Embedded Swift only emits specialized function, so don't emit genreic
+  // functions, even if they're externally visible.
+  if (f.getASTContext().LangOpts.hasFeature(Feature::Embedded) &&
+      f.getLoweredFunctionType()->getSubstGenericSignature()) {
+    return true;
+  }
+  
   if (f.isPossiblyUsedExternally())
     return false;
 
@@ -1403,6 +1410,17 @@ deleteAndReenqueueForEmissionValuesDependentOnCanonicalPrespecializedMetadataRec
 /// Emit any lazy definitions (of globals or functions or whatever
 /// else) that we require.
 void IRGenerator::emitLazyDefinitions() {
+  if (SIL.getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
+    // In embedded Swift, the compiler cannot emit any metadata, etc.
+    LazyTypeMetadata.clear();
+    LazySpecializedTypeMetadataRecords.clear();
+    LazyTypeContextDescriptors.clear();
+    LazyOpaqueTypeDescriptors.clear();
+    LazyCanonicalSpecializedMetadataAccessors.clear();
+    LazyMetadataAccessors.clear();
+    LazyWitnessTables.clear();
+  }
+
   while (!LazyTypeMetadata.empty() ||
          !LazySpecializedTypeMetadataRecords.empty() ||
          !LazyTypeContextDescriptors.empty() ||

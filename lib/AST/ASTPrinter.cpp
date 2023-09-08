@@ -2954,9 +2954,9 @@ static bool usesFeatureRethrowsProtocol(
     return false;
 
   // Check an inheritance clause for a marker protocol.
-  auto checkInherited = [&](ArrayRef<InheritedEntry> inherited) -> bool {
-    for (const auto &inheritedEntry : inherited) {
-      if (auto inheritedType = inheritedEntry.getType()) {
+  auto checkInherited = [&](InheritedTypes inherited) -> bool {
+    for (unsigned i : inherited.getIndices()) {
+      if (auto inheritedType = inherited.getResolvedType(i)) {
         if (inheritedType->isExistentialType()) {
           auto layout = inheritedType->getExistentialLayout();
           for (ProtocolDecl *proto : layout.getProtocols()) {
@@ -3145,6 +3145,10 @@ static bool usesFeatureImplicitSelfCapture(Decl *decl) {
 }
 
 static bool usesFeatureBuiltinStackAlloc(Decl *decl) {
+  return false;
+}
+
+static bool usesFeatureEmbedded(Decl *decl) {
   return false;
 }
 
@@ -7681,16 +7685,11 @@ void
 swift::getInheritedForPrinting(
     const Decl *decl, const PrintOptions &options,
     llvm::SmallVectorImpl<InheritedEntry> &Results) {
-  ArrayRef<InheritedEntry> inherited;
-  if (auto td = dyn_cast<TypeDecl>(decl)) {
-    inherited = td->getInherited();
-  } else if (auto ed = dyn_cast<ExtensionDecl>(decl)) {
-    inherited = ed->getInherited();
-  }
+  InheritedTypes inherited = InheritedTypes(decl);
 
   // Collect explicit inherited types.
-  for (auto entry: inherited) {
-    if (auto ty = entry.getType()) {
+  for (auto i : inherited.getIndices()) {
+    if (auto ty = inherited.getResolvedType(i)) {
       bool foundUnprintable = ty.findIf([&](Type subTy) {
         if (auto aliasTy = dyn_cast<TypeAliasType>(subTy.getPointer()))
           return !options.shouldPrint(aliasTy->getDecl());
@@ -7704,7 +7703,7 @@ swift::getInheritedForPrinting(
         continue;
     }
 
-    Results.push_back(entry);
+    Results.push_back(inherited.getEntry(i));
   }
 
   // Collect synthesized conformances.
@@ -7831,7 +7830,7 @@ void GenericParamList::print(ASTPrinter &Printer,
         if (!P->getInherited().empty()) {
           Printer << " : ";
 
-          auto loc = P->getInherited()[0];
+          auto loc = P->getInherited().getEntry(0);
           if (willUseTypeReprPrinting(loc, nullptr, PO)) {
             loc.getTypeRepr()->print(Printer, PO);
           } else {
