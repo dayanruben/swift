@@ -505,6 +505,9 @@ def disable_sil_partial_apply : Flag<["-"], "disable-sil-partial-apply">,
 def enable_spec_devirt : Flag<["-"], "enable-spec-devirt">,
   HelpText<"Enable speculative devirtualization pass.">;
 
+def enable_async_demotion : Flag<["-"], "enable-experimental-async-demotion">,
+  HelpText<"Enables an optimization pass to demote async functions.">;
+
 def disable_access_control : Flag<["-"], "disable-access-control">,
   HelpText<"Don't respect access control restrictions">;
 def enable_access_control : Flag<["-"], "enable-access-control">,
@@ -801,6 +804,9 @@ def enable_source_import : Flag<["-"], "enable-source-import">,
 
 def enable_throw_without_try : Flag<["-"], "enable-throw-without-try">,
   HelpText<"Allow throwing function calls without 'try'">;
+
+def throws_as_traps : Flag<["-"], "throws-as-traps">,
+  HelpText<"Turn all throw sites into immediate traps">;
 
 def import_module : Separate<["-"], "import-module">,
   HelpText<"Implicitly import the specified module">;

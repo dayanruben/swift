@@ -522,6 +522,13 @@ public:
     return false;
   }
 
+  bool isAsyncFunction() const {
+    if (auto *fTy = getASTType()->getAs<SILFunctionType>()) {
+      return fTy->isAsync();
+    }
+    return false;
+  }
+
   /// True if the type involves any archetypes.
   bool hasArchetype() const { return getASTType()->hasArchetype(); }
 
@@ -747,10 +754,6 @@ public:
   /// Returns true if this type is a first class move only type or a move only
   /// wrapped type.
   bool isMoveOnly() const;
-
-  /// Is this a type that is a first class move only type. This returns false
-  /// for a move only wrapped type.
-  bool isPureMoveOnly() const;
 
   /// Return true if this is a value type (struct/enum) that requires
   /// deinitialization beyond destruction of its members.

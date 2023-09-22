@@ -723,6 +723,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.EnableThrowWithoutTry |= Args.hasArg(OPT_enable_throw_without_try);
 
+  Opts.ThrowsAsTraps |= Args.hasArg(OPT_throws_as_traps);
+
   if (auto A = Args.getLastArg(OPT_enable_objc_attr_requires_foundation_module,
                                OPT_disable_objc_attr_requires_foundation_module)) {
     Opts.EnableObjCAttrRequiresFoundation
@@ -1095,7 +1097,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.EnableObjCInterop =
       Args.hasFlag(OPT_enable_objc_interop, OPT_disable_objc_interop,
-                   Target.isOSDarwin());
+                   Target.isOSDarwin() && !Opts.hasFeature(Feature::Embedded));
 
   Opts.CForeignReferenceTypes =
       Args.hasArg(OPT_experimental_c_foreign_reference_types);
@@ -1323,7 +1325,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.UnavailableDeclOptimizationMode = UnavailableDeclOptimization::Complete;
     Opts.DisableImplicitStringProcessingModuleImport = true;
     Opts.DisableImplicitConcurrencyModuleImport = true;
-    Opts.EnableObjCInterop = false;
 
     if (FrontendOpts.EnableLibraryEvolution) {
       Diags.diagnose(SourceLoc(), diag::evolution_with_embedded);
@@ -1332,6 +1333,11 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
     if (FrontendOpts.InputsAndOutputs.hasPrimaryInputs()) {
       Diags.diagnose(SourceLoc(), diag::wmo_with_embedded);
+      HadError = true;
+    }
+
+    if (Opts.EnableObjCInterop) {
+      Diags.diagnose(SourceLoc(), diag::objc_with_embedded);
       HadError = true;
     }
   }
@@ -2212,6 +2218,7 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   Opts.EnableOSSAOptimizations &= !Args.hasArg(OPT_disable_ossa_opts);
   Opts.EnableSILOpaqueValues |= Args.hasArg(OPT_enable_sil_opaque_values);
   Opts.EnableSpeculativeDevirtualization |= Args.hasArg(OPT_enable_spec_devirt);
+  Opts.EnableAsyncDemotion |= Args.hasArg(OPT_enable_async_demotion);
   Opts.EnableActorDataRaceChecks |= Args.hasFlag(
       OPT_enable_actor_data_race_checks,
       OPT_disable_actor_data_race_checks, /*default=*/false);
