@@ -210,15 +210,22 @@ struct UnparsedSpecification {
   /// (@{instruction|block|function}) can be parsed in terms of this
   /// anchor.
   SILInstruction *context;
+  /// Map from names used in the specification to the corresponding SILValues.
+  llvm::StringMap<SILValue> values;
 };
 
-/// Finds and deletes each test_specification instruction in \p function and
+/// Populates the array \p components with the elements of \p
+/// specificationString.
+void getTestSpecificationComponents(StringRef specificationString,
+                                    SmallVectorImpl<StringRef> &components);
+
+/// Finds and deletes each specify_test instruction in \p function and
 /// appends its string payload to the provided vector.
 void getTestSpecifications(
     SILFunction *function,
     SmallVectorImpl<UnparsedSpecification> &specifications);
 
-/// Given the string \p specification operand of a test_specification
+/// Given the string \p specification operand of a specify_test
 /// instruction from \p function, parse the arguments which it refers to into
 /// \p arguments and the component strings into \p argumentStrings.
 void parseTestArgumentsFromSpecification(

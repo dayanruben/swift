@@ -770,37 +770,6 @@ static Type applyGenericArguments(Type type, TypeResolution resolution,
       return ErrorType::get(ctx);
     }
 
-    // Build ParameterizedProtocolType if the protocol has a primary associated
-    // type and we're in a supported context.
-    if (resolution.getOptions().isConstraintImplicitExistential() &&
-        !ctx.LangOpts.hasFeature(Feature::ImplicitSome)) {
-
-      if (!genericArgs.empty()) {
-
-        SmallVector<Type, 2> argTys;
-        for (auto *genericArg : genericArgs) {
-          Type argTy = resolution.resolveType(genericArg);
-          if (!argTy || argTy->hasError())
-            return ErrorType::get(ctx);
-
-          argTys.push_back(argTy);
-        }
-
-        auto parameterized =
-            ParameterizedProtocolType::get(ctx, protoType, argTys);
-        diags.diagnose(loc, diag::existential_requires_any, parameterized,
-                       ExistentialType::get(parameterized),
-                       /*isAlias=*/isa<TypeAliasType>(type.getPointer()));
-      } else {
-        diags.diagnose(loc, diag::existential_requires_any,
-                       protoDecl->getDeclaredInterfaceType(),
-                       protoDecl->getDeclaredExistentialType(),
-                       /*isAlias=*/isa<TypeAliasType>(type.getPointer()));
-      }
-
-      return ErrorType::get(ctx);
-    }
-
     // Disallow opaque types anywhere in the structure of the generic arguments
     // to a parameterized existential type.
     if (options.is(TypeResolverContext::ExistentialConstraint))
@@ -809,6 +778,7 @@ static Type applyGenericArguments(Type type, TypeResolution resolution,
         TypeResolverContext::ProtocolGenericArgument);
     auto genericResolution = resolution.withOptions(argOptions);
 
+    // Resolve the generic arguments.
     SmallVector<Type, 2> argTys;
     for (auto *genericArg : genericArgs) {
       Type argTy = genericResolution.resolveType(genericArg, silContext);
@@ -818,7 +788,20 @@ static Type applyGenericArguments(Type type, TypeResolution resolution,
       argTys.push_back(argTy);
     }
 
-    return ParameterizedProtocolType::get(ctx, protoType, argTys);
+    auto parameterized =
+        ParameterizedProtocolType::get(ctx, protoType, argTys);
+
+    // Build ParameterizedProtocolType if the protocol has primary associated
+    // types and we're in a supported context.
+    if (resolution.getOptions().isConstraintImplicitExistential() &&
+        !ctx.LangOpts.hasFeature(Feature::ImplicitSome)) {
+      diags.diagnose(loc, diag::existential_requires_any, parameterized,
+                     ExistentialType::get(parameterized),
+                     /*isAlias=*/isa<TypeAliasType>(type.getPointer()));
+      return ErrorType::get(ctx);
+    }
+
+    return parameterized;
   }
 
   // We must either have an unbound generic type, or a generic type alias.
@@ -4312,13 +4295,15 @@ TypeResolver::resolveOwnershipTypeRepr(OwnershipTypeRepr *repr,
       options.hasBase(TypeResolverContext::EnumElementDecl)) {
 
     decltype(diag::attr_only_on_parameters) diagID;
-    if (options.getBaseContext() == TypeResolverContext::SubscriptDecl) {
-      diagID = diag::attr_not_on_subscript_parameters;
+    if (options.hasBase(TypeResolverContext::SubscriptDecl) ||
+        options.hasBase(TypeResolverContext::EnumElementDecl)) {
+      diagID = diag::attr_only_valid_on_func_or_init_params;
     } else if (options.is(TypeResolverContext::VariadicFunctionInput)) {
       diagID = diag::attr_not_on_variadic_parameters;
     } else {
       diagID = diag::attr_only_on_parameters;
     }
+
     StringRef name;
     if (ownershipRepr) {
       name = ownershipRepr->getSpecifierSpelling();
@@ -5057,10 +5042,10 @@ NeverNullType TypeResolver::resolveInverseType(InverseTypeRepr *repr,
   if (auto protoTy = ty->getAs<ProtocolType>())
     if (auto protoDecl = protoTy->getDecl())
       if (auto kp = protoDecl->getKnownProtocolKind())
-        if (getInvertableProtocols().contains(*kp))
+        if (getInvertibleProtocols().contains(*kp))
           return ty;
 
-  diagnoseInvalid(repr, repr->getLoc(), diag::inverse_type_not_invertable, ty);
+  diagnoseInvalid(repr, repr->getLoc(), diag::inverse_type_not_invertible, ty);
   return ErrorType::get(getASTContext());
 }
 

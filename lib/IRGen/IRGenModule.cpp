@@ -1295,6 +1295,8 @@ bool IRGenerator::canEmitWitnessTableLazily(SILWitnessTable *wt) {
 }
 
 void IRGenerator::addLazyWitnessTable(const ProtocolConformance *Conf) {
+  assert(!SIL.getASTContext().LangOpts.hasFeature(Feature::Embedded));
+
   if (auto *wt = SIL.lookUpWitnessTable(Conf)) {
     // Add it to the queue if it hasn't already been put there.
     if (canEmitWitnessTableLazily(wt) &&
@@ -1458,6 +1460,9 @@ void IRGenModule::addLinkLibrary(const LinkLibrary &linkLib) {
   // the LinkLibraries of the module, so there's no reason to
   // emit it into the IR of debugger expressions.
   if (Context.LangOpts.DebuggerSupport)
+    return;
+
+  if (Context.LangOpts.hasFeature(Feature::Embedded))
     return;
   
   switch (linkLib.getKind()) {

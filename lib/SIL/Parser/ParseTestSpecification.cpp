@@ -179,13 +179,16 @@ class ParseArgumentSpecification {
   ParseTestSpecification &outer;
   StringRef specification;
   SILInstruction *context;
+  llvm::StringMap<SILValue> values;
 
   SILValue getTraceValue(unsigned index, SILFunction *function);
 
 public:
   ParseArgumentSpecification(ParseTestSpecification &outer,
-                             StringRef specification, SILInstruction *context)
-      : outer(outer), specification(specification), context(context) {}
+                             StringRef specification, SILInstruction *context,
+                             llvm::StringMap<SILValue> values)
+      : outer(outer), specification(specification), context(context),
+        values(values) {}
 
   Argument parse() {
     auto argument = parseArgument();
@@ -344,7 +347,7 @@ private:
     if (!consumePrefix("argument"))
       return nullptr;
     // If this is a bare @argument reference, it refers to the first argument
-    // of the block containing the test_specification.
+    // of the block containing the specify_test.
     if (!block) {
       block = context->getParent();
     }
@@ -382,7 +385,7 @@ private:
     if (empty() || peekPrefix(".")) {
       if (!within) {
         // If this is a bare @instruction reference, it refers to to the
-        // context of the test_specification.
+        // context of the specify_test.
         return context;
       }
       return getInstructionAtIndex(0, *within);
@@ -390,7 +393,7 @@ private:
     if (auto subscript = parseSubscript()) {
       // If this is a bare @instruction[...] reference, it can refer either to
       // an instruction counting from the beginning of the function or else to
-      // an instruction offset from the context of the test_specification.
+      // an instruction offset from the context of the specify_test.
       if (!within && subscript->isa<long long>()) {
         auto offset = subscript->get<long long>();
         return getInstructionOffsetFrom(context, offset);
@@ -419,7 +422,7 @@ private:
       return nullptr;
     if (empty() || peekPrefix(".")) {
       // If this is a bare @block reference, it refers to the block containing
-      // the test_specification instruction.
+      // the specify_test instruction.
       if (!within) {
         return context->getParent();
       }
@@ -429,7 +432,7 @@ private:
     if (auto subscript = parseSubscript()) {
       // If this is a bare @block[...] reference, it can refer either to a block
       // counting from the beginning of the function or else to a block offset
-      // from the block containing the context of the test_specification.
+      // from the block containing the context of the specify_test.
       if (!within && subscript->isa<long long>()) {
         return getBlockOffsetFrom(context->getParent(),
                                   subscript->get<long long>());
@@ -459,7 +462,7 @@ private:
       return nullptr;
     if (empty() || peekPrefix(".")) {
       // If this is a bare @function reference, it refers to the function
-      // containing the test_specification instruction.
+      // containing the specify_test instruction.
       if (!within) {
         return context->getFunction();
       }
@@ -501,6 +504,38 @@ private:
     llvm_unreachable("unhandled suffix after 'function'!?");
   }
 
+  SILValue parseValueComponent() {
+    if (!peekPrefix("%"))
+      return SILValue();
+    auto nameEnd = specification.find_if_not(
+        [](char c) { return clang::isAsciiIdentifierContinue(c); }, 1);
+    if (nameEnd == StringRef::npos)
+      nameEnd = specification.size();
+    auto name = specification.take_front(nameEnd);
+    specification = specification.drop_front(nameEnd);
+    if (!empty() && !peekPrefix(".")) {
+      llvm::errs() << specification << "\n";
+      llvm::report_fatal_error("bad suffix on value!?");
+    }
+    auto value = values[name];
+    if (!value) {
+      llvm::errs() << "unknown value '" << name << "'\n"
+                   << "have the following name->value pairs:\n";
+      for (auto &pair : values) {
+        llvm::errs() << pair.getKey() << "->" << pair.getValue() << "\n";
+      }
+      llvm::report_fatal_error("unknown value!?");
+    }
+    return value;
+  }
+
+  llvm::Optional<Argument> parseValueReference() {
+    auto value = parseValueComponent();
+    if (!value)
+      return llvm::None;
+    return ValueArgument{value};
+  }
+
   llvm::Optional<Argument> parseReference() {
     if (!consumePrefix("@"))
       return llvm::None;
@@ -524,6 +559,8 @@ private:
     if (auto arg = parseBool())
       return *arg;
     if (auto arg = parseUInt())
+      return *arg;
+    if (auto arg = parseValueReference())
       return *arg;
     if (auto arg = parseReference())
       return *arg;
@@ -563,15 +600,10 @@ public:
 
   void parse(UnparsedSpecification const &specification, Arguments &arguments) {
     StringRef specificationString = specification.string;
-    specificationString.split(components, " ");
-    for (unsigned long index = 0, size = components.size(); index < size;
-         ++index) {
-      auto componentString = components[index].trim();
-      if (componentString.empty())
-        continue;
-
-      ParseArgumentSpecification parser(*this, componentString,
-                                        specification.context);
+    getTestSpecificationComponents(specificationString, components);
+    for (auto componentString : components) {
+      ParseArgumentSpecification parser(
+          *this, componentString, specification.context, specification.values);
       auto argument = parser.parse();
       arguments.storage.push_back(argument);
     }
@@ -627,6 +659,19 @@ void Argument::print(llvm::raw_ostream &os) {
 
 // API
 
+void swift::test::getTestSpecificationComponents(
+    StringRef specificationString, SmallVectorImpl<StringRef> &components) {
+  SmallVector<StringRef, 16> rawComponents;
+  specificationString.split(rawComponents, " ");
+  for (unsigned long index = 0, size = rawComponents.size(); index < size;
+       ++index) {
+    auto componentString = rawComponents[index].trim();
+    if (componentString.empty())
+      continue;
+    components.push_back(componentString);
+  }
+}
+
 void swift::test::getTestSpecifications(
     SILFunction *function,
     SmallVectorImpl<UnparsedSpecification> &specifications) {
@@ -635,7 +680,8 @@ void swift::test::getTestSpecifications(
       if (auto *tsi = dyn_cast<TestSpecificationInst>(&inst)) {
         auto ref = tsi->getArgumentsSpecification();
         auto *anchor = findAnchorInstructionAfter(tsi);
-        specifications.push_back({std::string(ref.begin(), ref.end()), anchor});
+        specifications.push_back(
+            {std::string(ref.begin(), ref.end()), anchor, tsi->getValues()});
         tsi->eraseFromParent();
       }
     }

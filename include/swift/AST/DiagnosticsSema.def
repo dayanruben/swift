@@ -2347,8 +2347,8 @@ ERROR(inferred_opaque_type,none,
       "return type of another declaration", (Type))
 
 // Inverse Constraints
-ERROR(inverse_type_not_invertable,none,
-      "type %0 is not invertable", (Type))
+ERROR(inverse_type_not_invertible,none,
+      "type %0 is not invertible", (Type))
 
 // Extensions
 ERROR(non_nominal_extension,none,
@@ -3681,10 +3681,10 @@ ERROR(dynamic_self_default_arg,none,
 
 ERROR(attr_only_one_decl_kind,none,
       "%0 may only be used on '%1' declarations", (DeclAttribute,StringRef))
+ERROR(attr_only_valid_on_func_or_init_params,none,
+      "'%0' may only be used on function or initializer parameters", (StringRef))
 ERROR(attr_not_on_variadic_parameters,none,
       "'%0' must not be used on variadic parameters", (StringRef))
-ERROR(attr_not_on_subscript_parameters,none,
-      "'%0' must not be used on subscript parameters", (StringRef))
 ERROR(attr_not_on_stored_properties,none,
       "'%0' must not be used on stored properties", (DeclAttribute))
 
@@ -5237,8 +5237,9 @@ ERROR(concurrent_access_of_inout_param,none,
       "concurrently-executing code",
       (DeclName))
 ERROR(non_sendable_capture,none,
-      "capture of %1 with non-sendable type %0 in a `@Sendable` closure",
-      (Type, DeclName))
+      "capture of %1 with non-sendable type %0 in a `@Sendable` "
+      "%select{local function|closure}2",
+      (Type, DeclName, bool))
 ERROR(implicit_async_let_non_sendable_capture,none,
       "capture of %1 with non-sendable type %0 in 'async let' binding",
       (Type, DeclName))

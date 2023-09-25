@@ -812,9 +812,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     if (auto feature = getExperimentalFeature(value)) {
 #ifdef NDEBUG
       if (!isFeatureAvailableInProduction(*feature)) {
-        Diags.diagnose(SourceLoc(),
-                       diag::error_experimental_feature_not_available,
-                       A->getValue());
+        llvm::errs() << "error: experimental feature '" << A->getValue() 
+                     << "' cannot be enabled in a production compiler\n";
+        exit(1);
       }
 #endif
 
@@ -3117,6 +3117,7 @@ bool CompilerInvocation::parseArgs(
   if (LangOpts.hasFeature(Feature::Embedded)) {
     IRGenOpts.InternalizeAtLink = true;
     IRGenOpts.DisableLegacyTypeInfo = true;
+    SILOpts.CMOMode = CrossModuleOptimizationMode::Everything;
   }
 
   return false;
