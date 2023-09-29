@@ -1294,6 +1294,18 @@ void IRGenerator::emitGlobalTopLevel(
   // Emit SIL functions.
   auto &m = PrimaryIGM->getSILModule();
   for (SILFunction &f : m) {
+    // Generic functions should not be present in embedded Swift.
+    //
+    // TODO: Cannot enable this check yet because we first need removal of
+    // unspecialized classes and class vtables in SIL.
+    //
+    // if (SIL.getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
+    //   if (f.isGeneric()) {
+    //     llvm::errs() << "Unspecialized function: \n" << f << "\n";
+    //     llvm_unreachable("unspecialized function present in embedded Swift");
+    //   }
+    // }
+
     if (isLazilyEmittedFunction(f, m))
       continue;
 
@@ -1407,11 +1419,6 @@ deleteAndReenqueueForEmissionValuesDependentOnCanonicalPrespecializedMetadataRec
   emitLazyTypeContextDescriptor(IGM, &decl, RequireMetadata);
 }
 
-static bool loweredFunctionHasGenericArguments(SILFunction *f) {
-  auto s = f->getLoweredFunctionType()->getInvocationGenericSignature();
-  return s && !s->areAllParamsConcrete();
-}
-
 /// Emit any lazy definitions (of globals or functions or whatever
 /// else) that we require.
 void IRGenerator::emitLazyDefinitions() {
@@ -1424,7 +1431,7 @@ void IRGenerator::emitLazyDefinitions() {
     assert(LazyFieldDescriptors.empty());
     // LazyFunctionDefinitions are allowed, but they must not be generic
     for (SILFunction *f : LazyFunctionDefinitions) {
-      assert(!loweredFunctionHasGenericArguments(f));
+      assert(!f->isGeneric());
     }
     assert(LazyWitnessTables.empty());
     assert(LazyCanonicalSpecializedMetadataAccessors.empty());
@@ -1554,7 +1561,7 @@ void IRGenerator::addLazyFunction(SILFunction *f) {
 
   // Embedded Swift doesn't expect any generic functions to be referenced.
   if (SIL.getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
-    assert(!loweredFunctionHasGenericArguments(f));
+    assert(!f->isGeneric());
   }
 
   assert(!FinishedEmittingLazyDefinitions);
@@ -3554,6 +3561,11 @@ llvm::Function *IRGenModule::getAddrOfSILFunction(
     addUsedGlobal(fn);
   if (!f->section().empty())
     fn->setSection(f->section());
+  if (!f->wasmExportName().empty()) {
+    llvm::AttrBuilder attrBuilder(getLLVMContext());
+    attrBuilder.addAttribute("wasm-export-name", f->wasmExportName());
+    fn->addFnAttrs(attrBuilder);
+  }
 
   // If `hasCReferences` is true, then the function is either marked with
   // @_silgen_name OR @_cdecl.  If it is the latter, it must have a definition

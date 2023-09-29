@@ -299,6 +299,10 @@ private:
   /// Name of a section if @_section attribute was used, otherwise empty.
   StringRef Section;
 
+  /// Name of a Wasm export if @_expose(wasm) attribute was used, otherwise
+  /// empty.
+  StringRef WasmExportName;
+
   /// Has value if there's a profile for this function
   /// Contains Function Entry Count
   ProfileCounter EntryCount;
@@ -779,6 +783,12 @@ public:
   // Returns true if the function has indirect out parameters.
   bool hasIndirectFormalResults() const {
     return getLoweredFunctionType()->hasIndirectFormalResults();
+  }
+
+  // Returns true if the function has any generic arguments.
+  bool isGeneric() const {
+    auto s = getLoweredFunctionType()->getInvocationGenericSignature();
+    return s && !s->areAllParamsConcrete();
   }
 
   /// Returns true if this function ie either a class method, or a
@@ -1263,6 +1273,10 @@ public:
   /// Return custom section name if @_section was used, otherwise empty
   StringRef section() const { return Section; }
   void setSection(StringRef value) { Section = value; }
+
+  /// Return Wasm export name if @_expose(wasm) was used, otherwise empty
+  StringRef wasmExportName() const { return WasmExportName; }
+  void setWasmExportName(StringRef value) { WasmExportName = value; }
 
   /// Returns true if this function belongs to a declaration that returns
   /// an opaque result type with one or more availability conditions that are
