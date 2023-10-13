@@ -1057,6 +1057,8 @@ NOTE(single_confusable_character,none,
       (bool, StringRef, StringRef, StringRef, StringRef))
 ERROR(cannot_find_type_in_scope,none,
       "cannot find type %0 in scope", (DeclNameRef))
+ERROR(cannot_find_type_in_cast_expression,none,
+      "type-casting operator expects a type on its right-hand side (got: %kind0)", (const ValueDecl *))
 ERROR(cannot_find_type_in_scope_did_you_mean,none,
       "cannot find type %0 in scope; did you mean to use '%1'?", (DeclNameRef, StringRef))
 NOTE(note_typo_candidate_implicit_member,none,
@@ -1869,6 +1871,10 @@ ERROR(section_not_at_top_level,none,
 ERROR(section_empty_name,none,
       "@_section section name cannot be empty", ())
 
+// @_extern
+ERROR(extern_not_at_top_level_func,none,
+      "@_extern attribute can only be applied to global functions", ())
+
 ERROR(expose_wasm_not_at_top_level_func,none,
       "@_expose attribute with 'wasm' can only be applied to global functions", ())
 
@@ -2356,9 +2362,6 @@ ERROR(spi_only_imports_not_enabled, none,
       ())
 
 // Access level on imports
-ERROR(access_level_on_import_not_enabled, none,
-      "Access level on imports require '-enable-experimental-feature AccessLevelOnImport'",
-      ())
 ERROR(access_level_on_import_unsupported, none,
       "The access level %0 is unsupported on imports: "
       "only 'public', 'package', 'internal', 'fileprivate' and 'private' "

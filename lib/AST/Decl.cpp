@@ -23,6 +23,7 @@
 #include "swift/AST/AccessScope.h"
 #include "swift/AST/Attr.h"
 #include "swift/AST/CaptureInfo.h"
+#include "swift/AST/DeclExportabilityVisitor.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/ExistentialLayout.h"
@@ -490,6 +491,10 @@ unsigned Decl::getAttachedMacroDiscriminator(DeclBaseName macroName,
   return ctx.getNextMacroDiscriminator(
       MacroDiscriminatorContext::getParentOf(getLoc(), getDeclContext()),
       macroName);
+}
+
+bool Decl::isExposedToClients() const {
+  return DeclExportabilityVisitor().visit(this);
 }
 
 const Decl *Decl::getInnermostDeclWithAvailability() const {
@@ -1506,9 +1511,8 @@ AccessLevel ImportDecl::getAccessLevel() const {
   }
 
   auto &LangOpts = getASTContext().LangOpts;
-  if (LangOpts.isSwiftVersionAtLeast(6) &&
-      LangOpts.hasFeature(Feature::AccessLevelOnImport)) {
-    // Tentative Swift 6 mode where the default import is internal.
+  if (LangOpts.hasFeature(Feature::InternalImportsByDefault)) {
+    // Swift 6 mode where the default import is internal.
     return AccessLevel::Internal;
   } else {
     return AccessLevel::Public;

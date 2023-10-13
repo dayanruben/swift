@@ -253,6 +253,7 @@ public:
 
   void visitCDeclAttr(CDeclAttr *attr);
   void visitExposeAttr(ExposeAttr *attr);
+  void visitExternAttr(ExternAttr *attr);
   void visitUsedAttr(UsedAttr *attr);
   void visitSectionAttr(SectionAttr *attr);
 
@@ -998,12 +999,6 @@ bool AttributeChecker::visitAbstractAccessControlAttr(
 
   SourceFile *File = D->getDeclContext()->getParentSourceFile();
   if (auto importDecl = dyn_cast<ImportDecl>(D)) {
-    if (!D->getASTContext().LangOpts.hasFeature(Feature::AccessLevelOnImport) &&
-        File && File->Kind != SourceFileKind::Interface) {
-      diagnoseAndRemoveAttr(attr, diag::access_level_on_import_not_enabled);
-      return true;
-    }
-
     if (attr->getAccess() == AccessLevel::Open) {
       diagnoseAndRemoveAttr(attr, diag::access_level_on_import_unsupported,
                             attr);
@@ -2067,6 +2062,13 @@ void AttributeChecker::visitExposeAttr(ExposeAttr *attr) {
     }
     break;
   }
+  }
+}
+
+void AttributeChecker::visitExternAttr(ExternAttr *attr) {
+  // Only top-level func decls are currently supported.
+  if (!isa<FuncDecl>(D) || D->getDeclContext()->isTypeContext()) {
+    diagnose(attr->getLocation(), diag::extern_not_at_top_level_func);
   }
 }
 

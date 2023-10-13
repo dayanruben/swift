@@ -11,12 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "Serialization.h"
+#include "ModuleFormat.h"
 #include "SILFormat.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTMangler.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/AutoDiff.h"
-#include "swift/AST/DeclExportabilityVisitor.h"
 #include "swift/AST/DiagnosticsCommon.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/FileSystem.h"
@@ -3115,6 +3115,18 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
       return;
     }
 
+    case DAK_Extern: {
+      auto *theAttr = cast<ExternAttr>(DA);
+      auto abbrCode = S.DeclTypeAbbrCodes[ExternDeclAttrLayout::Code];
+      llvm::SmallString<32> blob;
+      blob.append(theAttr->ModuleName);
+      blob.append(theAttr->Name);
+      ExternDeclAttrLayout::emitRecord(
+          S.Out, S.ScratchRecord, abbrCode, theAttr->isImplicit(),
+          theAttr->ModuleName.size(), theAttr->Name.size(), blob);
+      return;
+    }
+
     case DAK_Section: {
       auto *theAttr = cast<SectionAttr>(DA);
       auto abbrCode = S.DeclTypeAbbrCodes[SectionDeclAttrLayout::Code];
@@ -3306,7 +3318,7 @@ public:
   /// it, but at the same time keep the safety checks precise to avoid
   /// XRef errors and such.
   static bool isDeserializationSafe(const Decl *decl) {
-    return DeclExportabilityVisitor().visit(decl);
+    return decl->isExposedToClients();
   }
 
 private:

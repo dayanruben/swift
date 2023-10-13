@@ -242,6 +242,12 @@ void swift::bindExtensions(ModuleDecl &mod) {
 }
 
 void swift::performTypeChecking(SourceFile &SF) {
+  if (SF.getASTContext().TypeCheckerOpts.EnableLazyTypecheck) {
+    // Skip eager type checking. Instead, let later stages of compilation drive
+    // type checking as needed through request evaluation.
+    return;
+  }
+
   return (void)evaluateOrDefault(SF.getASTContext().evaluator,
                                  TypeCheckSourceFileRequest{&SF}, {});
 }
@@ -310,7 +316,7 @@ TypeCheckSourceFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
       CheckInconsistentSPIOnlyImportsRequest{SF},
       {});
 
-  if (!Ctx.LangOpts.isSwiftVersionAtLeast(6)) {
+  if (!Ctx.LangOpts.hasFeature(Feature::InternalImportsByDefault)) {
     evaluateOrDefault(
       Ctx.evaluator,
       CheckInconsistentAccessLevelOnImport{SF},
