@@ -179,6 +179,8 @@ set(SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY TRUE)
 is_build_type_optimized("${SWIFT_STDLIB_BUILD_TYPE}" swift_optimized)
 if(NOT swift_optimized)
   set(SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY FALSE)
+elseif(BOOTSTRAPPING_MODE STREQUAL "OFF")
+  set(SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY FALSE)
 endif()
 if(SWIFT_SHOULD_BUILD_EMBEDDED_STDLIB AND SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY)
   add_custom_target(embedded-concurrency ALL)
@@ -207,7 +209,7 @@ if(SWIFT_SHOULD_BUILD_EMBEDDED_STDLIB AND SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENC
       embedded-concurrency-${mod}
       swift_Concurrency
       STATIC
-      IS_STDLIB
+      IS_STDLIB IS_FRAGILE
 
       ${SWIFT_RUNTIME_CONCURRENCY_C_SOURCES}
       # TODO: Only a handful of Swift Concurrency .swift sources, for now.
