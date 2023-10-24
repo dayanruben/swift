@@ -2888,7 +2888,7 @@ class ObjCImplementationChecker {
     return diag;
   }
 
-  SmallSetVector<ValueDecl *, 16> unmatchedRequirements;
+  llvm::SmallSetVector<ValueDecl *, 16> unmatchedRequirements;
 
   /// Candidates with their explicit ObjC names, if any.
   llvm::SmallDenseMap<ValueDecl *, ObjCSelector, 16> unmatchedCandidates;
@@ -2955,14 +2955,21 @@ private:
   void addRequirements(IterableDeclContext *idc) {
     assert(idc->getDecl()->hasClangNode());
     for (Decl *_member : idc->getMembers()) {
-      // Skip accessors; we'll match their storage instead. Also skip overrides;
-      // the override checker handles those.
+      // Skip accessors; we'll match their storage instead.
       auto member = dyn_cast<ValueDecl>(_member);
-      if (!member || isa<AccessorDecl>(member) || member->getOverriddenDecl())
+      if (!member || isa<AccessorDecl>(member))
+        continue;
+
+      ASTContext &ctx = member->getASTContext();
+
+      // Also skip overrides, unless they override an unavailable decl, which
+      // makes them not formally overrides anymore.
+      if (member->getOverriddenDecl() &&
+          !member->getOverriddenDecl()->getAttrs().isUnavailable(ctx))
         continue;
 
       // Skip alternate Swift names for other language modes.
-      if (member->getAttrs().isUnavailable(member->getASTContext()))
+      if (member->getAttrs().isUnavailable(ctx))
         continue;
 
       // Skip async versions of members. We'll match against the completion
@@ -3103,8 +3110,8 @@ private:
 
     // Requirements and candidates that have been matched (even ambiguously) and
     // should be removed from our unmatched lists.
-    SmallSetVector<ValueDecl *, 16> requirementsToRemove;
-    SmallSetVector<ValueDecl *, 16> candidatesToRemove;
+    llvm::SmallSetVector<ValueDecl *, 16> requirementsToRemove;
+    llvm::SmallSetVector<ValueDecl *, 16> candidatesToRemove;
 
     // First, loop through unsatisfied candidates and try the requirements.
     for (const auto &pair : unmatchedCandidates) {
