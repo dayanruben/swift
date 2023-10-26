@@ -1,5 +1,17 @@
-#ifndef SWIFT_PARTITIONUTILS_H
-#define SWIFT_PARTITIONUTILS_H
+//===--- PartitionUtils.h -------------------------------------------------===//
+//
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2014 - 2023 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef SWIFT_SILOPTIMIZER_UTILS_PARTITIONUTILS_H
+#define SWIFT_SILOPTIMIZER_UTILS_PARTITIONUTILS_H
 
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/LLVM.h"
@@ -171,21 +183,22 @@ public:
   void print(llvm::raw_ostream &os) const {
     switch (OpKind) {
     case PartitionOpKind::Assign:
-      os << "assign %%" << OpArgs[0] << " = %%" << OpArgs[1] << "\n";
+      os << "assign %%" << OpArgs[0] << " = %%" << OpArgs[1];
       break;
     case PartitionOpKind::AssignFresh:
-      os << "assign_fresh %%" << OpArgs[0] << "\n";
+      os << "assign_fresh %%" << OpArgs[0];
       break;
     case PartitionOpKind::Transfer:
-      os << "transfer %%" << OpArgs[0] << "\n";
+      os << "transfer %%" << OpArgs[0];
       break;
     case PartitionOpKind::Merge:
-      os << "merge %%" << OpArgs[0] << " with %%" << OpArgs[1] << "\n";
+      os << "merge %%" << OpArgs[0] << " with %%" << OpArgs[1];
       break;
     case PartitionOpKind::Require:
-      os << "require %%" << OpArgs[0] << "\n";
+      os << "require %%" << OpArgs[0];
       break;
     }
+    os << ": " << *getSourceInst(true);
   }
 };
 
@@ -408,7 +421,9 @@ public:
           [](const PartitionOp &, Element) {},
       ArrayRef<Element> nonconsumables = {},
       llvm::function_ref<void(const PartitionOp &, Element)>
-          handleConsumeNonConsumable = [](const PartitionOp &, Element) {}) {
+          handleConsumeNonConsumable = [](const PartitionOp &, Element) {},
+      llvm::function_ref<bool(Element)> isActorDerived = nullptr) {
+
     REGIONBASEDISOLATION_VERBOSE_LOG(llvm::dbgs() << "Applying: ";
                                      op.print(llvm::dbgs()));
     REGIONBASEDISOLATION_VERBOSE_LOG(llvm::dbgs() << "    Before: ";
@@ -444,7 +459,7 @@ public:
       fresh_label = Region(fresh_label + 1);
       canonical = false;
       break;
-    case PartitionOpKind::Transfer:
+    case PartitionOpKind::Transfer: {
       assert(op.OpArgs.size() == 1 &&
              "Consume PartitionOp should be passed 1 argument");
       assert(labels.count(op.OpArgs[0]) &&
@@ -464,12 +479,26 @@ public:
         }
       }
 
-      // ensure region is transferred
-      if (!isTransferred(op.OpArgs[0]))
-        // mark region as transferred
-        horizontalUpdate(labels, op.OpArgs[0], Region::transferred());
+      // If this value is actor derived or if any elements in its region are
+      // actor derived, we need to treat as non-consumable.
+      if (isActorDerived && isActorDerived(op.OpArgs[0]))
+        return handleConsumeNonConsumable(op, op.OpArgs[0]);
+      Region elementRegion = labels.at(op.OpArgs[0]);
+      if (llvm::any_of(labels,
+                       [&](const std::pair<Element, Region> &pair) -> bool {
+                         if (pair.second != elementRegion)
+                           return false;
+                         return isActorDerived && isActorDerived(pair.first);
+                       }))
+        return handleConsumeNonConsumable(op, op.OpArgs[0]);
 
+      // Ensure if the region is transferred...
+      if (!isTransferred(op.OpArgs[0]))
+        // that all elements associated with the region are marked as
+        // transferred.
+        horizontalUpdate(labels, op.OpArgs[0], Region::transferred());
       break;
+    }
     case PartitionOpKind::Merge:
       assert(op.OpArgs.size() == 2 &&
              "Merge PartitionOp should be passed 2 arguments");
