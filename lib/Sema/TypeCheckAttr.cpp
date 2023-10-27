@@ -1503,6 +1503,19 @@ visitObjCImplementationAttr(ObjCImplementationAttr *attr) {
     return;
   }
 
+  if (!CD->hasSuperclass()) {
+    diagnoseAndRemoveAttr(attr, diag::attr_objc_implementation_must_have_super,
+                          CD);
+    CD->diagnose(diag::decl_declared_here, CD);
+    return;
+  }
+
+  if (CD->isTypeErasedGenericClass()) {
+    diagnoseAndRemoveAttr(attr, diag::objc_implementation_cannot_have_generics,
+                          CD);
+    CD->diagnose(diag::decl_declared_here, CD);
+  }
+
   if (!attr->isCategoryNameInvalid() && !ED->getImplementedObjCDecl()) {
     diagnose(attr->getLocation(),
              diag::attr_objc_implementation_category_not_found,
@@ -6764,9 +6777,10 @@ void AttributeChecker::visitNonisolatedAttr(NonisolatedAttr *attr) {
   if (auto var = dyn_cast<VarDecl>(D)) {
     // stored properties have limitations as to when they can be nonisolated.
     if (var->hasStorage()) {
+      const bool isUnsafeGlobal = attr->isUnsafe() && var->isGlobalStorage();
 
       // 'nonisolated' can not be applied to mutable stored properties.
-      if (var->supportsMutation()) {
+      if (var->supportsMutation() && !isUnsafeGlobal) {
         diagnoseAndRemoveAttr(attr, diag::nonisolated_mutable_storage);
         return;
       }
@@ -6820,8 +6834,8 @@ void AttributeChecker::visitNonisolatedAttr(NonisolatedAttr *attr) {
       return;
     }
   }
-  
-  // `nonisolated` on non-async actor initializers is invalid
+
+  // `nonisolated` on non-async actor initializers is invalid.
   // the reasoning is that there is a "little bit" of isolation,
   // as afforded by flow-isolation.
   if (auto ctor = dyn_cast<ConstructorDecl>(D)) {

@@ -1825,7 +1825,8 @@ llvm::Optional<Identifier>
 ExtensionDecl::getCategoryNameForObjCImplementation() const {
   assert(isObjCImplementation());
 
-  auto attr = getAttrs().getAttribute<ObjCImplementationAttr>();
+  auto attr = getAttrs()
+                  .getAttribute<ObjCImplementationAttr>(/*AllowInvalid=*/true);
   if (attr->isCategoryNameInvalid())
     return llvm::None;
 
@@ -2459,6 +2460,7 @@ static bool deferMatchesEnclosingAccess(const FuncDecl *defer) {
 
         switch (getActorIsolation(type)) {
           case ActorIsolation::Unspecified:
+          case ActorIsolation::NonisolatedUnsafe:
           case ActorIsolation::GlobalActorUnsafe:
             break;
 
@@ -4904,7 +4906,7 @@ int TypeDecl::compare(const TypeDecl *type1, const TypeDecl *type2) {
 }
 
 bool NominalTypeDecl::isFormallyResilient() const {
-  // Private and (unversioned) internal types always have a
+  // Private, (unversioned) internal, and package types always have a
   // fixed layout.
   if (!getFormalAccessScope(/*useDC=*/nullptr,
                             /*treatUsableFromInlineAsPublic=*/true).isPublic())
@@ -7892,6 +7894,15 @@ VarDecl *VarDecl::getLazyStorageProperty() const {
       {});
 }
 
+bool VarDecl::isGlobalStorage() const {
+  if (!hasStorage()) {
+    return false;
+  }
+  const auto *dc = getDeclContext();
+  return isStatic() || dc->isModuleScopeContext() ||
+         (dc->isTypeContext() && !isInstanceMember());
+}
+
 bool VarDecl::isPropertyMemberwiseInitializedWithWrappedType() const {
   auto customAttrs = getAttachedPropertyWrappers();
   if (customAttrs.empty())
@@ -10499,6 +10510,7 @@ bool VarDecl::isSelfParamCaptureIsolated() const {
       switch (auto isolation = closure->getActorIsolation()) {
       case ActorIsolation::Unspecified:
       case ActorIsolation::Nonisolated:
+      case ActorIsolation::NonisolatedUnsafe:
       case ActorIsolation::GlobalActor:
       case ActorIsolation::GlobalActorUnsafe:
         return false;
@@ -10539,22 +10551,15 @@ ActorIsolation swift::getActorIsolationOfContext(
     return getActorIsolation(vd);
 
   // In the context of the initializing or default-value expression of a
-  // stored property, the isolation varies between instance and type members:
+  // stored property:
   //   - For a static stored property, the isolation matches the VarDecl.
   //     Static properties are initialized upon first use, so the isolation
   //     of the initializer must match the isolation required to access the
   //     property.
-  //   - For a field of a nominal type, the expression can require a specific
-  //     actor isolation. That default expression may only be used from inits
-  //     that meet the required isolation.
+  //   - For a field of a nominal type, the expression can require the same
+  //     actor isolation as the field itself. That default expression may only
+  //     be used from inits that meet the required isolation.
   if (auto *var = dcToUse->getNonLocalVarDecl()) {
-    auto &ctx = dc->getASTContext();
-    if (ctx.LangOpts.hasFeature(Feature::IsolatedDefaultValues) &&
-        var->isInstanceMember() &&
-        !var->getAttrs().hasAttribute<LazyAttr>()) {
-      return ActorIsolation::forNonisolated();
-    }
-
     return getActorIsolation(var);
   }
 
