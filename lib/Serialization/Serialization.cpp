@@ -40,7 +40,6 @@
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/Basic/Defer.h"
-#include "swift/Basic/Dwarf.h"
 #include "swift/Basic/FileSystem.h"
 #include "swift/Basic/LLVMExtras.h"
 #include "swift/Basic/PathRemapper.h"
@@ -3024,7 +3023,8 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
       if (D->getResolvedMacro(const_cast<CustomAttr *>(theAttr)))
         return;
 
-      auto typeID = S.addTypeRef(theAttr->getType());
+      auto typeID = S.addTypeRef(
+          D->getResolvedCustomAttrType(const_cast<CustomAttr *>(theAttr)));
       if (!typeID && !S.allowCompilerErrors()) {
         llvm::PrettyStackTraceString message("CustomAttr has no type");
         abort();

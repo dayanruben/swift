@@ -659,6 +659,13 @@ bool swift::isSendableType(ModuleDecl *module, Type type) {
   if (!proto)
     return true;
 
+  // First check if we have a function type. If we do, check if it is
+  // Sendable. We do this since functions cannot conform to protocols.
+  if (auto *fas = type->getCanonicalType()->getAs<SILFunctionType>())
+    return fas->isSendable();
+  if (auto *fas = type->getCanonicalType()->getAs<AnyFunctionType>())
+    return fas->isSendable();
+
   auto conformance = TypeChecker::conformsToProtocol(type, proto, module);
   if (conformance.isInvalid())
     return false;
@@ -2229,7 +2236,7 @@ namespace {
       // in the current context stack must require the same isolation. If
       // along the way to the innermost context, we find a DeclContext that
       // has a different isolation (e.g. it's a local function that does not
-      // recieve isolation from its decl context), then the expression cannot
+      // receive isolation from its decl context), then the expression cannot
       // require a different isolation.
       for (auto *dc : contextStack) {
         if (!infersIsolationFromContext(dc)) {
