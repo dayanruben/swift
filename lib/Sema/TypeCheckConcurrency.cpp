@@ -515,6 +515,11 @@ static bool varIsSafeAcrossActors(const ModuleDecl *fromModule,
     if (var->getAttrs().hasAttribute<NonisolatedAttr>())
       return true;
 
+    // Static 'let's are initialized upon first access, so they cannot be
+    // synchronously accessed across actors.
+    if (var->isGlobalStorage() && var->isLazilyInitializedGlobal())
+      return false;
+
     // If it's distributed, generally variable access is not okay...
     if (auto nominalParent = var->getDeclContext()->getSelfNominalTypeDecl()) {
       if (nominalParent->isDistributedActor())
@@ -1338,7 +1343,8 @@ void swift::tryDiagnoseExecutorConformance(ASTContext &C,
                                            const NominalTypeDecl *nominal,
                                            ProtocolDecl *proto) {
   assert(proto->isSpecificProtocol(KnownProtocolKind::Executor) ||
-         proto->isSpecificProtocol(KnownProtocolKind::SerialExecutor));
+         proto->isSpecificProtocol(KnownProtocolKind::SerialExecutor) ||
+         proto->isSpecificProtocol(KnownProtocolKind::TaskExecutor));
 
   auto &diags = C.Diags;
   auto module = nominal->getParentModule();
