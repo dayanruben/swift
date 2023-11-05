@@ -2075,6 +2075,10 @@ DeclAttributes SemanticDeclAttrsRequest::evaluate(Evaluator &evaluator,
                           {});
 
   // Trigger requests that cause additional semantic attributes to be added.
+  if (auto vd = dyn_cast<ValueDecl>(decl)) {
+    (void)vd->isDynamic();
+    (void)vd->isFinal();
+  }
   if (auto afd = dyn_cast<AbstractFunctionDecl>(decl)) {
     (void)afd->isTransparent();
   } else if (auto asd = dyn_cast<AbstractStorageDecl>(decl)) {
