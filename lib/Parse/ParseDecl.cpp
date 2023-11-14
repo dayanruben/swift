@@ -30,6 +30,7 @@
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/Basic/StringExtras.h"
+#include "swift/Bridging/ASTGen.h"
 #include "swift/Parse/IDEInspectionCallbacks.h"
 #include "swift/Parse/ParseSILSupport.h"
 #include "swift/Parse/Parser.h"
@@ -43,6 +44,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include <algorithm>
+#include <initializer_list>
 
 using namespace swift;
 
@@ -171,32 +173,6 @@ static void appendToVector(void *declPtr, void *vecPtr) {
   vec->push_back(decl);
 }
 #endif
-
-/// Parse a source file.
-extern "C" void *swift_ASTGen_parseSourceFile(const char *buffer,
-                                              size_t bufferLength,
-                                              const char *moduleName,
-                                              const char *filename,
-                                              void *_Nullable ctx);
-
-/// Destroy a source file parsed with swift_ASTGen_parseSourceFile.
-extern "C" void swift_ASTGen_destroySourceFile(void *sourceFile);
-
-/// Check whether the given source file round-trips correctly. Returns 0 if
-/// round-trip succeeded, non-zero otherwise.
-extern "C" int swift_ASTGen_roundTripCheck(void *sourceFile);
-
-/// Emit parser diagnostics for given source file.. Returns non-zero if any
-/// diagnostics were emitted.
-extern "C" int
-swift_ASTGen_emitParserDiagnostics(void *diagEngine, void *sourceFile,
-                                   int emitOnlyErrors,
-                                   int downgradePlaceholderErrorsToWarnings);
-
-// Build AST nodes for the top-level entities in the syntax.
-extern "C" void swift_ASTGen_buildTopLevelASTNodes(
-    void *diagEngine, void *sourceFile, void *declContext, void *astContext,
-    void *outputContext, void (*)(void *, void *));
 
 /// Main entrypoint for the parser.
 ///
@@ -380,8 +356,9 @@ void Parser::parseSourceFileViaASTGen(
 
   // If we want to do ASTGen, do so now.
   if (langOpts.hasFeature(Feature::ParserASTGen)) {
+    this->IsForASTGen = true;
     swift_ASTGen_buildTopLevelASTNodes(&Diags, exportedSourceFile,
-                                       CurDeclContext, &Context, &items,
+                                       CurDeclContext, Context, *this, &items,
                                        appendToVector);
 
     // Spin the C++ parser to the end; we won't be using it.
@@ -5400,18 +5377,34 @@ bool swift::isKeywordPossibleDeclStart(const LangOptions &options,
   }
 }
 
-/// Given a current token of 'unowned', check to see if it is followed by a
-/// "(safe)" or "(unsafe)" specifier.
-static bool isParenthesizedUnowned(Parser &P) {
-  assert(P.Tok.getText() == "unowned" && P.peekToken().is(tok::l_paren) &&
+static bool
+isParenthesizedModifier(Parser &P, StringRef name,
+                        std::initializer_list<StringRef> allowedArguments) {
+  assert((P.Tok.getText() == name) && P.peekToken().is(tok::l_paren) &&
          "Invariant violated");
-  
+
   // Look ahead to parse the parenthesized expression.
   Parser::BacktrackingScope Backtrack(P);
   P.consumeToken(tok::identifier);
   P.consumeToken(tok::l_paren);
-  return P.Tok.is(tok::identifier) && P.peekToken().is(tok::r_paren) &&
-          (P.Tok.getText() == "safe" || P.Tok.getText() == "unsafe");
+
+  const bool argumentIsAllowed =
+      std::find(allowedArguments.begin(), allowedArguments.end(),
+                P.Tok.getText()) != allowedArguments.end();
+  return argumentIsAllowed && P.Tok.is(tok::identifier) &&
+         P.peekToken().is(tok::r_paren);
+}
+
+/// Given a current token of 'unowned', check to see if it is followed by a
+/// "(safe)" or "(unsafe)" specifier.
+static bool isParenthesizedUnowned(Parser &P) {
+  return isParenthesizedModifier(P, "unowned", {"safe", "unsafe"});
+}
+
+/// Given a current token of 'nonisolated', check to see if it is followed by an
+/// "(unsafe)" specifier.
+static bool isParenthesizedNonisolated(Parser &P) {
+  return isParenthesizedModifier(P, "nonisolated", {"unsafe"});
 }
 
 static void skipAttribute(Parser &P) {
@@ -5441,30 +5434,10 @@ static void skipAttribute(Parser &P) {
 
 bool Parser::isStartOfSwiftDecl(bool allowPoundIfAttributes,
                                 bool hadAttrsOrModifiers) {
-  const bool isTopLevelLibrary = (SF.Kind == SourceFileKind::Library) ||
-                                 (SF.Kind == SourceFileKind::Interface) ||
-                                 (SF.Kind == SourceFileKind::SIL);
   if (Tok.is(tok::at_sign) && peekToken().is(tok::kw_rethrows)) {
     // @rethrows does not follow the general rule of @<identifier> so
     // it is needed to short circuit this else there will be an infinite
     // loop on invalid attributes of just rethrows
-  } else if (Context.LangOpts.hasFeature(Feature::GlobalConcurrency) &&
-             (Tok.getKind() == tok::identifier) &&
-             Tok.getText().equals("nonisolated") && isTopLevelLibrary &&
-             !CurDeclContext->isLocalContext()) {
-    // TODO: hack to unblock proposal review by treating top-level nonisolated
-    // contextual keyword like an attribute; more robust implementation pending
-    BacktrackingScope backtrack(*this);
-    skipAttribute(*this);
-
-    // If this attribute is the last element in the block,
-    // consider it is a start of incomplete decl.
-    if (Tok.isAny(tok::r_brace, tok::eof) ||
-        (Tok.is(tok::pound_endif) && !allowPoundIfAttributes))
-      return true;
-
-    return isStartOfSwiftDecl(allowPoundIfAttributes,
-                              /*hadAttrsOrModifiers=*/true);
   } else if (!isKeywordPossibleDeclStart(Context.LangOpts, Tok)) {
     // If this is obviously not the start of a decl, then we're done.
     return false;
@@ -5595,6 +5568,19 @@ bool Parser::isStartOfSwiftDecl(bool allowPoundIfAttributes,
   if (Tok.getText() == "unowned" && Tok2.is(tok::l_paren) &&
       isParenthesizedUnowned(*this)) {
     Parser::BacktrackingScope Backtrack(*this);
+    consumeToken(tok::identifier);
+    consumeToken(tok::l_paren);
+    consumeToken(tok::identifier);
+    consumeToken(tok::r_paren);
+    return isStartOfSwiftDecl(/*allowPoundIfAttributes=*/false,
+                              /*hadAttrsOrModifiers=*/true);
+  }
+
+  // If this is 'nonisolated', check to see if it is valid.
+  if (Context.LangOpts.hasFeature(Feature::GlobalConcurrency) &&
+      Tok.isContextualKeyword("nonisolated") && Tok2.is(tok::l_paren) &&
+      isParenthesizedNonisolated(*this)) {
+    BacktrackingScope backtrack(*this);
     consumeToken(tok::identifier);
     consumeToken(tok::l_paren);
     consumeToken(tok::identifier);
@@ -5818,9 +5804,17 @@ static Parser::ParseDeclOptions getParseDeclOptions(DeclContext *DC) {
 ///     decl-import
 ///     decl-operator
 /// \endverbatim
+///
+/// \param fromASTGen If true , this function in called from ASTGen as the
+/// fallback, so do not attempt a callback to ASTGen.
 ParserResult<Decl> Parser::parseDecl(bool IsAtStartOfLineOrPreviousHadSemi,
                                      bool IfConfigsAreDeclAttrs,
-                                     llvm::function_ref<void(Decl *)> Handler) {
+                                     llvm::function_ref<void(Decl *)> Handler,
+                                     bool fromASTGen) {
+#if SWIFT_BUILD_SWIFT_SYNTAX
+  if (IsForASTGen && !fromASTGen)
+    return parseDeclFromSyntaxTree();
+#endif
   ParseDeclOptions Flags = getParseDeclOptions(CurDeclContext);
   ParserPosition BeginParserPosition;
   if (isIDEInspectionFirstPass())
@@ -6432,51 +6426,6 @@ static void addMoveOnlyAttrIf(SourceLoc const &parsedTildeCopyable,
   attrs.add(new(Context) MoveOnlyAttr(/*IsImplicit=*/true));
 }
 
-bool Parser::parseLegacyTildeCopyable(SourceLoc *parseTildeCopyable,
-                                      ParserStatus &Status,
-                                      SourceLoc &TildeCopyableLoc) {
-  // Is suppression permitted?
-  if (parseTildeCopyable) {
-    // Try to find '~' 'Copyable'
-    //
-    // We do this knowing that Copyable is not a real type as of now, so we
-    // can't rely on parseType.
-    if (Tok.isTilde()) {
-      const auto &nextTok = peekToken(); // lookahead
-      if (isIdentifier(nextTok, Context.Id_Copyable.str())) {
-        auto tildeLoc = consumeToken();
-        consumeToken(); // the 'Copyable' token
-
-        if (TildeCopyableLoc)
-          diagnose(tildeLoc, diag::already_suppressed, Context.Id_Copyable);
-        else
-          TildeCopyableLoc = tildeLoc;
-
-        return true;
-      } else if (nextTok.is(tok::code_complete)) {
-        consumeToken(); // consume '~'
-        Status.setHasCodeCompletionAndIsError();
-        if (CodeCompletionCallbacks) {
-          CodeCompletionCallbacks->completeWithoutConstraintType();
-        }
-        consumeToken(tok::code_complete);
-      }
-
-      // can't suppress whatever is between '~' and ',' or '{'.
-      diagnose(Tok, diag::only_suppress_copyable);
-      consumeToken();
-    }
-
-  } else if (Tok.isTilde()) {
-    // a suppression isn't allowed here, so emit an error eat the token to
-    // prevent further parsing errors.
-    diagnose(Tok, diag::cannot_suppress_here);
-    consumeToken();
-  }
-
-  return false;
-}
-
 /// Parse an inheritance clause.
 ///
 /// \verbatim
@@ -6552,11 +6501,47 @@ ParserStatus Parser::parseInheritance(
       continue;
     }
 
-    if (!EnabledNoncopyableGenerics) {
-      if (parseLegacyTildeCopyable(parseTildeCopyable,
-                                   Status,
-                                   TildeCopyableLoc))
-        continue;
+    if (!EnabledNoncopyableGenerics && Tok.isTilde()) {
+      ErrorTypeRepr *error = nullptr;
+      if (parseTildeCopyable) {
+        const auto &nextTok = peekToken(); // lookahead
+        if (isIdentifier(nextTok, Context.Id_Copyable.str())) {
+          auto tildeLoc = consumeToken();
+          consumeToken(); // the 'Copyable' token
+
+          if (TildeCopyableLoc)
+            Inherited.push_back(InheritedEntry(
+                ErrorTypeRepr::create(Context, tildeLoc,
+                                      diag::already_suppressed_copyable)));
+          else
+            TildeCopyableLoc = tildeLoc;
+
+          continue; // success
+        }
+
+        if (nextTok.is(tok::code_complete)) {
+          consumeToken(); // consume '~'
+          Status.setHasCodeCompletionAndIsError();
+          if (CodeCompletionCallbacks) {
+            CodeCompletionCallbacks->completeWithoutConstraintType();
+          }
+          consumeToken(tok::code_complete);
+        }
+
+        // can't suppress whatever is between '~' and ',' or '{'.
+        error = ErrorTypeRepr::create(Context, consumeToken(),
+                                      diag::only_suppress_copyable);
+      } else {
+        // Otherwise, a suppression isn't allowed here unless noncopyable
+        // generics is enabled, so record a delayed error diagnostic and
+        // eat the token to prevent further parsing errors.
+        error = ErrorTypeRepr::create(Context, consumeToken(),
+                                      diag::cannot_suppress_here);
+      }
+
+      // Record the error parsing ~Copyable, but continue on to parseType.
+      if (error)
+        Inherited.push_back(InheritedEntry(error));
     }
 
     auto ParsedTypeResult = parseType();
@@ -9671,7 +9656,7 @@ Parser::parseDeclSubscript(SourceLoc StaticLoc,
 
     if (ElementTy.isNull()) {
       // Always set an element type.
-      ElementTy = makeParserResult(ElementTy, new (Context) ErrorTypeRepr());
+      ElementTy = makeParserResult(ElementTy, ErrorTypeRepr::create(Context));
     }
   }
 
