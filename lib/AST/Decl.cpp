@@ -2072,7 +2072,7 @@ void PatternBindingEntry::setInit(Expr *E) {
   } else {
     PatternAndFlags.setInt(F | Flags::Removed);
   }
-  InitExpr.initAfterSynthesis = E;
+  InitExpr.initAfterSynthesis.setPointer(E);
   InitContextAndFlags.setInt(InitContextAndFlags.getInt() -
                              PatternFlags::IsText);
 }
@@ -2198,11 +2198,17 @@ PatternBindingDecl::getInitializerIsolation(unsigned i) const {
   return var->getInitializerIsolation();
 }
 
-Expr *PatternBindingDecl::getCheckedExecutableInit(unsigned i) const {
+Expr *PatternBindingDecl::getCheckedAndContextualizedInit(unsigned i) const {
   return evaluateOrDefault(getASTContext().evaluator,
-                           PatternBindingCheckedExecutableInitRequest{
+                           PatternBindingCheckedAndContextualizedInitRequest{
                                const_cast<PatternBindingDecl *>(this), i},
                            nullptr);
+}
+
+Expr *PatternBindingDecl::getCheckedAndContextualizedExecutableInit(
+    unsigned i) const {
+  (void)getCheckedAndContextualizedInit(i);
+  return getExecutableInit(i);
 }
 
 bool PatternBindingDecl::hasStorage() const {
@@ -9182,13 +9188,6 @@ bool IsFunctionBodySkippedRequest::evaluate(
     // typecheck them.
     if (accessor->hasForcedStaticDispatch())
       return false;
-
-    if (auto *varDecl = dyn_cast<VarDecl>(accessor->getStorage())) {
-      // FIXME: If we don't typecheck the synthesized accessors of lazy storage
-      // properties then SILGen crashes when emitting the initializer.
-      if (varDecl->getAttrs().hasAttribute<LazyAttr>() && accessor->isSynthesized())
-        return false;
-    }
   }
 
   // Actor initializers need to be checked to determine delegation status.
