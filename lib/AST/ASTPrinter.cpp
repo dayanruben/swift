@@ -2940,6 +2940,10 @@ static bool usesFeatureExtensionMacros(Decl *decl) {
   return macro->getMacroRoles().contains(MacroRole::Extension);
 }
 
+static bool usesFeatureBodyMacros(Decl *decl) {
+  return false;
+}
+
 static bool usesFeatureExtensionMacroAttr(Decl *decl) {
   return usesFeatureExtensionMacros(decl);
 }
@@ -3638,6 +3642,14 @@ static bool usesFeatureTypedThrows(Decl *decl) {
 
 static bool usesFeatureExtern(Decl *decl) {
   return decl->getAttrs().hasAttribute<ExternAttr>();
+}
+
+static bool usesFeatureStaticExclusiveOnly(Decl *decl) {
+  return decl->getAttrs().hasAttribute<StaticExclusiveOnlyAttr>();
+}
+
+static bool usesFeatureExtractConstantsFromMembers(Decl *decl) {
+  return decl->getAttrs().hasAttribute<ExtractConstantsFromMembersAttr>();
 }
 
 /// Suppress the printing of a particular feature.
