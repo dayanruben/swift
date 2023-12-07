@@ -199,14 +199,14 @@ extension ASTGenVisitor {
     preconditionFailure("isExprMigrated() mismatch")
   }
 
-  public func generate(arrowExpr node: ArrowExprSyntax) -> BridgedArrowExpr {
+  func generate(arrowExpr node: ArrowExprSyntax) -> BridgedArrowExpr {
     let asyncLoc: BridgedSourceLoc
     let throwsLoc: BridgedSourceLoc
     let thrownTypeExpr: BridgedNullableExpr
 
     if let effectSpecifiers = node.effectSpecifiers {
-      asyncLoc = effectSpecifiers.asyncSpecifier.bridgedSourceLoc(in: self)
-      throwsLoc = (effectSpecifiers.throwsClause?.throwsSpecifier).bridgedSourceLoc(in: self)
+      asyncLoc = self.generateSourceLoc(effectSpecifiers.asyncSpecifier)
+      throwsLoc = self.generateSourceLoc(effectSpecifiers.throwsClause?.throwsSpecifier)
       if let thrownTypeNode = effectSpecifiers.thrownError {
         let typeExpr = BridgedTypeExpr.createParsed(
           self.ctx,
@@ -227,31 +227,31 @@ extension ASTGenVisitor {
       asyncLoc: asyncLoc,
       throwsLoc: throwsLoc,
       thrownType: thrownTypeExpr,
-      arrowLoc: node.arrow.bridgedSourceLoc(in: self)
+      arrowLoc: self.generateSourceLoc(node.arrow)
     )
   }
 
-  public func generate(assignmentExpr node: AssignmentExprSyntax) -> BridgedAssignExpr {
-    return .createParsed(self.ctx, equalsLoc: node.equal.bridgedSourceLoc(in: self))
+  func generate(assignmentExpr node: AssignmentExprSyntax) -> BridgedAssignExpr {
+    return .createParsed(self.ctx, equalsLoc: self.generateSourceLoc(node.equal))
   }
 
-  public func generate(binaryOperatorExpr node: BinaryOperatorExprSyntax) -> BridgedUnresolvedDeclRefExpr {
+  func generate(binaryOperatorExpr node: BinaryOperatorExprSyntax) -> BridgedUnresolvedDeclRefExpr {
     return createOperatorRefExpr(token: node.operator, kind: .binaryOperator)
   }
 
-  public func generate(closureExpr node: ClosureExprSyntax) -> BridgedClosureExpr {
+  func generate(closureExpr node: ClosureExprSyntax) -> BridgedClosureExpr {
     let body = BridgedBraceStmt.createParsed(
       self.ctx,
-      lBraceLoc: node.leftBrace.bridgedSourceLoc(in: self),
+      lBraceLoc: self.generateSourceLoc(node.leftBrace),
       elements: self.generate(codeBlockItemList: node.statements),
-      rBraceLoc: node.rightBrace.bridgedSourceLoc(in: self)
+      rBraceLoc: self.generateSourceLoc(node.rightBrace)
     )
 
     // FIXME: Translate the signature, capture list, 'in' location, etc.
     return .createParsed(self.ctx, declContext: self.declContext, body: body)
   }
 
-  public func generate(functionCallExpr node: FunctionCallExprSyntax) -> BridgedCallExpr {
+  func generate(functionCallExpr node: FunctionCallExprSyntax) -> BridgedCallExpr {
     if !node.arguments.isEmpty || node.trailingClosure == nil {
       if node.leftParen == nil {
         self.diagnose(
@@ -300,16 +300,16 @@ extension ASTGenVisitor {
     case .keyword(.subscript):
       baseName = .createSubscript()
     default:
-      baseName = .createIdentifier(node.baseName.bridgedIdentifier(in: self))
+      baseName = .createIdentifier(self.generateIdentifier(node.baseName))
     }
-    let baseNameLoc = node.baseName.bridgedSourceLoc(in: self)
+    let baseNameLoc = self.generateSourceLoc(node.baseName)
 
     if let argumentClause = node.argumentNames {
       let labels = argumentClause.arguments.lazy.map {
-        $0.name.bridgedIdentifier(in: self)
+        self.generateIdentifier($0.name)
       }
       let labelLocs = argumentClause.arguments.lazy.map {
-        $0.name.bridgedSourceLoc(in: self)
+        self.generateSourceLoc($0.name)
       }
       return (
         name: .createParsed(
@@ -320,9 +320,9 @@ extension ASTGenVisitor {
         loc: .createParsed(
           self.ctx,
           baseNameLoc: baseNameLoc,
-          lParenLoc: argumentClause.leftParen.bridgedSourceLoc(in: self),
+          lParenLoc: self.generateSourceLoc(argumentClause.leftParen),
           argumentLabelLocs: labelLocs.bridgedArray(in: self),
-          rParenLoc: argumentClause.rightParen.bridgedSourceLoc(in: self)
+          rParenLoc: self.generateSourceLoc(argumentClause.rightParen)
         )
       )
     } else {
@@ -333,7 +333,7 @@ extension ASTGenVisitor {
     }
   }
 
-  public func generate(declReferenceExpr node: DeclReferenceExprSyntax) -> BridgedUnresolvedDeclRefExpr {
+  func generate(declReferenceExpr node: DeclReferenceExprSyntax) -> BridgedUnresolvedDeclRefExpr {
     let nameAndLoc = createDeclNameRef(declReferenceExpr: node)
     return .createParsed(
       self.ctx,
@@ -343,32 +343,32 @@ extension ASTGenVisitor {
     )
   }
 
-  public func generate(discardAssignmentExpr node: DiscardAssignmentExprSyntax) -> BridgedDiscardAssignmentExpr {
-    return .createParsed(self.ctx, loc: node.wildcard.bridgedSourceLoc(in: self))
+  func generate(discardAssignmentExpr node: DiscardAssignmentExprSyntax) -> BridgedDiscardAssignmentExpr {
+    return .createParsed(self.ctx, loc: self.generateSourceLoc(node.wildcard))
   }
 
-  public func generate(memberAccessExpr node: MemberAccessExprSyntax) -> BridgedExpr {
+  func generate(memberAccessExpr node: MemberAccessExprSyntax) -> BridgedExpr {
     let nameAndLoc = createDeclNameRef(declReferenceExpr: node.declName)
 
     if let base = node.base {
       return BridgedUnresolvedDotExpr.createParsed(
         self.ctx,
         base: self.generate(expr: base),
-        dotLoc: node.period.bridgedSourceLoc(in: self),
+        dotLoc: self.generateSourceLoc(node.period),
         name: nameAndLoc.name,
         nameLoc: nameAndLoc.loc
       ).asExpr
     } else {
       return BridgedUnresolvedMemberExpr.createParsed(
         self.ctx,
-        dotLoc: node.period.bridgedSourceLoc(in: self),
+        dotLoc: self.generateSourceLoc(node.period),
         name: nameAndLoc.name,
         nameLoc: nameAndLoc.loc
       ).asExpr
     }
   }
 
-  public func generate(ifExpr node: IfExprSyntax) -> BridgedSingleValueStmtExpr {
+  func generate(ifExpr node: IfExprSyntax) -> BridgedSingleValueStmtExpr {
     let stmt = makeIfStmt(node).asStmt
 
     // Wrap in a SingleValueStmtExpr to embed as an expression.
@@ -380,7 +380,7 @@ extension ASTGenVisitor {
     )
   }
 
-  public func generate(postfixOperatorExpr node: PostfixOperatorExprSyntax) -> BridgedPostfixUnaryExpr {
+  func generate(postfixOperatorExpr node: PostfixOperatorExprSyntax) -> BridgedPostfixUnaryExpr {
     return .createParsed(
       self.ctx,
       operator: self.createOperatorRefExpr(
@@ -391,7 +391,7 @@ extension ASTGenVisitor {
     )
   }
 
-  public func generate(prefixOperatorExpr node: PrefixOperatorExprSyntax) -> BridgedPrefixUnaryExpr {
+  func generate(prefixOperatorExpr node: PrefixOperatorExprSyntax) -> BridgedPrefixUnaryExpr {
     return .createParsed(
       self.ctx,
       operator: self.createOperatorRefExpr(
@@ -402,7 +402,7 @@ extension ASTGenVisitor {
     )
   }
 
-  public func generate(sequenceExpr node: SequenceExprSyntax) -> BridgedExpr {
+  func generate(sequenceExpr node: SequenceExprSyntax) -> BridgedExpr {
     assert(
       !node.elements.count.isMultiple(of: 2),
       "SequenceExpr must have odd number of elements"
@@ -458,20 +458,20 @@ extension ASTGenVisitor {
     ).asExpr
   }
 
-  public func generate(tupleExpr node: TupleExprSyntax) -> BridgedTupleExpr {
+  func generate(tupleExpr node: TupleExprSyntax) -> BridgedTupleExpr {
     return self.generate(labeledExprList: node.elements, leftParen: node.leftParen, rightParen: node.rightParen)
   }
 
-  public func generate(typeExpr node: TypeExprSyntax) -> BridgedTypeExpr {
+  func generate(typeExpr node: TypeExprSyntax) -> BridgedTypeExpr {
     return .createParsed(
       self.ctx,
       type: self.generate(type: node.type)
     )
   }
 
-  public func generate(unresolvedAsExpr node: UnresolvedAsExprSyntax, typeExpr typeNode: TypeExprSyntax) -> BridgedExpr {
+  func generate(unresolvedAsExpr node: UnresolvedAsExprSyntax, typeExpr typeNode: TypeExprSyntax) -> BridgedExpr {
     let type = self.generate(type: typeNode.type)
-    let asLoc = node.asKeyword.bridgedSourceLoc(in: self)
+    let asLoc = self.generateSourceLoc(node.asKeyword)
 
     switch node.questionOrExclamationMark {
     case nil:
@@ -484,14 +484,14 @@ extension ASTGenVisitor {
       return BridgedConditionalCheckedCastExpr.createParsed(
         self.ctx,
         asLoc: asLoc,
-        questionLoc: question.bridgedSourceLoc(in: self),
+        questionLoc: self.generateSourceLoc(question),
         type: type
       ).asExpr
     case let exclaim? where exclaim.text == "!":
       return BridgedForcedCheckedCastExpr.createParsed(
         self.ctx,
         asLoc: asLoc,
-        exclaimLoc: exclaim.bridgedSourceLoc(in: self),
+        exclaimLoc: self.generateSourceLoc(exclaim),
         type: type
       ).asExpr
     case _?:
@@ -499,20 +499,20 @@ extension ASTGenVisitor {
     }
   }
 
-  public func generate(unresolvedIsExpr node: UnresolvedIsExprSyntax, typeExpr typeNode: TypeExprSyntax) -> BridgedIsExpr {
+  func generate(unresolvedIsExpr node: UnresolvedIsExprSyntax, typeExpr typeNode: TypeExprSyntax) -> BridgedIsExpr {
     return .createParsed(
       self.ctx,
-      isLoc: node.isKeyword.bridgedSourceLoc(in: self),
+      isLoc: self.generateSourceLoc(node.isKeyword),
       type: self.generate(type: typeNode.type)
     )
   }
 
-  public func generate(unresolvedTernaryExpr node: UnresolvedTernaryExprSyntax) -> BridgedTernaryExpr {
+  func generate(unresolvedTernaryExpr node: UnresolvedTernaryExprSyntax) -> BridgedTernaryExpr {
     return .createParsed(
       self.ctx,
-      questionLoc: node.questionMark.bridgedSourceLoc(in: self),
+      questionLoc: self.generateSourceLoc(node.questionMark),
       thenExpr: self.generate(expr: node.thenExpression),
-      colonLoc: node.colon.bridgedSourceLoc(in: self)
+      colonLoc: self.generateSourceLoc(node.colon)
     )
   }
 
@@ -521,7 +521,7 @@ extension ASTGenVisitor {
 
 extension ASTGenVisitor {
   fileprivate func createOperatorRefExpr(token node: TokenSyntax, kind: BridgedDeclRefKind) -> BridgedUnresolvedDeclRefExpr {
-    let (name, nameLoc) = node.bridgedIdentifierAndSourceLoc(in: self)
+    let (name, nameLoc) = self.generateIdentifierAndSourceLoc(node)
 
     return .createParsed(
       self.ctx,
@@ -538,23 +538,23 @@ extension ASTGenVisitor {
       self.generate(expr: $0.expression)
     }
     let labels = node.lazy.map {
-      $0.label.bridgedIdentifier(in: self)
+      self.generateIdentifier($0.label)
     }
     let labelLocations = node.lazy.map {
       if let label = $0.label {
-        return label.bridgedSourceLoc(in: self)
+        return self.generateSourceLoc(label)
       }
 
-      return $0.bridgedSourceLoc(in: self)
+      return self.generateSourceLoc($0)
     }
 
     return BridgedTupleExpr.createParsed(
       self.ctx,
-      leftParenLoc: leftParen.bridgedSourceLoc(in: self),
+      leftParenLoc: self.generateSourceLoc(leftParen),
       exprs: expressions.bridgedArray(in: self),
       labels: labels.bridgedArray(in: self),
       labelLocs: labelLocations.bridgedArray(in: self),
-      rightParenLoc: rightParen.bridgedSourceLoc(in: self)
+      rightParenLoc: self.generateSourceLoc(rightParen)
     )
   }
 }
