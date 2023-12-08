@@ -7149,6 +7149,11 @@ VarDecl::VarDecl(DeclKind kind, bool isStatic, VarDecl::Introducer introducer,
 }
 
 Type VarDecl::getTypeInContext() const {
+  // If we are performing pack iteration, use the generic environment of the
+  // pack expansion expression to get the right context of a local variable.
+  if (auto *env = getOpenedElementEnvironment())
+    return GenericEnvironment::mapTypeIntoContext(env, getInterfaceType());
+
   return getDeclContext()->mapTypeIntoContext(getInterfaceType());
 }
 
@@ -7671,7 +7676,7 @@ void ParamDecl::setSpecifier(Specifier specifier) {
   VarDecl::Introducer introducer;
   switch (specifier) {
   // Unannotated or `borrowing` parameters are locally immutable.
-  // So are parameters using the legacy `__shared` or `__owned` modifiers.
+  // So are parameters using the legacy `__shared` or  `__owned` modifiers.
   case ParamSpecifier::Default:
   case ParamSpecifier::Borrowing:
   case ParamSpecifier::LegacyShared:
@@ -11701,14 +11706,34 @@ CatchNode::getThrownErrorTypeInContext(DeclContext *dc) const {
     return llvm::None;
   }
 
-  auto doCatch = get<DoCatchStmt *>();
-  if (auto thrownError = doCatch->getCaughtErrorType(dc)) {
-    if (thrownError->isNever())
-      return llvm::None;
+  if (auto doCatch = dyn_cast<DoCatchStmt *>()) {
+    if (auto thrownError = doCatch->getCaughtErrorType(dc)) {
+      if (thrownError->isNever())
+        return llvm::None;
 
-    return thrownError;
+      return thrownError;
+    }
+
+    // If we haven't computed the error type yet, return 'any Error'.
+    return dc->getASTContext().getErrorExistentialType();
   }
 
-  // If we haven't computed the error type yet, do so now.
-  return dc->getASTContext().getErrorExistentialType();
+  auto tryExpr = get<AnyTryExpr *>();
+  if (auto forceTry = llvm::dyn_cast<ForceTryExpr>(tryExpr)) {
+    if (auto thrownError = forceTry->getThrownError())
+      return thrownError;
+
+    // If we haven't computed the error type yet, return 'any Error'.
+    return dc->getASTContext().getErrorExistentialType();
+  }
+
+  if (auto optTry = llvm::dyn_cast<OptionalTryExpr>(tryExpr)) {
+    if (auto thrownError = optTry->getThrownError())
+      return thrownError;
+
+    // If we haven't computed the error type yet, return 'any Error'.
+    return dc->getASTContext().getErrorExistentialType();
+  }
+
+  llvm_unreachable("Unhandled catch node kind");
 }
