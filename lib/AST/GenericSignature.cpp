@@ -503,6 +503,7 @@ CanType GenericSignature::getReducedType(Type type) const {
 GenericSignature GenericSignature::typeErased(ArrayRef<Type> typeErasedParams) const {
   bool changedSignature = false;
   llvm::SmallVector<Requirement, 2> requirementsErased;
+  auto &C = Ptr->getASTContext();
 
   for (auto req : getRequirements()) {
     bool found = std::any_of(typeErasedParams.begin(),
@@ -511,10 +512,29 @@ GenericSignature GenericSignature::typeErased(ArrayRef<Type> typeErasedParams) c
       auto other = req.getFirstType();
       return t->isEqual(other);
     });
-    if (found) {
-      requirementsErased.push_back(Requirement(RequirementKind::SameType,
-                                               req.getFirstType(),
-                                               Ptr->getASTContext().getAnyObjectType()));
+    if (found && req.getKind() == RequirementKind::Layout) {
+      auto layout = req.getLayoutConstraint();
+      if (layout->isClass()) {
+        requirementsErased.push_back(Requirement(RequirementKind::SameType,
+                                                 req.getFirstType(),
+                                                 C.getAnyObjectType()));
+      } else if (layout->isBridgeObject()) {
+        requirementsErased.push_back(Requirement(RequirementKind::SameType,
+                                                 req.getFirstType(),
+                                                 C.TheBridgeObjectType));
+      } else if (layout->isFixedSizeTrivial()) {
+        unsigned bitWidth = layout->getTrivialSizeInBits();
+        requirementsErased.push_back(
+            Requirement(RequirementKind::SameType, req.getFirstType(),
+                        CanType(BuiltinIntegerType::get(bitWidth, C))));
+      } else if (layout->isTrivialStride()) {
+        unsigned bitWidth = layout->getTrivialStrideInBits();
+        requirementsErased.push_back(
+            Requirement(RequirementKind::SameType, req.getFirstType(),
+                        CanType(BuiltinIntegerType::get(bitWidth, C))));
+      } else {
+        requirementsErased.push_back(req);
+      }
     } else {
       requirementsErased.push_back(req);
     }

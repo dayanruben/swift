@@ -640,11 +640,13 @@ public:
 
   bool isPlaceholder();
 
-  /// DEPRECIATED: Returns true if this is a noncopyable type.
-  bool isNoncopyable();
+  /// Returns true if this type lacks conformance to Copyable in the context,
+  /// if provided.
+  bool isNoncopyable(const DeclContext *dc = nullptr);
 
-  /// Returns true if this type lacks conformance to Copyable in the context.
-  bool isNoncopyable(const DeclContext *dc);
+  /// Returns true if this type conforms to Escapable in the context,
+  /// if provided.
+  bool isEscapable(const DeclContext *dc = nullptr);
 
   /// Does the type have outer parenthesis?
   bool hasParenSugar() const { return getKind() == TypeKind::Paren; }
@@ -1531,48 +1533,6 @@ public:
   }
 };
 DEFINE_EMPTY_CAN_TYPE_WRAPPER(NominalOrBoundGenericNominalType, AnyGenericType)
-
-/// InverseType represents the "inverse" of a ProtocolType as a constraint.
-/// An inverse represents the _absence_ of an implicit constraint to the given
-/// protocol.
-///
-/// Otherwise, an inverse is not a real type! It's an annotation for other types
-/// to signal whether an implicit requirement on that type should be omitted.
-/// Because that annotation is expressed in the surface language as if it _were_
-/// a type (that is, as a type constraint) we still model it as a Type through
-/// typechecking.
-class InverseType final : public TypeBase {
-  Type protocol;
-
-  InverseType(Type type,
-              const ASTContext *canonicalContext,
-              RecursiveTypeProperties properties)
-      : TypeBase(TypeKind::Inverse, canonicalContext, properties),
-        protocol(type) {
-    assert(protocol->is<ProtocolType>());
-  }
-
-public:
-  /// Produce an inverse constraint type for the given protocol type.
-  static Type get(Type protocolType);
-
-
-  /// Obtain the underlying \c ProtocolType that was inverted.
-  Type getInvertedProtocol() const {
-    return protocol;
-  }
-
-  /// Get known kind of inverse this type represents.
-  InvertibleProtocolKind getInverseKind() const;
-
-  // Implement isa/cast/dyncast/etc.
-  static bool classof(const TypeBase *T) {
-    return T->getKind() == TypeKind::Inverse;
-  }
-};
-BEGIN_CAN_TYPE_WRAPPER(InverseType, Type)
-  PROXY_CAN_TYPE_SIMPLE_GETTER(getInvertedProtocol)
-END_CAN_TYPE_WRAPPER(InverseType, Type)
 
 /// ErrorType - Represents the type of an erroneously constructed declaration,
 /// expression, or type. When creating ErrorTypes, an associated error
@@ -5813,6 +5773,9 @@ public:
   /// Constructs a protocol composition corresponding to the `AnyObject` type.
   static Type theAnyObjectType(const ASTContext &C);
 
+  /// Constructs a protocol composition corresponding to the `~IP` type.
+  static Type getInverseOf(const ASTContext &C, InvertibleProtocolKind IP);
+
   /// Canonical protocol composition types are minimized only to a certain
   /// degree to preserve ABI compatibility. This routine enables performing
   /// slower, but stricter minimization at need (e.g. redeclaration checking).
@@ -6798,11 +6761,13 @@ public:
   /// Substitute the base type, looking up our associated type in it if it is
   /// non-dependent. Returns null if the member could not be found in the new
   /// base.
-  Type substBaseType(Type base, LookupConformanceFn lookupConformance);
+  Type substBaseType(Type base, LookupConformanceFn lookupConformance,
+                     SubstOptions options);
 
   /// Substitute the root generic type, looking up the chain of associated types.
   /// Returns null if the member could not be found in the new root.
-  Type substRootParam(Type newRoot, LookupConformanceFn lookupConformance);
+  Type substRootParam(Type newRoot, LookupConformanceFn lookupConformance,
+                      SubstOptions options);
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const TypeBase *T) {
@@ -7296,8 +7261,7 @@ inline bool TypeBase::isConstraintType() const {
 inline bool CanType::isConstraintTypeImpl(CanType type) {
   return (isa<ProtocolType>(type) ||
           isa<ProtocolCompositionType>(type) ||
-          isa<ParameterizedProtocolType>(type) ||
-          isa<InverseType>(type));
+          isa<ParameterizedProtocolType>(type));
 }
 
 inline bool TypeBase::isExistentialType() {
@@ -7313,7 +7277,6 @@ inline bool CanType::isExistentialTypeImpl(CanType type) {
          isa<ProtocolCompositionType>(type) ||
          isa<ExistentialType>(type) ||
          isa<ParameterizedProtocolType>(type);
-  // TODO(kavon): treat InverseType as an existential, etc?
 }
 
 inline bool CanType::isAnyExistentialTypeImpl(CanType type) {

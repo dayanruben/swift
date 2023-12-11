@@ -2238,6 +2238,8 @@ public:
       // Keep these layout constraints as is.
       case LayoutConstraintKind::RefCountedObject:
       case LayoutConstraintKind::TrivialOfAtMostSize:
+      case LayoutConstraintKind::BridgeObject:
+      case LayoutConstraintKind::TrivialStride:
         break;
       
       case LayoutConstraintKind::UnknownLayout:

@@ -1184,6 +1184,8 @@ getActualLayoutConstraintKind(uint64_t rawKind) {
   CASE(Class)
   CASE(NativeClass)
   CASE(UnknownLayout)
+  CASE(BridgeObject)
+  CASE(TrivialStride)
   }
 #undef CASE
 
@@ -1243,7 +1245,8 @@ llvm::Error ModuleFile::deserializeGenericRequirementsChecked(
       ASTContext &ctx = getContext();
       LayoutConstraint layout;
       if (kind != LayoutConstraintKind::TrivialOfAtMostSize &&
-          kind != LayoutConstraintKind::TrivialOfExactSize)
+          kind != LayoutConstraintKind::TrivialOfExactSize &&
+          kind != LayoutConstraintKind::TrivialStride)
         layout = LayoutConstraint::getLayoutConstraint(kind, ctx);
       else
         layout =
@@ -4043,9 +4046,9 @@ public:
                                         async, throws, thrownType,
                                         genericParams, resultType, DC);
     } else {
-      auto *accessor = AccessorDecl::createDeserialized(
-          ctx, accessorKind, storage, staticSpelling.value(), async, throws,
-          thrownType, resultType, DC);
+      auto *accessor =
+          AccessorDecl::createDeserialized(ctx, accessorKind, storage, async,
+                                           throws, thrownType, resultType, DC);
       accessor->setIsTransparent(isTransparent);
 
       fn = accessor;

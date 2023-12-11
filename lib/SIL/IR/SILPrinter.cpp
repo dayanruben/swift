@@ -1431,6 +1431,9 @@ public:
     printDebugVar(AVI->getVarInfo(),
                   &AVI->getModule().getASTContext().SourceMgr);
   }
+  void visitAllocVectorInst(AllocVectorInst *AVI) {
+    *this << AVI->getElementType() << ", " << getIDAndType(AVI->getCapacity());
+  }
   void visitAllocPackInst(AllocPackInst *API) {
     *this << API->getType().getObjectType();
   }
@@ -2188,6 +2191,15 @@ public:
           [&](const SILValue &V) { *this << getIDAndType(V); },
           [&] { *this << ", "; });
     }
+    *this << ')';
+  }
+
+  void visitVectorInst(VectorInst *vi) {
+    *this << "(";
+    llvm::interleave(
+        vi->getElements(),
+        [&](const SILValue &V) { *this << getIDAndType(V); },
+        [&] { *this << ", "; });
     *this << ')';
   }
 
@@ -4300,7 +4312,7 @@ void SILSpecializeAttr::print(llvm::raw_ostream &OS) const {
             Requirement ReqWithDecls(req.getKind(), FirstTy,
                                      req.getLayoutConstraint());
             auto SubPrinterCopy = SubPrinter;
-            SubPrinterCopy.PrintClassLayoutName = erased;
+            SubPrinterCopy.PrintInternalLayoutName = erased;
             ReqWithDecls.print(OS, SubPrinterCopy);
           }
         },

@@ -2644,9 +2644,7 @@ public:
         abort();
       }
 
-      // If we are performing pack iteration, variables have to carry the
-      // generic environment. Catching the missing environment here will prevent
-      // the code from being lowered.
+      // Catch cases where there's a missing generic environment.
       if (var->getTypeInContext()->is<ErrorType>()) {
         Out << "VarDecl is missing a Generic Environment: ";
         var->getInterfaceType().print(Out);

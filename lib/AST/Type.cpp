@@ -177,22 +177,24 @@ static bool alwaysNoncopyable(Type ty) {
   return false; // otherwise, the conservative assumption is it's copyable.
 }
 
-/// \returns true iff this type lacks conformance to Copyable, using the given
-/// context to substitute unbound types.
-bool TypeBase::isNoncopyable(const DeclContext *dc) {
-  assert(dc);
+static CanType preprocessType(const DeclContext *dc, Type orig) {
+  Type type = orig;
 
-  if (!hasArchetype() || hasOpenedExistential())
-    if (auto env = dc->getGenericEnvironmentOfContext())
-      return GenericEnvironment::mapTypeIntoContext(env, this)->isNoncopyable();
+  // Turn any type parameters into archetypes.
+  if (dc) {
+    if (!type->hasArchetype() || type->hasOpenedExistential())
+      if (auto env = dc->getGenericEnvironmentOfContext())
+        type = GenericEnvironment::mapTypeIntoContext(env, type);
+  }
 
-  return isNoncopyable();
+  // Strip @lvalue and canonicalize.
+  auto canType = type->getRValueType()->getCanonicalType();
+  return canType;
 }
 
 /// \returns true iff this type lacks conformance to Copyable.
-bool TypeBase::isNoncopyable() {
-  // Strip @lvalue and canonicalize.
-  auto canType = getRValueType()->getCanonicalType();
+bool TypeBase::isNoncopyable(const DeclContext *dc) {
+  auto canType = preprocessType(dc, this);
   auto &ctx = canType->getASTContext();
 
   // for legacy-mode queries that are not dependent on conformances to Copyable
@@ -201,6 +203,22 @@ bool TypeBase::isNoncopyable() {
 
   IsNoncopyableRequest request{canType};
   return evaluateOrDefault(ctx.evaluator, request, /*default=*/true);
+}
+
+bool TypeBase::isEscapable(const DeclContext *dc) {
+  auto canType = preprocessType(dc, this);
+  auto &ctx = canType->getASTContext();
+
+  // for legacy-mode queries that are not dependent on conformances to Escapable
+  if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
+    if (auto nom = canType.getAnyNominal())
+      return nom->isEscapable();
+    else
+      return false;
+  }
+
+  IsEscapableRequest request{canType};
+  return evaluateOrDefault(ctx.evaluator, request, /*default=*/false);
 }
 
 bool TypeBase::isPlaceholder() {
@@ -286,7 +304,6 @@ bool CanType::isReferenceTypeImpl(CanType type, const GenericSignatureImpl *sig,
   case TypeKind::Module:
   case TypeKind::LValue:
   case TypeKind::InOut:
-  case TypeKind::Inverse:
   case TypeKind::TypeVariable:
   case TypeKind::Placeholder:
   case TypeKind::BoundGenericEnum:
@@ -366,18 +383,6 @@ ExistentialLayout::ExistentialLayout(CanProtocolType type) {
   expandDefaultProtocols(type->getASTContext(), {}, protocols);
 }
 
-ExistentialLayout::ExistentialLayout(CanInverseType type) {
-  hasExplicitAnyObject = false;
-  containsNonObjCProtocol = false;
-  containsParameterized = false;
-  representsAnyObject = false;
-
-  // NOTE: all the invertible protocols are usable from ObjC.
-  expandDefaultProtocols(type->getASTContext(),
-                         {type->getInverseKind()},
-                         protocols);
-}
-
 ExistentialLayout::ExistentialLayout(CanProtocolCompositionType type) {
   hasExplicitAnyObject = type->hasExplicitAnyObject();
   containsNonObjCProtocol = false;
@@ -443,9 +448,6 @@ ExistentialLayout CanType::getExistentialLayout() {
 
   if (auto param = dyn_cast<ParameterizedProtocolType>(ty))
     return ExistentialLayout(param);
-
-  if (auto inverse = dyn_cast<InverseType>(ty))
-    return ExistentialLayout(inverse);
 
   auto comp = cast<ProtocolCompositionType>(ty);
   return ExistentialLayout(comp);
@@ -1820,12 +1822,6 @@ CanType TypeBase::computeCanonicalType() {
       CanArgs.push_back(t->getCanonicalType());
     auto &C = Base->getASTContext();
     Result = ParameterizedProtocolType::get(C, Base, CanArgs);
-    break;
-  }
-  case TypeKind::Inverse: {
-    auto *inverse = cast<InverseType>(this);
-    auto protocol = inverse->getInvertedProtocol()->getCanonicalType();
-    Result = InverseType::get(protocol).getPointer();
     break;
   }
   case TypeKind::Existential: {
@@ -3905,6 +3901,12 @@ Type ProtocolCompositionType::theAnyObjectType(const ASTContext &C) {
   return ProtocolCompositionType::get(C, {}, /*HasExplicitAnyObject=*/true);
 }
 
+Type ProtocolCompositionType::getInverseOf(const ASTContext &C,
+                                           InvertibleProtocolKind IP) {
+  return ProtocolCompositionType::get(C, {}, {IP},
+                                      /*HasExplicitAnyObject=*/false);
+}
+
 Type ProtocolCompositionType::get(const ASTContext &C, ArrayRef<Type> Members,
                                   bool HasExplicitAnyObject) {
   return ProtocolCompositionType::get(C, Members,
@@ -3920,8 +3922,6 @@ Type ProtocolCompositionType::get(const ASTContext &C,
   if (Members.empty()) {
     return build(C, Members, Inverses, HasExplicitAnyObject);
   }
-
-  assert(llvm::none_of(Members, [](Type t){return t->is<InverseType>();}));
 
   // Whether this composition has an `AnyObject` or protocol-inverse member
   // that is not reflected in the Members array.
@@ -5135,20 +5135,6 @@ case TypeKind::Id:
     return ExistentialType::get(constraint);
   }
 
-  case TypeKind::Inverse: {
-    auto *inverse = cast<InverseType>(base);
-    auto protocol =
-        inverse->getInvertedProtocol().transformWithPosition(pos, fn);
-    if (!protocol || protocol->hasError())
-      return protocol;
-
-    if (protocol.getPointer() ==
-        inverse->getInvertedProtocol().getPointer())
-      return *this;
-
-    return InverseType::get(protocol);
-  }
-
   case TypeKind::ProtocolComposition: {
     auto pc = cast<ProtocolCompositionType>(base);
     SmallVector<Type, 4> substMembers;
@@ -5409,7 +5395,6 @@ ReferenceCounting TypeBase::getReferenceCounting() {
   case TypeKind::Module:
   case TypeKind::LValue:
   case TypeKind::InOut:
-  case TypeKind::Inverse:
   case TypeKind::TypeVariable:
   case TypeKind::Placeholder:
   case TypeKind::BoundGenericEnum:
@@ -5595,7 +5580,7 @@ TypeBase::getAutoDiffTangentSpace(LookupConformanceFn lookupConformance) {
 
   // Try to get the `TangentVector` associated type of `base`.
   // Return the associated type if it is valid.
-  auto assocTy = dependentType->substBaseType(this, lookupConformance);
+  auto assocTy = dependentType->substBaseType(this, lookupConformance, llvm::None);
   if (!assocTy->hasError())
     return cache(TangentSpace::getTangentVector(assocTy));
 

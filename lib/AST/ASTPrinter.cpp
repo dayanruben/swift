@@ -3212,6 +3212,10 @@ static bool usesFeatureBuiltinUnprotectedStackAlloc(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureBuiltinAllocVector(Decl *decl) {
+  return false;
+}
+
 static bool usesFeatureBuiltinAssumeAlignment(Decl *decl) {
   return false;
 }
@@ -3367,8 +3371,9 @@ static bool usesFeatureFlowSensitiveConcurrencyCaptures(Decl *decl) {
 
 /// \param isRelevantInverse the function used to inspect a mark corresponding
 /// to an inverse to determine whether it "has" an inverse that we care about.
-static bool hasInverseCopyable(
+static bool hasInverse(
     Decl *decl,
+    InvertibleProtocolKind ip,
     std::function<bool(InverseMarking const&)> isRelevantInverse) {
 
   auto getTypeDecl = [](Type type) -> TypeDecl* {
@@ -3381,21 +3386,22 @@ static bool hasInverseCopyable(
 
   if (auto *extension = dyn_cast<ExtensionDecl>(decl)) {
     if (auto *nominal = extension->getSelfNominalTypeDecl())
-      if (isRelevantInverse(nominal->getNoncopyableMarking()))
+      if (isRelevantInverse(nominal->getMarking(ip)))
         return true;
   }
 
   if (auto typeDecl = dyn_cast<TypeDecl>(decl)) {
-    if (isRelevantInverse(typeDecl->getNoncopyableMarking()))
+    if (isRelevantInverse(typeDecl->getMarking(ip)))
       return true;
 
     // Check the protocol's associated types too.
     if (auto proto = dyn_cast<ProtocolDecl>(decl)) {
-      auto hasNoncopyable = llvm::any_of(proto->getAssociatedTypeMembers(),
-                                         [&](AssociatedTypeDecl *assocTyDecl) {
-                                           return isRelevantInverse(assocTyDecl->getNoncopyableMarking());
-                                         });
-      if (hasNoncopyable)
+      auto hasInverse =
+          llvm::any_of(proto->getAssociatedTypeMembers(),
+                       [&](AssociatedTypeDecl *assocTyDecl) {
+                         return isRelevantInverse(assocTyDecl->getMarking(ip));
+                       });
+      if (hasInverse)
         return true;
     }
   }
@@ -3403,15 +3409,15 @@ static bool hasInverseCopyable(
   if (auto value = dyn_cast<ValueDecl>(decl)) {
     // Check for noncopyable types in the types of this declaration.
     if (Type type = value->getInterfaceType()) {
-      bool hasNoncopyable = type.findIf([&](Type type) {
+      bool hasInverse = type.findIf([&](Type type) {
         if (auto *typeDecl = getTypeDecl(type))
-          if (isRelevantInverse(typeDecl->getNoncopyableMarking()))
+          if (isRelevantInverse(typeDecl->getMarking(ip)))
             return true;
 
         return false;
       });
 
-      if (hasNoncopyable)
+      if (hasInverse)
         return true;
     }
   }
@@ -3420,7 +3426,8 @@ static bool hasInverseCopyable(
 }
 
 static bool usesFeatureMoveOnly(Decl *decl) {
-  return hasInverseCopyable(decl, [](auto &marking) -> bool {
+  return hasInverse(decl, InvertibleProtocolKind::Copyable,
+                    [](auto &marking) -> bool {
     return marking.getInverse().is(InverseMarking::Kind::LegacyExplicit);
   });
 }
@@ -3462,24 +3469,23 @@ static bool usesFeatureMoveOnlyPartialConsumption(Decl *decl) {
 }
 
 static bool usesFeatureNoncopyableGenerics(Decl *decl) {
-  return hasInverseCopyable(decl, [](auto &marking) -> bool {
+  auto checkMarking = [](auto &marking) -> bool {
     switch (marking.getInverse().getKind()) {
     case InverseMarking::Kind::None:
-    case InverseMarking::Kind::LegacyExplicit: // covered by MoveOnly
+    case InverseMarking::Kind::LegacyExplicit: // covered by other checks.
       return false;
 
     case InverseMarking::Kind::Explicit:
     case InverseMarking::Kind::Inferred:
       return true;
     }
-  });
+  };
+
+  return hasInverse(decl, InvertibleProtocolKind::Copyable, checkMarking)
+      || hasInverse(decl, InvertibleProtocolKind::Escapable, checkMarking);
 }
 
 static bool usesFeatureOneWayClosureParameters(Decl *decl) {
-  return false;
-}
-
-static bool usesFeatureTypeWitnessSystemInference(Decl *decl) {
   return false;
 }
 
@@ -3609,6 +3615,10 @@ static bool usesFeatureNonEscapableTypes(Decl *decl) {
   if (pd && pd->hasResultDependsOn()) {
     return true;
   }
+  return false;
+}
+
+static bool usesFeatureFixedArrays(Decl *decl) {
   return false;
 }
 
@@ -6317,11 +6327,6 @@ public:
       Printer << "_";
   }
 
-  void visitInverseType(InverseType *T) {
-    Printer << "~";
-    visit(T->getInvertedProtocol());
-  }
-
   void visitPlaceholderType(PlaceholderType *T) {
     if (Options.PrintTypesForDebugging) {
       Printer << "<<placeholder for ";
@@ -7680,7 +7685,7 @@ void LayoutConstraint::print(raw_ostream &OS,
 
 void LayoutConstraintInfo::print(ASTPrinter &Printer,
                                  const PrintOptions &PO) const {
-  Printer << getName(PO.PrintClassLayoutName);
+  Printer << getName(PO.PrintInternalLayoutName);
   switch (getKind()) {
   case LayoutConstraintKind::UnknownLayout:
   case LayoutConstraintKind::RefCountedObject:
@@ -7688,9 +7693,11 @@ void LayoutConstraintInfo::print(ASTPrinter &Printer,
   case LayoutConstraintKind::Class:
   case LayoutConstraintKind::NativeClass:
   case LayoutConstraintKind::Trivial:
-    return;
+  case LayoutConstraintKind::BridgeObject:
+    return; // non-parameterized cases
   case LayoutConstraintKind::TrivialOfAtMostSize:
   case LayoutConstraintKind::TrivialOfExactSize:
+  case LayoutConstraintKind::TrivialStride:
     Printer << "(";
     Printer << SizeInBits;
     if (Alignment)

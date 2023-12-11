@@ -314,29 +314,6 @@ void IsFinalRequest::cacheResult(bool value) const {
 }
 
 //----------------------------------------------------------------------------//
-// isEscapable computation.
-//----------------------------------------------------------------------------//
-
-llvm::Optional<bool> IsEscapableRequest::getCachedResult() const {
-  auto decl = std::get<0>(getStorage());
-  if (decl->LazySemanticInfo.isEscapableComputed)
-    return static_cast<bool>(decl->LazySemanticInfo.isEscapable);
-
-  return llvm::None;
-}
-
-void IsEscapableRequest::cacheResult(bool value) const {
-  auto decl = std::get<0>(getStorage());
-  decl->LazySemanticInfo.isEscapableComputed = true;
-  decl->LazySemanticInfo.isEscapable = value;
-
-  // Add an attribute for printing
-  if (!value && !decl->getAttrs().hasAttribute<NonEscapableAttr>())
-    decl->getAttrs().add(new (decl->getASTContext())
-                             NonEscapableAttr(/*Implicit=*/true));
-}
-
-//----------------------------------------------------------------------------//
 // isDynamic computation.
 //----------------------------------------------------------------------------//
 
@@ -1817,10 +1794,10 @@ DeclNameRef UnresolvedMacroReference::getMacroName() const {
   if (auto *expansion = pointer.dyn_cast<FreestandingMacroExpansion *>())
     return expansion->getMacroName();
   if (auto *attr = pointer.dyn_cast<CustomAttr *>()) {
-    auto *identTypeRepr = dyn_cast_or_null<IdentTypeRepr>(attr->getTypeRepr());
-    if (!identTypeRepr)
+    auto [_, macro] = attr->destructureMacroRef();
+    if (!macro)
       return DeclNameRef();
-    return identTypeRepr->getNameRef();
+    return macro->getNameRef();
   }
   llvm_unreachable("Unhandled case");
 }
@@ -1833,14 +1810,38 @@ SourceLoc UnresolvedMacroReference::getSigilLoc() const {
   llvm_unreachable("Unhandled case");
 }
 
+DeclNameRef UnresolvedMacroReference::getModuleName() const {
+  if (auto *expansion = pointer.dyn_cast<FreestandingMacroExpansion *>())
+    return expansion->getModuleName();
+  if (auto *attr = pointer.dyn_cast<CustomAttr *>()) {
+    auto [module, _] = attr->destructureMacroRef();
+    if (!module)
+      return DeclNameRef();
+    return module->getNameRef();
+  }
+  llvm_unreachable("Unhandled case");
+}
+
+DeclNameLoc UnresolvedMacroReference::getModuleNameLoc() const {
+  if (auto *expansion = pointer.dyn_cast<FreestandingMacroExpansion *>())
+    return expansion->getModuleNameLoc();
+  if (auto *attr = pointer.dyn_cast<CustomAttr *>()) {
+    auto [module, _] = attr->destructureMacroRef();
+    if (!module)
+      return DeclNameLoc();
+    return module->getNameLoc();
+  }
+  llvm_unreachable("Unhandled case");
+}
+
 DeclNameLoc UnresolvedMacroReference::getMacroNameLoc() const {
   if (auto *expansion = pointer.dyn_cast<FreestandingMacroExpansion *>())
     return expansion->getMacroNameLoc();
   if (auto *attr = pointer.dyn_cast<CustomAttr *>()) {
-    auto *identTypeRepr = dyn_cast_or_null<IdentTypeRepr>(attr->getTypeRepr());
-    if (!identTypeRepr)
+    auto [_, macro] = attr->destructureMacroRef();
+    if (!macro)
       return DeclNameLoc();
-    return identTypeRepr->getNameLoc();
+    return macro->getNameLoc();
   }
   llvm_unreachable("Unhandled case");
 }
@@ -1850,8 +1851,10 @@ SourceRange UnresolvedMacroReference::getGenericArgsRange() const {
     return expansion->getGenericArgsRange();
 
   if (auto *attr = pointer.dyn_cast<CustomAttr *>()) {
-    auto *typeRepr = attr->getTypeRepr();
-    auto *genericTypeRepr = dyn_cast_or_null<GenericIdentTypeRepr>(typeRepr);
+    auto [_, macro] = attr->destructureMacroRef();
+    if (!macro)
+      return SourceRange();
+    auto *genericTypeRepr = dyn_cast_or_null<GenericIdentTypeRepr>(macro);
     if (!genericTypeRepr)
       return SourceRange();
 
@@ -1866,8 +1869,10 @@ ArrayRef<TypeRepr *> UnresolvedMacroReference::getGenericArgs() const {
     return expansion->getGenericArgs();
 
   if (auto *attr = pointer.dyn_cast<CustomAttr *>()) {
-    auto *typeRepr = attr->getTypeRepr();
-    auto *genericTypeRepr = dyn_cast_or_null<GenericIdentTypeRepr>(typeRepr);
+    auto [_, macro] = attr->destructureMacroRef();
+    if (!macro)
+      return {};
+    auto *genericTypeRepr = dyn_cast_or_null<GenericIdentTypeRepr>(macro);
     if (!genericTypeRepr)
       return {};
 

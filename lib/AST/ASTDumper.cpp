@@ -4348,6 +4348,9 @@ namespace {
         case InvertibleProtocolKind::Copyable:
           printFlag("inverse_copyable");
           break;
+        case InvertibleProtocolKind::Escapable:
+          printFlag("inverse_escapable");
+          break;
         }
       }
 
@@ -4372,12 +4375,6 @@ namespace {
                               StringRef label) {
       printCommon("existential_type", label);
       printRec(T->getConstraintType());
-      printFoot();
-    }
-
-    void visitInverseType(InverseType *T, StringRef label) {
-      printCommon("inverse_type", label);
-      printRec(T->getInvertedProtocol());
       printFoot();
     }
 

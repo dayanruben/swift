@@ -2680,19 +2680,12 @@ private:
     /// Whether this declaration produces an implicitly unwrapped
     /// optional result.
     unsigned isIUO : 1;
-
-    /// Whether the "isEscapable" bit has been computed yet.
-    unsigned isEscapable : 1;
-
-    /// Whether this declaration is escapable.
-    unsigned isEscapableComputed : 1;
   } LazySemanticInfo = { };
 
   friend class DynamicallyReplacedDeclRequest;
   friend class OverriddenDeclsRequest;
   friend class IsObjCRequest;
   friend class IsFinalRequest;
-  friend class IsEscapableRequest;
   friend class IsDynamicRequest;
   friend class IsImplicitlyUnwrappedOptionalRequest;
   friend class InterfaceTypeRequest;
@@ -2980,9 +2973,6 @@ public:
   /// Is this declaration 'final'?
   bool isFinal() const;
 
-  /// Is this declaration escapable?
-  bool isEscapable() const;
-
   /// Is this declaration marked with 'dynamic'?
   bool isDynamic() const;
 
@@ -3190,8 +3180,12 @@ public:
   /// Type if it `isNoncopyable` instead of using this.
   bool canBeNoncopyable() const;
 
-  /// Determine how the ~Copyable was applied to this TypeDecl, if at all.
-  InverseMarking getNoncopyableMarking() const;
+  /// Is this declaration escapable?
+  bool isEscapable() const;
+
+  /// Determine how the given invertible protocol was written on this TypeDecl,
+  /// if at all.
+  InverseMarking getMarking(InvertibleProtocolKind ip) const;
 
   static bool classof(const Decl *D) {
     return D->getKind() >= DeclKind::First_TypeDecl &&
@@ -6865,7 +6859,9 @@ public:
                                        SourceLoc SubscriptLoc,
                                        ParameterList *Indices,
                                        SourceLoc ArrowLoc, Type ElementTy,
-                                       DeclContext *Parent, ClangNode ClangN);
+                                       DeclContext *Parent,
+                                       GenericParamList *GenericParams,
+                                       ClangNode ClangN);
   
   /// \returns the way 'static'/'class' was spelled in the source.
   StaticSpellingKind getStaticSpelling() const {
@@ -7754,8 +7750,7 @@ public:
   SourceLoc getFuncLoc() const { return FuncLoc; }
 
   SourceLoc getStartLoc() const {
-    return StaticLoc.isValid() && !isa<AccessorDecl>(this)
-              ? StaticLoc : FuncLoc;
+    return StaticLoc.isValid() ? StaticLoc : FuncLoc;
   }
   SourceRange getSourceRange() const;
 
@@ -7847,12 +7842,10 @@ class AccessorDecl final : public FuncDecl {
 
   AccessorDecl(SourceLoc declLoc, SourceLoc accessorKeywordLoc,
                AccessorKind accessorKind, AbstractStorageDecl *storage,
-               SourceLoc staticLoc, StaticSpellingKind staticSpelling,
                bool async, SourceLoc asyncLoc, bool throws, SourceLoc throwsLoc,
-               TypeLoc thrownTy,
-               bool hasImplicitSelfDecl, DeclContext *parent)
-      : FuncDecl(DeclKind::Accessor, staticLoc, staticSpelling,
-                 /*func loc*/ declLoc,
+               TypeLoc thrownTy, bool hasImplicitSelfDecl, DeclContext *parent)
+      : FuncDecl(DeclKind::Accessor, /*StaticLoc*/ SourceLoc(),
+                 StaticSpellingKind::None, /*func loc*/ declLoc,
                  /*name*/ Identifier(), /*name loc*/ declLoc, async, asyncLoc,
                  throws, throwsLoc, thrownTy, hasImplicitSelfDecl,
                  /*genericParams*/ nullptr, parent),
@@ -7865,10 +7858,8 @@ class AccessorDecl final : public FuncDecl {
   static AccessorDecl *
   createImpl(ASTContext &ctx, SourceLoc declLoc, SourceLoc accessorKeywordLoc,
              AccessorKind accessorKind, AbstractStorageDecl *storage,
-             SourceLoc staticLoc, StaticSpellingKind staticSpelling, bool async,
-             SourceLoc asyncLoc, bool throws, SourceLoc throwsLoc,
-             TypeLoc thrownTy,
-             DeclContext *parent, ClangNode clangNode);
+             bool async, SourceLoc asyncLoc, bool throws, SourceLoc throwsLoc,
+             TypeLoc thrownTy, DeclContext *parent, ClangNode clangNode);
 
   llvm::Optional<bool> getCachedIsTransparent() const {
     if (Bits.AccessorDecl.IsTransparentComputed)
@@ -7879,22 +7870,17 @@ class AccessorDecl final : public FuncDecl {
   friend class IsAccessorTransparentRequest;
 
 public:
-  static AccessorDecl *createDeserialized(ASTContext &ctx,
-                                          AccessorKind accessorKind,
-                                          AbstractStorageDecl *storage,
-                                          StaticSpellingKind staticSpelling,
-                                          bool async, bool throws,
-                                          Type thrownType,
-                                          Type fnRetType, DeclContext *parent);
+  static AccessorDecl *
+  createDeserialized(ASTContext &ctx, AccessorKind accessorKind,
+                     AbstractStorageDecl *storage, bool async, bool throws,
+                     Type thrownType, Type fnRetType, DeclContext *parent);
 
   static AccessorDecl *
   create(ASTContext &ctx, SourceLoc declLoc, SourceLoc accessorKeywordLoc,
-         AccessorKind accessorKind, AbstractStorageDecl *storage,
-         SourceLoc staticLoc, StaticSpellingKind staticSpelling, bool async,
+         AccessorKind accessorKind, AbstractStorageDecl *storage, bool async,
          SourceLoc asyncLoc, bool throws, SourceLoc throwsLoc,
          TypeLoc thrownType, ParameterList *parameterList, Type fnRetType,
-         DeclContext *parent,
-         ClangNode clangNode = ClangNode());
+         DeclContext *parent, ClangNode clangNode = ClangNode());
 
   SourceLoc getAccessorKeywordLoc() const { return AccessorKeywordLoc; }
 

@@ -585,6 +585,9 @@ namespace swift {
     /// Enable warnings for redundant requirements in generic signatures.
     bool WarnRedundantRequirements = false;
 
+    /// Enable experimental associated type inference improvements.
+    bool EnableExperimentalAssociatedTypeInference = false;
+
     /// Enables dumping type witness systems from associated type inference.
     bool DumpTypeWitnessSystems = false;
 
@@ -1001,6 +1004,16 @@ namespace swift {
 
     std::vector<std::string> getRemappedExtraArgs(
         std::function<std::string(StringRef)> pathRemapCallback) const;
+
+    /// For a swift module dependency, interface build command generation must
+    /// inherit
+    /// `-Xcc` flags used for configuration of the building instance's
+    /// `ClangImporter`. However, we can ignore Clang search path flags because
+    /// explicit Swift module build tasks will not rely on them and they may be
+    /// source-target-context-specific and hinder module sharing across
+    /// compilation source targets.
+    std::vector<std::string>
+    getReducedExtraArgsForSwiftModuleDependency() const;
   };
 
 } // end namespace swift

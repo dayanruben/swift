@@ -5029,11 +5029,6 @@ TypeResolver::resolveCompositionType(CompositionTypeRepr *repr,
         continue;
       }
 
-      if (auto inverse = ty->getAs<InverseType>()) {
-        Inverses.insert(inverse->getInverseKind());
-        continue;
-      }
-
       if (ty->is<ParameterizedProtocolType>() &&
           !options.isConstraintImplicitExistential() &&
           options.getContext() != TypeResolverContext::ExistentialConstraint) {
@@ -5042,7 +5037,7 @@ TypeResolver::resolveCompositionType(CompositionTypeRepr *repr,
         continue;
       }
 
-      if (ty->is<ProtocolCompositionType>()) {
+      if (auto pct = ty->getAs<ProtocolCompositionType>()) {
         auto layout = ty->getExistentialLayout();
         if (auto superclass = layout.explicitSuperclass)
           if (checkSuperclass(tyR->getStartLoc(), superclass))
@@ -5050,6 +5045,7 @@ TypeResolver::resolveCompositionType(CompositionTypeRepr *repr,
         if (!layout.getProtocols().empty())
           HasProtocol = true;
 
+        Inverses.insertAll(pct->getInverses());
         Members.push_back(ty);
         continue;
       }
@@ -5196,9 +5192,20 @@ NeverNullType TypeResolver::resolveInverseType(InverseTypeRepr *repr,
   if (ty->hasError())
     return ErrorType::get(getASTContext());
 
-  if (auto kp = ty->getKnownProtocol())
-    if (getInvertibleProtocolKind(*kp))
-      return InverseType::get(ty);
+  if (auto kp = ty->getKnownProtocol()) {
+    if (auto kind = getInvertibleProtocolKind(*kp)) {
+
+      // Gate the '~Escapable' type behind a specific flag for now.
+      if (*kind == InvertibleProtocolKind::Escapable &&
+          !getASTContext().LangOpts.hasFeature(Feature::NonEscapableTypes)) {
+        diagnoseInvalid(repr, repr->getLoc(),
+                        diag::escapable_requires_feature_flag);
+        return ErrorType::get(getASTContext());
+      }
+
+      return ProtocolCompositionType::getInverseOf(getASTContext(), *kind);
+    }
+  }
 
   diagnoseInvalid(repr, repr->getLoc(), diag::inverse_type_not_invertible, ty);
   return ErrorType::get(getASTContext());
