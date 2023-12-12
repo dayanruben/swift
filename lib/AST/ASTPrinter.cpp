@@ -3110,6 +3110,8 @@ static bool usesFeatureBuiltinExecutor(Decl *decl) {
   return usesBuiltinType(decl, BuiltinTypeKind::BuiltinExecutor);
 }
 
+static bool usesFeatureBuiltinBuildTaskExecutor(Decl *decl) { return false; }
+
 static bool usesFeatureBuiltinBuildExecutor(Decl *decl) {
   return false;
 }
@@ -3135,6 +3137,14 @@ static bool usesFeatureBuiltinTaskGroupWithArgument(Decl *decl) {
 }
 
 static bool usesFeatureBuiltinCreateAsyncTaskInGroup(Decl *decl) {
+  return false;
+}
+
+static bool usesFeatureBuiltinCreateAsyncTaskInGroupWithExecutor(Decl *decl) {
+  return false;
+}
+
+static bool usesFeatureBuiltinCreateAsyncTaskWithExecutor(Decl *decl) {
   return false;
 }
 
@@ -6325,6 +6335,17 @@ public:
       Printer << "<<unresolvedtype>>";
     else
       Printer << "_";
+  }
+
+  void visitErrorUnionType(ErrorUnionType *T) {
+    Printer << "error_union(";
+    interleave(T->getTerms(),
+               [&](Type type) {
+                 visit(type);
+               }, [&]{
+                 Printer << ", ";
+               });
+    Printer << ")";
   }
 
   void visitPlaceholderType(PlaceholderType *T) {

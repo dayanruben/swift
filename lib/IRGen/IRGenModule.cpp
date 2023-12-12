@@ -674,7 +674,8 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
   SwiftAsyncLetPtrTy = Int8PtrTy; // we pass it opaquely (AsyncLet*)
   SwiftTaskOptionRecordPtrTy = SizeTy; // Builtin.RawPointer? that we get as (TaskOptionRecord*)
   SwiftTaskGroupPtrTy = Int8PtrTy; // we pass it opaquely (TaskGroup*)
-  SwiftTaskOptionRecordTy = createStructType(*this, "swift.task_option", {
+  SwiftTaskOptionRecordTy = createStructType(
+      *this, "swift.task_option", {
     SizeTy,                     // Flags
     SwiftTaskOptionRecordPtrTy, // Parent
   });
@@ -697,6 +698,11 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
   SwiftExecutorTy = createStructType(*this, "swift.executor", {
     ExecutorFirstTy,      // identity
     ExecutorSecondTy,     // implementation
+  });
+  SwiftInitialTaskExecutorPreferenceTaskOptionRecordTy =
+      createStructType(*this, "swift.task_executor_task_option", {
+    SwiftTaskOptionRecordTy, // Base option record
+    SwiftExecutorTy,         // Executor
   });
   SwiftJobTy = createStructType(*this, "swift.job", {
     RefCountedStructTy,   // object header
@@ -875,6 +881,14 @@ namespace RuntimeConstants {
 
   RuntimeAvailability ConcurrencyAvailability(ASTContext &context) {
     auto featureAvailability = context.getConcurrencyAvailability();
+    if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
+      return RuntimeAvailability::ConditionallyAvailable;
+    }
+    return RuntimeAvailability::AlwaysAvailable;
+  }
+
+  RuntimeAvailability TaskExecutorAvailability(ASTContext &context) {
+    auto featureAvailability = context.getTaskExecutorAvailability();
     if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
       return RuntimeAvailability::ConditionallyAvailable;
     }
@@ -1443,6 +1457,12 @@ void IRGenModule::constructInitialFnAttributes(
   if (stackProtector == StackProtectorMode::StackProtector) {
     Attrs.addAttribute(llvm::Attribute::StackProtectReq);
     Attrs.addAttribute("stack-protector-buffer-size", llvm::utostr(8));
+  }
+
+  // Mark as 'nounwind' to avoid referencing exception personality symbols, this
+  // is okay even with C++ interop on because the landinpads are trapping.
+  if (Context.LangOpts.hasFeature(Feature::Embedded)) {
+    Attrs.addAttribute(llvm::Attribute::NoUnwind);
   }
 }
 
