@@ -2989,7 +2989,7 @@ class DarwinLegacyFilterDeclConsumer : public swift::VisibleDeclConsumer {
     if (clangModule->Name == "MacTypes") {
       if (!VD->hasName() || VD->getBaseName().isSpecial())
         return true;
-      return llvm::StringSwitch<bool>(VD->getBaseIdentifier().str())
+      return llvm::StringSwitch<bool>(VD->getBaseName().userFacingName())
           .Cases("OSErr", "OSStatus", "OptionBits", false)
           .Cases("FourCharCode", "OSType", false)
           .Case("Boolean", false)
@@ -4981,7 +4981,7 @@ const clang::CXXMethodDecl *getCalledBaseCxxMethod(FuncDecl *baseMember) {
     if (auto *v = ce->getCalledValue()) {
       if (v->getModuleContext() ==
               baseMember->getASTContext().TheBuiltinModule &&
-          v->getBaseIdentifier().is("reinterpretCast")) {
+          v->getBaseName().userFacingName() == "reinterpretCast") {
         returnExpr = ce->getArgs()->get(0).getExpr();
       }
     }
@@ -6502,7 +6502,7 @@ static ValueDecl *rewriteIntegerTypes(SubstitutionMap subst, ValueDecl *oldDecl,
           func->getASTContext(), func->getNameLoc(),
           func->getName(), func->getNameLoc(),
           func->hasAsync(), func->hasThrows(),
-          /*FIXME:ThrownType=*/func->getThrownInterfaceType(),
+          func->getThrownInterfaceType(),
           fixedParams, originalFnSubst->getResult(),
           /*genericParams=*/nullptr, func->getDeclContext(), newDecl->getClangDecl());
       if (func->isStatic()) newFnDecl->setStatic();
@@ -6914,7 +6914,7 @@ bool ClangImporter::isUnsafeCXXMethod(const FuncDecl *func) {
     return false;
   if (!func->hasName())
     return false;
-  auto id = func->getBaseIdentifier().str();
+  auto id = func->getBaseName().userFacingName();
   return id.startswith("__") && id.endswith("Unsafe");
 }
 
@@ -7625,6 +7625,11 @@ const clang::TypedefType *ClangImporter::getTypeDefForCXXCFOptionsDefinition(
 bool importer::requiresCPlusPlus(const clang::Module *module) {
   // The libc++ modulemap doesn't currently declare the requirement.
   if (module->getTopLevelModuleName() == "std")
+    return true;
+  // In recent libc++ versions the module is split into multiple top-level
+  // modules (std_vector, std_utility, etc).
+  if (module->getTopLevelModule()->IsSystem &&
+      module->getTopLevelModuleName().starts_with("std_"))
     return true;
 
   // Modulemaps often declare the requirement for the top-level module only.
