@@ -4389,6 +4389,10 @@ SolutionResult ConstraintSystem::salvage() {
       return SolutionResult::forSolved(std::move(viable[0]));
     }
 
+    if (shouldSuppressDiagnostics())
+      return viable.empty() ? SolutionResult::forUndiagnosedError()
+                            : SolutionResult::forAmbiguous(viable);
+
     // FIXME: If we were able to actually fix things along the way,
     // we may have to hunt for the best solution. For now, we don't care.
 
@@ -5228,7 +5232,7 @@ static bool diagnoseContextualFunctionCallGenericAmbiguity(
 
 bool ConstraintSystem::diagnoseAmbiguityWithFixes(
     SmallVectorImpl<Solution> &solutions) {
-  if (solutions.empty())
+  if (solutions.empty() || shouldSuppressDiagnostics())
     return false;
 
   SolutionDiff solutionDiff(solutions);
@@ -5663,12 +5667,17 @@ bool ConstraintSystem::diagnoseAmbiguity(ArrayRef<Solution> solutions) {
       case OverloadChoiceKind::Decl:
       case OverloadChoiceKind::DeclViaDynamic:
       case OverloadChoiceKind::DeclViaBridge:
-      case OverloadChoiceKind::DeclViaUnwrappedOptional:
+      case OverloadChoiceKind::DeclViaUnwrappedOptional: {
         // FIXME: show deduced types, etc, etc.
-        if (EmittedDecls.insert(choice.getDecl()).second)
-          DE.diagnose(choice.getDecl(), diag::found_candidate);
+        auto decl = choice.getDecl();
+        if (EmittedDecls.insert(decl).second) {
+          auto declModule = decl->getDeclContext()->getParentModule();
+          bool printModuleName = declModule != DC->getParentModule();
+          DE.diagnose(decl, diag::found_candidate_in_module,
+                      printModuleName, declModule);
+        }
         break;
-
+      }
       case OverloadChoiceKind::KeyPathApplication:
       case OverloadChoiceKind::DynamicMemberLookup:
       case OverloadChoiceKind::KeyPathDynamicMemberLookup:
