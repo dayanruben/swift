@@ -2872,7 +2872,7 @@ ParserStatus Parser::parseNewDeclAttribute(DeclAttributes &Attributes,
   }
 
   if (DK == DAK_ResultDependsOnSelf &&
-      !Context.LangOpts.hasFeature(Feature::NonEscapableTypes)) {
+      !Context.LangOpts.hasFeature(Feature::NonescapableTypes)) {
     diagnose(Loc, diag::requires_non_escapable_types, AttrName, true);
     DiscardAttribute = true;
   }
@@ -5160,7 +5160,7 @@ ParserStatus Parser::parseTypeAttributeListPresent(
     }
 
     if (Tok.isContextualKeyword("_resultDependsOn")) {
-      if (!Context.LangOpts.hasFeature(Feature::NonEscapableTypes)) {
+      if (!Context.LangOpts.hasFeature(Feature::NonescapableTypes)) {
         diagnose(Tok, diag::requires_non_escapable_types, "resultDependsOn",
                  false);
       }
@@ -5579,8 +5579,7 @@ bool Parser::isStartOfSwiftDecl(bool allowPoundIfAttributes,
   }
 
   // If this is 'nonisolated', check to see if it is valid.
-  if (Context.LangOpts.hasFeature(Feature::GlobalConcurrency) &&
-      Tok.isContextualKeyword("nonisolated") && Tok2.is(tok::l_paren) &&
+  if (Tok.isContextualKeyword("nonisolated") && Tok2.is(tok::l_paren) &&
       isParenthesizedNonisolated(*this)) {
     BacktrackingScope backtrack(*this);
     consumeToken(tok::identifier);

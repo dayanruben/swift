@@ -1737,7 +1737,8 @@ void PrintAST::printGenericSignature(
         genericParams.slice(paramIdx, lastParamIdx - paramIdx);
 
     SmallVector<InverseRequirement, 2> inversesAtDepth;
-    reconstituteInverses(genericSig, genericParamsAtDepth, inversesAtDepth);
+    if (flags & CollapseDefaultReqs)
+      reconstituteInverses(genericSig, genericParamsAtDepth, inversesAtDepth);
 
     SmallVector<Requirement, 2> requirementsAtDepth;
     getRequirementsAtDepth(genericSig, depth, requirementsAtDepth);
@@ -3751,7 +3752,7 @@ static bool usesFeatureStructLetDestructuring(Decl *decl) {
   return false;
 }
 
-static bool usesFeatureNonEscapableTypes(Decl *decl) {
+static bool usesFeatureNonescapableTypes(Decl *decl) {
   if (decl->getAttrs().hasAttribute<NonEscapableAttr>() ||
       decl->getAttrs().hasAttribute<UnsafeNonEscapableResultAttr>()) {
     return true;
