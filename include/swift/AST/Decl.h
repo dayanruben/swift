@@ -5861,6 +5861,9 @@ enum class PropertyWrapperSynthesizedPropertyKind {
 class VarDecl : public AbstractStorageDecl {
   friend class NamingPatternRequest;
   NamedPattern *NamingPattern = nullptr;
+  /// When the variable is declared in context of a for-in loop over the elements of 
+  /// a parameter pack, this is the opened element environment of the pack expansion
+  /// to use as the variable's context generic environment.
   GenericEnvironment *OpenedElementEnvironment = nullptr;
 
 public:
@@ -6814,7 +6817,6 @@ class SubscriptDecl : public GenericContext, public AbstractStorageDecl {
 
   SourceLoc StaticLoc;
   SourceLoc ArrowLoc;
-  SourceLoc EndLoc;
   ParameterList *Indices;
   TypeLoc ElementTy;
 
@@ -6843,13 +6845,12 @@ public:
                                            Type ElementTy, DeclContext *Parent,
                                            GenericParamList *GenericParams);
 
-  static SubscriptDecl *create(ASTContext &Context, DeclName Name,
-                               SourceLoc StaticLoc,
-                               StaticSpellingKind StaticSpelling,
-                               SourceLoc SubscriptLoc, ParameterList *Indices,
-                               SourceLoc ArrowLoc, TypeRepr *ElementTyR,
-                               DeclContext *Parent,
-                               GenericParamList *GenericParams);
+  static SubscriptDecl *createParsed(ASTContext &Context, SourceLoc StaticLoc,
+                                     StaticSpellingKind StaticSpelling,
+                                     SourceLoc SubscriptLoc,
+                                     ParameterList *Indices, SourceLoc ArrowLoc,
+                                     TypeRepr *ElementTyR, DeclContext *Parent,
+                                     GenericParamList *GenericParams);
 
   static SubscriptDecl *create(ASTContext &Context, DeclName Name,
                                SourceLoc StaticLoc,
@@ -6874,13 +6875,7 @@ public:
   
   SourceLoc getStaticLoc() const { return StaticLoc; }
   SourceLoc getSubscriptLoc() const { return getNameLoc(); }
-  
-  SourceLoc getStartLoc() const {
-    return getStaticLoc().isValid() ? getStaticLoc() : getSubscriptLoc();
-  }
-  SourceLoc getEndLoc() const { return EndLoc; }
 
-  void setEndLoc(SourceLoc sl) { EndLoc = sl; }
   SourceRange getSourceRange() const;
   SourceRange getSignatureSourceRange() const;
 
@@ -7885,6 +7880,23 @@ public:
          SourceLoc asyncLoc, bool throws, SourceLoc throwsLoc,
          TypeLoc thrownType, ParameterList *parameterList, Type fnRetType,
          DeclContext *parent, ClangNode clangNode = ClangNode());
+
+  /// Create a parsed accessor.
+  ///
+  /// \param paramList A parameter list for e.g \c set(newValue), or \c nullptr
+  /// if the accessor doesn't have any user-specified arguments.
+  static AccessorDecl *createParsed(ASTContext &ctx, AccessorKind accessorKind,
+                                    AbstractStorageDecl *storage,
+                                    SourceLoc declLoc,
+                                    SourceLoc accessorKeywordLoc,
+                                    ParameterList *paramList,
+                                    SourceLoc asyncLoc, SourceLoc throwsLoc,
+                                    TypeRepr *thrownType, DeclContext *dc);
+
+  /// Retrieve the implicit parameter name for the given accessor kind (e.g
+  /// \c oldValue for `didSet`, `newValue` for `set`), or an empty string if
+  /// the kind does not have an implicit parameter name.
+  static StringRef implicitParameterNameFor(AccessorKind kind);
 
   SourceLoc getAccessorKeywordLoc() const { return AccessorKeywordLoc; }
 

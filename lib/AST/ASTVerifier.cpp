@@ -1703,7 +1703,7 @@ public:
             auto concreteLayout = concreteTy->getCanonicalType()
                                             ->getExistentialLayout();
             canBeClass = concreteLayout.getKind() == ExistentialLayout::Kind::Class
-              && !concreteLayout.containsNonObjCProtocol;
+              && !concreteLayout.containsSwiftProtocol;
           } else {
             canBeClass = false;
           }
@@ -2644,7 +2644,7 @@ public:
       }
 
       // Catch cases where there's a missing generic environment.
-      if (var->getTypeInContext()->is<ErrorType>()) {
+      if (var->getTypeInContext()->hasError()) {
         Out << "VarDecl is missing a Generic Environment: ";
         var->getInterfaceType().print(Out);
         Out << "\n";
