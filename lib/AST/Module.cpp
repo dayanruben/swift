@@ -1181,6 +1181,16 @@ ASTNode SourceFile::getMacroExpansion() const {
   return ASTNode::getFromOpaqueValue(genInfo.astNode);
 }
 
+SourceRange SourceFile::getMacroInsertionRange() const {
+  if (Kind != SourceFileKind::MacroExpansion)
+    return SourceRange();
+
+  auto generatedInfo =
+      *getASTContext().SourceMgr.getGeneratedSourceInfo(*getBufferID());
+  auto origRange = generatedInfo.originalSourceRange;
+  return {origRange.getStart(), origRange.getEnd()};
+}
+
 CustomAttr *SourceFile::getAttachedMacroAttribute() const {
   if (Kind != SourceFileKind::MacroExpansion)
     return nullptr;
@@ -2706,14 +2716,6 @@ const clang::Module *ModuleDecl::findUnderlyingClangModule() const {
   return nullptr;
 }
 
-bool ModuleDecl::isExportedAs(const ModuleDecl *other) const {
-  auto clangModule = findUnderlyingClangModule();
-  if (!clangModule)
-    return false;
-
-  return other->getRealName().str() == clangModule->ExportAsModule;
-}
-
 void ModuleDecl::collectBasicSourceFileInfo(
     llvm::function_ref<void(const BasicSourceFileInfo &)> callback) const {
   for (const FileUnit *fileUnit : getFiles()) {
@@ -3509,8 +3511,8 @@ void SourceFile::lookupImportedSPIGroups(
   for (auto &import : *Imports) {
     if (import.options.contains(ImportFlags::SPIAccessControl) &&
         (importedModule == import.module.importedModule ||
-         (imports.isImportedBy(importedModule, import.module.importedModule) &&
-          importedModule->isExportedAs(import.module.importedModule)))) {
+         imports.isImportedByViaSwiftOnly(importedModule,
+                                       import.module.importedModule))) {
       spiGroups.insert(import.spiGroups.begin(), import.spiGroups.end());
     }
   }
