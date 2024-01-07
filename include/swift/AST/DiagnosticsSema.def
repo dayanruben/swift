@@ -2851,7 +2851,6 @@ WARNING(assoc_type_default_conformance_failed,none,
 NOTE(assoc_type_default_here,none,
      "associated type %0 has default type %1 written here",
      (const AssociatedTypeDecl *, Type))
-
 ERROR(protocol_access,none,
       "%select{protocol must be declared %select{"
       "%select{private|fileprivate|internal|package|%error|%error}1"
@@ -5238,9 +5237,6 @@ WARNING(no_throw_in_try,none,
 WARNING(no_throw_in_do_with_catch,none,
         "'catch' block is unreachable because no errors are thrown in 'do' block", ())
 
-ERROR(experimental_typed_throws,none,
-      "typed throws is an experimental feature", ())
-
 ERROR(thrown_type_not_error,none,
       "thrown type %0 does not conform to the 'Error' protocol", (Type))
 
@@ -5522,18 +5518,18 @@ ERROR(distributed_actor_remote_func_must_not_be_distributed,none,
 NOTE(actor_mutable_state,none,
      "mutation of this %0 is only permitted within the actor",
      (DescriptiveDeclKind))
-WARNING(shared_mutable_state_access,none,
-        "reference to %kind0 is not concurrency-safe because it involves "
-        "shared mutable state", (const ValueDecl *))
-WARNING(shared_mutable_state_decl,none,
-        "%kind0 is not concurrency-safe because it is non-isolated global "
-        "shared mutable state", (const ValueDecl *))
+ERROR(shared_mutable_state_access,none,
+      "reference to %kind0 is not concurrency-safe because it involves shared "
+      "mutable state", (const ValueDecl *))
+ERROR(shared_mutable_state_decl,none,
+      "%kind0 is not concurrency-safe because it is non-isolated global shared "
+      "mutable state", (const ValueDecl *))
 NOTE(shared_mutable_state_decl_note,none,
      "isolate %0 to a global actor, or convert it to a 'let' constant and "
      "conform it to 'Sendable'", (const ValueDecl *))
-WARNING(shared_immutable_state_decl,none,
-        "%kind0 is not concurrency-safe because it is not either conforming to "
-        "'Sendable' or isolated to a global actor", (const ValueDecl *))
+ERROR(shared_immutable_state_decl,none,
+      "%kind0 is not concurrency-safe because it is not either conforming to "
+      "'Sendable' or isolated to a global actor", (const ValueDecl *))
 ERROR(actor_isolated_witness,none,
      "%select{|distributed }0%1 %kind2 cannot be used to satisfy %3 protocol "
      "requirement",
@@ -6717,10 +6713,6 @@ ERROR(conformance_availability_only_version_newer, none,
       "conformance of %0 to %1 is only available in %2 %3 or newer",
       (Type, Type, StringRef, llvm::VersionTuple))
 
-WARNING(conformance_availability_only_version_newer_warn, none,
-        "conformance of %0 to %1 is only available in %2 %3 or newer",
-        (Type, Type, StringRef, llvm::VersionTuple))
-
 //------------------------------------------------------------------------------
 // MARK: @discardableResult
 //------------------------------------------------------------------------------
@@ -6843,6 +6835,10 @@ ERROR(inlinable_decl_not_public,
 
 ERROR(inlinable_resilient_deinit,
       none, "deinitializer can only be '@inlinable' if the class is '@_fixed_layout'", ())
+
+ERROR(resilient_associated_type_less_available_requires_default,none,
+      "associated type %0 that is less available than its protocol must have a "
+      "default", (const AssociatedTypeDecl *))
 
 //------------------------------------------------------------------------------
 // MARK: @_specialize diagnostics

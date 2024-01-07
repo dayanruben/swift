@@ -82,7 +82,7 @@ ExpressionTimer::~ExpressionTimer() {
 
   if (PrintDebugTiming) {
     // Round up to the nearest 100th of a millisecond.
-    llvm::errs() << llvm::format("%0.2f", ceil(elapsed * 100000) / 100)
+    llvm::errs() << llvm::format("%0.2f", std::ceil(elapsed * 100000) / 100)
                  << "ms\t";
     if (auto *E = Anchor.dyn_cast<Expr *>()) {
       E->getLoc().print(llvm::errs(), Context.SourceMgr);
@@ -374,7 +374,7 @@ void ConstraintSystem::recordPotentialThrowSite(
   ASTContext &ctx = getASTContext();
 
   // Only record potential throw sites when typed throws is enabled.
-  if (!ctx.LangOpts.hasFeature(Feature::TypedThrows))
+  if (!ctx.LangOpts.hasFeature(Feature::FullTypedThrows))
     return;
 
   // Catch node location is determined by the source location.
@@ -431,6 +431,9 @@ Type ConstraintSystem::getCaughtErrorType(CatchNode catchNode) {
   if (auto closure = catchNode.dyn_cast<ClosureExpr *>()) {
     return getClosureType(closure)->getEffectiveThrownErrorTypeOrNever();
   }
+
+  if (!ctx.LangOpts.hasFeature(Feature::FullTypedThrows))
+    return ctx.getErrorExistentialType();
 
   // Handle inference of caught error types.
 

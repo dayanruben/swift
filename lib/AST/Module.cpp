@@ -1444,7 +1444,8 @@ void SourceFile::getPrecedenceGroups(
 }
 
 void SourceFile::getLocalTypeDecls(SmallVectorImpl<TypeDecl*> &Results) const {
-  Results.append(LocalTypeDecls.begin(), LocalTypeDecls.end());
+  auto decls = getLocalTypeDecls();
+  Results.append(decls.begin(), decls.end());
 }
 
 void
@@ -1456,7 +1457,7 @@ const {
 
 TypeDecl *SourceFile::lookupLocalType(llvm::StringRef mangledName) const {
   ASTContext &ctx = getASTContext();
-  for (auto typeDecl : LocalTypeDecls) {
+  for (auto typeDecl : getLocalTypeDecls()) {
     auto typeMangledName = evaluateOrDefault(ctx.evaluator,
                                              MangleLocalTypeDeclRequest { typeDecl },
                                              std::string());
@@ -3192,8 +3193,8 @@ void SourceFile::setImportUsedPreconcurrency(
 
 AccessLevel
 SourceFile::getMaxAccessLevelUsingImport(
-    AttributedImport<ImportedModule> import) const {
-  auto known = ImportsUseAccessLevel.find(import);
+    const ModuleDecl *mod) const {
+  auto known = ImportsUseAccessLevel.find(mod);
   if (known == ImportsUseAccessLevel.end())
     return AccessLevel::Internal;
   return known->second;
@@ -3202,11 +3203,12 @@ SourceFile::getMaxAccessLevelUsingImport(
 void SourceFile::registerAccessLevelUsingImport(
     AttributedImport<ImportedModule> import,
     AccessLevel accessLevel) {
-  auto known = ImportsUseAccessLevel.find(import);
+  auto mod = import.module.importedModule;
+  auto known = ImportsUseAccessLevel.find(mod);
   if (known == ImportsUseAccessLevel.end())
-    ImportsUseAccessLevel[import] = accessLevel;
+    ImportsUseAccessLevel[mod] = accessLevel;
   else
-    ImportsUseAccessLevel[import] = std::max(accessLevel, known->second);
+    ImportsUseAccessLevel[mod] = std::max(accessLevel, known->second);
 }
 
 bool HasImportsMatchingFlagRequest::evaluate(Evaluator &evaluator,
@@ -4242,6 +4244,50 @@ ASTNode GetSourceFileAsyncNode::evaluate(Evaluator &eval,
     }
   }
   return ASTNode();
+}
+
+ArrayRef<TypeDecl *> SourceFile::getLocalTypeDecls() const {
+  auto *mutableThis = const_cast<SourceFile *>(this);
+  return evaluateOrDefault(getASTContext().evaluator,
+                           LocalTypeDeclsRequest{mutableThis}, {});
+}
+
+namespace {
+class LocalTypeDeclCollector : public ASTWalker {
+  SmallVectorImpl<TypeDecl *> &results;
+
+public:
+  LocalTypeDeclCollector(SmallVectorImpl<TypeDecl *> &results)
+      : results(results) {}
+
+  MacroWalking getMacroWalkingBehavior() const override {
+    return MacroWalking::Expansion;
+  }
+
+  PreWalkAction walkToDeclPre(Decl *D) override {
+    switch (D->getKind()) {
+    case DeclKind::Enum:
+    case DeclKind::Struct:
+    case DeclKind::Class:
+    case DeclKind::Protocol:
+    case DeclKind::TypeAlias:
+      if (D->getDeclContext()->isLocalContext())
+        results.push_back(cast<TypeDecl>(D));
+      break;
+    default:
+      break;
+    }
+    return PreWalkAction::Continue;
+  }
+};
+} // namespace
+
+ArrayRef<TypeDecl *> LocalTypeDeclsRequest::evaluate(Evaluator &evaluator,
+                                                     SourceFile *sf) const {
+  SmallVector<TypeDecl *> results;
+  LocalTypeDeclCollector collector(results);
+  sf->walk(collector);
+  return sf->getASTContext().AllocateCopy(results);
 }
 
 //===----------------------------------------------------------------------===//

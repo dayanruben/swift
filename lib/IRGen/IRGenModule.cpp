@@ -787,20 +787,6 @@ namespace RuntimeConstants {
   const auto FirstParamReturned = llvm::Attribute::Returned;
   const auto WillReturn = llvm::Attribute::WillReturn;
 
-#ifdef CHECK_RUNTIME_EFFECT_ANALYSIS
-  const auto NoEffect = RuntimeEffect::NoEffect;
-  const auto Locking = RuntimeEffect::Locking;
-  const auto Allocating = RuntimeEffect::Allocating;
-  const auto Deallocating = RuntimeEffect::Deallocating;
-  const auto RefCounting = RuntimeEffect::RefCounting;
-  const auto ObjectiveC = RuntimeEffect::ObjectiveC;
-  const auto Concurrency = RuntimeEffect::Concurrency;
-  const auto AutoDiff = RuntimeEffect::AutoDiff;
-  const auto MetaData = RuntimeEffect::MetaData;
-  const auto Casting = RuntimeEffect::Casting;
-  const auto ExclusivityChecking = RuntimeEffect::ExclusivityChecking;
-#endif
-
   RuntimeAvailability AlwaysAvailable(ASTContext &Context) {
     return RuntimeAvailability::AlwaysAvailable;
   }
@@ -2046,8 +2032,23 @@ bool IRGenModule::canMakeStaticObjectsReadOnly() {
   if (!Triple.isOSDarwin())
     return false;
 
-  return getAvailabilityContext().isContainedIn(
-          Context.getStaticReadOnlyArraysAvailability());
+  if (!getAvailabilityContext().isContainedIn(Context.getStaticReadOnlyArraysAvailability()))
+    return false;
+
+  if (!getStaticArrayStorageDecl())
+    return false;
+
+  return true;
+}
+
+ClassDecl *IRGenModule::getStaticArrayStorageDecl() {
+  SmallVector<ValueDecl *, 1> results;
+  Context.lookupInSwiftModule("__StaticArrayStorage", results);
+
+  if (results.size() != 1)
+    return nullptr;
+
+  return dyn_cast<ClassDecl>(results[0]);
 }
 
 void IRGenerator::addGenModule(SourceFile *SF, IRGenModule *IGM) {
