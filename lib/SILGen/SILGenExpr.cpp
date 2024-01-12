@@ -2647,24 +2647,8 @@ SILGenFunction::emitApplyOfDefaultArgGenerator(SILLocation loc,
   emitCaptures(loc, generator, CaptureEmission::ImmediateApplication,
                captures);
 
-  // The default argument might require the callee's isolation. If so,
-  // make sure to emit an actor hop.
-  //
-  // FIXME: Instead of hopping back and forth for each individual isolated
-  // default argument, we should emit one hop for all default arguments if
-  // any of them are isolated, and immediately enter the function after.
-  llvm::Optional<ActorIsolation> implicitActorHopTarget = llvm::None;
-  if (implicitlyAsync) {
-    auto *param = getParameterAt(defaultArgsOwner.getDecl(), destIndex);
-    auto isolation = param->getInitializerIsolation();
-    if (isolation.isActorIsolated()) {
-      implicitActorHopTarget = isolation;
-    }
-  }
-
   return emitApply(std::move(resultPtr), std::move(argScope), loc, fnRef, subs,
-                   captures, calleeTypeInfo, ApplyOptions(), C,
-                   implicitActorHopTarget);
+                   captures, calleeTypeInfo, ApplyOptions(), C, llvm::None);
 }
 
 RValue SILGenFunction::emitApplyOfStoredPropertyInitializer(
@@ -4344,14 +4328,14 @@ visitMagicIdentifierLiteralExpr(MagicIdentifierLiteralExpr *E, SGFContext C) {
             SILGlobalVariable::create(M, SILLinkage::DefaultForDeclaration,
                                       IsNotSerialized, "__ImageBase",
                                       BuiltinRawPtrTy);
-      ModuleBase = B.createGlobalAddr(SILLoc, ImageBase);
+      ModuleBase = B.createGlobalAddr(SILLoc, ImageBase, /*dependencyToken=*/ SILValue());
     } else {
       auto DSOHandle = M.lookUpGlobalVariable("__dso_handle");
       if (!DSOHandle)
         DSOHandle = SILGlobalVariable::create(M, SILLinkage::PublicExternal,
                                               IsNotSerialized, "__dso_handle",
                                               BuiltinRawPtrTy);
-      ModuleBase = B.createGlobalAddr(SILLoc, DSOHandle);
+      ModuleBase = B.createGlobalAddr(SILLoc, DSOHandle, /*dependencyToken=*/ SILValue());
     }
 
     auto ModuleBasePointer =

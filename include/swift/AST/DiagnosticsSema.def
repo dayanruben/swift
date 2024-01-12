@@ -388,6 +388,9 @@ ERROR(cannot_convert_argument_value_for_swift_func,none,
 NOTE(candidate_has_invalid_argument_at_position,none,
      "candidate expects %select{|in-out }2value of type %0 for parameter #%1 (got %3)",
      (Type, unsigned, bool, Type))
+NOTE(candidate_has_invalid_closure_at_position,none,
+     "closure passed to parameter of type %0 that does not "
+     "accept a closure", (Type))
 
 ERROR(cannot_convert_array_to_variadic,none,
       "cannot pass array of type %0 as variadic arguments of type %1",
@@ -1285,8 +1288,8 @@ ERROR(single_value_stmt_branch_must_end_in_result,none,
 ERROR(cannot_jump_in_single_value_stmt,none,
       "cannot '%0' in '%1' when used as expression",
       (StmtKind, StmtKind))
-ERROR(effect_marker_on_single_value_stmt,none,
-      "'%0' may not be used on '%1' expression", (StringRef, StmtKind))
+WARNING(effect_marker_on_single_value_stmt,none,
+      "'%0' has no effect on '%1' expression", (StringRef, StmtKind))
 ERROR(out_of_place_then_stmt,none,
       "'then' may only appear as the last statement in an 'if', 'switch', or "
       "'do' expression", ())
@@ -1547,9 +1550,9 @@ ERROR(extra_argument_to_nullary_call,none,
 ERROR(extra_trailing_closure_in_call,none,
       "extra trailing closure passed in "
       "%select{call|subscript|macro expansion}0", (unsigned))
-ERROR(trailing_closure_bad_param,none,
-      "trailing closure passed to parameter of type %0 that does not "
-      "accept a closure", (Type))
+ERROR(closure_bad_param,none,
+      "%select{|trailing }1closure passed to parameter of type %0 that does not "
+      "accept a closure", (Type, bool))
 WARNING(unlabeled_trailing_closure_deprecated,Deprecation,
         "backward matching of the unlabeled trailing closure is deprecated; label the argument with %0 to suppress this warning",
         (Identifier))
@@ -7582,6 +7585,10 @@ WARNING(redundant_inverse_constraint,none,
 ERROR(inverse_on_class, none,
       "classes cannot be '~%0'",
       (StringRef))
+ERROR(inverse_with_class_constraint, none,
+      "composition involving %select{class requirement %2|'AnyObject'}0 "
+      "cannot contain '~%1'",
+      (bool, StringRef, Type))
 ERROR(inverse_extension, none,
       "cannot apply inverse %0 to extension",
       (Type))

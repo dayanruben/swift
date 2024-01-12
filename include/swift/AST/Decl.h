@@ -792,10 +792,6 @@ protected:
     NumberOfVTableEntries : 2
   );
 
-  SWIFT_INLINE_BITFIELD(MacroExpansionDecl, Decl, 16,
-    Discriminator : 16
-  );
-
   } Bits;
   // Turn back on clang-format now that we have defined our inline bitfields.
   // clang-format on
@@ -5171,6 +5167,10 @@ public:
   /// Determine whether this protocol inherits from the given ("super")
   /// protocol.
   bool inheritsFrom(const ProtocolDecl *Super) const;
+
+  /// Determine whether this protocol requires conformance to `IP`, without
+  /// querying a generic signature.
+  bool requiresInvertible(InvertibleProtocolKind ip) const;
   
   SourceLoc getStartLoc() const { return ProtocolLoc; }
   SourceRange getSourceRange() const {
@@ -5216,9 +5216,9 @@ public:
   /// semantics but has no corresponding witness table.
   bool isMarkerProtocol() const;
 
-  /// Determine whether this is an invertible protocol,
-  /// i.e., for a protocol P, the inverse constraint ~P exists.
-  bool isInvertibleProtocol() const;
+  /// Determine if this is an invertible protocol and return its kind,
+  /// i.e., for a protocol P, returns the kind if inverse constraint ~P exists.
+  llvm::Optional<InvertibleProtocolKind> getInvertibleProtocolKind() const;
 
 private:
   void computeKnownProtocolKind() const;
@@ -9004,8 +9004,6 @@ public:
 class MacroExpansionDecl : public Decl, public FreestandingMacroExpansion {
 
 public:
-  enum : unsigned { InvalidDiscriminator = 0xFFFF };
-
   MacroExpansionDecl(DeclContext *dc, MacroExpansionInfo *info);
 
   static MacroExpansionDecl *create(DeclContext *dc, SourceLoc poundLoc,
@@ -9024,24 +9022,6 @@ public:
 
   /// Enumerate the nodes produced by expanding this macro expansion.
   void forEachExpandedNode(llvm::function_ref<void(ASTNode)> callback) const;
-
-  /// Returns a discriminator which determines this macro expansion's index
-  /// in the sequence of macro expansions within the current function.
-  unsigned getDiscriminator() const;
-
-  /// Retrieve the raw discriminator, which may not have been computed yet.
-  ///
-  /// Only use this for queries that are checking for (e.g.) reentrancy or
-  /// intentionally do not want to initiate verification.
-  unsigned getRawDiscriminator() const {
-    return Bits.MacroExpansionDecl.Discriminator;
-  }
-
-  void setDiscriminator(unsigned discriminator) {
-    assert(getRawDiscriminator() == InvalidDiscriminator);
-    assert(discriminator != InvalidDiscriminator);
-    Bits.MacroExpansionDecl.Discriminator = discriminator;
-  }
 
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::MacroExpansion;

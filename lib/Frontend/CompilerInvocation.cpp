@@ -880,6 +880,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   if (Opts.hasFeature(Feature::CompleteConcurrency)) {
     Opts.StrictConcurrencyLevel = StrictConcurrency::Complete;
     Opts.enableFeature(Feature::DisableOutwardActorInference);
+    Opts.enableFeature(Feature::IsolatedDefaultValues);
     Opts.enableFeature(Feature::GlobalConcurrency);
   }
 
@@ -919,6 +920,14 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableSwift3ObjCInference =
     Args.hasFlag(OPT_enable_swift3_objc_inference,
                  OPT_disable_swift3_objc_inference, false);
+
+  if (Args.hasArg(OPT_enable_swift3_objc_inference))
+    Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
+                   "-enable-swift3-objc-inference");
+
+  if (Args.hasArg(OPT_disable_swift3_objc_inference))
+    Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
+                   "-disable-swift3-objc-inference");
 
   if (const Arg *A = Args.getLastArg(OPT_library_level)) {
     StringRef contents = A->getValue();
@@ -983,6 +992,14 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     }
   }
 
+  if (Args.hasArg(OPT_warn_swift3_objc_inference_minimal))
+    Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
+                   "-warn-swift3-objc-inference-minimal");
+
+  if (Args.hasArg(OPT_warn_swift3_objc_inference_complete))
+    Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
+                   "-warn-swift3-objc-inference-complete");
+
   // Swift 6+ uses the strictest concurrency level.
   if (Opts.isSwiftVersionAtLeast(6)) {
     Opts.StrictConcurrencyLevel = StrictConcurrency::Complete;
@@ -1001,6 +1018,11 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   } else {
     // Default to minimal checking in Swift 5.x.
     Opts.StrictConcurrencyLevel = StrictConcurrency::Minimal;
+  }
+
+  // StrictConcurrency::Complete enables all data-race safety features.
+  if (Opts.StrictConcurrencyLevel == StrictConcurrency::Complete) {
+    Opts.enableFeature(Feature::IsolatedDefaultValues);
   }
 
   Opts.WarnImplicitOverrides =

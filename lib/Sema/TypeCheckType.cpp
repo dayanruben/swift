@@ -4485,6 +4485,14 @@ TypeResolver::resolveIsolatedTypeRepr(IsolatedTypeRepr *repr,
 
   // isolated parameters must be of actor type
   if (!type->hasTypeParameter() && !type->isActorType() && !type->hasError()) {
+    // Optional actor types are fine - `nil` represents `nonisolated`.
+    auto wrapped = type->getOptionalObjectType();
+    auto allowOptional = getASTContext().LangOpts
+        .hasFeature(Feature::OptionalIsolatedParameters);
+    if (allowOptional && wrapped && wrapped->isActorType()) {
+      return type;
+    }
+
     diagnoseInvalid(
         repr, repr->getSpecifierLoc(), diag::isolated_parameter_not_actor, type);
     return ErrorType::get(type);
@@ -4985,6 +4993,7 @@ TypeResolver::resolveCompositionType(CompositionTypeRepr *repr,
   Type SuperclassType;
   SmallVector<Type, 4> Members;
   InvertibleProtocolSet Inverses;
+  bool HasAnyObject = false;
 
   // Whether we saw at least one protocol. A protocol composition
   // must either be empty (in which case it is Any or AnyObject),
@@ -5042,6 +5051,8 @@ TypeResolver::resolveCompositionType(CompositionTypeRepr *repr,
             continue;
         if (!layout.getProtocols().empty())
           HasProtocol = true;
+        if (layout.hasExplicitAnyObject)
+          HasAnyObject = true;
 
         Inverses.insertAll(pct->getInverses());
         Members.push_back(ty);
@@ -5055,6 +5066,17 @@ TypeResolver::resolveCompositionType(CompositionTypeRepr *repr,
 
     IsInvalid = true;
   }
+
+  // Cannot combine inverses with Superclass or AnyObject in a composition.
+  if ((SuperclassType || HasAnyObject) && !Inverses.empty()) {
+    diagnose(repr->getStartLoc(),
+             diag::inverse_with_class_constraint,
+             HasAnyObject,
+             getProtocolName(getKnownProtocolKind(*Inverses.begin())),
+             SuperclassType);
+    IsInvalid = true;
+  }
+
 
   if (IsInvalid) {
     repr->setInvalid();

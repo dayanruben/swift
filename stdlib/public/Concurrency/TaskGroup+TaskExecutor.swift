@@ -223,7 +223,7 @@ extension DiscardingTaskGroup {
     priority: TaskPriority? = nil,
     operation: __owned @Sendable @escaping () async throws -> Void
   ) {
-    #if $BuiltinCreateAsyncTaskInGroupWithExecutor
+    #if $BuiltinCreateAsyncDiscardingTaskInGroupWithExecutor
     let flags = taskCreateFlags(
       priority: priority, isChildTask: true, copyTaskLocals: false,
       inheritContext: false, enqueueJob: true,
@@ -238,7 +238,7 @@ extension DiscardingTaskGroup {
       }
 
     // Create the task in this group with an executor preference.
-    _ = Builtin.createAsyncTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
+    _ = Builtin.createAsyncDiscardingTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
     #else
     fatalError("Unsupported Swift compiler")
     #endif
@@ -265,7 +265,7 @@ extension DiscardingTaskGroup {
     priority: TaskPriority? = nil,
     operation: __owned @Sendable @escaping () async -> Void
   ) -> Bool {
-    #if $BuiltinCreateAsyncTaskInGroupWithExecutor
+    #if $BuiltinCreateAsyncDiscardingTaskInGroupWithExecutor
     let canAdd = _taskGroupAddPendingTask(group: _group, unconditionally: false)
 
     guard canAdd else {
@@ -286,7 +286,7 @@ extension DiscardingTaskGroup {
     }
 
     // Create the task in this group with an executor preference.
-    _ = Builtin.createAsyncTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
+    _ = Builtin.createAsyncDiscardingTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
     return true
     #else
     fatalError("Unsupported Swift compiler")
@@ -317,7 +317,7 @@ extension ThrowingDiscardingTaskGroup {
     priority: TaskPriority? = nil,
     operation: __owned @Sendable @escaping () async throws -> Void
   ) {
-    #if $BuiltinCreateAsyncTaskInGroupWithExecutor
+    #if $BuiltinCreateAsyncDiscardingTaskInGroupWithExecutor
     let flags = taskCreateFlags(
       priority: priority, isChildTask: true, copyTaskLocals: false,
       inheritContext: false, enqueueJob: true,
@@ -332,7 +332,7 @@ extension ThrowingDiscardingTaskGroup {
     }
 
     // Create the task in this group with an executor preference.
-    _ = Builtin.createAsyncTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
+    _ = Builtin.createAsyncDiscardingTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
     #else
     fatalError("Unsupported Swift compiler")
     #endif
@@ -359,7 +359,7 @@ extension ThrowingDiscardingTaskGroup {
     priority: TaskPriority? = nil,
     operation: __owned @Sendable @escaping () async throws -> Void
   ) -> Bool {
-    #if $BuiltinCreateAsyncTaskInGroupWithExecutor
+    #if $BuiltinCreateAsyncDiscardingTaskInGroupWithExecutor
     let canAdd = _taskGroupAddPendingTask(group: _group, unconditionally: false)
 
     guard canAdd else {
@@ -380,7 +380,7 @@ extension ThrowingDiscardingTaskGroup {
     }
 
     // Create the task in this group with an executor preference.
-    _ = Builtin.createAsyncTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
+    _ = Builtin.createAsyncDiscardingTaskInGroupWithExecutor(flags, _group, executorBuiltin, operation)
     return true
     #else
     fatalError("Unsupported Swift compiler")

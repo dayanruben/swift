@@ -119,8 +119,8 @@ public class Instruction : CustomStringConvertible, Hashable {
     return bridged.mayLoadWeakOrUnowned()
   }
 
-  public final var maySynchronizeNotConsideringSideEffects: Bool {
-    return bridged.maySynchronizeNotConsideringSideEffects()
+  public final var maySynchronize: Bool {
+    return bridged.maySynchronize()
   }
 
   public final var mayBeDeinitBarrierNotConsideringSideEffects: Bool {
@@ -649,6 +649,10 @@ final public class PreviousDynamicFunctionRefInst : FunctionRefBaseInst {
 final public class GlobalAddrInst : GlobalAccessInst, VarDeclInstruction {
   public var varDecl: VarDecl? {
     VarDecl(bridged: bridged.GlobalAddr_getDecl())
+  }
+
+  public var dependencyToken: Value? {
+    operands.count == 1 ? operands[0].value : nil
   }
 }
 

@@ -73,8 +73,6 @@
 
 using namespace swift;
 
-#pragma clang optimize off
-
 // Defined here to avoid repeatedly paying the price of template instantiation.
 const std::function<bool(const ExtensionDecl *)>
     PrintOptions::defaultPrintExtensionContentAsMembers
@@ -1471,6 +1469,10 @@ static void reconstituteInverses(GenericSignature genericSig,
 
   for (auto tp : typeParams) {
     assert(tp);
+
+    // Any generic parameter with a superclass bound could not have an inverse.
+    if (genericSig->getSuperclassBound(tp))
+      continue;
 
     auto defaults = InverseRequirement::expandDefault(tp);
     for (auto ip : defaults) {
@@ -3286,7 +3288,16 @@ static bool usesFeatureBuiltinCreateAsyncTaskInGroupWithExecutor(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureBuiltinCreateAsyncDiscardingTaskInGroup(Decl *decl) {
+  return false;
+}
+
 static bool usesFeatureBuiltinCreateAsyncTaskWithExecutor(Decl *decl) {
+  return false;
+}
+
+static bool
+usesFeatureBuiltinCreateAsyncDiscardingTaskInGroupWithExecutor(Decl *decl) {
   return false;
 }
 
@@ -3829,6 +3840,25 @@ static bool usesFeatureInferSendableFromCaptures(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureOptionalIsolatedParameters(Decl *decl) {
+  auto *value = dyn_cast<ValueDecl>(decl);
+  if (!value)
+    return false;
+
+  auto *paramList = getParameterList(value);
+  if (!paramList)
+    return false;
+
+  for (auto param : *paramList) {
+    if (param->isIsolated()) {
+      auto paramType = param->getInterfaceType();
+      return !paramType->getOptionalObjectType().isNull();
+    }
+  }
+
+  return false;
+}
+
 static bool usesFeaturePlaygroundExtendedCallbacks(Decl *decl) {
   return false;
 }
@@ -3858,6 +3888,14 @@ static bool usesFeatureTypedThrows(Decl *decl) {
 
 static bool usesFeatureExtern(Decl *decl) {
   return decl->getAttrs().hasAttribute<ExternAttr>();
+}
+
+static void suppressingFeatureExtern(PrintOptions &options,
+                                     llvm::function_ref<void()> action) {
+  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
+  options.ExcludeAttrList.push_back(DAK_Extern);
+  action();
+  options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
 
 static bool usesFeatureStaticExclusiveOnly(Decl *decl) {

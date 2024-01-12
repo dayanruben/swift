@@ -107,7 +107,6 @@ SHOULD_NEVER_VISIT_INST(FunctionRef)
 SHOULD_NEVER_VISIT_INST(DebugStep)
 SHOULD_NEVER_VISIT_INST(DynamicFunctionRef)
 SHOULD_NEVER_VISIT_INST(PreviousDynamicFunctionRef)
-SHOULD_NEVER_VISIT_INST(GlobalAddr)
 SHOULD_NEVER_VISIT_INST(GlobalValue)
 SHOULD_NEVER_VISIT_INST(BaseAddrForOffset)
 SHOULD_NEVER_VISIT_INST(HasSymbol)
@@ -207,6 +206,7 @@ OPERAND_OWNERSHIP(TrivialUse, PackPackIndex)
 OPERAND_OWNERSHIP(TrivialUse, PackElementGet)
 OPERAND_OWNERSHIP(TrivialUse, PackElementSet)
 OPERAND_OWNERSHIP(TrivialUse, TuplePackElementAddr)
+OPERAND_OWNERSHIP(TrivialUse, GlobalAddr)
 
 // The dealloc_stack_ref operand needs to have NonUse ownership because
 // this use comes after the last consuming use (which is usually a dealloc_ref).
@@ -912,8 +912,10 @@ OperandOwnershipBuiltinClassifier
 
 const int PARAMETER_INDEX_CREATE_ASYNC_TASK_FUTURE_FUNCTION = 2;
 const int PARAMETER_INDEX_CREATE_ASYNC_TASK_GROUP_FUTURE_FUNCTION = 3;
+const int PARAMETER_INDEX_CREATE_ASYNC_DISCARDING_TASK_GROUP_FUTURE_FUNCTION = 3;
 const int PARAMETER_INDEX_CREATE_ASYNC_TASK_WITH_EXECUTOR_FUNCTION = 3;
 const int PARAMETER_INDEX_CREATE_ASYNC_TASK_GROUP_WITH_EXECUTOR_FUNCTION = 4;
+const int PARAMETER_INDEX_CREATE_ASYNC_DISCARDING_TASK_GROUP_WITH_EXECUTOR_FUNCTION = 4;
 
 OperandOwnership OperandOwnershipBuiltinClassifier::visitCreateAsyncTask(
     BuiltinInst *bi, StringRef attr, int paramIndex) {
@@ -939,6 +941,14 @@ OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskInGroup(BuiltinInst *bi,
 }
 
 OperandOwnership
+OperandOwnershipBuiltinClassifier::visitCreateAsyncDiscardingTaskInGroup(
+    BuiltinInst *bi, StringRef attr) {
+  return visitCreateAsyncTask(
+      bi, attr,
+      PARAMETER_INDEX_CREATE_ASYNC_DISCARDING_TASK_GROUP_FUTURE_FUNCTION);
+}
+
+OperandOwnership
 OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskWithExecutor(
     BuiltinInst *bi, StringRef attr) {
   return visitCreateAsyncTask(
@@ -950,6 +960,13 @@ OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskInGroupWithExecutor(
     BuiltinInst *bi, StringRef attr) {
   return visitCreateAsyncTask(
       bi, attr, PARAMETER_INDEX_CREATE_ASYNC_TASK_GROUP_WITH_EXECUTOR_FUNCTION);
+}
+
+OperandOwnership
+OperandOwnershipBuiltinClassifier::visitCreateAsyncDiscardingTaskInGroupWithExecutor(
+    BuiltinInst *bi, StringRef attr) {
+  return visitCreateAsyncTask(
+      bi, attr, PARAMETER_INDEX_CREATE_ASYNC_DISCARDING_TASK_GROUP_WITH_EXECUTOR_FUNCTION);
 }
 
 OperandOwnership OperandOwnershipBuiltinClassifier::
