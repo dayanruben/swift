@@ -3027,7 +3027,12 @@ void TypeConverter::verifyTrivialLowering(const TypeLowering &lowering,
   if (!bitwiseCopyableProtocol)
     return;
 
-  auto conformance = M.conformsToProtocol(substType, bitwiseCopyableProtocol);
+  // We can't check conditional requirements in this case. Why are we seeing
+  // interface types here at all?
+  if (substType->hasTypeParameter())
+    return;
+
+  auto conformance = M.checkConformance(substType, bitwiseCopyableProtocol);
 
   if (lowering.isTrivial() && !conformance) {
     // A trivial type can only lack a conformance if one of its leaves is a
@@ -3063,7 +3068,7 @@ void TypeConverter::verifyTrivialLowering(const TypeLowering &lowering,
 
           // A BitwiseCopyable conformer appearing within its layout doesn't
           // explain why substType doesn't itself conform.
-          if (M.conformsToProtocol(ty, bitwiseCopyableProtocol))
+          if (M.checkConformance(ty, bitwiseCopyableProtocol))
             return true;
 
           // ModuleTypes are trivial but don't warrant being given a conformance
@@ -3143,7 +3148,7 @@ void TypeConverter::verifyTrivialLowering(const TypeLowering &lowering,
 
           // Unfortunately, the type parameter's conformance may not be visible
           // here.
-          assert(M.conformsToProtocol(ty, bitwiseCopyableProtocol) &&
+          assert(M.checkConformance(ty, bitwiseCopyableProtocol) &&
                  "leaf of non-trivial BitwiseCopyable type that doesn't "
                  "conform to BitwiseCopyable!?");
 

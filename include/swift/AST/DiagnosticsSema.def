@@ -1274,8 +1274,7 @@ ERROR(single_value_stmt_branch_empty,none,
       "expected expression in branch of '%0' expression",
       (StmtKind))
 ERROR(single_value_stmt_branch_must_end_in_result,none,
-      "non-expression branch of '%0' expression may only end with a 'throw' "
-      "or 'then'",
+      "non-expression branch of '%0' expression may only end with a 'throw'",
       (StmtKind))
 ERROR(cannot_jump_in_single_value_stmt,none,
       "cannot '%0' in '%1' when used as expression",
@@ -4284,6 +4283,11 @@ ERROR(no_member_of_module,none,
 
 ERROR(super_with_no_base_class,none,
       "'super' members cannot be referenced in a root class", ())
+ERROR(unqualified_init,none,
+      "initializer expression requires explicit access"
+      "%select{|; did you mean to prepend it with|; did you mean to prepend "
+      "it with}0%select{| 'self.'?| 'super.'?}0",
+      (unsigned))
 
 ERROR(bad_init_ref_base, none,
       "'init' can only refer to the initializers of "
@@ -5552,6 +5556,8 @@ ERROR(isolated_parameter_global_actor_type,none,
 ERROR(isolated_parameter_combined_nonisolated,none,
       "%0 with 'isolated' parameter cannot be 'nonisolated'",
       (DescriptiveDeclKind))
+ERROR(isolation_macro_experimental,none,
+      "#isolation macro is experimental", ())
 
 NOTE(in_derived_conformance, none,
      "in derived conformance to %0",
@@ -5625,6 +5631,15 @@ ERROR(unchecked_not_inheritance_clause,none,
       "'unchecked' attribute only applies in inheritance clauses", ())
 ERROR(unchecked_not_existential,none,
       "'unchecked' attribute cannot apply to non-protocol type %0", (Type))
+
+WARNING(preconcurrency_conformance_not_used,none,
+        "@preconcurrency attribute on conformance to %0 has no effect", (Type))
+ERROR(preconcurrency_not_inheritance_clause,none,
+      "'preconcurrency' attribute only applies in inheritance clauses", ())
+ERROR(preconcurrency_not_existential,none,
+      "'preconcurrency' attribute cannot apply to non-protocol type %0", (Type))
+ERROR(preconcurrency_attr_disabled,none,
+      "attribute requires '-enable-experimental-feature PreconcurrencyConformances'", ())
 
 ERROR(redundant_any_in_existential,none,
        "redundant 'any' in type %0",

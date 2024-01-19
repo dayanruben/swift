@@ -2940,9 +2940,10 @@ public:
                   .getRequirements(),
               [&exprType, this](auto requirement) {
                 if (requirement.getKind() == RequirementKind::Conformance) {
-                  auto conformance = TypeChecker::conformsToProtocol(
-                      exprType->getRValueType(), requirement.getProtocolDecl(),
-                      Implementation->getModuleContext(),
+                  auto conformance = Implementation->getModuleContext()
+                      ->checkConformance(
+                      exprType->getRValueType(),
+                      requirement.getProtocolDecl(),
                       /*allowMissing=*/false);
                   return !conformance.isInvalid();
                 }
@@ -3937,6 +3938,8 @@ private:
               continue;
             }
           }
+          // TODO: If 'then' statements are enabled by default, the wording of
+          // this diagnostic should be tweaked.
           Diags.diagnose(branch->getEndLoc(),
                          diag::single_value_stmt_branch_must_end_in_result,
                          S->getKind());

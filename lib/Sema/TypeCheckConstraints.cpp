@@ -821,7 +821,7 @@ bool TypeChecker::typeCheckBinding(Pattern *&pattern, Expr *&initializer,
                                    TypeCheckExprOptions options) {
   SyntacticElementTarget target =
       PBD ? SyntacticElementTarget::forInitialization(
-                initializer, DC, patternType, PBD, patternNumber,
+                initializer, patternType, PBD, patternNumber,
                 /*bindPatternVarsOneWay=*/false)
           : SyntacticElementTarget::forInitialization(
                 initializer, DC, patternType, pattern,
@@ -871,14 +871,8 @@ bool TypeChecker::typeCheckPatternBinding(PatternBindingDecl *PBD,
   Expr *init = PBD->getInit(patternNumber);
 
   // Enter an initializer context if necessary.
-  PatternBindingInitializer *initContext = nullptr;
-  DeclContext *DC = PBD->getDeclContext();
-  if (!DC->isLocalContext()) {
-    initContext = cast_or_null<PatternBindingInitializer>(
-        PBD->getInitContext(patternNumber));
-    if (initContext)
-      DC = initContext;
-  }
+  PatternBindingInitializer *initContext = PBD->getInitContext(patternNumber);
+  DeclContext *DC = initContext ? initContext : PBD->getDeclContext();
 
   // If we weren't given a pattern type, compute one now.
   if (!patternType) {
@@ -902,7 +896,7 @@ bool TypeChecker::typeCheckPatternBinding(PatternBindingDecl *PBD,
     return true;
   }
 
-  PBD->setPattern(patternNumber, pattern, initContext);
+  PBD->setPattern(patternNumber, pattern);
   PBD->setInit(patternNumber, init);
 
   if (hadError)
@@ -2218,7 +2212,7 @@ TypeChecker::typeCheckCheckedCast(Type fromType, Type toType,
     auto nsErrorTy = Context.getNSErrorType();
 
     if (auto errorTypeProto = Context.getProtocol(KnownProtocolKind::Error)) {
-      if (conformsToProtocol(toType, errorTypeProto, module)) {
+      if (module->checkConformance(toType, errorTypeProto)) {
         if (nsErrorTy) {
           if (isSubtypeOf(fromType, nsErrorTy, dc)
               // Don't mask "always true" warnings if NSError is cast to
@@ -2228,7 +2222,7 @@ TypeChecker::typeCheckCheckedCast(Type fromType, Type toType,
         }
       }
 
-      if (conformsToProtocol(fromType, errorTypeProto, module)) {
+      if (module->checkConformance(fromType, errorTypeProto)) {
         // Cast of an error-conforming type to NSError or NSObject.
         if ((nsObject && toType->isEqual(nsObject)) ||
              (nsErrorTy && toType->isEqual(nsErrorTy)))

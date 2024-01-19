@@ -1137,8 +1137,7 @@ namespace {
     }
 
     bool isFactoryInit(ImportedName &name) {
-      return name &&
-             name.getDeclName().getBaseName() == DeclBaseName::createConstructor() &&
+      return name && name.getDeclName().getBaseName().isConstructor() &&
              (name.getInitKind() == CtorInitializerKind::Factory ||
               name.getInitKind() == CtorInitializerKind::ConvenienceFactory);
     }
@@ -2959,9 +2958,7 @@ namespace {
         if (notInstantiated)
           return nullptr;
       }
-      if (!clangSema.isCompleteType(
-              decl->getLocation(),
-              Impl.getClangASTContext().getRecordType(decl))) {
+      if (!decl->getDefinition()) {
         // If we got nullptr definition now it means the type is not complete.
         // We don't import incomplete types.
         return nullptr;
@@ -3503,7 +3500,7 @@ namespace {
           isa<clang::CXXMethodDecl>(decl) && Impl.importSymbolicCXXDecls;
       if (!dc->isModuleScopeContext() && !isa<clang::CXXMethodDecl>(decl)) {
         // Handle initializers.
-        if (name.getBaseName() == DeclBaseName::createConstructor()) {
+        if (name.getBaseName().isConstructor()) {
           assert(!accessorInfo);
           return importGlobalAsInitializer(decl, name, dc,
                                            importedName.getInitKind(),
@@ -7273,9 +7270,9 @@ void SwiftDeclConverter::importObjCProtocols(
             Impl.importDecl(*cp, getActiveSwiftVersion()))) {
       addProtocols(proto, protocols, knownProtocols);
       inheritedTypes.push_back(
-        InheritedEntry(
-          TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
-          /*isUnchecked=*/false, /*isRetroactive=*/false));
+          InheritedEntry(TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
+                         /*isUnchecked=*/false, /*isRetroactive=*/false,
+                         /*isPreconcurrency=*/false));
     }
   }
 
@@ -9468,7 +9465,8 @@ void ClangImporter::Implementation::loadAllConformances(
         dc->getDeclaredInterfaceType(),
         protocol, SourceLoc(), dc,
         ProtocolConformanceState::Incomplete,
-        protocol->isSpecificProtocol(KnownProtocolKind::Sendable));
+        protocol->isSpecificProtocol(KnownProtocolKind::Sendable),
+        /*isPreconcurrency=*/false);
     conformance->setLazyLoader(this, /*context*/0);
     conformance->setState(ProtocolConformanceState::Complete);
     Conformances.push_back(conformance);

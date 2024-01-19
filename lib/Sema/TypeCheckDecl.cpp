@@ -534,7 +534,7 @@ BodyInitKindRequest::evaluate(Evaluator &evaluator,
       } else if (auto *CRE = dyn_cast<ConstructorRefCallExpr>(Callee)) {
         arg = CRE->getBase();
       } else if (auto *dotExpr = dyn_cast<UnresolvedDotExpr>(Callee)) {
-        if (dotExpr->getName().getBaseName() != DeclBaseName::createConstructor())
+        if (!dotExpr->getName().getBaseName().isConstructor())
           return Action::Continue(E);
 
         arg = dotExpr->getBase();
@@ -2721,8 +2721,8 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
       ProtocolDecl *errorProto = Context.getErrorDecl();
       if (thrownTy && errorProto) {
         Type thrownTyInContext = AFD->mapTypeIntoContext(thrownTy);
-        if (!TypeChecker::conformsToProtocol(
-                thrownTyInContext, errorProto, AFD->getParentModule())) {
+        if (!AFD->getParentModule()->checkConformance(
+                thrownTyInContext, errorProto)) {
           SourceLoc loc;
           if (auto thrownTypeRepr = AFD->getThrownTypeRepr())
             loc = thrownTypeRepr->getLoc();

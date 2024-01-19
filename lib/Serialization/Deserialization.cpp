@@ -930,13 +930,15 @@ ProtocolConformanceDeserializer::readNormalProtocolConformance(
 
   DeclID protoID;
   DeclContextID contextID;
-  unsigned valueCount, typeCount, conformanceCount, isUnchecked;
+  unsigned valueCount, typeCount, conformanceCount, isUnchecked,
+      isPreconcurrency;
   ArrayRef<uint64_t> rawIDs;
 
   NormalProtocolConformanceLayout::readRecord(scratch, protoID,
                                               contextID, typeCount,
                                               valueCount, conformanceCount,
                                               isUnchecked,
+                                              isPreconcurrency,
                                               rawIDs);
 
   auto doOrError = MF.getDeclContextChecked(contextID);
@@ -959,7 +961,7 @@ ProtocolConformanceDeserializer::readNormalProtocolConformance(
   auto conformance = ctx.getNormalConformance(
       conformingType, proto, SourceLoc(), dc,
       ProtocolConformanceState::Incomplete,
-      isUnchecked);
+      isUnchecked, isPreconcurrency);
   // Record this conformance.
   if (conformanceEntry.isComplete()) {
     assert(conformanceEntry.get() == conformance);
@@ -2657,10 +2659,10 @@ Expected<DeclContext *>ModuleFile::getLocalDeclContext(LocalDeclContextID DCID) 
     auto decl = getDecl(bindingID);
     PatternBindingDecl *binding = cast<PatternBindingDecl>(decl);
 
-    if (!declContextOrOffset.isComplete())
-      declContextOrOffset = new (ctx)
-        SerializedPatternBindingInitializer(binding, bindingIndex);
-
+    if (!declContextOrOffset.isComplete()) {
+      declContextOrOffset =
+          PatternBindingInitializer::createDeserialized(binding, bindingIndex);
+    }
     if (!blobData.empty())
       binding->setInitStringRepresentation(bindingIndex, blobData);
     break;
@@ -2674,8 +2676,7 @@ Expected<DeclContext *>ModuleFile::getLocalDeclContext(LocalDeclContextID DCID) 
                                                               index);
     DeclContext *parent = getDeclContext(parentID);
 
-    declContextOrOffset = new (ctx)
-      SerializedDefaultArgumentInitializer(index, parent);
+    declContextOrOffset = new (ctx) DefaultArgumentInitializer(parent, index);
     break;
   }
 
@@ -3146,10 +3147,15 @@ class DeclDeserializer {
                        ArrayRef<uint64_t> rawInheritedIDs) {
     SmallVector<InheritedEntry, 2> inheritedTypes;
     for (auto rawID : rawInheritedIDs) {
-      // The low bit indicates "@unchecked".
-      bool isUnchecked = rawID & 0x01;
-      TypeID typeID = rawID >> 1;
+      // The first low bit indicates "@preconcurrency".
+      bool isPreconcurrency = rawID & 0x01;
+      rawID = rawID >> 1;
 
+      // The second low bit indicates "@unchecked".
+      bool isUnchecked = rawID & 0x01;
+      rawID = rawID >> 1;
+
+      TypeID typeID = rawID;
       auto maybeType = MF.getTypeChecked(typeID);
       if (!maybeType) {
         MF.diagnoseAndConsumeError(maybeType.takeError());
@@ -3157,7 +3163,7 @@ class DeclDeserializer {
       }
       inheritedTypes.push_back(
           InheritedEntry(TypeLoc::withoutLoc(maybeType.get()), isUnchecked,
-                         /*isRetroactive=*/false));
+                         /*isRetroactive=*/false, isPreconcurrency));
     }
 
     auto inherited = ctx.AllocateCopy(inheritedTypes);
@@ -4363,8 +4369,9 @@ public:
       binding->setImplicit();
 
     for (unsigned i = 0; i != patterns.size(); ++i) {
-      DeclContext *initContext = MF.getDeclContext(patterns[i].second);
-      binding->setPattern(i, patterns[i].first, initContext);
+      binding->setPattern(i, patterns[i].first);
+      if (auto *context = MF.getDeclContext(patterns[i].second))
+        binding->setInitContext(i, cast<PatternBindingInitializer>(context));
     }
 
     return binding;
@@ -5153,6 +5160,10 @@ public:
         builtinKind = BuiltinMacroKind::ExternalMacro;
         break;
 
+      case 2:
+        builtinKind = BuiltinMacroKind::IsolationMacro;
+        break;
+          
       default:
         break;
       }
@@ -7625,7 +7636,6 @@ public:
     if (!rawKind)
       return nullptr;
 
-    clang::attr::Kind attrKind = static_cast<clang::attr::Kind>(rawKind - 1);
     auto name = readIdentifier();
     auto scopeName = readIdentifier();
 
@@ -8024,7 +8034,8 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
 
   DeclID protoID;
   DeclContextID contextID;
-  unsigned valueCount, typeCount, conformanceCount, isUnchecked;
+  unsigned valueCount, typeCount, conformanceCount, isUnchecked,
+      isPreconcurrency;
   ArrayRef<uint64_t> rawIDs;
   SmallVector<uint64_t, 16> scratch;
 
@@ -8034,10 +8045,9 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
     fatal(llvm::make_error<InvalidRecordKindError>(kind,
                     "registered lazy loader incorrectly"));
 
-  NormalProtocolConformanceLayout::readRecord(scratch, protoID,
-                                              contextID, typeCount,
-                                              valueCount, conformanceCount,
-                                              isUnchecked, rawIDs);
+  NormalProtocolConformanceLayout::readRecord(
+      scratch, protoID, contextID, typeCount, valueCount, conformanceCount,
+      isUnchecked, isPreconcurrency, rawIDs);
 
   // Read requirement signature conformances.
   SmallVector<ProtocolConformanceRef, 4> reqConformances;

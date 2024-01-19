@@ -25,6 +25,7 @@
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/TypeMatcher.h"
 #include "swift/AST/Types.h"
+#include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/Defer.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "llvm/ADT/Statistic.h"
@@ -344,8 +345,7 @@ static bool isExtensionUsableForInference(const ExtensionDecl *extension,
   auto *module = conformanceDC->getParentModule();
   auto checkConformance = [&](ProtocolDecl *proto) {
     auto typeInContext = conformanceDC->mapTypeIntoContext(conformance->getType());
-    auto otherConf = TypeChecker::conformsToProtocol(
-        typeInContext, proto, module);
+    auto otherConf = module->checkConformance(typeInContext, proto);
     return !otherConf.isInvalid();
   };
 
@@ -375,7 +375,6 @@ static bool isExtensionUsableForInference(const ExtensionDecl *extension,
 
 InferredAssociatedTypesByWitnesses
 AssociatedTypeInference::inferTypeWitnessesViaValueWitnesses(
-                    ConformanceChecker &checker,
                     const llvm::SetVector<AssociatedTypeDecl *> &allUnresolved,
                     ValueDecl *req) {
   // Conformances constructed by the ClangImporter should have explicit type
@@ -393,7 +392,7 @@ AssociatedTypeInference::inferTypeWitnessesViaValueWitnesses(
   InferredAssociatedTypesByWitnesses result;
 
   for (auto witness :
-       checker.lookupValueWitnesses(req, /*ignoringNames=*/nullptr)) {
+       lookupValueWitnesses(dc, req, /*ignoringNames=*/nullptr)) {
     LLVM_DEBUG(llvm::dbgs() << "Inferring associated types from decl:\n";
                witness->dump(llvm::dbgs()));
 
@@ -583,9 +582,7 @@ next_witness:;
 
 InferredAssociatedTypes
 AssociatedTypeInference::inferTypeWitnessesViaValueWitnesses(
-  ConformanceChecker &checker,
-  const llvm::SetVector<AssociatedTypeDecl *> &assocTypes)
-{
+  const llvm::SetVector<AssociatedTypeDecl *> &assocTypes) {
   InferredAssociatedTypes result;
   for (auto member : proto->getMembers()) {
     auto req = dyn_cast<ValueDecl>(member);
@@ -599,8 +596,7 @@ AssociatedTypeInference::inferTypeWitnessesViaValueWitnesses(
       if (assocTypes.count(assocType) == 0)
         continue;
 
-      auto reqInferred = inferTypeWitnessesViaAssociatedType(checker,
-                                                             assocTypes,
+      auto reqInferred = inferTypeWitnessesViaAssociatedType(assocTypes,
                                                              assocType);
       if (!reqInferred.empty())
         result.push_back({req, std::move(reqInferred)});
@@ -624,7 +620,9 @@ AssociatedTypeInference::inferTypeWitnessesViaValueWitnesses(
     // Check whether any of the associated types we care about are
     // referenced in this value requirement.
     {
-      const auto referenced = checker.getReferencedAssociatedTypes(req);
+      auto referenced = evaluateOrDefault(ctx.evaluator,
+                                          ReferencedAssociatedTypesRequest{req},
+                                          TinyPtrVector<AssociatedTypeDecl *>());
       if (llvm::find_if(referenced, [&](AssociatedTypeDecl *const assocType) {
                           return assocTypes.count(assocType);
                         }) == referenced.end())
@@ -634,7 +632,7 @@ AssociatedTypeInference::inferTypeWitnessesViaValueWitnesses(
     // Infer associated types from the potential value witnesses for
     // this requirement.
     auto reqInferred =
-      inferTypeWitnessesViaValueWitnesses(checker, assocTypes, req);
+      inferTypeWitnessesViaValueWitnesses(assocTypes, req);
     if (reqInferred.empty())
       continue;
 
@@ -739,7 +737,6 @@ static Type removeSelfParam(ValueDecl *value, Type type) {
 
 InferredAssociatedTypesByWitnesses
 AssociatedTypeInference::inferTypeWitnessesViaAssociatedType(
-                   ConformanceChecker &checker,
                    const llvm::SetVector<AssociatedTypeDecl *> &allUnresolved,
                    AssociatedTypeDecl *assocType) {
   // Form the default name _Default_Foo.
@@ -1353,17 +1350,17 @@ bool AssociatedTypeInference::checkCurrentTypeWitnesses(
   sanitizeProtocolRequirements(proto, requirements,
                                sanitizedRequirements);
 
-  switch (TypeChecker::checkGenericArguments(
+  switch (checkRequirements(
       dc->getParentModule(), sanitizedRequirements,
       QuerySubstitutionMap{substitutions}, options)) {
-  case CheckGenericArgumentsResult::RequirementFailure:
+  case CheckRequirementsResult::RequirementFailure:
     ++NumSolutionStatesFailedCheck;
     LLVM_DEBUG(llvm::dbgs() << std::string(valueWitnesses.size(), '+')
                << "+ Requirement failure\n";);
     return true;
 
-  case CheckGenericArgumentsResult::Success:
-  case CheckGenericArgumentsResult::SubstitutionFailure:
+  case CheckRequirementsResult::Success:
+  case CheckRequirementsResult::SubstitutionFailure:
     break;
   }
 
@@ -1401,14 +1398,14 @@ bool AssociatedTypeInference::checkConstrainedExtension(ExtensionDecl *ext) {
   auto subs = typeInContext->getContextSubstitutions(ext);
 
   SubstOptions options = getSubstOptionsWithCurrentTypeWitnesses();
-  switch (TypeChecker::checkGenericArguments(
+  switch (checkRequirements(
       dc->getParentModule(), ext->getGenericSignature().getRequirements(),
       QueryTypeSubstitutionMap{subs}, options)) {
-  case CheckGenericArgumentsResult::Success:
-  case CheckGenericArgumentsResult::SubstitutionFailure:
+  case CheckRequirementsResult::Success:
+  case CheckRequirementsResult::SubstitutionFailure:
     return false;
 
-  case CheckGenericArgumentsResult::RequirementFailure:
+  case CheckRequirementsResult::RequirementFailure:
     return true;
   }
   llvm_unreachable("unhandled result");
@@ -2514,13 +2511,13 @@ bool AssociatedTypeInference::diagnoseAmbiguousSolutions(
 }
 
 bool AssociatedTypeInference::canAttemptEagerTypeWitnessDerivation(
-    ConformanceChecker &checker,
-    AssociatedTypeDecl *assocType) {
+    DeclContext *DC, AssociatedTypeDecl *assocType) {
 
   /// Rather than locating the TypeID via the default implementation of
   /// Identifiable, we need to find the type based on the associated ActorSystem
-  if (checker.Adoptee->isDistributedActor() &&
-      assocType->getProtocol()->isSpecificProtocol(KnownProtocolKind::Identifiable)) {
+  if (auto *nominal = DC->getSelfNominalTypeDecl())
+    if (nominal->isDistributedActor() &&
+        assocType->getProtocol()->isSpecificProtocol(KnownProtocolKind::Identifiable)) {
     return true;
   }
 
@@ -2551,7 +2548,7 @@ auto AssociatedTypeInference::solve(ConformanceChecker &checker)
     if (conformance->hasTypeWitness(assocType))
       continue;
 
-    if (canAttemptEagerTypeWitnessDerivation(checker, assocType)) {
+    if (canAttemptEagerTypeWitnessDerivation(dc, assocType)) {
       auto derivedType = computeDerivedTypeWitness(assocType);
       if (derivedType.first) {
         checker.recordTypeWitness(assocType,
@@ -2603,8 +2600,7 @@ auto AssociatedTypeInference::solve(ConformanceChecker &checker)
     return result;
 
   // Infer potential type witnesses from value witnesses.
-  inferred = inferTypeWitnessesViaValueWitnesses(checker,
-                                                 unresolvedAssocTypes);
+  inferred = inferTypeWitnessesViaValueWitnesses(unresolvedAssocTypes);
   LLVM_DEBUG(llvm::dbgs() << "Candidates for inference:\n";
              dumpInferredAssociatedTypes(inferred));
 
@@ -3037,7 +3033,11 @@ void ConformanceChecker::resolveSingleWitness(ValueDecl *requirement) {
 
   // If any of the type witnesses was erroneous, don't bother to check
   // this value witness: it will fail.
-  for (auto assocType : getReferencedAssociatedTypes(requirement)) {
+  auto assocTypes = evaluateOrDefault(getASTContext().evaluator,
+                                      ReferencedAssociatedTypesRequest{requirement},
+                                      TinyPtrVector<AssociatedTypeDecl *>());
+
+  for (auto assocType : assocTypes) {
     if (Conformance->getTypeWitness(assocType)->hasError()) {
       Conformance->setInvalid();
       return;

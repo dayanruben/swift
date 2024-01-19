@@ -683,31 +683,6 @@ static bool isSendableClosure(
   return false;
 }
 
-/// Determine whether the given type is suitable as a concurrent value type.
-bool swift::isSendableType(ModuleDecl *module, Type type) {
-  auto proto = module->getASTContext().getProtocol(KnownProtocolKind::Sendable);
-  if (!proto)
-    return true;
-
-  // First check if we have a function type. If we do, check if it is
-  // Sendable. We do this since functions cannot conform to protocols.
-  if (auto *fas = type->getCanonicalType()->getAs<SILFunctionType>())
-    return fas->isSendable();
-  if (auto *fas = type->getCanonicalType()->getAs<AnyFunctionType>())
-    return fas->isSendable();
-
-  auto conformance = TypeChecker::conformsToProtocol(type, proto, module);
-  if (conformance.isInvalid())
-    return false;
-
-  // Look for missing Sendable conformances.
-  return !conformance.forEachMissingConformance(
-      [](BuiltinProtocolConformance *missing) {
-        return missing->getProtocol()->isSpecificProtocol(
-            KnownProtocolKind::Sendable);
-      });
-}
-
 /// Add Fix-It text for the given nominal type to adopt Sendable.
 static void addSendableFixIt(
     const NominalTypeDecl *nominal, InFlightDiagnostic &diag, bool unchecked) {
@@ -1074,7 +1049,7 @@ bool swift::diagnoseNonSendableTypes(
     return false;
 
   // FIXME: More detail for unavailable conformances.
-  auto conformance = TypeChecker::conformsToProtocol(type, proto, module);
+  auto conformance = module->lookupConformance(type, proto, /*allowMissing=*/true);
   if (conformance.isInvalid() || conformance.hasUnavailableConformance()) {
     return diagnoseSingleNonSendableType(
         type, fromContext, inDerivedConformance, loc, diagnose);
@@ -1271,8 +1246,7 @@ namespace {
           return true;
 
         auto module = nominal->getParentModule();
-        auto conformance = TypeChecker::conformsToProtocol(
-            type, sendableProto, module);
+        auto conformance = module->checkConformance(type, sendableProto);
         if (conformance.isInvalid())
           return true;
 
@@ -2799,6 +2773,9 @@ namespace {
         }
       }
 
+      if (auto isolationExpr = dyn_cast<CurrentContextIsolationExpr>(expr))
+        recordCurrentContextIsolation(isolationExpr);
+
       return Action::Continue(expr);
     }
 
@@ -3464,6 +3441,63 @@ namespace {
         return true;
 
       return false;
+    }
+
+    void recordCurrentContextIsolation(
+        CurrentContextIsolationExpr *isolationExpr) {
+      // If an actor has already been assigned, we're done.
+      if (isolationExpr->getActor())
+        return;
+
+      auto loc = isolationExpr->getLoc();
+      auto isolation = getActorIsolationOfContext(
+          const_cast<DeclContext *>(getDeclContext()),
+                                    getClosureActorIsolation);
+      Expr *actorExpr = nullptr;
+      Type optionalAnyActorType = isolationExpr->getType();
+      switch (isolation) {
+      case ActorIsolation::ActorInstance: {
+        const VarDecl *var = isolation.getActorInstance();
+        if (!var) {
+          auto dc = getDeclContext();
+          auto paramIdx = isolation.getActorInstanceParameter();
+          if (paramIdx == 0) {
+            var = cast<AbstractFunctionDecl>(dc)->getImplicitSelfDecl();
+          } else {
+            var = getParameterAt(dc, paramIdx - 1);
+          }
+        }
+        actorExpr = new (ctx) DeclRefExpr(
+            const_cast<VarDecl *>(var), DeclNameLoc(loc),
+            /*Implicit=*/true);
+        break;
+      }
+      case ActorIsolation::GlobalActor:
+      case ActorIsolation::GlobalActorUnsafe: {
+        // Form a <global actor type>.shared reference.
+        Type globalActorType = getDeclContext()->mapTypeIntoContext(
+            isolation.getGlobalActor());
+        auto typeExpr = TypeExpr::createImplicit(globalActorType, ctx);
+        actorExpr = new (ctx) UnresolvedDotExpr(
+            typeExpr, loc, DeclNameRef(ctx.Id_shared), DeclNameLoc(),
+            /*implicit=*/true);
+        break;
+      }
+
+      case ActorIsolation::Unspecified:
+      case ActorIsolation::Nonisolated:
+      case ActorIsolation::NonisolatedUnsafe:
+        actorExpr = new (ctx) NilLiteralExpr(loc, /*implicit=*/true);
+        break;
+      }
+
+      // Convert the actor argument to the appropriate type.
+      (void)TypeChecker::typeCheckExpression(
+          actorExpr, const_cast<DeclContext *>(getDeclContext()),
+          constraints::ContextualTypeInfo(
+            optionalAnyActorType, CTP_CallArgument));
+
+      isolationExpr->setActor(actorExpr);
     }
 
     /// Find the innermost context in which this declaration was explicitly
@@ -4642,7 +4676,7 @@ ActorIsolation ActorIsolationRequest::evaluate(
       auto &ctx = value->getASTContext();
       auto conformsTo = [&](KnownProtocolKind kind) {
         if (auto *proto = ctx.getProtocol(kind))
-          return value->getModuleContext()->conformsToProtocol(paramType, proto);
+          return value->getModuleContext()->checkConformance(paramType, proto);
         return ProtocolConformanceRef::forInvalid();
       };
 
@@ -4682,8 +4716,7 @@ ActorIsolation ActorIsolationRequest::evaluate(
           diagVar = originalVar;
         }
         if (var->isLet()) {
-          if (!isSendableType(var->getModuleContext(),
-                              var->getInterfaceType())) {
+          if (!var->getInterfaceType()->isSendableType()) {
             diagVar->diagnose(diag::shared_immutable_state_decl, diagVar)
                 .warnUntilSwiftVersion(6);
           }
@@ -5090,7 +5123,8 @@ DefaultInitializerIsolation::evaluate(Evaluator &evaluator,
     if (enclosingIsolation != requiredIsolation) {
       var->diagnose(
           diag::isolated_default_argument_context,
-          requiredIsolation, enclosingIsolation);
+          requiredIsolation, enclosingIsolation)
+        .warnUntilSwiftVersionIf(!isa<ParamDecl>(var), 6);
       return ActorIsolation::forUnspecified();
     }
   }
@@ -5556,7 +5590,8 @@ ProtocolConformance *swift::deriveImplicitSendableConformance(
       // FIXME: This is a hack--we should give conformances real availability.
       auto inherits = ctx.AllocateCopy(makeArrayRef(
           InheritedEntry(TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
-                         /*isUnchecked*/true, /*isRetroactive=*/false)));
+                         /*isUnchecked*/ true, /*isRetroactive=*/false,
+                         /*isPreconcurrency=*/false)));
       // If you change the use of AtLoc in the ExtensionDecl, make sure you
       // update isNonSendableExtension() in ASTPrinter.
       auto extension = ExtensionDecl::create(ctx, attrMakingUnavailable->AtLoc,
@@ -5582,7 +5617,8 @@ ProtocolConformance *swift::deriveImplicitSendableConformance(
     auto conformance = ctx.getNormalConformance(
         nominal->getDeclaredInterfaceType(), proto, nominal->getLoc(),
         conformanceDC, ProtocolConformanceState::Complete,
-        /*isUnchecked=*/attrMakingUnavailable != nullptr);
+        /*isUnchecked=*/attrMakingUnavailable != nullptr,
+        /*isPreconcurrency=*/false);
     conformance->setSourceKindAndImplyingConformance(
         ConformanceEntryKind::Synthesized, nullptr);
 
@@ -5595,9 +5631,9 @@ ProtocolConformance *swift::deriveImplicitSendableConformance(
   if (classDecl) {
     if (Type superclass = classDecl->getSuperclass()) {
       auto classModule = classDecl->getParentModule();
-      auto inheritedConformance = TypeChecker::conformsToProtocol(
+      auto inheritedConformance = classModule->checkConformance(
           classDecl->mapTypeIntoContext(superclass),
-          proto, classModule, /*allowMissing=*/false);
+          proto, /*allowMissing=*/false);
       if (inheritedConformance.hasUnavailableConformance())
         inheritedConformance = ProtocolConformanceRef::forInvalid();
 
@@ -6297,7 +6333,7 @@ ActorReferenceResult ActorReferenceResult::forReference(
         (!actorInstance || actorInstance->isSelf())) {
       auto type =
           fromDC->mapTypeIntoContext(declRef.getDecl()->getInterfaceType());
-      if (!isSendableType(fromDC->getParentModule(), type)) {
+      if (!type->isSendableType()) {
         // Treat the decl isolation as 'preconcurrency' to downgrade violations
         // to warnings, because violating Sendable here is accepted by the
         // Swift 5.9 compiler.

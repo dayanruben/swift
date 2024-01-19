@@ -2037,8 +2037,7 @@ TypeVariableType *ConstraintSystem::openGenericParameter(
   // been loaded because you've passed `-parse-stdlib` and are not building the
   // stdlib itself (which would have `-module-name Swift` too).
   if (!outerDC->getParentModule()->isBuiltinModule()) {
-    if (auto *copyable = TypeChecker::getProtocol(getASTContext(), SourceLoc(),
-                                                  KnownProtocolKind::Copyable)) {
+    if (auto *copyable = getASTContext().getProtocol(KnownProtocolKind::Copyable)) {
       addConstraint(
           ConstraintKind::ConformsTo, typeVar,
           copyable->getDeclaredInterfaceType(),
@@ -2806,8 +2805,7 @@ ConstraintSystem::getTypeOfMemberReference(
     FunctionType::ExtInfo info;
 
     if (Context.LangOpts.hasFeature(Feature::InferSendableFromCaptures)) {
-      if (isPartialApplication(locator) &&
-          isSendableType(DC->getParentModule(), baseOpenedTy)) {
+      if (isPartialApplication(locator) && baseOpenedTy->isSendableType()) {
         // Add @Sendable to functions without conditional conformances
         functionType =
             functionType

@@ -1785,6 +1785,7 @@ void Serializer::writeLocalNormalProtocolConformance(
                                               numValueWitnesses,
                                               numSignatureConformances,
                                               conformance->isUnchecked(),
+                                              conformance->isPreconcurrency(),
                                               data);
 }
 
@@ -2497,16 +2498,6 @@ void Serializer::writeASTBlockEntity(const DeclContext *DC) {
       auto SACE = cast<SerializedAbstractClosureExpr>(local);
       writeAbstractClosureExpr(SACE->getParent(), SACE->getType(),
                                SACE->isImplicit(), SACE->getDiscriminator());
-      return;
-    }
-    case LocalDeclContextKind::DefaultArgumentInitializer: {
-      auto DAI = cast<SerializedDefaultArgumentInitializer>(local);
-      writeDefaultArgumentInitializer(DAI->getParent(), DAI->getIndex());
-      return;
-    }
-    case LocalDeclContextKind::PatternBindingInitializer: {
-      auto PBI = cast<SerializedPatternBindingInitializer>(local);
-      writePatternBindingInitializer(PBI->getBinding(), PBI->getBindingIndex());
       return;
     }
     case LocalDeclContextKind::TopLevelCodeDecl: {
@@ -3829,6 +3820,8 @@ public:
 
       // Encode "unchecked" in the low bit.
       typeRef = (typeRef << 1) | (inherited.isUnchecked ? 0x01 : 0x00);
+      // Encode "preconcurrency" in the low bit.
+      typeRef = (typeRef << 1) | (inherited.isPreconcurrency ? 0x01 : 0x00);
 
       result.push_back(typeRef);
     }
@@ -4816,6 +4809,9 @@ public:
         switch (def.getBuiltinKind()) {
         case BuiltinMacroKind::ExternalMacro:
           builtinID = 1;
+          break;
+        case BuiltinMacroKind::IsolationMacro:
+          builtinID = 2;
           break;
         }
         break;
