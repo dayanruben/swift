@@ -206,6 +206,7 @@ public:
   void visitNonMutatingAttr(NonMutatingAttr *attr) { visitMutationAttr(attr); }
   void visitBorrowingAttr(BorrowingAttr *attr) { visitMutationAttr(attr); }
   void visitConsumingAttr(ConsumingAttr *attr) { visitMutationAttr(attr); }
+  void visitTransferringAttr(TransferringAttr *attr) {}
   void visitLegacyConsumingAttr(LegacyConsumingAttr *attr) { visitMutationAttr(attr); }
   void visitResultDependsOnSelfAttr(ResultDependsOnSelfAttr *attr) {
     FuncDecl *FD = cast<FuncDecl>(D);
@@ -3980,7 +3981,13 @@ void AttributeChecker::visitCustomAttr(CustomAttr *attr) {
 
   if (nominal->isMainActor() && Ctx.LangOpts.isConcurrencyModelTaskToThread() &&
       !AvailableAttr::isUnavailable(D)) {
-    Ctx.Diags.diagnose(attr->getLocation(),
+    SourceLoc loc;
+    if (attr->isImplicit()) {
+      loc = D->getStartLoc();
+    } else {
+      loc = attr->getLocation();
+    }
+    Ctx.Diags.diagnose(loc,
                        diag::concurrency_task_to_thread_model_main_actor,
                        "task-to-thread concurrency model");
     return;

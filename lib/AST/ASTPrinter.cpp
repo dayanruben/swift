@@ -2727,12 +2727,12 @@ void PrintAST::printInherited(const Decl *decl) {
   Printer << ": ";
 
   interleave(TypesToPrint, [&](InheritedEntry inherited) {
-    if (inherited.isUnchecked)
+    if (inherited.isUnchecked())
       Printer << "@unchecked ";
-    if (inherited.isRetroactive &&
+    if (inherited.isRetroactive() &&
         !llvm::is_contained(Options.ExcludeAttrList, TAK_retroactive))
       Printer << "@retroactive ";
-    if (inherited.isPreconcurrency)
+    if (inherited.isPreconcurrency())
       Printer << "@preconcurrency ";
 
     printTypeLoc(inherited);
@@ -3221,11 +3221,9 @@ static bool usesFeatureRetroactiveAttribute(Decl *decl) {
   if (!ext)
     return false;
 
-  ArrayRef<InheritedEntry> entries = ext->getInherited().getEntries();
-  return std::find_if(entries.begin(), entries.end(), 
-    [](const InheritedEntry &entry) {
-      return entry.isRetroactive;
-    }) != entries.end();
+  return llvm::any_of(
+      ext->getInherited().getEntries(),
+      [](const InheritedEntry &entry) { return entry.isRetroactive(); });
 }
 
 static bool usesBuiltinType(Decl *decl, BuiltinTypeKind kind) {
@@ -3906,13 +3904,21 @@ static bool usesFeatureExtractConstantsFromMembers(Decl *decl) {
 
 static bool usesFeatureBitwiseCopyable(Decl *decl) { return false; }
 
-static bool usesFeatureTransferringArgsAndResults(Decl *decl) { return false; }
+static bool usesFeatureTransferringArgsAndResults(Decl *decl) {
+  if (auto *pd = dyn_cast<ParamDecl>(decl))
+    if (pd->getSpecifier() == ParamSpecifier::Transferring)
+      return true;
+
+  // TODO: Results.
+
+  return false;
+}
 
 static bool usesFeaturePreconcurrencyConformances(Decl *decl) {
   auto usesPreconcurrencyConformance = [&](const InheritedTypes &inherited) {
     return llvm::any_of(
         inherited.getEntries(),
-        [](const InheritedEntry &entry) { return entry.isPreconcurrency; });
+        [](const InheritedEntry &entry) { return entry.isPreconcurrency(); });
   };
 
   if (auto *T = dyn_cast<TypeDecl>(decl))
@@ -4567,6 +4573,8 @@ static void printParameterFlags(ASTPrinter &printer,
     printer.printAttrName("@autoclosure ");
   if (!options.excludeAttrKind(TAK_noDerivative) && flags.isNoDerivative())
     printer.printAttrName("@noDerivative ");
+  if (flags.isTransferring())
+    printer.printAttrName("@transferring ");
 
   switch (flags.getOwnershipSpecifier()) {
   case ParamSpecifier::Default:
@@ -4586,6 +4594,9 @@ static void printParameterFlags(ASTPrinter &printer,
     break;
   case ParamSpecifier::LegacyOwned:
     printer.printKeyword("__owned", options, " ");
+    break;
+  case ParamSpecifier::Transferring:
+    printer.printKeyword("transferring", options, " ");
     break;
   }
   
@@ -8066,6 +8077,11 @@ void SILParameterInfo::print(ASTPrinter &Printer,
   if (options.contains(SILParameterInfo::NotDifferentiable)) {
     options -= SILParameterInfo::NotDifferentiable;
     Printer << "@noDerivative ";
+  }
+
+  if (options.contains(SILParameterInfo::Transferring)) {
+    options -= SILParameterInfo::Transferring;
+    Printer << "@transferring ";
   }
 
   // If we did not handle a case in Options, this code was not updated

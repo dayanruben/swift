@@ -2551,6 +2551,8 @@ static uint8_t getRawStableParamDeclSpecifier(swift::ParamDecl::Specifier sf) {
     return uint8_t(serialization::ParamDeclSpecifier::LegacyShared);
   case swift::ParamDecl::Specifier::LegacyOwned:
     return uint8_t(serialization::ParamDeclSpecifier::LegacyOwned);
+  case swift::ParamDecl::Specifier::Transferring:
+    return uint8_t(serialization::ParamDeclSpecifier::Transferring);
   }
   llvm_unreachable("bad param decl specifier kind");
 }
@@ -3819,9 +3821,9 @@ public:
       TypeID typeRef = S.addTypeRef(inherited.getType());
 
       // Encode "unchecked" in the low bit.
-      typeRef = (typeRef << 1) | (inherited.isUnchecked ? 0x01 : 0x00);
+      typeRef = (typeRef << 1) | (inherited.isUnchecked() ? 0x01 : 0x00);
       // Encode "preconcurrency" in the low bit.
-      typeRef = (typeRef << 1) | (inherited.isPreconcurrency ? 0x01 : 0x00);
+      typeRef = (typeRef << 1) | (inherited.isPreconcurrency() ? 0x01 : 0x00);
 
       result.push_back(typeRef);
     }
@@ -5426,7 +5428,8 @@ public:
           S.addTypeRef(param.getPlainType()), paramFlags.isVariadic(),
           paramFlags.isAutoClosure(), paramFlags.isNonEphemeral(), rawOwnership,
           paramFlags.isIsolated(), paramFlags.isNoDerivative(),
-          paramFlags.isCompileTimeConst(), paramFlags.hasResultDependsOn());
+          paramFlags.isCompileTimeConst(), paramFlags.hasResultDependsOn(),
+          paramFlags.isTransferring());
     }
   }
 

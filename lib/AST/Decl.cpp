@@ -1588,11 +1588,12 @@ NominalTypeDecl::takeConformanceLoaderSlow() {
 }
 
 InheritedEntry::InheritedEntry(const TypeLoc &typeLoc)
-    : TypeLoc(typeLoc), isUnchecked(false) {
+    : InheritedEntry(typeLoc, /*isUnchecked=*/false, /*isRetroactive=*/false,
+                     /*isPreconcurrency=*/false) {
   if (auto typeRepr = typeLoc.getTypeRepr()) {
-    isUnchecked = typeRepr->findAttrLoc(TAK_unchecked).isValid();
-    isRetroactive = typeRepr->findAttrLoc(TAK_retroactive).isValid();
-    isPreconcurrency = typeRepr->findAttrLoc(TAK_preconcurrency).isValid();
+    IsUnchecked = typeRepr->findAttrLoc(TAK_unchecked).isValid();
+    IsRetroactive = typeRepr->findAttrLoc(TAK_retroactive).isValid();
+    IsPreconcurrency = typeRepr->findAttrLoc(TAK_preconcurrency).isValid();
   }
 }
 
@@ -7746,6 +7747,7 @@ void ParamDecl::setSpecifier(Specifier specifier) {
   // `inout` and `consuming` parameters are locally mutable.
   case ParamSpecifier::InOut:
   case ParamSpecifier::Consuming:
+  case ParamSpecifier::Transferring:
     introducer = VarDecl::Introducer::Var;
     break;
   }
@@ -7809,6 +7811,8 @@ StringRef ParamDecl::getSpecifierSpelling(ParamSpecifier specifier) {
     return "__shared";
   case ParamSpecifier::LegacyOwned:
     return "__owned";
+  case ParamSpecifier::Transferring:
+    return "transferring";
   }
   llvm_unreachable("invalid ParamSpecifier");
 }
@@ -8410,7 +8414,8 @@ AnyFunctionType::Param ParamDecl::toFunctionParam(Type type) const {
   auto flags = ParameterTypeFlags::fromParameterType(
       type, isVariadic(), isAutoClosure(), isNonEphemeral(), getSpecifier(),
       isIsolated(), /*isNoDerivative*/ false, isCompileTimeConst(),
-      hasResultDependsOn());
+      hasResultDependsOn(),
+      getSpecifier() == ParamDecl::Specifier::Transferring /*is transferring*/);
   return AnyFunctionType::Param(type, label, flags, internalLabel);
 }
 

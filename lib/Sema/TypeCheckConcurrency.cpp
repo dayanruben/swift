@@ -4125,7 +4125,7 @@ getIsolationFromAttributes(const Decl *decl, bool shouldDiagnose = true,
 
     return ActorIsolation::forGlobalActor(
         globalActorType->mapTypeOutOfContext(), isUnsafe)
-        .withPreconcurrency(decl->preconcurrency());
+        .withPreconcurrency(decl->preconcurrency() || isUnsafe);
   }
 
   llvm_unreachable("Forgot about an attribute?");
@@ -4898,8 +4898,10 @@ ActorIsolation ActorIsolationRequest::evaluate(
   }
 
   if (auto var = dyn_cast<VarDecl>(value)) {
-    if (var->isTopLevelGlobal() &&
-        (var->getASTContext().LangOpts.StrictConcurrencyLevel >=
+    auto &ctx = var->getASTContext();
+    if (!ctx.LangOpts.isConcurrencyModelTaskToThread() &&
+        var->isTopLevelGlobal() &&
+        (ctx.LangOpts.StrictConcurrencyLevel >=
              StrictConcurrency::Complete ||
          var->getDeclContext()->isAsyncContext())) {
       if (Type mainActor = var->getASTContext().getMainActorType())
