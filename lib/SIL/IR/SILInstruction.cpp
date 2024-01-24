@@ -1070,6 +1070,10 @@ MemoryBehavior SILInstruction::getMemoryBehavior() const {
     }
     llvm_unreachable("Covered switch isn't covered?!");
   }
+  
+  // TODO: An UncheckedTakeEnumDataAddr instruction has no memory behavior if
+  // it is nondestructive. Setting this currently causes LICM to miscompile
+  // because access paths do not account for enum projections.
 
   switch (getKind()) {
 #define FULL_INST(CLASS, TEXTUALNAME, PARENT, MEMBEHAVIOR, RELEASINGBEHAVIOR)  \
@@ -1400,6 +1404,12 @@ bool SILInstruction::isTriviallyDuplicatable() const {
   // cloned so OSSA lowering can directly convert it to a single allocation.
   if (auto *PA = dyn_cast<PartialApplyInst>(this)) {
     return !PA->isOnStack();
+  }
+  // Like partial_apply [onstack], mark_dependence [nonescaping] creates a
+  // borrow scope. We currently assume that a set of dominated scope-ending uses
+  // can be found.
+  if (auto *MD = dyn_cast<MarkDependenceInst>(this)) {
+    return !MD->isNonEscaping();
   }
 
   if (isa<OpenExistentialAddrInst>(this) || isa<OpenExistentialRefInst>(this) ||
@@ -1831,6 +1841,18 @@ PartialApplyInst::visitOnStackLifetimeEnds(
   return !noUsers;
 }
 
+bool MarkDependenceInst::
+visitNonEscapingLifetimeEnds(llvm::function_ref<bool (Operand *)> func) const {
+  assert(getFunction()->hasOwnership() && isNonEscaping()
+         && "only meaningful for nonescaping dependencies");
+  bool noUsers = true;
+
+  if (!visitRecursivelyLifetimeEndingUses(this, noUsers, func)) {
+    return false;
+  }
+  return !noUsers;
+}
+
 PartialApplyInst *
 DestroyValueInst::getNonescapingClosureAllocation() const {
   SILValue operand = getOperand();
@@ -1876,6 +1898,35 @@ DestroyValueInst::getNonescapingClosureAllocation() const {
       return nullptr;
     }
   }
+}
+
+bool
+UncheckedTakeEnumDataAddrInst::isDestructive(EnumDecl *forEnum, SILModule &M) {
+  // We only potentially use spare bit optimization when an enum is always
+  // loadable.
+  auto sig = forEnum->getGenericSignature().getCanonicalSignature();
+  if (SILType::isAddressOnly(forEnum->getDeclaredInterfaceType()->getReducedType(sig),
+                             M.Types, sig,
+                             TypeExpansionContext::minimal())) {
+    return false;
+  }
+  
+  // We only overlap spare bits with valid payload values when an enum has
+  // multiple payloads.
+  bool sawPayloadCase = false;
+  for (auto element : forEnum->getAllElements()) {
+    if (element->hasAssociatedValues()) {
+      if (sawPayloadCase) {
+        // TODO: If the associated value's type is always visibly empty then it
+        // would get laid out like a no-payload case.
+        return true;
+      } else {
+        sawPayloadCase = true;
+      }
+    }
+  }
+  
+  return false;
 }
 
 #ifndef NDEBUG

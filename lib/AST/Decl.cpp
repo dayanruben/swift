@@ -2512,15 +2512,20 @@ static bool deferMatchesEnclosingAccess(const FuncDecl *defer) {
         if (type->isAnyActor())
           return true;
 
-        switch (getActorIsolation(type)) {
+        auto isolation = getActorIsolation(type);
+        switch (isolation) {
           case ActorIsolation::Unspecified:
           case ActorIsolation::NonisolatedUnsafe:
-          case ActorIsolation::GlobalActorUnsafe:
             break;
+
+          case ActorIsolation::GlobalActor:
+            if (isolation.preconcurrency())
+              break;
+
+            return true;
 
           case ActorIsolation::ActorInstance:
           case ActorIsolation::Nonisolated:
-          case ActorIsolation::GlobalActor:
             return true;
         }
       }
@@ -3003,7 +3008,7 @@ bool AbstractStorageDecl::isFormallyResilient() const {
   // Non-public global and static variables always have a
   // fixed layout.
   if (!getFormalAccessScope(/*useDC=*/nullptr,
-                            /*treatUsableFromInlineAsPublic=*/true).isPublic())
+                            /*treatUsableFromInlineAsPublic=*/true).isPublicOrPackage())
     return false;
 
   return true;
@@ -4152,17 +4157,7 @@ AccessLevel ValueDecl::getEffectiveAccess() const {
   // Handle @testable/@_private(sourceFile:)
   switch (effectiveAccess) {
   case AccessLevel::Open:
-    break;
   case AccessLevel::Package:
-    if (getModuleContext()->isTestingEnabled() ||
-        getModuleContext()->arePrivateImportsEnabled()) {
-        effectiveAccess = getMaximallyOpenAccessFor(this);
-    } else {
-        // Package declarations are effectively public within their
-        // package unit.
-        effectiveAccess = AccessLevel::Public;
-    }
-    break;
   case AccessLevel::Public:
   case AccessLevel::Internal:
     if (getModuleContext()->isTestingEnabled() ||
@@ -5004,10 +4999,10 @@ int TypeDecl::compare(const TypeDecl *type1, const TypeDecl *type2) {
 }
 
 bool NominalTypeDecl::isFormallyResilient() const {
-  // Private, (unversioned) internal, and package types always have a
+  // Private and (unversioned) internal types always have a
   // fixed layout.
   if (!getFormalAccessScope(/*useDC=*/nullptr,
-                            /*treatUsableFromInlineAsPublic=*/true).isPublic())
+                            /*treatUsableFromInlineAsPublic=*/true).isPublicOrPackage())
     return false;
 
   // Check for an explicit @_fixed_layout or @frozen attribute.
@@ -5895,9 +5890,9 @@ bool ClassDecl::hasResilientMetadata() const {
   if (!getModuleContext()->isResilient())
     return false;
 
-  // If the class is not public, we can't use it outside the module at all.
+  // If the class is not public or package, we can't use it outside the module at all.
   // Take enable testing into account.
-  if (getEffectiveAccess() < AccessLevel::Public)
+  if (getEffectiveAccess() < AccessLevel::Package)
     return false;
 
   // Otherwise we access metadata members, such as vtable entries, resiliently.
@@ -10897,7 +10892,6 @@ bool VarDecl::isSelfParamCaptureIsolated() const {
       case ActorIsolation::Nonisolated:
       case ActorIsolation::NonisolatedUnsafe:
       case ActorIsolation::GlobalActor:
-      case ActorIsolation::GlobalActorUnsafe:
         return false;
 
       case ActorIsolation::ActorInstance:
@@ -10965,9 +10959,9 @@ ActorIsolation swift::getActorIsolationOfContext(
         dcToUse->getASTContext().LangOpts.StrictConcurrencyLevel >=
             StrictConcurrency::Complete) {
       if (Type mainActor = dcToUse->getASTContext().getMainActorType())
-        return ActorIsolation::forGlobalActor(
-            mainActor,
-            /*unsafe=*/!dcToUse->getASTContext().isSwiftVersionAtLeast(6));
+        return ActorIsolation::forGlobalActor(mainActor)
+            .withPreconcurrency(
+                !dcToUse->getASTContext().isSwiftVersionAtLeast(6));
     }
   }
 
@@ -11769,7 +11763,8 @@ MacroDiscriminatorContext::getInnermostMacroContext(DeclContext *dc) {
 
   case DeclContextKind::EnumElementDecl:
   case DeclContextKind::AbstractFunctionDecl:
-  case DeclContextKind::SerializedLocal:
+  case DeclContextKind::SerializedAbstractClosure:
+  case DeclContextKind::SerializedTopLevelCodeDecl:
   case DeclContextKind::Package:
   case DeclContextKind::Module:
   case DeclContextKind::FileUnit:

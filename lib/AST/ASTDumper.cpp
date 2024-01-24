@@ -1732,8 +1732,8 @@ void swift::printContext(raw_ostream &os, DeclContext *dc) {
     os << "(file)";
     break;
 
-  case DeclContextKind::SerializedLocal:
-    os << "local context";
+  case DeclContextKind::SerializedAbstractClosure:
+    os << "serialized abstract closure";
     break;
 
   case DeclContextKind::AbstractClosureExpr: {
@@ -1782,6 +1782,7 @@ void swift::printContext(raw_ostream &os, DeclContext *dc) {
     break;
 
   case DeclContextKind::TopLevelCodeDecl:
+  case DeclContextKind::SerializedTopLevelCodeDecl:
     os << "top-level code";
     break;
 
@@ -2789,7 +2790,6 @@ public:
       break;
 
     case ActorIsolation::GlobalActor:
-    case ActorIsolation::GlobalActorUnsafe:
       printFieldQuoted(isolation.getGlobalActor().getString(),
                        "global_actor_isolated", CapturesColor);
       break;

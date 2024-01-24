@@ -1427,7 +1427,6 @@ getRawStableActorIsolationKind(swift::ActorIsolation::Kind kind) {
   CASE(Nonisolated)
   CASE(NonisolatedUnsafe)
   CASE(GlobalActor)
-  CASE(GlobalActorUnsafe)
 #undef CASE
   }
   llvm_unreachable("bad actor isolation");
@@ -2057,7 +2056,8 @@ void Serializer::writeCrossReference(const DeclContext *DC, uint32_t pathLen) {
   case DeclContextKind::AbstractClosureExpr:
   case DeclContextKind::Initializer:
   case DeclContextKind::TopLevelCodeDecl:
-  case DeclContextKind::SerializedLocal:
+  case DeclContextKind::SerializedAbstractClosure:
+  case DeclContextKind::SerializedTopLevelCodeDecl:
   case DeclContextKind::EnumElementDecl:
   case DeclContextKind::MacroDecl:
     llvm_unreachable("cannot cross-reference this context");
@@ -2473,6 +2473,15 @@ void Serializer::writeASTBlockEntity(const DeclContext *DC) {
     break;
   }
 
+  case DeclContextKind::SerializedAbstractClosure: {
+    // We're merging an already serialized module, handle the same as a
+    // regular AbstractClosureExpr.
+    auto *SACE = cast<SerializedAbstractClosureExpr>(DC);
+    writeAbstractClosureExpr(SACE->getParent(), SACE->getType(),
+                             SACE->isImplicit(), SACE->getDiscriminator());
+    return;
+  }
+
   case DeclContextKind::Initializer: {
     if (auto PBI = dyn_cast<PatternBindingInitializer>(DC)) {
       writePatternBindingInitializer(PBI->getBinding(), PBI->getBindingIndex());
@@ -2482,31 +2491,12 @@ void Serializer::writeASTBlockEntity(const DeclContext *DC) {
     break;
   }
 
-  case DeclContextKind::TopLevelCodeDecl: {
+  case DeclContextKind::TopLevelCodeDecl:
+  case DeclContextKind::SerializedTopLevelCodeDecl: {
     auto abbrCode = DeclTypeAbbrCodes[TopLevelCodeDeclContextLayout::Code];
     TopLevelCodeDeclContextLayout::emitRecord(Out, ScratchRecord, abbrCode,
         addDeclContextRef(DC->getParent()).getOpaqueValue());
     break;
-  }
-
-  // If we are merging already serialized modules with local decl contexts,
-  // we handle them here in a similar fashion.
-  case DeclContextKind::SerializedLocal: {
-    auto local = cast<SerializedLocalDeclContext>(DC);
-    switch (local->getLocalDeclContextKind()) {
-    case LocalDeclContextKind::AbstractClosure: {
-      auto SACE = cast<SerializedAbstractClosureExpr>(local);
-      writeAbstractClosureExpr(SACE->getParent(), SACE->getType(),
-                               SACE->isImplicit(), SACE->getDiscriminator());
-      return;
-    }
-    case LocalDeclContextKind::TopLevelCodeDecl: {
-      auto abbrCode = DeclTypeAbbrCodes[TopLevelCodeDeclContextLayout::Code];
-      TopLevelCodeDeclContextLayout::emitRecord(Out, ScratchRecord,
-          abbrCode, addDeclContextRef(DC->getParent()).getOpaqueValue());
-      return;
-    }
-    }
   }
 
   default:
@@ -2691,7 +2681,6 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
     case DAK_SetterAccess:
     case DAK_ObjCBridged:
     case DAK_SynthesizedProtocol:
-    case DAK_Implements:
     case DAK_ObjCRuntimeName:
     case DAK_RestatedObjCConformance:
     case DAK_ClangImporterSynthesizedType:
@@ -2716,6 +2705,29 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
       SILGenNameDeclAttrLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode,
   	                                       theAttr->isImplicit(),
   	                                       theAttr->Name);
+      return;
+    }
+
+    case DAK_Implements: {
+      auto *theAttr = cast<ImplementsAttr>(DA);
+      auto abbrCode = S.DeclTypeAbbrCodes[ImplementsDeclAttrLayout::Code];
+
+      DeclName memberName = theAttr->getMemberName();
+      SmallVector<IdentifierID, 4> nameComponents;
+      nameComponents.push_back(
+          S.addDeclBaseNameRef(memberName.getBaseName()));
+      for (auto argName : memberName.getArgumentNames())
+        nameComponents.push_back(S.addDeclBaseNameRef(argName));
+
+      auto dc = D->getDeclContext();
+      ImplementsDeclAttrLayout::emitRecord(
+          S.Out, S.ScratchRecord, abbrCode,
+          theAttr->isImplicit(),
+          S.addDeclContextRef(dc).getOpaqueValue(),
+          S.addDeclRef(theAttr->getProtocol(dc)),
+          memberName.getArgumentNames().size() +
+            memberName.isCompoundName(),
+          nameComponents);
       return;
     }
 

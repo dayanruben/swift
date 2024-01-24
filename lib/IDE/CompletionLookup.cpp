@@ -767,15 +767,15 @@ void CompletionLookup::analyzeActorIsolation(
     }
     break;
   }
-  case ActorIsolation::GlobalActorUnsafe:
-    // For "unsafe" global actor isolation, automatic 'async' only happens
+  case ActorIsolation::GlobalActor: {
+    // For "preconcurrency" global actor isolation, automatic 'async' only happens
     // if the context has adopted concurrency.
-    if (!CanCurrDeclContextHandleAsync &&
+    if (isolation.preconcurrency() &&
+        !CanCurrDeclContextHandleAsync &&
         !completionContextUsesConcurrencyFeatures(CurrDeclContext)) {
       return;
     }
-    LLVM_FALLTHROUGH;
-  case ActorIsolation::GlobalActor: {
+
     auto getClosureActorIsolation = [this](AbstractClosureExpr *CE) {
       // Prefer solution-specific actor-isolations and fall back to the one
       // recorded in the AST.
@@ -1233,6 +1233,10 @@ void CompletionLookup::addFunctionCallPattern(
             : CodeCompletionResultKind::Pattern,
         SemanticContext ? *SemanticContext : getSemanticContextKind(AFD));
     Builder.addFlair(CodeCompletionFlairBit::ArgumentLabels);
+    if (DotLoc) {
+      Builder.setNumBytesToErase(Ctx.SourceMgr.getByteDistance(
+          DotLoc, Ctx.SourceMgr.getIDEInspectionTargetLoc()));
+    }
     if (AFD)
       Builder.setAssociatedDecl(AFD);
 
@@ -3440,8 +3444,8 @@ void CompletionLookup::getOptionalBindingCompletions(SourceLoc Loc) {
                      /*IncludeTopLevel=*/false, Loc);
 }
 
-void CompletionLookup::getWithoutConstraintTypes() {
-  // FIXME: Once we have a typealias declaration for copyable, we should be
-  // returning that instead of a keyword (rdar://109107817).
-  addKeyword("Copyable");
+void CompletionLookup::addWithoutConstraintTypes() {
+  auto *CopyableDecl = Ctx.getProtocol(KnownProtocolKind::Copyable);
+  addNominalTypeRef(CopyableDecl, DeclVisibilityKind::VisibleAtTopLevel,
+                    DynamicLookupInfo());
 }
