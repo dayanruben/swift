@@ -14,7 +14,7 @@ extension Actor {
   func g() { }
 }
 
-@MainActor func mainActorFn() {}
+@MainActor func mainActorFn() {} // expected-note {{calls to global function 'mainActorFn()' from outside of its actor context are implicitly asynchronous}}
 
 @available(SwiftStdlib 5.1, *)
 func testA<T: Actor>(
@@ -232,7 +232,7 @@ func checkIsolatedAndGlobalClosures(_ a: A) {
   let _: @MainActor (isolated A) -> Void // expected-warning {{function type cannot have global actor and 'isolated' parameter; this is an error in Swift 6}}
       = {
     $0.f()
-    mainActorFn()
+    mainActorFn() // expected-error {{call to main actor-isolated global function 'mainActorFn()' in a synchronous actor-isolated context}}
   }
 
   let _: @MainActor (isolated A) -> Void // expected-warning {{function type cannot have global actor and 'isolated' parameter; this is an error in Swift 6}}
@@ -363,6 +363,7 @@ func isolated_generic_ok_1<T: Actor>(_ t: isolated T) {}
 
 
 class NotSendable {} // expected-complete-note 5 {{class 'NotSendable' does not conform to the 'Sendable' protocol}}
+// expected-note@-1 {{class 'NotSendable' does not conform to the 'Sendable' protocol}}
 
 func optionalIsolated(_ ns: NotSendable, to actor: isolated (any Actor)?) async {}
 func optionalIsolatedSync(_ ns: NotSendable, to actor: isolated (any Actor)?) {}
@@ -415,4 +416,60 @@ actor A2 {
     await { (self: isolated Self?) in }(self)
     return self
   }
+}
+
+func testNonSendableCaptures(ns: NotSendable, a: isolated MyActor) {
+  Task {
+    _ = a
+    _ = ns
+  }
+
+  // FIXME: The `a` in the capture list and `isolated a` are the same,
+  // but the actor isolation checker doesn't know that.
+  Task { [a] in
+    _ = a
+    _ = ns // expected-warning {{capture of 'ns' with non-sendable type 'NotSendable' in a `@Sendable` closure}}
+  }
+}
+
+
+@globalActor actor MyGlobal {
+  static let shared = MyGlobal()
+}
+
+func sync(isolatedTo actor: isolated (any Actor)?) {}
+
+func pass(value: NotSendable, isolation: isolated (any Actor)?) async -> NotSendable {
+  value
+}
+
+func preciseIsolated(a: isolated MyActor) async {
+  sync(isolatedTo: a)
+  sync(isolatedTo: nil) // okay from anywhere
+  sync(isolatedTo: #isolation)
+
+  Task { @MainActor in
+    sync(isolatedTo: MainActor.shared)
+    sync(isolatedTo: nil) // okay from anywhere
+    sync(isolatedTo: #isolation)
+  }
+
+  Task { @MyGlobal in
+    sync(isolatedTo: MyGlobal.shared)
+    sync(isolatedTo: nil) // okay from anywhere
+    sync(isolatedTo: #isolation)
+  }
+
+  Task.detached {
+    sync(isolatedTo: nil) // okay from anywhere
+    sync(isolatedTo: #isolation)
+  }
+}
+
+@MainActor func fromMain(ns: NotSendable) async -> NotSendable {
+  await pass(value: ns, isolation: MainActor.shared)
+}
+
+nonisolated func fromNonisolated(ns: NotSendable) async -> NotSendable {
+  await pass(value: ns, isolation: nil)
 }

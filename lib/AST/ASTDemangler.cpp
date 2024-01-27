@@ -389,11 +389,13 @@ void ASTBuilder::endPackExpansion() {
 
 Type ASTBuilder::createFunctionType(
     ArrayRef<Demangle::FunctionParam<Type>> params,
-    Type output, FunctionTypeFlags flags,
+    Type output, FunctionTypeFlags flags, ExtendedFunctionTypeFlags extFlags,
     FunctionMetadataDifferentiabilityKind diffKind, Type globalActor,
     Type thrownError) {
   // The result type must be materializable.
   if (!output->isMaterializable()) return Type();
+
+  bool hasIsolatedParameter = false;
 
   llvm::SmallVector<AnyFunctionType::Param, 8> funcParams;
   for (const auto &param : params) {
@@ -411,8 +413,10 @@ Type ASTBuilder::createFunctionType(
                               .withOwnershipSpecifier(ownership)
                               .withVariadic(flags.isVariadic())
                               .withAutoClosure(flags.isAutoClosure())
-                              .withNoDerivative(flags.isNoDerivative());
+                              .withNoDerivative(flags.isNoDerivative())
+                              .withIsolated(flags.isIsolated());
 
+    hasIsolatedParameter |= flags.isIsolated();
     funcParams.push_back(AnyFunctionType::Param(type, label, parameterFlags));
   }
 
@@ -445,6 +449,13 @@ Type ASTBuilder::createFunctionType(
   #undef SIMPLE_CASE
   }
 
+  FunctionTypeIsolation isolation = FunctionTypeIsolation::forNonIsolated();
+  if (hasIsolatedParameter) {
+    isolation = FunctionTypeIsolation::forParameter();
+  } else if (globalActor) {
+    isolation = FunctionTypeIsolation::forGlobalActor(globalActor);
+  }
+
   auto noescape =
     (representation == FunctionTypeRepresentation::Swift
      || representation == FunctionTypeRepresentation::Block)
@@ -455,10 +466,12 @@ Type ASTBuilder::createFunctionType(
     clangFunctionType = Ctx.getClangFunctionType(funcParams, output,
                                                  representation);
 
+  // TODO: Handle LifetimeDependenceInfo here.
   auto einfo =
       FunctionType::ExtInfoBuilder(representation, noescape, flags.isThrowing(),
                                    thrownError, resultDiffKind,
-                                   clangFunctionType, globalActor)
+                                   clangFunctionType, isolation,
+                                   LifetimeDependenceInfo())
           .withAsync(flags.isAsync())
           .withConcurrent(flags.isSendable())
           .build();

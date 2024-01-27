@@ -58,7 +58,7 @@ const uint16_t SWIFTMODULE_VERSION_MAJOR = 0;
 /// describe what change you made. The content of this comment isn't important;
 /// it just ensures a conflict if two people change the module format.
 /// Don't worry about adhering to the 80-column limit for this line.
-const uint16_t SWIFTMODULE_VERSION_MINOR = 840; // isolated SIL param info
+const uint16_t SWIFTMODULE_VERSION_MINOR = 843; // add OSLog string encoding
 
 /// A standard hash seed used for all string hashes in a serialized module.
 ///
@@ -684,6 +684,14 @@ enum class PluginSearchOptionKind : uint8_t {
 };
 using PluginSearchOptionKindField = BCFixed<3>;
 
+enum class FunctionTypeIsolation : uint8_t {
+  NonIsolated,
+  Parameter,
+  Dynamic,
+  GlobalActorOffset, // Add this to the global actor type ID
+};
+using FunctionTypeIsolationField = TypeIDField;
+
 // Encodes a VersionTuple:
 //
 //  Major
@@ -849,7 +857,8 @@ namespace control_block {
     SDK_NAME,
     REVISION,
     IS_OSSA,
-    ALLOWABLE_CLIENT_NAME
+    ALLOWABLE_CLIENT_NAME,
+    HAS_NONCOPYABLE_GENERICS,
   };
 
   using MetadataLayout = BCRecordLayout<
@@ -893,6 +902,11 @@ namespace control_block {
   using AllowableClientLayout = BCRecordLayout<
     ALLOWABLE_CLIENT_NAME,
     BCBlob
+  >;
+
+  using HasNoncopyableGenerics = BCRecordLayout<
+      HAS_NONCOPYABLE_GENERICS,
+      BCFixed<1>
   >;
 }
 
@@ -1213,7 +1227,7 @@ namespace decls_block {
     BCFixed<1>,                      // throws?
     TypeIDField,                     // thrown error
     DifferentiabilityKindField,      // differentiability kind
-    TypeIDField                      // global actor
+    FunctionTypeIsolationField       // isolation
     // trailed by parameters
   );
 
@@ -1311,7 +1325,7 @@ namespace decls_block {
     BCFixed<1>,                      // throws?
     TypeIDField,                     // thrown error
     DifferentiabilityKindField,      // differentiability kind
-    TypeIDField,                     // global actor
+    FunctionTypeIsolationField,      // isolation
     GenericSignatureIDField          // generic signature
 
     // trailed by parameters

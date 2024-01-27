@@ -165,7 +165,6 @@ public:
   IGNORED_ATTR(BackDeployed)
   IGNORED_ATTR(Documentation)
   IGNORED_ATTR(LexicalLifetimes)
-  IGNORED_ATTR(ResultDependsOn)
 #undef IGNORED_ATTR
 
   void visitAlignmentAttr(AlignmentAttr *attr) {
@@ -206,7 +205,6 @@ public:
   void visitNonMutatingAttr(NonMutatingAttr *attr) { visitMutationAttr(attr); }
   void visitBorrowingAttr(BorrowingAttr *attr) { visitMutationAttr(attr); }
   void visitConsumingAttr(ConsumingAttr *attr) { visitMutationAttr(attr); }
-  void visitTransferringAttr(TransferringAttr *attr) {}
   void visitLegacyConsumingAttr(LegacyConsumingAttr *attr) { visitMutationAttr(attr); }
   void visitResultDependsOnSelfAttr(ResultDependsOnSelfAttr *attr) {
     FuncDecl *FD = cast<FuncDecl>(D);
@@ -2778,22 +2776,20 @@ SynthesizeMainFunctionRequest::evaluate(Evaluator &evaluator,
 
     Type mainActor = context.getMainActorType();
     if (mainActor) {
+      auto extInfo = ASTExtInfoBuilder().withIsolation(
+          FunctionTypeIsolation::forGlobalActor(mainActor));
       mainTypes.push_back(FunctionType::get(
           /*params*/ {}, context.TheEmptyTupleType,
-          ASTExtInfoBuilder().withGlobalActor(mainActor).build()));
+          extInfo.build()));
       mainTypes.push_back(FunctionType::get(
           /*params*/ {}, context.TheEmptyTupleType,
-          ASTExtInfoBuilder().withAsync().withGlobalActor(mainActor).build()));
+          extInfo.withAsync().build()));
       mainTypes.push_back(FunctionType::get(
           /*params*/ {}, context.TheEmptyTupleType,
-          ASTExtInfoBuilder().withThrows().withGlobalActor(mainActor).build()));
-      mainTypes.push_back(FunctionType::get(/*params*/ {},
-                                            context.TheEmptyTupleType,
-                                            ASTExtInfoBuilder()
-                                                .withAsync()
-                                                .withThrows()
-                                                .withGlobalActor(mainActor)
-                                                .build()));
+          extInfo.withThrows().build()));
+      mainTypes.push_back(FunctionType::get(
+          /*params*/ {}, context.TheEmptyTupleType,
+          extInfo.withAsync().withThrows().build()));
     }
     TypeVariableType *mainType =
         CS.createTypeVariable(locator, /*options=*/0);
@@ -6832,7 +6828,14 @@ void AttributeChecker::visitDistributedActorAttr(DistributedActorAttr *attr) {
 }
 
 void AttributeChecker::visitKnownToBeLocalAttr(KnownToBeLocalAttr *attr) {
-  if (!D->isImplicit()) {
+  auto &ctx = D->getASTContext();
+  auto *module = D->getDeclContext()->getParentModule();
+  auto *distributed = ctx.getLoadedModule(ctx.Id_Distributed);
+
+  // FIXME: An explicit `_local` is used in the implementation of
+  // `DistributedActor.whenLocal`, which otherwise violates actor
+  // isolation checking.
+  if (!D->isImplicit() && (module != distributed)) {
     diagnoseAndRemoveAttr(attr, diag::distributed_local_cannot_be_used);
   }
 }
@@ -6871,7 +6874,9 @@ void AttributeChecker::visitNonisolatedAttr(NonisolatedAttr *attr) {
       // 'nonisolated' can not be applied to mutable stored properties unless
       // qualified as 'unsafe'.
       if (var->supportsMutation() && !attr->isUnsafe()) {
-        diagnoseAndRemoveAttr(attr, diag::nonisolated_mutable_storage);
+        diagnoseAndRemoveAttr(attr, diag::nonisolated_mutable_storage)
+            .fixItInsertAfter(attr->getRange().End, "(unsafe)");
+        var->diagnose(diag::nonisolated_mutable_storage_note, var);
         return;
       }
 
@@ -7260,7 +7265,7 @@ void AttributeChecker::visitRawLayoutAttr(RawLayoutAttr *attr) {
     return;
   }
   
-  if (!sd->canBeNoncopyable()) {
+  if (sd->canBeCopyable()) {
     diagnoseAndRemoveAttr(attr, diag::attr_rawlayout_cannot_be_copyable);
   }
   
@@ -7318,8 +7323,7 @@ void AttributeChecker::visitStaticExclusiveOnlyAttr(
   // Can only be applied to structs.
   auto structDecl = cast<StructDecl>(D);
 
-  if (!structDecl->getDeclaredInterfaceType()
-                 ->isNoncopyable(D->getDeclContext())) {
+  if (structDecl->canBeCopyable() != TypeDecl::CanBeInvertible::Never) {
     diagnoseAndRemoveAttr(attr, diag::attr_static_exclusive_only_noncopyable);
   }
 }

@@ -188,7 +188,7 @@ func testConcurrency() {
   acceptConcurrent {
     print(x) // expected-warning{{capture of 'x' with non-sendable type 'NotConcurrent' in a `@Sendable` closure}}
     print(y) // expected-warning{{capture of 'y' with non-sendable type 'NotConcurrent' in a `@Sendable` closure}}
-    // expected-error@-1{{reference to captured var 'y' in concurrently-executing code}}
+    // expected-warning@-1{{reference to captured var 'y' in concurrently-executing code}}
   }
 }
 
@@ -341,6 +341,26 @@ class C6: C5 {
 final class C7<T>: Sendable { }
 
 class C9: Sendable { } // expected-warning{{non-final class 'C9' cannot conform to 'Sendable'; use '@unchecked Sendable'}}
+
+@globalActor
+struct SomeActor {
+  static let shared = A1()
+}
+
+class NotSendable {}
+
+// actor-isolated mutable properties are valid
+final class C10: Sendable { // expected-warning{{default initializer for 'C10' cannot be both nonisolated and main actor-isolated}}
+  @MainActor var x = 0
+  @MainActor var ns1 : NotSendable? // expected-note{{initializer for property 'ns1' is main actor-isolated}}
+  @MainActor let ns : NotSendable? = nil
+}
+
+final class C14: Sendable { // expected-warning{{default initializer for 'C14' cannot be both nonisolated and global actor 'SomeActor'-isolated}}
+  @SomeActor var y = 1
+  @SomeActor var nc = NotConcurrent() // expected-note{{initializer for property 'nc' is global actor 'SomeActor'-isolated}}
+  @SomeActor let nc1 = NotConcurrent()
+}
 
 extension NotConcurrent {
   func f() { }

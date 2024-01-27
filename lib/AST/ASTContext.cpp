@@ -2780,6 +2780,48 @@ ASTContext::MissingWitness::MissingWitness(ValueDecl *requirement,
   : requirement(requirement),
     matches(matches.begin(), matches.end()) { }
 
+static void maybeEmitFallbackConformanceDiagnostic(
+    ASTContext &ctx,
+    NormalProtocolConformance *conformance,
+    DelayedConformanceDiags &diagnostics) {
+
+  if (diagnostics.HadError)
+    return;
+
+  diagnostics.HadError = true;
+
+  auto *proto = conformance->getProtocol();
+  auto *dc = conformance->getDeclContext();
+  auto *sf = dc->getParentSourceFile();
+  auto *mod = sf->getParentModule();
+  assert(mod->isMainModule());
+
+  // If we have at least one primary file and the conformance is declared in a
+  // non-primary file, emit a fallback diagnostic.
+  if ((!sf->isPrimary() && !mod->getPrimarySourceFiles().empty()) ||
+      ctx.TypeCheckerOpts.EnableLazyTypecheck) {
+    auto complainLoc = ctx.evaluator.getInnermostSourceLoc([&](SourceLoc loc) {
+      if (loc.isInvalid())
+        return false;
+
+      auto *otherSF = mod->getSourceFileContainingLocation(loc);
+      if (otherSF == nullptr)
+        return false;
+
+      return otherSF->isPrimary();
+    });
+
+    if (complainLoc.isInvalid()) {
+      complainLoc = conformance->getLoc();
+    }
+
+    ctx.Diags.diagnose(complainLoc,
+                       diag::type_does_not_conform,
+                       dc->getSelfInterfaceType(),
+                       proto->getDeclaredInterfaceType());
+  }
+}
+
 void ASTContext::addDelayedConformanceDiag(
        NormalProtocolConformance *conformance, bool isError,
        std::function<void(NormalProtocolConformance *)> callback) {
@@ -2788,40 +2830,8 @@ void ASTContext::addDelayedConformanceDiag(
 
   auto &diagnostics = getImpl().DelayedConformanceDiags[conformance];
 
-  if (isError && !diagnostics.HadError) {
-    diagnostics.HadError = true;
-
-    auto *proto = conformance->getProtocol();
-    auto *dc = conformance->getDeclContext();
-    auto *sf = dc->getParentSourceFile();
-    auto *mod = sf->getParentModule();
-    assert(mod->isMainModule());
-
-    // If we have at least one primary file and the conformance is declared in a
-    // non-primary file, emit a fallback diagnostic.
-    if ((!sf->isPrimary() && !mod->getPrimarySourceFiles().empty()) ||
-        TypeCheckerOpts.EnableLazyTypecheck) {
-      auto complainLoc = evaluator.getInnermostSourceLoc([&](SourceLoc loc) {
-        if (loc.isInvalid())
-          return false;
-
-        auto *otherSF = mod->getSourceFileContainingLocation(loc);
-        if (otherSF == nullptr)
-          return false;
-
-        return otherSF->isPrimary();
-      });
-
-      if (complainLoc.isInvalid()) {
-        complainLoc = conformance->getLoc();
-      }
-
-      Diags.diagnose(complainLoc,
-                     diag::type_does_not_conform,
-                     dc->getSelfInterfaceType(),
-                     proto->getDeclaredInterfaceType());
-    }
-  }
+  if (isError)
+    maybeEmitFallbackConformanceDiagnostic(*this, conformance, diagnostics);
 
   diagnostics.Diags.push_back({isError, callback});
 }
@@ -2829,7 +2839,10 @@ void ASTContext::addDelayedConformanceDiag(
 void ASTContext::addDelayedMissingWitness(
     NormalProtocolConformance *conformance,
     ASTContext::MissingWitness missingWitness) {
+  conformance->setInvalid();
+
   auto &diagnostics = getImpl().DelayedConformanceDiags[conformance];
+  maybeEmitFallbackConformanceDiagnostic(*this, conformance, diagnostics);
   diagnostics.MissingWitnesses.push_back(missingWitness);
 }
 
@@ -4215,9 +4228,15 @@ FunctionType *FunctionType::get(ArrayRef<AnyFunctionType::Param> params,
       info.has_value() && !info.value().getClangTypeInfo().empty();
 
   unsigned numTypes = (globalActor ? 1 : 0) + (thrownError ? 1 : 0);
-  size_t allocSize = totalSizeToAlloc<
-      AnyFunctionType::Param, ClangTypeInfo, Type
-    >(params.size(), hasClangInfo ? 1 : 0, numTypes);
+
+  bool hasLifetimeDependenceInfo =
+      info.has_value() && !info.value().getLifetimeDependenceInfo().empty();
+
+  size_t allocSize = totalSizeToAlloc<AnyFunctionType::Param, ClangTypeInfo,
+                                      Type, LifetimeDependenceInfo>(
+      params.size(), hasClangInfo ? 1 : 0, numTypes,
+      hasLifetimeDependenceInfo ? 1 : 0);
+
   void *mem = ctx.Allocate(allocSize, alignof(FunctionType), arena);
 
   bool isCanonical = isAnyFunctionTypeCanonical(params, result);
@@ -4244,6 +4263,14 @@ FunctionType *FunctionType::get(ArrayRef<AnyFunctionType::Param> params,
   return funcTy;
 }
 
+#ifndef NDEBUG
+static bool isConsistentAboutIsolation(const llvm::Optional<ASTExtInfo> &info,
+                                       ArrayRef<AnyFunctionType::Param> params) {
+  return (hasIsolatedParameter(params)
+            == (info && info->getIsolation().isParameter()));
+}
+#endif
+
 // If the input and result types are canonical, then so is the result.
 FunctionType::FunctionType(ArrayRef<AnyFunctionType::Param> params, Type output,
                            llvm::Optional<ExtInfo> info, const ASTContext *ctx,
@@ -4252,6 +4279,7 @@ FunctionType::FunctionType(ArrayRef<AnyFunctionType::Param> params, Type output,
                       params.size(), info) {
   std::uninitialized_copy(params.begin(), params.end(),
                           getTrailingObjects<AnyFunctionType::Param>());
+  assert(isConsistentAboutIsolation(info, params));
   if (info.has_value()) {
     auto clangTypeInfo = info.value().getClangTypeInfo();
     if (!clangTypeInfo.empty())
@@ -4263,6 +4291,10 @@ FunctionType::FunctionType(ArrayRef<AnyFunctionType::Param> params, Type output,
     }
     if (Type thrownError = info->getThrownError())
       getTrailingObjects<Type>()[thrownErrorIndex] = thrownError;
+    auto lifetimeDependenceInfo = info->getLifetimeDependenceInfo();
+    if (!lifetimeDependenceInfo.empty()) {
+      *getTrailingObjects<LifetimeDependenceInfo>() = lifetimeDependenceInfo;
+    }
   }
 }
 
@@ -4366,6 +4398,7 @@ GenericFunctionType::GenericFunctionType(
       Signature(sig) {
   std::uninitialized_copy(params.begin(), params.end(),
                           getTrailingObjects<AnyFunctionType::Param>());
+  assert(isConsistentAboutIsolation(info, params));
   if (info) {
     unsigned thrownErrorIndex = 0;
     if (Type globalActor = info->getGlobalActor()) {

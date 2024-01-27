@@ -906,7 +906,8 @@ bool TypeChecker::typeCheckPatternBinding(PatternBindingDecl *PBD,
   return hadError;
 }
 
-bool TypeChecker::typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt) {
+bool TypeChecker::typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt,
+                                          GenericEnvironment *packElementEnv) {
   auto &Context = dc->getASTContext();
   FrontendStatsTracer statsTracer(Context.Stats, "typecheck-for-each", stmt);
   PrettyStackTraceStmt stackTrace(Context, "type-checking-for-each", stmt);
@@ -922,7 +923,8 @@ bool TypeChecker::typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt) {
     return true;
   };
 
-  auto target = SyntacticElementTarget::forForEachStmt(stmt, dc);
+  auto target = SyntacticElementTarget::forForEachStmt(
+      stmt, dc, /*ignoreWhereClause=*/false, packElementEnv);
   if (!typeCheckTarget(target))
     return failed();
 
@@ -1726,8 +1728,8 @@ TypeChecker::typeCheckCheckedCast(Type fromType, Type toType,
   //
   // Thus, right now, a move-only type is only a subtype of itself.
   // We also want to prevent conversions of a move-only type's metatype.
-  if (fromType->getMetatypeInstanceType()->isNoncopyable(dc)
-      || toType->getMetatypeInstanceType()->isNoncopyable(dc))
+  if (fromType->getMetatypeInstanceType()->isNoncopyable()
+      || toType->getMetatypeInstanceType()->isNoncopyable())
     return CheckedCastKind::Unresolved;
   
   // Check for a bridging conversion.

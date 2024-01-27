@@ -1852,6 +1852,7 @@ static PreparedArguments emitStringLiteralArgs(SILGenFunction &SGF, SILLocation 
     break;
 
   case StringLiteralInst::Encoding::Bytes:
+  case StringLiteralInst::Encoding::UTF8_OSLOG:
   case StringLiteralInst::Encoding::ObjCSelector:
     llvm_unreachable("these cannot be formed here");
   }
@@ -3267,7 +3268,7 @@ Expr *ArgumentSource::findStorageReferenceExprForMoveOnly(
 
   SILType ty =
       SGF.getLoweredType(type->getWithoutSpecifierType()->getCanonicalType());
-  bool isMoveOnly = ty.getASTType()->isNoncopyable();
+  bool isMoveOnly = ty.isMoveOnly(/*orWrapped=*/false);
   if (auto *pd = dyn_cast<ParamDecl>(storage)) {
     isMoveOnly |= pd->getSpecifier() == ParamSpecifier::Borrowing;
     isMoveOnly |= pd->getSpecifier() == ParamSpecifier::Consuming;

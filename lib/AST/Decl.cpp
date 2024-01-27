@@ -4930,14 +4930,52 @@ InverseMarking TypeDecl::getMarking(InvertibleProtocolKind ip) const {
   );
 }
 
-bool TypeDecl::canBeNoncopyable() const {
-  auto copyable = getMarking(InvertibleProtocolKind::Copyable);
-  return bool(copyable.getInverse()) && !copyable.getPositive();
+static TypeDecl::CanBeInvertible::Result
+conformanceExists(TypeDecl const *decl, InvertibleProtocolKind ip) {
+  auto *proto = decl->getASTContext().getProtocol(getKnownProtocolKind(ip));
+  assert(proto);
+
+  // Handle protocols specially, without building a GenericSignature.
+  if (auto *protoDecl = dyn_cast<ProtocolDecl>(decl))
+    return protoDecl->requiresInvertible(ip)
+         ? TypeDecl::CanBeInvertible::Always
+         : TypeDecl::CanBeInvertible::Never;
+
+  Type selfTy = decl->getDeclaredInterfaceType();
+  assert(selfTy);
+
+  auto conformance = decl->getModuleContext()->lookupConformance(selfTy, proto,
+      /*allowMissing=*/false);
+
+  if (conformance.isInvalid())
+    return TypeDecl::CanBeInvertible::Never;
+
+  if (!conformance.getConditionalRequirements().empty())
+    return TypeDecl::CanBeInvertible::Conditionally;
+
+  return TypeDecl::CanBeInvertible::Always;
 }
 
-bool TypeDecl::isEscapable() const {
-  auto escapable = getMarking(InvertibleProtocolKind::Escapable);
-  return !escapable.getInverse() || bool(escapable.getPositive());
+TypeDecl::CanBeInvertible::Result TypeDecl::canBeCopyable() const {
+  if (!getASTContext().LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
+    auto copyable = getMarking(InvertibleProtocolKind::Copyable);
+    return !copyable.getInverse() || bool(copyable.getPositive())
+         ? CanBeInvertible::Always
+         : CanBeInvertible::Never;
+  }
+
+  return conformanceExists(this, InvertibleProtocolKind::Copyable);
+}
+
+TypeDecl::CanBeInvertible::Result TypeDecl::canBeEscapable() const {
+  if (!getASTContext().LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
+    auto escapable = getMarking(InvertibleProtocolKind::Escapable);
+    return !escapable.getInverse() || bool(escapable.getPositive())
+         ? CanBeInvertible::Always
+         : CanBeInvertible::Never;
+  }
+
+  return conformanceExists(this, InvertibleProtocolKind::Escapable);
 }
 
 Type TypeDecl::getDeclaredInterfaceType() const {
@@ -6588,10 +6626,20 @@ bool ProtocolDecl::inheritsFrom(const ProtocolDecl *super) const {
 }
 
 bool ProtocolDecl::requiresInvertible(InvertibleProtocolKind ip) const {
-  // HACK: until we enable Feature::NoncopyableGenerics in the stdlib,
-  // hardcode the fact that an invertible protocol does not require any other!
-  if (getInvertibleProtocolKind())
-    return false;
+  // Specially handle when asking if an invertible protocol requires another.
+  if (auto thisIP = getInvertibleProtocolKind()) {
+    if (SWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS) {
+      // Hardcode that the invertible protocols do not require themselves.
+      // Otherwise, defer to what the stdlib says by walking the protocol.
+      if (thisIP == ip)
+        return false;
+    } else {
+      // The stdlib was NOT built with noncopyable generics, so claim that
+      // this invertible protocol require no others.
+      // FIXME: this configuration will eventually go away.
+      return false;
+    }
+  }
 
   auto kp = ::getKnownProtocolKind(ip);
   return walkInheritedProtocols([kp, ip](ProtocolDecl *proto) {
@@ -10613,12 +10661,14 @@ Type ConstructorDecl::getInitializerInterfaceType() {
   auto initSelfParam = computeSelfParam(this, /*isInitializingCtor=*/true);
 
   // FIXME: Verify ExtInfo state is correct, not working by accident.
+  AnyFunctionType::ExtInfo info;
+  if (initSelfParam.isIsolated())
+    info = info.withIsolation(FunctionTypeIsolation::forParameter());
+
   Type initFuncTy;
   if (auto sig = getGenericSignature()) {
-    GenericFunctionType::ExtInfo info;
     initFuncTy = GenericFunctionType::get(sig, {initSelfParam}, funcTy, info);
   } else {
-    FunctionType::ExtInfo info;
     initFuncTy = FunctionType::get({initSelfParam}, funcTy, info);
   }
   InitializerInterfaceType = initFuncTy;
@@ -11223,9 +11273,62 @@ ActorIsolation::ActorIsolation(Kind kind, NominalTypeDecl *actor,
     : actorInstance(actor), kind(kind), isolatedByPreconcurrency(false),
       silParsed(false), parameterIndex(parameterIndex) {}
 
-ActorIsolation::ActorIsolation(Kind kind, VarDecl *capturedActor)
-    : actorInstance(capturedActor), kind(kind), isolatedByPreconcurrency(false),
-      silParsed(false), parameterIndex(0) {}
+ActorIsolation::ActorIsolation(Kind kind, VarDecl *actor,
+                               unsigned parameterIndex)
+    : actorInstance(actor), kind(kind), isolatedByPreconcurrency(false),
+      silParsed(false), parameterIndex(parameterIndex) {}
+
+ActorIsolation::ActorIsolation(Kind kind, Expr *actor,
+                               unsigned parameterIndex)
+    : actorInstance(actor), kind(kind), isolatedByPreconcurrency(false),
+      silParsed(false), parameterIndex(parameterIndex) {}
+
+ActorIsolation
+ActorIsolation::forActorInstanceParameter(Expr *actor,
+                                          unsigned parameterIndex) {
+  auto &ctx = actor->getType()->getASTContext();
+
+  // An isolated value of `nil` is statically nonisolated.
+  // FIXME: Also allow 'Optional.none'
+  if (dyn_cast<NilLiteralExpr>(actor))
+    return ActorIsolation::forNonisolated(/*unsafe*/false);
+
+  // An isolated value of `<global actor type>.shared` is statically
+  // global actor isolated.
+  if (auto *memberRef = dyn_cast<MemberRefExpr>(actor)) {
+    // Check that the member declaration witnesses the `shared`
+    // requirement of the `GlobalActor` protocol.
+    auto declRef = memberRef->getDecl();
+    auto baseType =
+        memberRef->getBase()->getType()->getMetatypeInstanceType();
+    if (auto globalActor = ctx.getProtocol(KnownProtocolKind::GlobalActor)) {
+      auto *dc = declRef.getDecl()->getDeclContext();
+      auto *module = dc->getParentModule();
+      auto conformance = module->checkConformance(baseType, globalActor);
+      if (conformance &&
+          conformance.getWitnessByName(baseType, ctx.Id_shared) == declRef) {
+        return ActorIsolation::forGlobalActor(baseType);
+      }
+    }
+  }
+
+  return ActorIsolation(ActorInstance, actor, parameterIndex + 1);
+}
+
+ActorIsolation
+ActorIsolation::forActorInstanceSelf(ValueDecl *decl) {
+  if (auto *fn = dyn_cast<AbstractFunctionDecl>(decl))
+    return ActorIsolation(ActorInstance, fn->getImplicitSelfDecl(), 0);
+
+  if (auto *storage = dyn_cast<AbstractStorageDecl>(decl)) {
+    if (auto *fn = storage->getAccessor(AccessorKind::Get)) {
+      return ActorIsolation(ActorInstance, fn->getImplicitSelfDecl(), 0);
+    }
+  }
+
+  auto *dc = decl->getDeclContext();
+  return ActorIsolation(ActorInstance, dc->getSelfNominalTypeDecl(), 0);
+}
 
 NominalTypeDecl *ActorIsolation::getActor() const {
   assert(getKind() == ActorInstance);
@@ -11233,8 +11336,19 @@ NominalTypeDecl *ActorIsolation::getActor() const {
   if (silParsed)
     return nullptr;
 
+  Type actorType;
+
   if (auto *instance = actorInstance.dyn_cast<VarDecl *>()) {
-    return instance->getTypeInContext()
+    actorType = instance->getTypeInContext();
+  } else if (auto *instance = actorInstance.dyn_cast<Expr *>()) {
+    actorType = instance->getType();
+  }
+
+  if (actorType) {
+    if (auto wrapped = actorType->getOptionalObjectType()) {
+      actorType = wrapped;
+    }
+    return actorType
         ->getReferenceStorageReferent()->getAnyActor();
   }
 
@@ -11248,6 +11362,15 @@ VarDecl *ActorIsolation::getActorInstance() const {
     return nullptr;
 
   return actorInstance.dyn_cast<VarDecl *>();
+}
+
+Expr *ActorIsolation::getActorInstanceExpr() const {
+  assert(getKind() == ActorInstance);
+
+  if (silParsed)
+    return nullptr;
+
+  return actorInstance.dyn_cast<Expr *>();
 }
 
 bool ActorIsolation::isMainActor() const {
@@ -11267,6 +11390,39 @@ bool ActorIsolation::isDistributedActor() const {
     return false;
 
   return getKind() == ActorInstance && getActor()->isDistributedActor();
+}
+
+bool ActorIsolation::isEqual(const ActorIsolation &lhs,
+                             const ActorIsolation &rhs) {
+  if (lhs.getKind() != rhs.getKind())
+    return false;
+
+  switch (lhs.getKind()) {
+  case Nonisolated:
+  case NonisolatedUnsafe:
+  case Unspecified:
+    return true;
+
+  case ActorInstance: {
+    auto *lhsActor = lhs.getActorInstance();
+    auto *rhsActor = rhs.getActorInstance();
+    if (lhsActor && rhsActor) {
+      // FIXME: This won't work for arbitrary isolated parameter captures.
+      if ((lhsActor->isSelfParameter() && rhsActor->isSelfParamCapture()) ||
+          (lhsActor->isSelfParamCapture() && rhsActor->isSelfParameter())) {
+        return true;
+      }
+    }
+
+    // The parameter index doesn't matter; only the actor instance
+    // values must be equal.
+    return (lhs.getActor() == rhs.getActor() &&
+            lhs.actorInstance == rhs.actorInstance);
+  }
+
+  case GlobalActor:
+    return areTypesEqual(lhs.globalActor, rhs.globalActor);
+  }
 }
 
 BuiltinTupleDecl::BuiltinTupleDecl(Identifier Name, DeclContext *Parent)

@@ -2576,6 +2576,134 @@ static Type validateParameterType(ParamDecl *decl) {
   return Ty;
 }
 
+llvm::Optional<LifetimeDependenceInfo> validateLifetimeDependenceInfo(
+    LifetimeDependentReturnTypeRepr *lifetimeDependentRepr, Type resultTy,
+    Decl *decl, bool allowIndex) {
+  auto *afd = cast<AbstractFunctionDecl>(decl);
+  auto *dc = decl->getDeclContext();
+  auto &ctx = dc->getASTContext();
+  auto &diags = ctx.Diags;
+  SmallBitVector copyLifetimeParamIndices(afd->getParameters()->size() + 1);
+  SmallBitVector borrowLifetimeParamIndices(afd->getParameters()->size() + 1);
+
+  auto updateLifetimeDependenceInfo = [&](LifetimeDependenceSpecifier specifier,
+                                          unsigned paramIndexToSet,
+                                          ValueOwnership ownership) {
+    auto loc = specifier.getLoc();
+    auto kind = specifier.getLifetimeDependenceKind();
+
+    /* TODO: Enable this
+    if (TypeChecker::conformsToKnownProtocol(resultTy,
+                                             InvertibleProtocolKind::Escapable,
+                                             dc->getParentModule())) {
+      diags.diagnose(loc, diag::lifetime_dependence_invalid_return_type);
+      return true;
+    }
+    */
+    if (ownership == ValueOwnership::Default) {
+      diags.diagnose(loc, diag::lifetime_dependence_missing_ownership_modifier);
+      return true;
+    }
+    if (kind == LifetimeDependenceKind::Borrow &&
+        ownership != ValueOwnership::Shared) {
+      diags.diagnose(loc, diag::lifetime_dependence_cannot_use_kind, "borrow",
+                     getOwnershipSpelling(ownership));
+      return true;
+    }
+    if (kind == LifetimeDependenceKind::Mutate &&
+        ownership != ValueOwnership::InOut) {
+      diags.diagnose(loc, diag::lifetime_dependence_cannot_use_kind, "mutate",
+                     getOwnershipSpelling(ownership));
+      return true;
+    }
+    if (kind == LifetimeDependenceKind::Consume &&
+        ownership != ValueOwnership::Owned) {
+      diags.diagnose(loc, diag::lifetime_dependence_cannot_use_kind, "consume",
+                     getOwnershipSpelling(ownership));
+      return true;
+    }
+    if (copyLifetimeParamIndices.test(paramIndexToSet) ||
+        borrowLifetimeParamIndices.test(paramIndexToSet)) {
+      diags.diagnose(loc, diag::lifetime_dependence_duplicate_param_id);
+      return true;
+    }
+    if (kind == LifetimeDependenceKind::Copy ||
+        kind == LifetimeDependenceKind::Consume) {
+      copyLifetimeParamIndices.set(paramIndexToSet);
+    } else {
+      assert(kind == LifetimeDependenceKind::Borrow ||
+             kind == LifetimeDependenceKind::Mutate);
+      borrowLifetimeParamIndices.set(paramIndexToSet);
+    }
+    return false;
+  };
+
+  for (auto specifier : lifetimeDependentRepr->getLifetimeDependencies()) {
+    switch (specifier.getSpecifierKind()) {
+    case LifetimeDependenceSpecifier::SpecifierKind::Named: {
+      bool foundParamName = false;
+      unsigned paramIndexToSet = 1;
+      for (auto *param : *afd->getParameters()) {
+        if (param->getParameterName() == specifier.getName()) {
+          foundParamName = true;
+          if (updateLifetimeDependenceInfo(specifier, paramIndexToSet,
+                                           param->getValueOwnership())) {
+            return llvm::None;
+          }
+          break;
+        }
+        paramIndexToSet++;
+      }
+      if (!foundParamName) {
+        diags.diagnose(specifier.getLoc(),
+                       diag::lifetime_dependence_invalid_param_name,
+                       specifier.getName());
+        return llvm::None;
+      }
+      break;
+    }
+    case LifetimeDependenceSpecifier::SpecifierKind::Ordered: {
+      auto paramIndex = specifier.getIndex();
+      if (paramIndex > afd->getParameters()->size()) {
+        diags.diagnose(specifier.getLoc(),
+                       diag::lifetime_dependence_invalid_param_index,
+                       paramIndex);
+        return llvm::None;
+      }
+      if (updateLifetimeDependenceInfo(
+              specifier, /*paramIndexToSet*/ specifier.getIndex() + 1,
+              afd->getParameters()->get(paramIndex)->getValueOwnership())) {
+        return llvm::None;
+      }
+      break;
+    }
+    case LifetimeDependenceSpecifier::SpecifierKind::Self: {
+      if (!afd->hasImplicitSelfDecl()) {
+        diags.diagnose(specifier.getLoc(),
+                       diag::lifetime_dependence_invalid_self);
+        return llvm::None;
+      }
+      if (updateLifetimeDependenceInfo(
+              specifier, /*selfIndex*/ 0,
+              afd->getImplicitSelfDecl()->getValueOwnership())) {
+        return llvm::None;
+      }
+      break;
+    }
+    }
+  }
+
+  return LifetimeDependenceInfo(
+      IndexSubset::get(ctx, copyLifetimeParamIndices),
+      IndexSubset::get(ctx, borrowLifetimeParamIndices));
+}
+
+static void maybeAddParameterIsolation(AnyFunctionType::ExtInfoBuilder &infoBuilder,
+                                       ArrayRef<AnyFunctionType::Param> params) {
+  if (hasIsolatedParameter(params))
+    infoBuilder = infoBuilder.withIsolation(FunctionTypeIsolation::forParameter());
+}
+
 Type
 InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
   auto &Context = D->getASTContext();
@@ -2744,6 +2872,16 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
       resultTy = TupleType::getEmpty(AFD->getASTContext());
     }
 
+    auto *returnTypeRepr = AFD->getResultTypeRepr();
+    llvm::Optional<LifetimeDependenceInfo> lifetimeDependenceInfo;
+    if (returnTypeRepr) {
+      if (auto *lifetimeDependentRepr =
+              dyn_cast<LifetimeDependentReturnTypeRepr>(returnTypeRepr)) {
+        lifetimeDependenceInfo = validateLifetimeDependenceInfo(
+            lifetimeDependentRepr, resultTy, D, /*allowIndex*/ false);
+      }
+    }
+
     // (Args...) -> Result
     Type funcTy;
 
@@ -2751,6 +2889,7 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
       SmallVector<AnyFunctionType::Param, 4> argTy;
       AFD->getParameters()->getParams(argTy);
 
+      maybeAddParameterIsolation(infoBuilder, argTy);
       infoBuilder = infoBuilder.withAsync(AFD->hasAsync());
       infoBuilder = infoBuilder.withConcurrent(AFD->isSendable());
       // 'throws' only applies to the innermost function.
@@ -2758,6 +2897,9 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
       // Defer bodies must not escape.
       if (auto fd = dyn_cast<FuncDecl>(D))
         infoBuilder = infoBuilder.withNoEscape(fd->isDeferBody());
+      if (lifetimeDependenceInfo.has_value())
+        infoBuilder =
+            infoBuilder.withLifetimeDependenceInfo(*lifetimeDependenceInfo);
       auto info = infoBuilder.build();
 
       if (sig && !hasSelf) {
@@ -2771,13 +2913,14 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
     if (hasSelf) {
       // Substitute in our own 'self' parameter.
       auto selfParam = computeSelfParam(AFD);
+      AnyFunctionType::ExtInfoBuilder selfInfoBuilder;
+      maybeAddParameterIsolation(selfInfoBuilder, {selfParam});
       // FIXME: Verify ExtInfo state is correct, not working by accident.
+      auto selfInfo = selfInfoBuilder.build();
       if (sig) {
-        GenericFunctionType::ExtInfo info;
-        funcTy = GenericFunctionType::get(sig, {selfParam}, funcTy, info);
+        funcTy = GenericFunctionType::get(sig, {selfParam}, funcTy, selfInfo);
       } else {
-        FunctionType::ExtInfo info;
-        funcTy = FunctionType::get({selfParam}, funcTy, info);
+        funcTy = FunctionType::get({selfParam}, funcTy, selfInfo);
       }
     }
 
@@ -2792,13 +2935,15 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
     SmallVector<AnyFunctionType::Param, 2> argTy;
     SD->getIndices()->getParams(argTy);
 
+    AnyFunctionType::ExtInfoBuilder infoBuilder;
+    maybeAddParameterIsolation(infoBuilder, argTy);
+
     Type funcTy;
     // FIXME: Verify ExtInfo state is correct, not working by accident.
+    auto info = infoBuilder.build();
     if (auto sig = SD->getGenericSignature()) {
-      GenericFunctionType::ExtInfo info;
       funcTy = GenericFunctionType::get(sig, argTy, elementTy, info);
     } else {
-      FunctionType::ExtInfo info;
       funcTy = FunctionType::get(argTy, elementTy, info);
     }
 

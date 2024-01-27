@@ -215,6 +215,10 @@ option(SWIFT_BUILD_REMOTE_MIRROR
     "Build the Swift Remote Mirror Library"
     TRUE)
 
+option(SWIFT_BUILD_EXTERNAL_GENERIC_METADATA_BUILDER
+    "Build the Swift External Generic Metadata Builder Library"
+    TRUE)
+
 option(SWIFT_BUILD_DYNAMIC_STDLIB
     "Build dynamic variants of the Swift standard library"
     TRUE)
@@ -222,11 +226,11 @@ option(SWIFT_BUILD_DYNAMIC_STDLIB
 option(SWIFT_BUILD_STATIC_STDLIB
     "Build static variants of the Swift standard library"
     FALSE)
-    
+
 option(SWIFT_STDLIB_STATIC_PRINT
     "Build compile-time evaluated vprintf()"
     FALSE)
-    
+
 option(SWIFT_STDLIB_ENABLE_UNICODE_DATA
     "Include Unicode data files in the standard library.
     NOTE: Disabling this will cause many String methods to crash."
@@ -639,6 +643,10 @@ option(SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED
   "Enable experimental distributed actors and functions"
   FALSE)
 
+option(SWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS
+  "Enable experimental NoncopyableGenerics"
+  FALSE)
+
 option(SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING
   "Enable experimental string processing"
   FALSE)
@@ -784,11 +792,17 @@ if (CMAKE_Swift_COMPILER)
 else()
   message(STATUS "Swift Compiler (None).")
 endif()
+
+set(THREADS_PREFER_PTHREAD_FLAG YES)
+include(FindThreads)
+
 if(SWIFT_PATH_TO_CMARK_BUILD)
   execute_process(COMMAND ${SWIFT_PATH_TO_CMARK_BUILD}/src/cmark --version
     OUTPUT_VARIABLE _CMARK_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE)
   message(STATUS "CMark Version: ${_CMARK_VERSION}")
+elseif(SWIFT_INCLUDE_TOOLS)
+  find_package(cmark-gfm CONFIG REQUIRED)
 endif()
 message(STATUS "")
 
@@ -1224,6 +1238,7 @@ if(SWIFT_BUILD_STDLIB OR SWIFT_BUILD_SDK_OVERLAY)
   message(STATUS "Differentiable Programming Support: ${SWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING}")
   message(STATUS "Concurrency Support:                ${SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY}")
   message(STATUS "Distributed Support:                ${SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED}")
+  message(STATUS "NoncopyableGenerics Support:        ${SWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS}")
   message(STATUS "String Processing Support:          ${SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING}")
   message(STATUS "Backtracing Support:                ${SWIFT_ENABLE_BACKTRACING}")
   message(STATUS "Unicode Support:                    ${SWIFT_STDLIB_ENABLE_UNICODE_DATA}")
@@ -1242,6 +1257,11 @@ endif()
 
 if(SWIFT_BUILD_REMOTE_MIRROR)
   message(STATUS "Building Swift Remote Mirror for SDKs: ${SWIFT_SDKS}")
+  message(STATUS "")
+endif()
+
+if(SWIFT_BUILD_EXTERNAL_GENERIC_METADATA_BUILDER)
+  message(STATUS "Building Swift External Generic Metadata Builder for SDKs: ${SWIFT_SDKS}")
   message(STATUS "")
 endif()
 

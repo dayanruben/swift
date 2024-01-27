@@ -3889,7 +3889,7 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
   }
 
   // move-only types (and their metatypes) cannot match with existential types.
-  if (type1->getMetatypeInstanceType()->isNoncopyable(DC)) {
+  if (type1->getMetatypeInstanceType()->isNoncopyable()) {
     // tailor error message
     if (shouldAttemptFixes()) {
       auto *fix = MustBeCopyable::create(*this,
@@ -11586,6 +11586,7 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
 
   auto *paramList = closure->getParameters();
   SmallVector<AnyFunctionType::Param, 4> parameters;
+  bool hasIsolatedParam = false;
   for (unsigned i = 0, n = paramList->size(); i != n; ++i) {
     auto param = inferredClosureType->getParams()[i];
     auto *paramDecl = paramList->get(i);
@@ -11719,6 +11720,8 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
       }
     }
 
+    hasIsolatedParam |= param.isIsolated();
+
     setType(paramDecl, internalType);
     parameters.push_back(param);
   }
@@ -11728,6 +11731,12 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
   if (auto contextualFnType = contextualType->getAs<FunctionType>()) {
     if (contextualFnType->isSendable())
       closureExtInfo = closureExtInfo.withConcurrent();
+  }
+
+  // Isolated parameters override any other kind of isolation we might infer.
+  if (hasIsolatedParam) {
+    closureExtInfo = closureExtInfo.withIsolation(
+      FunctionTypeIsolation::forParameter());
   }
 
   auto closureType =
@@ -11886,7 +11895,7 @@ ConstraintSystem::simplifyBridgingConstraint(Type type1,
 
   // Noncopyable types can't be involved in bridging conversions since a bridged
   // type assumes the ability to copy.
-  if (type1->isNoncopyable(DC)) {
+  if (type1->isNoncopyable()) {
     return SolutionKind::Error;
   }
 

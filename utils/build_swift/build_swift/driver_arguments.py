@@ -1092,6 +1092,10 @@ def create_argument_parser():
            default=True,
            help='Build Remote Mirror')
 
+    option('--build-swift-external-generic-metadata-builder', toggle_true,
+           default=True,
+           help='Build External Generic Metadata Builder')
+
     option('--build-swift-libexec', toggle_true,
            default=True,
            help='build auxiliary executables')
@@ -1333,6 +1337,10 @@ def create_argument_parser():
     option('--enable-experimental-distributed', toggle_true,
            default=True,
            help='Enable experimental Swift distributed actors.')
+
+    option('--enable-experimental-noncopyable-generics', toggle_true,
+           default=False,
+           help='Enable experimental NoncopyableGenerics.')
 
     option('--enable-experimental-string-processing', toggle_true,
            default=True,

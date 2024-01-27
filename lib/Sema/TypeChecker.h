@@ -748,7 +748,8 @@ bool typeCheckPatternBinding(PatternBindingDecl *PBD, unsigned patternNumber,
 /// Type-check a for-each loop's pattern binding and sequence together.
 ///
 /// \returns true if a failure occurred.
-bool typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt);
+bool typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt,
+                             GenericEnvironment *packElementEnv);
 
 /// Compute the set of captures for the given function or closure.
 void computeCaptures(AnyFunctionRef AFR);
@@ -833,13 +834,6 @@ ProtocolConformanceRef checkConformanceToNSCopying(VarDecl *var);
 ValueDecl *deriveProtocolRequirement(DeclContext *DC,
                                      NominalTypeDecl *TypeDecl,
                                      ValueDecl *Requirement);
-
-/// Derive an implicit type witness for the given associated type in
-/// the conformance of the given nominal type to some known
-/// protocol.
-std::pair<Type, TypeDecl *>
-deriveTypeWitness(DeclContext *DC, NominalTypeDecl *nominal,
-                  AssociatedTypeDecl *assocType);
 
 /// \name Name lookup
 ///
@@ -1399,6 +1393,10 @@ bool isOverrideBasedOnType(const ValueDecl *decl, Type declTy,
 /// protocol. If \p type is not null, check specifically whether \p decl
 /// could fulfill a protocol requirement for it.
 bool isMemberOperator(FuncDecl *decl, Type type);
+
+/// Given an interface type and possibly a generic environment,
+/// is the type ever noncopyable?
+bool isInterfaceTypeNoncopyable(Type interfaceTy, GenericEnvironment *env);
 
 /// Returns `true` iff `AdditiveArithmetic` derived conformances are enabled.
 bool isAdditiveArithmeticConformanceDerivationEnabled(SourceFile &SF);

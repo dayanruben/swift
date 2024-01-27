@@ -1067,7 +1067,7 @@ void IRGenModule::addObjCClassStub(llvm::Constant *classPtr) {
 
 void IRGenModule::addRuntimeResolvableType(GenericTypeDecl *type) {
   // Collect the nominal type records we emit into a special section.
-  if (type->canBeNoncopyable()) {
+  if (!type->canBeCopyable()) {
     // Older runtimes should not be allowed to discover noncopyable types, since
     // they will try to expose them dynamically as copyable types. Record
     // noncopyable type descriptors in a separate vector so that future
@@ -5878,9 +5878,15 @@ Address IRGenFunction::createAlloca(llvm::Type *type,
 /// resolving relative references to coalesceable symbols.
 /// It should be removed when fixed. rdar://problem/22674524
 llvm::Constant *IRGenModule::getAddrOfGlobalString(StringRef data,
-                                               bool willBeRelativelyAddressed) {
+                                               bool willBeRelativelyAddressed,
+                                               bool useOSLogSection) {
+  useOSLogSection = useOSLogSection &&
+    TargetInfo.OutputObjectFormat == llvm::Triple::MachO;
+
   // Check whether this string already exists.
-  auto &entry = GlobalStrings[data];
+  auto &entry = useOSLogSection ? GlobalOSLogStrings[data] :
+    GlobalStrings[data];
+
   if (entry.second) {
     // FIXME: Clear unnamed_addr if the global will be relative referenced
     // to work around an ld64 bug. rdar://problem/22674524
@@ -5900,9 +5906,12 @@ llvm::Constant *IRGenModule::getAddrOfGlobalString(StringRef data,
     name[i] = '_';
     (llvm::Twine(".nul") + llvm::Twine(i)).toVector(name);
   }
-  
+
+  auto sectionName =
+    useOSLogSection ? "__TEXT,__oslogstring,cstring_literals" : "";
+
   entry = createStringConstant(data, willBeRelativelyAddressed,
-                               /*sectionName*/ "", name);
+                               sectionName, name);
   return entry.second;
 }
 

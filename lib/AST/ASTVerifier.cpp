@@ -2803,7 +2803,6 @@ public:
         // Ignore incomplete conformances; we didn't need them.
         return;
 
-      case ProtocolConformanceState::CheckingTypeWitnesses:
       case ProtocolConformanceState::Checking:
         dumpRef(decl);
         Out << " has a protocol conformance that is still being checked "
@@ -3288,7 +3287,7 @@ public:
       PrettyStackTraceDecl debugStack("verifying DestructorDecl", DD);
 
       auto *ND = DD->getDeclContext()->getSelfNominalTypeDecl();
-      if (!isa<ClassDecl>(ND) && !ND->canBeNoncopyable() && !DD->isInvalid()) {
+      if (!isa<ClassDecl>(ND) && ND->canBeCopyable() && !DD->isInvalid()) {
         Out << "DestructorDecls outside classes/move only types should be "
                "marked invalid\n";
         abort();

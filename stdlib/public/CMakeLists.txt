@@ -78,7 +78,7 @@ endif()
 add_subdirectory(Threading)
 
 # This static library is shared across swiftCore and swiftRemoteInspection
-if(SWIFT_BUILD_STDLIB OR SWIFT_BUILD_REMOTE_MIRROR)
+if(SWIFT_BUILD_STDLIB OR SWIFT_BUILD_REMOTE_MIRROR OR SWIFT_BUILD_EXTERNAL_GENERIC_METADATA_BUILDER)
   # TODO: due to the use of `add_swift_target_library` rather than `add_library`
   # we cannot use `target_sources` and thus must resort to list manipulations to
   # adjust the source list.
@@ -188,6 +188,12 @@ if(SWIFT_SHOULD_BUILD_EMBEDDED_STDLIB)
     list(APPEND EMBEDDED_STDLIB_TARGET_TRIPLES
       "riscv32  riscv32-none-none-eabi    riscv32-none-none-eabi"
       "riscv64  riscv64-none-none-eabi    riscv64-none-none-eabi"
+    )
+  endif()
+  if("X86" IN_LIST LLVM_TARGETS_TO_BUILD)
+    list(APPEND EMBEDDED_STDLIB_TARGET_TRIPLES
+      "i686    i686-unknown-none-elf       i686-unknown-none-elf"
+      "x86_64  x86_64-unknown-none-elf     x86_64-unknown-none-elf"
     )
   endif()
 
