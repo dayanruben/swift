@@ -543,8 +543,22 @@ static bool varIsSafeAcrossActors(const ModuleDecl *fromModule,
         return false;
     }
 
+    bool accessWithinModule =
+        (fromModule == var->getDeclContext()->getParentModule());
+
+    // If the type is not 'Sendable', it's unsafe
+    if (!var->getTypeInContext()->isSendableType()) {
+      // Compiler versions <= 5.10 treated this variable as nonisolated,
+      // so downgrade async access errors in the effects checker to
+      // warnings prior to Swift 6.
+      if (accessWithinModule)
+        options = ActorReferenceResult::Flags::Preconcurrency;
+
+      return false;
+    }
+
     // If it's actor-isolated but in the same module, then it's OK too.
-    return (fromModule == var->getDeclContext()->getParentModule());
+    return accessWithinModule;
   }
 }
 
@@ -1375,7 +1389,7 @@ void swift::tryDiagnoseExecutorConformance(ASTContext &C,
                                            ProtocolDecl *proto) {
   assert(proto->isSpecificProtocol(KnownProtocolKind::Executor) ||
          proto->isSpecificProtocol(KnownProtocolKind::SerialExecutor) ||
-         proto->isSpecificProtocol(KnownProtocolKind::_TaskExecutor));
+         proto->isSpecificProtocol(KnownProtocolKind::TaskExecutor));
 
   auto &diags = C.Diags;
   auto module = nominal->getParentModule();
@@ -2785,6 +2799,25 @@ namespace {
               }
             }
             return nullptr;
+          },
+          [this]() -> VarDecl * {
+            auto isolation = getActorIsolationOfContext(
+                               const_cast<DeclContext *>(getDeclContext()),
+                               getClosureActorIsolation);
+            if (isolation == ActorIsolation::ActorInstance) {
+              VarDecl *var = isolation.getActorInstance();
+              if (!var) {
+                auto dc = const_cast<DeclContext *>(getDeclContext());
+                auto paramIdx = isolation.getActorInstanceParameter();
+                if (paramIdx == 0) {
+                  var = cast<AbstractFunctionDecl>(dc)->getImplicitSelfDecl();
+                } else {
+                  var = const_cast<ParamDecl *>(getParameterAt(dc, paramIdx - 1));
+                }
+              }
+              return var;
+            }
+            return nullptr;
           });
     }
 
@@ -3293,7 +3326,8 @@ namespace {
         }
 
         argForIsolatedParam = arg;
-        if (getIsolatedActor(arg))
+        unsatisfiedIsolation = llvm::None;
+        if (getIsolatedActor(arg) || isa<CurrentContextIsolationExpr>(arg))
           continue;
 
         // An isolated parameter was provided with a non-isolated argument.
@@ -3639,33 +3673,25 @@ namespace {
             LLVM_FALLTHROUGH;
           }
 
-          case ActorIsolation::ActorInstance:
-            // If this entity is always accessible across actors, just check
-            // Sendable.
+          case ActorIsolation::ActorInstance: {
+            ActorReferenceResult::Options options = llvm::None;
             if (isAccessibleAcrossActors(decl, isolation, getDeclContext(),
-                                         llvm::None)) {
-              if (diagnoseNonSendableTypes(
-                             component.getComponentType(), getDeclContext(),
-                             /*inDerivedConformance*/Type(),
-                             component.getLoc(),
-                             diag::non_sendable_keypath_access)) {
-                diagnosed = true;
-              }
+                                         options)) {
               break;
             }
 
-            {
-              auto diagnostic = ctx.Diags.diagnose(
-                  component.getLoc(), diag::actor_isolated_keypath_component,
-                  isolation, decl);
+            bool downgrade = isolation.isGlobalActor() ||
+              options.contains(
+                  ActorReferenceResult::Flags::Preconcurrency);
 
-              if (isolation == ActorIsolation::ActorInstance)
-                diagnosed = true;
-              else
-                diagnostic.warnUntilSwiftVersion(6);
-            }
+            ctx.Diags.diagnose(
+                component.getLoc(), diag::actor_isolated_keypath_component,
+                isolation, decl)
+              .warnUntilSwiftVersionIf(downgrade, 6);
 
+            diagnosed = !downgrade;
             break;
+          }
           }
         }
 
@@ -6041,7 +6067,8 @@ AbstractFunctionDecl const *swift::isActorInitOrDeInitContext(
 /// for the given expression.
 VarDecl *swift::getReferencedParamOrCapture(
     Expr *expr,
-    llvm::function_ref<Expr *(OpaqueValueExpr *)> getExistentialValue) {
+    llvm::function_ref<Expr *(OpaqueValueExpr *)> getExistentialValue,
+    llvm::function_ref<VarDecl *()> getCurrentIsolatedVar) {
   // Look through identity expressions and implicit conversions.
   Expr *prior;
 
@@ -6067,6 +6094,11 @@ VarDecl *swift::getReferencedParamOrCapture(
   // Declaration references to a variable.
   if (auto declRef = dyn_cast<DeclRefExpr>(expr))
     return dyn_cast<VarDecl>(declRef->getDecl());
+
+  // The current context isolation expression (#isolation) always
+  // corresponds to the isolation of the given code.
+  if (isa<CurrentContextIsolationExpr>(expr))
+    return getCurrentIsolatedVar();
 
   return nullptr;
 }

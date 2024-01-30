@@ -1339,6 +1339,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   if (Args.hasArg(OPT_warn_redundant_requirements))
     Opts.WarnRedundantRequirements = true;
 
+  Opts.EnableExperimentalAssociatedTypeInference = true;
+
   if (Args.hasArg(OPT_enable_experimental_associated_type_inference))
     Opts.EnableExperimentalAssociatedTypeInference = true;
   if (Args.hasArg(OPT_disable_experimental_associated_type_inference))
@@ -3009,7 +3011,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Args.hasFlag(OPT_enable_relative_protocol_witness_tables,
                  OPT_disable_relative_protocol_witness_tables,
                  Opts.UseRelativeProtocolWitnessTables);
-
+  Opts.EnableLargeLoadableTypesReg2Mem =
+      Args.hasFlag(OPT_enable_large_loadable_types_reg2mem,
+                   OPT_disable_large_loadable_types_reg2mem,
+                   Opts.EnableLargeLoadableTypesReg2Mem);
   Opts.EnableLayoutStringValueWitnesses = Args.hasFlag(OPT_enable_layout_string_value_witnesses,
                                                        OPT_disable_layout_string_value_witnesses,
                                                        Opts.EnableLayoutStringValueWitnesses);

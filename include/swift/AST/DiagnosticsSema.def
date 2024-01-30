@@ -5602,9 +5602,6 @@ WARNING(non_sendable_property_type,none,
 WARNING(non_sendable_keypath_capture,none,
         "cannot form key path that captures non-sendable type %0",
         (Type))
-WARNING(non_sendable_keypath_access,none,
-        "cannot form key path that accesses non-sendable type %0",
-        (Type))
 ERROR(non_concurrent_type_member,none,
       "%select{stored property %2|associated value %2}1 of "
       "'Sendable'-conforming %kind3 has non-sendable type %0",
@@ -5668,6 +5665,10 @@ NOTE(nonisolated_mutable_storage_note,none,
      "convert %0 to a 'let' constant or consider declaring it "
      "'nonisolated(unsafe)' if manually managing concurrency safety",
      (const VarDecl *))
+ERROR(nonisolated_non_sendable,none,
+      "'nonisolated' can not be applied to variable with non-'Sendable' "
+      "type %0",
+      (Type))
 ERROR(nonisolated_local_var,none,
       "'nonisolated' can not be applied to local variables",
       ())
@@ -6077,8 +6078,8 @@ ERROR(sil_function_input_label,PointsToFirstBadToken,
       "SIL function types cannot have labeled inputs", ())
 ERROR(sil_non_coro_yields,PointsToFirstBadToken,
       "non-coroutine SIL function types cannot have @yield results", ())
-ERROR(sil_function_repeat_convention,PointsToFirstBadToken,
-      "repeated %select{parameter|result|callee}0 convention attribute",
+ERROR(sil_function_invalid_convention,PointsToFirstBadToken,
+      "convention attribute isn't valid on a %select{parameter|result|callee}0",
       (unsigned))
 ERROR(ast_subst_function_type,none,
       "substitutions cannot be provided on a formal function type", ())
@@ -6099,6 +6100,9 @@ ERROR(sil_metatype_without_repr,none,
       ())
 ERROR(sil_metatype_multiple_reprs,none,
       "metatypes in SIL can only be one of @thin, @thick, or @objc_metatype",
+      ())
+ERROR(sil_metatype_not_metatype,none,
+      "@thin, @thick, or @objc_metatype can only apply to metatype types in SIL",
       ())
 
 //------------------------------------------------------------------------------
@@ -7803,10 +7807,22 @@ ERROR(pack_iteration_where_clause_not_supported, none,
        "functions, methods, initializers",
        ())
  ERROR(lifetime_dependence_invalid_return_type, none,
-       "lifetime dependence specifiers can only be specifier on ~Escapable "
-       "results", ())
+       "lifetime dependence can only be specified on ~Escapable results", ())
  ERROR(lifetime_dependence_missing_ownership_modifier, none,
        "lifetime dependence can only be specified on parameters with ownership "
        "modifiers (borrowing, consuming, inout)", ())
+ ERROR(lifetime_dependence_cannot_infer_wo_ownership_modifier_on_method, none,
+       "cannot infer lifetime dependence, specify ownership modifier for the "
+       "method",
+       ())
+ ERROR(lifetime_dependence_cannot_infer_wo_ambiguous_candidate, none,
+       "cannot infer lifetime dependence, multiple ~Escapable or ~Copyable "
+       "parameters with ownership modifiers, specify explicit lifetime "
+       "dependence",
+       ())
+ ERROR(lifetime_dependence_cannot_infer_no_candidates, none,
+       "cannot infer lifetime dependence, no ~Escapable or ~Copyable "
+       "parameters with ownership modifiers present",
+       ())
 #define UNDEFINE_DIAGNOSTIC_MACROS
 #include "DefineDiagnosticMacros.h"

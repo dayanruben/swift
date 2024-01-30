@@ -4298,6 +4298,16 @@ ClangTypeInfo SILFunctionType::getClangTypeInfo() const {
   return *info;
 }
 
+LifetimeDependenceInfo SILFunctionType::getLifetimeDependenceInfo() const {
+  if (!Bits.SILFunctionType.HasLifetimeDependenceInfo)
+    return LifetimeDependenceInfo();
+  auto *info = getTrailingObjects<LifetimeDependenceInfo>();
+  assert(
+      !info->empty() &&
+      "If the LifetimeDependenceInfo was empty, we shouldn't have stored it.");
+  return *info;
+}
+
 bool SILFunctionType::hasNonDerivableClangType() {
   auto clangTypeInfo = getClangTypeInfo();
   if (clangTypeInfo.empty())
@@ -5700,7 +5710,7 @@ llvm::Optional<Type> AnyFunctionType::getEffectiveThrownErrorType() const {
     return getASTContext().getErrorExistentialType();
 
   // If the thrown interface type is "Never", this function does not throw.
-  if (thrownError->isEqual(getASTContext().getNeverType()))
+  if (thrownError->isNever())
     return llvm::None;
 
   // Otherwise, return the typed error.

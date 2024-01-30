@@ -551,8 +551,10 @@ Decl::getIntroducedOSVersion(PlatformKind Kind) const {
 
 llvm::Optional<llvm::VersionTuple>
 Decl::getBackDeployedBeforeOSVersion(ASTContext &Ctx) const {
-  if (auto *attr = getAttrs().getBackDeployed(Ctx))
-    return attr->Version;
+  if (auto *attr = getAttrs().getBackDeployed(Ctx)) {
+    auto version = attr->Version;
+    return version;
+  }
 
   // Accessors may inherit `@backDeployed`.
   if (auto *AD = dyn_cast<AccessorDecl>(this))
@@ -2310,7 +2312,9 @@ static bool isDefaultInitializable(const TypeRepr *typeRepr, ASTContext &ctx) {
   // Look through most attributes.
   if (const auto attributed = dyn_cast<AttributedTypeRepr>(typeRepr)) {
     // Ownership kinds have optionalness requirements.
-    if (optionalityOf(attributed->getAttrs().getOwnership()) ==
+    // FIXME: this is checking for *SIL* ownership; normal weak/unowned/etc.
+    // are decl attributes.  Is this actually an important check to do?
+    if (optionalityOf(attributed->getSILOwnership()) ==
         ReferenceOwnershipOptionality::Required)
       return true;
 

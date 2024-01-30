@@ -20,6 +20,8 @@
 #ifndef SWIFT_SILOPTIMIZER_MANDATORY_MOVEONLYTYPEUTILS_H
 #define SWIFT_SILOPTIMIZER_MANDATORY_MOVEONLYTYPEUTILS_H
 
+#include "swift/Basic/Feature.h"
+#include "swift/Basic/TaggedUnion.h"
 #include "swift/SIL/FieldSensitivePrunedLiveness.h"
 #include "swift/SIL/SILBuilder.h"
 
@@ -87,6 +89,118 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
             << ")";
 }
 
+/// How a portion of a move-only value/address was "mutated".
+///
+/// Emulates this enum with associated value:
+///
+/// enum PartialMutation {
+/// case consumed
+/// case reinitialized(Instruction)
+/// }
+class PartialMutation {
+  struct Consume {};
+  struct Reinit {
+    SILInstruction &earlierConsumingUse;
+  };
+  TaggedUnion<Consume, Reinit> storage;
+
+  PartialMutation(Consume c) : storage({c}) {}
+  PartialMutation(Reinit r) : storage({r}) {}
+
+public:
+  enum class Kind {
+    Consume,
+    Reinit,
+  };
+
+  operator Kind() {
+    if (storage.isa<Consume>())
+      return Kind::Consume;
+    return Kind::Reinit;
+  }
+
+  static PartialMutation consume() { return PartialMutation(Consume{}); }
+  static PartialMutation reinit(SILInstruction &earlierConsumingUse) {
+    return PartialMutation(Reinit{earlierConsumingUse});
+  }
+  SILInstruction &getEarlierConsumingUse() {
+    return storage.get<Reinit>().earlierConsumingUse;
+  }
+};
+
+inline Feature partialMutationFeature(PartialMutation::Kind kind) {
+  switch (kind) {
+  case PartialMutation::Kind::Consume:
+    return Feature::MoveOnlyPartialConsumption;
+  case PartialMutation::Kind::Reinit:
+    return Feature::MoveOnlyPartialReinitialization;
+  }
+}
+
+/// How a partial mutation (consume/reinit) is illegal for diagnostic emission.
+///
+/// Emulates the following enum with associated value:
+///
+/// enum class PartialMutationError {
+/// case featureDisabled(SILType)
+/// case hasDeinit(SILType, NominalTypeDecl)
+/// }
+class PartialMutationError {
+  struct FeatureDisabled {
+    PartialMutation::Kind kind;
+  };
+  struct HasDeinit {
+    NominalTypeDecl &nominal;
+  };
+  TaggedUnion<FeatureDisabled, HasDeinit> kind;
+
+  PartialMutationError(SILType type, FeatureDisabled fd)
+      : kind({fd}), type(type) {}
+  PartialMutationError(SILType type, HasDeinit r) : kind({r}), type(type) {}
+
+public:
+  /// The type within the aggregate responsible for the error.
+  ///
+  /// case featureDisabled:
+  ///   The type of the portion of the aggregate that would be mutated.
+  /// case hasDeinit:
+  ///   The type that has the deinit.
+  SILType type;
+  /// The reason it's illegal.
+  ///
+  /// See shouldEmitPartialMutationError, emitPartialMutationError.
+  enum class Kind : uint8_t {
+    /// The partial consumption feature is disabled.
+    ///
+    /// See -enable-experimental-feature MoveOnlyPartialConsumption.
+    FeatureDisabled,
+    /// A partially consumed/reinitialized aggregate has a deinit.
+    ///
+    /// The aggregate is somewhere in the type layout between the consumed
+    /// range and the full value.  It is the \p nominal field of
+    /// PartialMutationError.
+    HasDeinit,
+  };
+
+  operator Kind() {
+    if (kind.isa<FeatureDisabled>())
+      return Kind::FeatureDisabled;
+    return Kind::HasDeinit;
+  }
+
+  static PartialMutationError featureDisabled(SILType type,
+                                              PartialMutation::Kind kind) {
+    return PartialMutationError(type, FeatureDisabled{kind});
+  }
+
+  static PartialMutationError hasDeinit(SILType type,
+                                        NominalTypeDecl &nominal) {
+    return PartialMutationError(type, HasDeinit{nominal});
+  }
+
+  NominalTypeDecl &getNominal() { return kind.get<HasDeinit>().nominal; };
+  PartialMutation::Kind getKind() { return kind.get<FeatureDisabled>().kind; };
+};
 } // namespace siloptimizer
 } // namespace swift
 

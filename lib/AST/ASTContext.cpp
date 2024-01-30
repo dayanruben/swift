@@ -287,6 +287,10 @@ struct ASTContext::Implementation {
   /// The declaration of 'AsyncIteratorProtocol.next()'.
   FuncDecl *AsyncIteratorNext = nullptr;
 
+  /// The declaration of 'AsyncIteratorProtocol.next(_:)' that takes
+  /// an actor isolation.
+  FuncDecl *AsyncIteratorNextIsolated = nullptr;
+
   /// The declaration of Swift.Optional<T>.Some.
   EnumElementDecl *OptionalSomeDecl = nullptr;
 
@@ -948,21 +952,63 @@ FuncDecl *ASTContext::getIteratorNext() const {
   return nullptr;
 }
 
+static std::pair<FuncDecl *, FuncDecl *>
+getAsyncIteratorNextRequirements(const ASTContext &ctx) {
+  auto proto = ctx.getProtocol(KnownProtocolKind::AsyncIteratorProtocol);
+  if (!proto)
+    return { nullptr, nullptr };
+
+  FuncDecl *next = nullptr;
+  FuncDecl *nextThrowing = nullptr;
+  for (auto result : proto->lookupDirect(ctx.Id_next)) {
+    if (result->getDeclContext() != proto)
+      continue;
+
+    if (auto func = dyn_cast<FuncDecl>(result)) {
+      switch (func->getParameters()->size()) {
+      case 0: next = func; break;
+      case 1: nextThrowing = func; break;
+      default: break;
+      }
+    }
+  }
+
+  return { next, nextThrowing };
+}
+
 FuncDecl *ASTContext::getAsyncIteratorNext() const {
   if (getImpl().AsyncIteratorNext) {
     return getImpl().AsyncIteratorNext;
   }
 
-  auto proto = getProtocol(KnownProtocolKind::AsyncIteratorProtocol);
-  if (!proto)
-    return nullptr;
+  auto next = getAsyncIteratorNextRequirements(*this).first;
+  getImpl().AsyncIteratorNext = next;
+  return next;
+}
 
-  if (auto *func = lookupRequirement(proto, Id_next)) {
-    getImpl().AsyncIteratorNext = func;
-    return func;
+FuncDecl *ASTContext::getAsyncIteratorNextIsolated() const {
+  if (getImpl().AsyncIteratorNextIsolated) {
+    return getImpl().AsyncIteratorNextIsolated;
   }
 
+  auto nextThrowing = getAsyncIteratorNextRequirements(*this).second;
+  getImpl().AsyncIteratorNextIsolated = nextThrowing;
+  return nextThrowing;
+}
+
+namespace {
+
+template<typename DeclClass>
+DeclClass *synthesizeBuiltinDecl(const ASTContext &ctx, StringRef name) {
+  if (name == "Never") {
+    auto never = new (ctx) EnumDecl(SourceLoc(), ctx.getIdentifier(name),
+                                    SourceLoc(), { }, nullptr,
+                                    ctx.MainModule);
+    return (DeclClass *)never;
+  }
   return nullptr;
+}
+
 }
 
 #define KNOWN_STDLIB_TYPE_DECL(NAME, DECL_CLASS, NUM_GENERIC_PARAMS) \
@@ -980,7 +1026,8 @@ DECL_CLASS *ASTContext::get##NAME##Decl() const { \
       } \
     } \
   } \
-  return nullptr; \
+  getImpl().NAME##Decl = synthesizeBuiltinDecl<DECL_CLASS>(*this, #NAME); \
+  return getImpl().NAME##Decl; \
 } \
 \
 Type ASTContext::get##NAME##Type() const { \
@@ -1171,7 +1218,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   case KnownProtocolKind::AsyncSequence:
   case KnownProtocolKind::AsyncIteratorProtocol:
   case KnownProtocolKind::Executor:
-  case KnownProtocolKind::_TaskExecutor:
+  case KnownProtocolKind::TaskExecutor:
   case KnownProtocolKind::SerialExecutor:
     M = getLoadedModule(Id_Concurrency);
     break;
@@ -4177,11 +4224,7 @@ void FunctionType::Profile(llvm::FoldingSetNodeID &ID,
   profileParams(ID, params);
   ID.AddPointer(result.getPointer());
   if (info.has_value()) {
-    auto infoKey = info.value().getFuncAttrKey();
-    ID.AddInteger(std::get<0>(infoKey));
-    ID.AddPointer(std::get<1>(infoKey));
-    ID.AddPointer(std::get<2>(infoKey));
-    ID.AddPointer(std::get<3>(infoKey));
+    info->Profile(ID);
   }
 }
 
@@ -4306,11 +4349,7 @@ void GenericFunctionType::Profile(llvm::FoldingSetNodeID &ID,
   profileParams(ID, params);
   ID.AddPointer(result.getPointer());
   if (info.has_value()) {
-    auto infoKey = info.value().getFuncAttrKey();
-    ID.AddInteger(std::get<0>(infoKey));
-    ID.AddPointer(std::get<1>(infoKey));
-    ID.AddPointer(std::get<2>(infoKey));
-    ID.AddPointer(std::get<3>(infoKey));
+    info->Profile(ID);
   }
 }
 
@@ -4446,9 +4485,7 @@ void SILFunctionType::Profile(
     ProtocolConformanceRef conformance, SubstitutionMap patternSubs,
     SubstitutionMap invocationSubs) {
   id.AddPointer(genericParams.getPointer());
-  auto infoKey = info.getFuncAttrKey();
-  id.AddInteger(infoKey.first);
-  id.AddPointer(infoKey.second);
+  info.Profile(id);
   id.AddInteger(unsigned(coroutineKind));
   id.AddInteger(unsigned(calleeConvention));
   id.AddInteger(params.size());
@@ -4494,6 +4531,8 @@ SILFunctionType::SILFunctionType(
   static_assert(SILExtInfoBuilder::NumMaskBits == NumSILExtInfoBits,
                 "ExtInfo and SILFunctionTypeBitfields must agree on bit size");
   Bits.SILFunctionType.HasClangTypeInfo = !ext.getClangTypeInfo().empty();
+  Bits.SILFunctionType.HasLifetimeDependenceInfo =
+      !ext.getLifetimeDependenceInfo().empty();
   Bits.SILFunctionType.CoroutineKind = unsigned(coroutineKind);
   NumParameters = params.size();
   if (coroutineKind == SILCoroutineKind::None) {
@@ -4543,6 +4582,10 @@ SILFunctionType::SILFunctionType(
   }
   if (!ext.getClangTypeInfo().empty())
     *getTrailingObjects<ClangTypeInfo>() = ext.getClangTypeInfo();
+
+  if (!ext.getLifetimeDependenceInfo().empty())
+    *getTrailingObjects<LifetimeDependenceInfo>() =
+        ext.getLifetimeDependenceInfo();
 
 #ifndef NDEBUG
   if (ext.getRepresentation() == Representation::WitnessMethod)
@@ -4730,10 +4773,12 @@ CanSILFunctionType SILFunctionType::get(
   // See [NOTE: SILFunctionType-layout]
   bool hasResultCache = normalResults.size() > 1;
   size_t bytes = totalSizeToAlloc<SILParameterInfo, SILResultInfo, SILYieldInfo,
-                                  SubstitutionMap, CanType, ClangTypeInfo>(
+                                  SubstitutionMap, CanType, ClangTypeInfo,
+                                  LifetimeDependenceInfo>(
       params.size(), normalResults.size() + (errorResult ? 1 : 0),
       yields.size(), (patternSubs ? 1 : 0) + (invocationSubs ? 1 : 0),
-      hasResultCache ? 2 : 0, ext.getClangTypeInfo().empty() ? 0 : 1);
+      hasResultCache ? 2 : 0, ext.getClangTypeInfo().empty() ? 0 : 1,
+      ext.getLifetimeDependenceInfo().empty() ? 0 : 1);
 
   void *mem = ctx.Allocate(bytes, alignof(SILFunctionType));
 
