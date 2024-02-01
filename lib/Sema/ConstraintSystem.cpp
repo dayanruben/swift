@@ -822,6 +822,12 @@ void ConstraintSystem::addPackEnvironment(PackElementExpr *packElement,
 static void extendDepthMap(
    Expr *expr,
    llvm::DenseMap<Expr *, std::pair<unsigned, Expr *>> &depthMap) {
+  // If we already have an entry in the map, we don't need to update it. This
+  // avoids invalidating previous entries when solving a smaller component of a
+  // larger AST node, e.g during conjunction solving.
+  if (depthMap.contains(expr))
+    return;
+
   class RecordingTraversal : public ASTWalker {
     SmallVector<ClosureExpr *, 4> Closures;
 
@@ -1212,7 +1218,7 @@ Type ConstraintSystem::openOpaqueType(Type type, ContextualTypePurpose context,
     return type;
 
   auto inReturnContext = [](ContextualTypePurpose context) {
-    return context == CTP_ReturnStmt || context == CTP_ReturnSingleExpr;
+    return context == CTP_ReturnStmt || context == CTP_ImpliedReturnStmt;
   };
 
   if (!(context == CTP_Initialization || inReturnContext(context)))
@@ -7028,7 +7034,7 @@ Expr *ConstraintSystem::buildAutoClosureExpr(Expr *expr,
 Expr *ConstraintSystem::buildTypeErasedExpr(Expr *expr, DeclContext *dc,
                                             Type contextualType,
                                             ContextualTypePurpose purpose) {
-  if (!(purpose == CTP_ReturnStmt || purpose == CTP_ReturnSingleExpr))
+  if (!(purpose == CTP_ReturnStmt || purpose == CTP_ImpliedReturnStmt))
     return expr;
 
   auto *decl = dyn_cast_or_null<ValueDecl>(dc->getAsDecl());

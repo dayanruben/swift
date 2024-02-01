@@ -6038,7 +6038,7 @@ bool ConstraintSystem::repairFailures(
 
     auto purpose = getContextualTypePurpose(anchor);
     if (rhs->isVoid() &&
-        (purpose == CTP_ReturnStmt || purpose == CTP_ReturnSingleExpr)) {
+        (purpose == CTP_ReturnStmt || purpose == CTP_ImpliedReturnStmt)) {
       conversionsOrFixes.push_back(
           RemoveReturn::create(*this, lhs, getConstraintLocator(locator)));
       return true;
@@ -7851,15 +7851,15 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
         // If a single statement closure has explicit `return` let's
         // forbid conversion to `Void` and report an error instead to
         // honor user's intent.
-        if (type1->isUninhabited() || !resultElt->hasExplicitReturn()) {
+        if (type1->isUninhabited() || resultElt->hasImpliedReturn()) {
           increaseScore(SK_FunctionConversion, locator);
           return getTypeMatchSuccess();
         }
       }
 
-      // Single expression function with implicit `return`.
+      // Function with an implied `return`, e.g a single expression body.
       if (auto contextualType = elt->getAs<LocatorPathElt::ContextualType>()) {
-        if (contextualType->isFor(CTP_ReturnSingleExpr)) {
+        if (contextualType->isFor(CTP_ImpliedReturnStmt)) {
           increaseScore(SK_FunctionConversion, locator);
           return getTypeMatchSuccess();
         }
@@ -13703,6 +13703,25 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
   if (simplifiedBoundType->isTypeVariableOrMember())
     return formUnsolved();
 
+  std::function<GenericParamList *(ValueDecl *)> getGenericParams =
+      [&](ValueDecl *decl) -> GenericParamList * {
+    auto genericContext = decl->getAsGenericContext();
+    if (!genericContext)
+      return nullptr;
+
+    auto genericParams = genericContext->getGenericParams();
+    if (!genericParams) {
+      // If declaration is a non-generic typealias, let's point
+      // to the underlying generic declaration.
+      if (auto *TA = dyn_cast<TypeAliasDecl>(decl)) {
+        if (auto *UGT = TA->getUnderlyingType()->getAs<AnyGenericType>())
+          return getGenericParams(UGT->getDecl());
+      }
+    }
+
+    return genericParams;
+  };
+
   ValueDecl *decl;
   SmallVector<OpenedType, 2> openedTypes;
   if (auto *bound = dyn_cast<TypeAliasType>(type1.getPointer())) {
@@ -13759,27 +13778,19 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
     decl = overloadChoice.getDecl();
 
     auto openedOverloadTypes = getOpenedTypes(overloadLocator);
-    openedTypes.append(openedOverloadTypes.begin(), openedOverloadTypes.end());
-  }
 
-  std::function<GenericParamList *(ValueDecl *)> getGenericParams =
-      [&](ValueDecl *decl) -> GenericParamList * {
-    auto genericContext = decl->getAsGenericContext();
-    if (!genericContext)
-      return nullptr;
-
-    auto genericParams = genericContext->getGenericParams();
-    if (!genericParams) {
-      // If declaration is a non-generic typealias, let's point
-      // to the underlying generic declaration.
-      if (auto *TA = dyn_cast<TypeAliasDecl>(decl)) {
-        if (auto *UGT = TA->getUnderlyingType()->getAs<AnyGenericType>())
-          return getGenericParams(UGT->getDecl());
+    auto genericParams = getGenericParams(decl);
+    if (genericParams) {
+      for (auto gp : *genericParams) {
+        auto found = find_if(openedOverloadTypes, [&](auto entry) {
+          return entry.first->getDepth() == gp->getDepth() &&
+              entry.first->getIndex() == gp->getIndex();
+        });
+        assert(found != openedOverloadTypes.end());
+        openedTypes.push_back(*found);
       }
     }
-
-    return genericParams;
-  };
+  }
 
   if (!decl->getAsGenericContext())
     return SolutionKind::Error;
@@ -15564,7 +15575,7 @@ void ConstraintSystem::addContextualConversionConstraint(
   auto constraintKind = ConstraintKind::Conversion;
   switch (purpose) {
   case CTP_ReturnStmt:
-  case CTP_ReturnSingleExpr:
+  case CTP_ImpliedReturnStmt:
   case CTP_Initialization: {
     if (conversionType->is<OpaqueTypeArchetypeType>())
       constraintKind = ConstraintKind::Equal;

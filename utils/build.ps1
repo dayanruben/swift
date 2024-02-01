@@ -578,6 +578,7 @@ function Build-CMakeProject {
 
     $CFlags = @("/GS-", "/Gw", "/Gy", "/Oi", "/Oy", "/Zc:inline")
     if ($UseMSVCCompilers.Contains("C") -Or $UseMSVCCompilers.Contains("CXX") -Or
+        $UseBuiltCompilers.Contains("C") -Or $UseBuiltCompilers.Contains("CXX") -Or
         $UsePinnedCompilers.Contains("C") -Or $UsePinnedCompilers.Contains("CXX")) {
       if ($DebugInfo) {
         $CFlags += if ($EnableCaching) { "/Z7" } else { "/Zi" }
@@ -902,7 +903,7 @@ function Build-BuildTools($Arch) {
       SWIFT_INCLUDE_APINOTES = "NO";
       SWIFT_INCLUDE_DOCS = "NO";
       SWIFT_INCLUDE_TESTS = "NO";
-      "cmark-gfm_DIR" = "$($HostArch.BinaryCache)\cmark-gfm-0.29.0.gfm.13";
+      "cmark-gfm_DIR" = "$($Arch.ToolchainInstallRoot)\usr\lib\cmake";
     }
 }
 
@@ -982,7 +983,7 @@ function Build-Compilers() {
         SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE = "$SourceCache\swift-syntax";
         SWIFT_PATH_TO_STRING_PROCESSING_SOURCE = "$SourceCache\swift-experimental-string-processing";
         SWIFT_PATH_TO_SWIFT_SDK = (Get-PinnedToolchainSDK);
-        "cmark-gfm_DIR" = "$($HostArch.BinaryCache)\cmark-gfm-0.29.0.gfm.13";
+        "cmark-gfm_DIR" = "$($Arch.ToolchainInstallRoot)\usr\lib\cmake";
       })
   }
 }
@@ -1621,7 +1622,7 @@ function Build-Markdown($Arch) {
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
       ArgumentParser_DIR = "$BinaryCache\6\cmake\modules";
-      "cmark-gfm_DIR" = "$($Arch.BinaryCache)\cmark-gfm-0.29.0.gfm.13";
+      "cmark-gfm_DIR" = "$($Arch.ToolchainInstallRoot)\usr\lib\cmake";
     }
 }
 
@@ -1639,7 +1640,7 @@ function Build-Format($Arch) {
       BUILD_SHARED_LIBS = "YES";
       ArgumentParser_DIR = "$BinaryCache\6\cmake\modules";
       SwiftSyntax_DIR = "$BinaryCache\1\cmake\modules";
-      "cmark-gfm_DIR" = "$($Arch.BinaryCache)\cmark-gfm-0.29.0.gfm.13";
+      "cmark-gfm_DIR" = "$($Arch.ToolchainInstallRoot)\usr\lib\cmake";
       SwiftMarkdown_DIR = "$BinaryCache\13\cmake\modules";
     }
 }
@@ -1731,8 +1732,6 @@ function Build-Installer($Arch) {
     BundleFlavor = "offline";
     DEVTOOLS_ROOT = "$($Arch.ToolchainInstallRoot)\";
     TOOLCHAIN_ROOT = "$($Arch.ToolchainInstallRoot)\";
-    INCLUDE_SWIFT_FORMAT = "true";
-    SWIFT_FORMAT_BUILD = "$($Arch.BinaryCache)\swift-format\release";
     INCLUDE_SWIFT_INSPECT = "true";
     SWIFT_INSPECT_BUILD = "$($Arch.BinaryCache)\swift-inspect\release";
     INCLUDE_SWIFT_DOCC = "true";

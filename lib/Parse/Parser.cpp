@@ -576,6 +576,23 @@ SourceLoc Parser::getEndOfPreviousLoc() const {
   return Lexer::getLocForEndOfToken(SourceMgr, PreviousLoc);
 }
 
+SourceLoc Parser::consumeAttributeLParen() {
+  SourceLoc LastTokenEndLoc = getEndOfPreviousLoc();
+  if (LastTokenEndLoc != Tok.getLoc() && !isInSILMode()) {
+    diagnose(LastTokenEndLoc, diag::attr_extra_whitespace_before_lparen)
+        .warnUntilSwiftVersion(6);
+  }
+  return consumeToken(tok::l_paren);
+}
+
+bool Parser::consumeIfAttributeLParen() {
+  if (!Tok.isFollowingLParen()) {
+    return false;
+  }
+  consumeAttributeLParen();
+  return true;
+}
+
 SourceLoc Parser::consumeStartingCharacterOfCurrentToken(tok Kind, size_t Len) {
   // Consumes prefix of token and returns its location.
   // (like '?', '<', '>' or '!' immediately followed by '<') 
@@ -1080,13 +1097,18 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
 }
 
 llvm::Optional<StringRef>
-Parser::getStringLiteralIfNotInterpolated(SourceLoc Loc, StringRef DiagText) {
+Parser::getStringLiteralIfNotInterpolated(SourceLoc Loc, StringRef DiagText,
+                                          bool AllowMultiline) {
   assert(Tok.is(tok::string_literal));
 
   // FIXME: Support extended escaping string literal.
   if (Tok.getCustomDelimiterLen()) {
     diagnose(Loc, diag::forbidden_extended_escaping_string, DiagText);
     return llvm::None;
+  }
+  if (!AllowMultiline && Tok.isMultilineString()) {
+    diagnose(Loc, diag::forbidden_multiline_string, DiagText)
+        .warnUntilSwiftVersion(6);
   }
 
   SmallVector<Lexer::StringSegment, 1> Segments;

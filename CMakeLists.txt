@@ -655,6 +655,10 @@ option(SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION
   "Enable build of the Swift observation module"
   FALSE)
 
+option(SWIFT_STDLIB_ENABLE_STRICT_CONCURRENCY_COMPLETE
+  "Build the stdlib with -strict-concurrency=complete"
+  FALSE)
+
 option(SWIFT_ENABLE_SYNCHRONIZATION
   "Enable build of the Swift Synchronization module"
   FALSE)
@@ -802,7 +806,7 @@ if(SWIFT_PATH_TO_CMARK_BUILD)
     OUTPUT_STRIP_TRAILING_WHITESPACE)
   message(STATUS "CMark Version: ${_CMARK_VERSION}")
 elseif(SWIFT_INCLUDE_TOOLS)
-  find_package(cmark-gfm REQUIRED)
+  find_package(cmark-gfm CONFIG REQUIRED)
 endif()
 message(STATUS "")
 

@@ -3545,8 +3545,9 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
               foundVP = VP;
         });
 
-        if (foundVP && !foundVP->isLet())
+        if (foundVP && foundVP->getIntroducer() != VarDecl::Introducer::Let) {
           FixItLoc = foundVP->getLoc();
+        }
       }
 
       // If this is a parameter explicitly marked 'var', remove it.
@@ -3879,7 +3880,7 @@ private:
     // Allowed in returns, throws, and bindings.
     switch (ctp) {
     case CTP_ReturnStmt:
-    case CTP_ReturnSingleExpr:
+    case CTP_ImpliedReturnStmt:
     case CTP_ThrowStmt:
     case CTP_Initialization:
       markValidSingleValueStmt(E);

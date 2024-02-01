@@ -15,11 +15,13 @@
 // RUN:    -I %t -source-filename=%s                                           \
 // RUN:    | %FileCheck -check-prefix=CHECK-PRINT %s
 
+// REQUIRES: noncopyable_generics
+
 // CHECK-NOT: UnknownCode
 
 // CHECK-PRINT-DAG: protocol Generator<Value> {
 // CHECK-PRINT-DAG: enum Maybe<Wrapped> where Wrapped : ~Copyable {
-// CHECK-PRINT-DAG: extension Maybe : Copyable where Wrapped : Copyable {
+// CHECK-PRINT-DAG: extension Maybe : Copyable {
 // CHECK-PRINT-DAG: func ncIdentity<T>(_ t: consuming T) -> T where T : ~Copyable
 // CHECK-PRINT-DAG: protocol Either<Left, Right> : ~Copyable {
 // CHECK-PRINT-DAG:   associatedtype Left : ~Copyable
@@ -48,5 +50,3 @@ func check() {
 
     let x: Maybe<NC> = .none // expected-error {{noncopyable type 'NC' cannot be used with generic type 'Maybe<Wrapped>' yet}}
 }
-
-

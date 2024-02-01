@@ -602,6 +602,18 @@ public:
     return true;
   }
 
+  /// Consume a '('. If it is not directly following the previous token, emit an
+  /// error (Swift 6) or warning (Swift <6) that attribute name and parentheses
+  /// must not be separated by a space.
+  SourceLoc consumeAttributeLParen();
+
+  /// If the next token is a '(' that's not on a new line consume it, and error
+  /// (Swift 6) or warn (Swift <6) that the attribute must not be separted from
+  /// the '(' by a space.
+  ///
+  /// If the next token is not '(' or it's on a new line, return false.
+  bool consumeIfAttributeLParen();
+
   bool consumeIfNotAtStartOfLine(tok K) {
     if (Tok.isAtStartOfLine()) return false;
     return consumeIf(K);
@@ -706,8 +718,11 @@ public:
   ///
   /// \param Loc where to diagnose.
   /// \param DiagText name for the string literal in the diagnostic.
+  /// \param AllowMultiline Whether the string literal can be a multiline string
+  ///        literal.
   llvm::Optional<StringRef>
-  getStringLiteralIfNotInterpolated(SourceLoc Loc, StringRef DiagText);
+  getStringLiteralIfNotInterpolated(SourceLoc Loc, StringRef DiagText,
+                                    bool AllowMultiline);
 
   /// Returns true to indicate that experimental concurrency syntax should be
   /// parsed if the parser is generating only a syntax tree or if the user has
@@ -1147,6 +1162,7 @@ public:
 
   /// Parse a specific attribute.
   ParserStatus parseDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
+                                  SourceLoc AtEndLoc,
                                   PatternBindingInitializer *&initContext,
                                   bool isFromClangAttribute = false);
 
@@ -1256,6 +1272,7 @@ public:
                                         bool justChecking);
 
   ParserStatus parseTypeAttribute(TypeOrCustomAttr &result, SourceLoc AtLoc,
+                                  SourceLoc AtEndLoc,
                                   PatternBindingInitializer *&initContext,
                                   bool justChecking = false);
 
