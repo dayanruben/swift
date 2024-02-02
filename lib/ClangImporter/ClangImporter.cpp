@@ -1539,6 +1539,10 @@ bool ClangImporter::Implementation::importHeader(
     std::unique_ptr<llvm::MemoryBuffer> sourceBuffer,
     bool implicitImport) {
 
+  // Progress update for the debugger.
+  SwiftContext.PreModuleImportHook(
+      headerName, ASTContext::ModuleImportKind::BridgingHeader);
+
   // Don't even try to load the bridging header if the Clang AST is in a bad
   // state. It could cause a crash.
   auto &clangDiags = getClangASTContext().getDiagnostics();
@@ -4175,7 +4179,7 @@ void ClangModuleUnit::getImportedModulesForLookup(
     // definitions of Swift protocols that C++ types might conform to, such as
     // CxxSequence.
     if (owner.SwiftContext.LangOpts.EnableCXXInterop &&
-        requiresCPlusPlus(clangModule) && clangModule->Name != "CxxShim") {
+        requiresCPlusPlus(clangModule) && clangModule->Name != CXX_SHIM_NAME) {
       auto *cxxModule =
           owner.SwiftContext.getModuleByIdentifier(owner.SwiftContext.Id_Cxx);
       if (cxxModule)
@@ -4753,7 +4757,7 @@ DeclRefExpr *getInteropStaticCastDeclRefExpr(ASTContext &ctx,
   }
 
   // Lookup our static cast helper function in the C++ shim module.
-  auto wrapperModule = ctx.getLoadedModule(ctx.getIdentifier("CxxShim"));
+  auto wrapperModule = ctx.getLoadedModule(ctx.getIdentifier(CXX_SHIM_NAME));
   assert(wrapperModule &&
          "CxxShim module is required when using members of a base class. "
          "Make sure you `import CxxShim`.");
