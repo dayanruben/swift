@@ -1737,6 +1737,11 @@ public:
   /// Retrieve the type of the \p ComponentIndex-th component in \p KP.
   Type getType(const KeyPathExpr *KP, unsigned ComponentIndex) const;
 
+  TypeVariableType *getKeyPathRootType(const KeyPathExpr *keyPath) const;
+
+  TypeVariableType *
+  getKeyPathRootTypeIfAvailable(const KeyPathExpr *keyPath) const;
+
   /// Retrieve the type of the given node as recorded in this solution
   /// and resolve all of the type variables in contains to form a fully
   /// "resolved" concrete type.
@@ -2680,12 +2685,12 @@ private:
 
     /// Ignore statements.
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *stmt) override {
-      return Action::SkipChildren(stmt);
+      return Action::SkipNode(stmt);
     }
 
     /// Ignore declarations.
     PreWalkAction walkToDeclPre(Decl *decl) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
   };
 
@@ -6384,7 +6389,7 @@ public:
   PreWalkAction walkToDeclPre(Decl *D) override {
     // We only need to walk into PatternBindingDecls, other kinds of decls
     // cannot reference outer vars.
-    return Action::VisitChildrenIf(isa<PatternBindingDecl>(D));
+    return Action::VisitNodeIf(isa<PatternBindingDecl>(D));
   }
 
   ArrayRef<TypeVariableType *> getTypeVars() const {

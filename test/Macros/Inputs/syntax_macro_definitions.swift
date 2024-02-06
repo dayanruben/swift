@@ -1819,6 +1819,17 @@ public struct VarValueMacro: DeclarationMacro, PeerMacro {
   }
 }
 
+public struct GenericToVoidMacro: ExpressionMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> ExprSyntax {
+    return """
+           ()
+           """
+  }
+}
+
 public struct SingleMemberMacro: MemberMacro {
   public static func expansion(
     of node: AttributeSyntax,
@@ -2091,6 +2102,35 @@ public struct SendableMacro: ExtensionMacro {
   }
 }
 
+public struct GenerateStubMemberMacro: MemberMacro {
+  public static func expansion(
+    of node: AttributeSyntax,
+    providingMembersOf declaration: some DeclGroupSyntax,
+    conformingTo protocols: [TypeSyntax],
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    return ["#generateMemberStubs"]
+  }
+}
+
+public struct GenerateStubsFreestandingMacro: DeclarationMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    return ["#generateMember"]
+  }
+}
+
+public struct SingleMemberStubMacro: DeclarationMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    return ["static func member() {}"]
+  }
+}
+
 public struct FakeCodeItemMacro: DeclarationMacro, PeerMacro {
   public static func expansion(
     of node: some FreestandingMacroExpansionSyntax,
@@ -2316,3 +2356,13 @@ public struct AddSubscript: MemberMacro {
     ]
   }
 }
+
+public struct AllLexicalContextsMacro: DeclarationMacro {
+  public static func expansion(
+    of node: some FreestandingMacroExpansionSyntax,
+    in context: some MacroExpansionContext
+  ) throws -> [DeclSyntax] {
+    context.lexicalContext.compactMap { $0.as(DeclSyntax.self)?.trimmed }
+  }
+}
+

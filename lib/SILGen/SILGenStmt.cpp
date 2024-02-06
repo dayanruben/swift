@@ -1244,8 +1244,8 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
         PackType::get(SGF.getASTContext(), expansion->getType())
             ->getCanonicalType());
 
-    JumpDest loopDest = createJumpDest(S->getBody());
-    JumpDest endDest = createJumpDest(S->getBody());
+    JumpDest continueDest = createJumpDest(S->getBody());
+    JumpDest breakDest = createJumpDest(S->getBody());
 
     SGF.emitDynamicPackLoop(
         SILLocation(expansion), formalPackType, 0,
@@ -1254,20 +1254,20 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
             SILValue packIndex) {
           Scope innerForScope(SGF.Cleanups, CleanupLocation(S->getBody()));
           auto letValueInit =
-              SGF.emitPatternBindingInitialization(S->getPattern(), loopDest);
+              SGF.emitPatternBindingInitialization(S->getPattern(), continueDest);
 
           SGF.emitExprInto(expansion->getPatternExpr(), letValueInit.get());
 
           // Set the destinations for 'break' and 'continue'.
-          SGF.BreakContinueDestStack.push_back({S, endDest, loopDest});
+          SGF.BreakContinueDestStack.push_back({S, breakDest, continueDest});
           visit(S->getBody());
           SGF.BreakContinueDestStack.pop_back();
 
           return;
         },
-        loopDest.getBlock());
+        continueDest.getBlock());
 
-    emitOrDeleteBlock(SGF, endDest, S);
+    emitOrDeleteBlock(SGF, breakDest, S);
 
     return;
   }
@@ -1560,24 +1560,57 @@ void SILGenFunction::emitThrow(SILLocation loc, ManagedValue exnMV,
 
   SILValue exn;
   if (!exnMV.isInContext()) {
-    // Claim the exception value.  If we need to handle throwing
-    // cleanups, the correct thing to do here is to recreate the
-    // exception's cleanup when emitting each cleanup we branch through.
-    // But for now we aren't bothering.
-    exn = exnMV.forward(*this);
-
     // Whether the thrown exception is already an Error existential box.
     SILType existentialBoxType = SILType::getExceptionType(getASTContext());
-    bool isExistentialBox = exn->getType() == existentialBoxType;
+    bool isExistentialBox = exnMV.getType() == existentialBoxType;
 
-    // FIXME: Right now, we suppress emission of the willThrow builtin if the
-    // error isn't already the error existential, because swift_willThrow expects
-    // the existential box.
-    if (emitWillThrow && isExistentialBox) {
-      // Generate a call to the 'swift_willThrow' runtime function to allow the
-      // debugger to catch the throw event.
-      B.createBuiltin(loc, SGM.getASTContext().getIdentifier("willThrow"),
-                      SGM.Types.getEmptyTupleType(), {}, {exn});
+    // If we are supposed to emit a call to swift_willThrow(Typed), do so now.
+    if (emitWillThrow) {
+      ASTContext &ctx = SGM.getASTContext();
+      if (isExistentialBox) {
+        // Generate a call to the 'swift_willThrow' runtime function to allow the
+        // debugger to catch the throw event.
+
+        // Claim the exception value.
+        exn = exnMV.forward(*this);
+
+        B.createBuiltin(loc,
+                        ctx.getIdentifier("willThrow"),
+                        SGM.Types.getEmptyTupleType(), {}, {exn});
+      } else {
+        // Call the _willThrowTyped entrypoint, which handles
+        // arbitrary error types.
+        SILValue tmpBuffer;
+        SILValue error;
+
+        FuncDecl *entrypoint = ctx.getWillThrowTyped();
+        auto genericSig = entrypoint->getGenericSignature();
+        SubstitutionMap subMap = SubstitutionMap::get(
+            genericSig, [&](SubstitutableType *dependentType) {
+              return exnMV.getType().getASTType();
+            }, LookUpConformanceInModule(getModule().getSwiftModule()));
+
+        // Generic errors are passed indirectly.
+        if (!exnMV.getType().isAddress()) {
+          // Materialize the error so we can pass the address down to the
+          // swift_willThrowTyped.
+          exnMV = exnMV.materialize(*this, loc);
+          error = exnMV.getValue();
+          exn = exnMV.forward(*this);
+        } else {
+          // Claim the exception value.
+          exn = exnMV.forward(*this);
+          error = exn;
+        }
+
+        emitApplyOfLibraryIntrinsic(
+            loc, entrypoint, subMap,
+            { ManagedValue::forForwardedRValue(*this, error) },
+            SGFContext());
+      }
+    } else {
+      // Claim the exception value.
+      exn = exnMV.forward(*this);
     }
   }
 

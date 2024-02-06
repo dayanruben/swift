@@ -2493,24 +2493,18 @@ static Type getTypeForDisplay(ModuleDecl *module, ValueDecl *decl) {
   if (!decl->getDeclContext()->isTypeContext())
     return type;
 
-  GenericSignature sigWithoutReqts;
-  if (auto genericFn = type->getAs<GenericFunctionType>()) {
-    // For generic functions, build a new generic function... but strip off
-    // the requirements. They don't add value.
-    sigWithoutReqts
-      = GenericSignature::get(genericFn->getGenericParams(), {});
-  }
-
   // For functions, strip off the 'Self' parameter clause.
-  if (isa<AbstractFunctionDecl>(decl))
-    type = type->castTo<AnyFunctionType>()->getResult();
+  if (isa<AbstractFunctionDecl>(decl)) {
+    if (auto genericFn = type->getAs<GenericFunctionType>()) {
+      auto sig = genericFn->getGenericSignature();
+      auto resultFn = genericFn->getResult()->castTo<FunctionType>();
+      return GenericFunctionType::get(sig,
+                                      resultFn->getParams(),
+                                      resultFn->getResult(),
+                                      resultFn->getExtInfo());
+    }
 
-  if (sigWithoutReqts) {
-    auto resultFn = type->castTo<AnyFunctionType>();
-    return GenericFunctionType::get(sigWithoutReqts,
-                                    resultFn->getParams(),
-                                    resultFn->getResult(),
-                                    resultFn->getExtInfo());
+    return type->castTo<FunctionType>()->getResult();
   }
 
   return type;
@@ -2800,18 +2794,18 @@ diagnoseMatch(ModuleDecl *module, NormalProtocolConformance *conformance,
     break;
 
   case MatchKind::TypeConflict: {
+    auto witnessType = getTypeForDisplay(module, match.Witness);
+
     if (!isa<TypeDecl>(req) && !isa<EnumElementDecl>(match.Witness)) {
       computeFixitsForOverriddenDeclaration(match.Witness, req, [&](bool){
         return diags.diagnose(match.Witness,
                               diag::protocol_witness_type_conflict,
-                              getTypeForDisplay(module, match.Witness),
-                              withAssocTypes);
+                              witnessType, withAssocTypes);
       });
     } else {
       diags.diagnose(match.Witness,
                      diag::protocol_witness_type_conflict,
-                     getTypeForDisplay(module, match.Witness),
-                     withAssocTypes);
+                     witnessType, withAssocTypes);
     }
     break;
   }
@@ -3456,7 +3450,7 @@ static bool isNSObjectProtocol(ProtocolDecl *proto) {
   return proto->hasClangNode();
 }
 
-Type swift::getTupleConformanceTypeWitness(DeclContext *dc,
+static Type getTupleConformanceTypeWitness(DeclContext *dc,
                                            AssociatedTypeDecl *assocType) {
   auto genericSig = dc->getGenericSignatureOfContext();
   assert(genericSig.getGenericParams().size() == 1);
@@ -3542,17 +3536,17 @@ printRequirementStub(ValueDecl *Requirement, DeclContext *Adopter,
     // Skip 'mutating' only inside classes: mutating methods usually
     // don't have a sensible non-mutating implementation.
     if (AdopterIsClass)
-      Options.ExcludeAttrList.push_back(DAK_Mutating);
+      Options.ExcludeAttrList.push_back(DeclAttrKind::Mutating);
     // 'nonmutating' is only meaningful on value type member accessors.
     if (AdopterIsClass || !isa<AbstractStorageDecl>(Requirement))
-      Options.ExcludeAttrList.push_back(DAK_NonMutating);
+      Options.ExcludeAttrList.push_back(DeclAttrKind::NonMutating);
 
     // FIXME: Once we support move-only types in generics, remove this if the
     //        conforming type is move-only. Until then, don't suggest printing
     //        ownership modifiers on a protocol requirement.
-    Options.ExcludeAttrList.push_back(DAK_LegacyConsuming);
-    Options.ExcludeAttrList.push_back(DAK_Consuming);
-    Options.ExcludeAttrList.push_back(DAK_Borrowing);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::LegacyConsuming);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::Consuming);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::Borrowing);
 
     Options.FunctionBody = [&](const ValueDecl *VD, ASTPrinter &Printer) {
       Printer << " {";
@@ -4367,6 +4361,7 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
       // Determine the type that the requirement is expected to have.
       Type reqType = getRequirementTypeForDisplay(dc->getParentModule(),
                                                   conformance, requirement);
+
       auto &diags = dc->getASTContext().Diags;
       auto diagnosticMessage = diag::ambiguous_witnesses;
       if (ignoringNames) {
@@ -4610,7 +4605,7 @@ hasInvariantSelfRequirement(const ProtocolDecl *proto,
 
         // 'Self.A' is OK.
         if (ty->is<DependentMemberType>())
-          return Action::SkipChildren;
+          return Action::SkipNode;
 
         return Action::Continue;
       }
@@ -4751,15 +4746,28 @@ static void ensureRequirementsAreSatisfied(ASTContext &ctx,
     return;
   }
 
-  // Now check that our associated conformances are at least as visible as
-  // the conformance itself.
+  bool isTupleConformance = isa<BuiltinTupleDecl>(dc->getSelfNominalTypeDecl());
+
   auto where = ExportContext::forConformance(dc, proto);
-  if (where.isImplicit())
-    return;
 
   conformance->forEachTypeWitness([&](AssociatedTypeDecl *assocType,
                                       Type type, TypeDecl *typeDecl) -> bool {
     checkObjCTypeErasedGenerics(conformance, assocType, type, typeDecl);
+
+    // Tuple conformances can only witness associated types by projecting them
+    // element-wise.
+    if (isTupleConformance) {
+      auto expectedTy = getTupleConformanceTypeWitness(dc, assocType);
+      if (!type->hasError() && !expectedTy->isEqual(type)) {
+        ctx.addDelayedConformanceDiag(conformance, true,
+              [dc, type, typeDecl, expectedTy](NormalProtocolConformance *conformance) {
+          dc->getASTContext().Diags.diagnose(
+              getLocForDiagnosingWitness(conformance, typeDecl),
+              diag::protocol_type_witness_tuple,
+              type, expectedTy);
+        });
+      }
+    }
 
     if (typeDecl && !typeDecl->isImplicit()) {
       auto requiredAccessScope = evaluateOrDefault(
@@ -4807,6 +4815,11 @@ static void ensureRequirementsAreSatisfied(ASTContext &ctx,
                                                       where.getDeclContext());
     return false;
   });
+
+  // Now check that our associated conformances are at least as visible as
+  // the conformance itself.
+  if (where.isImplicit())
+    return;
 
   conformance->forEachAssociatedConformance(
     [&](Type depTy, ProtocolDecl *proto, unsigned index) {
@@ -4871,7 +4884,7 @@ hasInvalidTypeInConformanceContext(const ValueDecl *requirement,
 
     Action walkToTypePre(Type ty) override {
       if (!ty->hasTypeParameter())
-        return Action::SkipChildren;
+        return Action::SkipNode;
 
       auto *const dmt = ty->getAs<DependentMemberType>();
       if (!dmt)
@@ -4879,11 +4892,11 @@ hasInvalidTypeInConformanceContext(const ValueDecl *requirement,
 
       // We only care about 'Self'-rooted type parameters.
       if (!dmt->getRootGenericParam()->isEqual(Proto->getSelfInterfaceType()))
-        return Action::SkipChildren;
+        return Action::SkipNode;
 
       if (ty.subst(Subs)->hasError())
         return Action::Stop;
-      return Action::SkipChildren;
+      return Action::SkipNode;
     }
   };
 

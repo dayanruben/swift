@@ -174,6 +174,9 @@ namespace swift {
     /// User-overridable language version to compile for.
     version::Version EffectiveLanguageVersion = version::Version::getCurrentLanguageVersion();
 
+    /// Swift runtime version to compile for.
+    version::Version RuntimeVersion = version::Version::getCurrentLanguageVersion();
+
     /// PackageDescription version to compile for.
     version::Version PackageDescriptionVersion;
 
@@ -549,9 +552,6 @@ namespace swift {
     /// concrete types. This will sometimes fail to produce a convergent
     /// rewrite system.
     bool EnableRequirementMachineOpaqueArchetypes = false;
-
-    /// Enable warnings for redundant requirements in generic signatures.
-    bool WarnRedundantRequirements = false;
 
     /// Enable experimental associated type inference improvements.
     bool EnableExperimentalAssociatedTypeInference = false;

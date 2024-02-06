@@ -58,6 +58,10 @@ extension ASTGenVisitor {
         addAttribute(self.generateDeclAttribute(attribute: node))
       case .ifConfigDecl:
         fatalError("unimplemented")
+#if RESILIENT_SWIFT_SYNTAX
+      @unknown default:
+        fatalError()
+#endif
       }
     }
 
@@ -941,7 +945,7 @@ extension ASTGenVisitor {
     if let segments = node.as(SimpleStringLiteralExprSyntax.self)?.segments {
       return extractRawText(segments).bridged
     } else if let segments = node.as(StringLiteralExprSyntax.self)?.segments,
-      segments.all({ $0.is(StringSegmentSyntax.self) })
+      segments.allSatisfy({ $0.is(StringSegmentSyntax.self) })
     {
       return extractRawText(segments).bridged
     }

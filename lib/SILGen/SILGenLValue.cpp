@@ -342,6 +342,8 @@ public:
 
   // Expressions that wrap lvalues
   
+  LValue visitLoadExpr(LoadExpr *e, SGFAccessKind accessKind,
+                        LValueOptions options);
   LValue visitInOutExpr(InOutExpr *e, SGFAccessKind accessKind,
                         LValueOptions options);
   LValue visitDotSyntaxBaseIgnoredExpr(DotSyntaxBaseIgnoredExpr *e,
@@ -4254,7 +4256,7 @@ LValue SILGenLValue::visitOpenExistentialExpr(OpenExistentialExpr *e,
   // Visit the subexpression.
   LValue lv = visitRec(e->getSubExpr(), accessKind, options);
 
-  // Sanity check that we did see the OpaqueValueExpr.
+  // Soundness check that we did see the OpaqueValueExpr.
   assert(SGF.OpaqueValueExprs.count(e->getOpaqueValue()) == 0 &&
          "opened existential not removed?");
   return lv;
@@ -4326,6 +4328,11 @@ LValue SILGenLValue::visitBindOptionalExpr(BindOptionalExpr *e,
 LValue SILGenLValue::visitInOutExpr(InOutExpr *e, SGFAccessKind accessKind,
                                     LValueOptions options) {
   return visitRec(e->getSubExpr(), accessKind, options);
+}
+
+LValue SILGenLValue::visitLoadExpr(LoadExpr *e, SGFAccessKind accessKind,
+                               LValueOptions options) {
+  return visit(e->getSubExpr(), accessKind, options);
 }
 
 LValue SILGenLValue::visitConsumeExpr(ConsumeExpr *e, SGFAccessKind accessKind,

@@ -630,6 +630,8 @@ struct ASTContext::Implementation {
 
   /// The declared interface type of Builtin.TheTupleType.
   BuiltinTupleType *TheTupleType = nullptr;
+
+  std::array<ProtocolDecl *, NumInvertibleProtocols> InvertibleProtocolDecls = {};
 };
 
 ASTContext::Implementation::Implementation()
@@ -1195,6 +1197,47 @@ Type ASTContext::get##NAME##Type() const { \
 
 #include "swift/AST/KnownSDKTypes.def"
 
+ProtocolDecl *
+ASTContext::synthesizeInvertibleProtocolDecl(InvertibleProtocolKind ip) const {
+  const uint8_t index = (uint8_t)ip;
+  if (auto *proto = getImpl().InvertibleProtocolDecls[index])
+    return proto;
+
+  ModuleDecl *stdlib = getStdlibModule();
+  FileUnit *file = nullptr;
+  if (stdlib) {
+    file = &stdlib->getFiles()[0]->getOrCreateSynthesizedFile();
+  } else {
+    file = &TheBuiltinModule->getMainFile(FileUnitKind::Builtin);
+  }
+
+  // No need to form an inheritance clause; invertible protocols do not
+  // implicitly inherit from other invertible protocols.
+  auto identifier = getIdentifier(getProtocolName(getKnownProtocolKind(ip)));
+  ProtocolDecl *protocol = new (*this) ProtocolDecl(file,
+                                                  SourceLoc(), SourceLoc(),
+                                                  identifier,
+                                                  /*primaryAssocTypes=*/{},
+                                                  /*inherited=*/{},
+                                                  /*whereClause=*/nullptr);
+  protocol->setImplicit(true);
+
+  // @_marker
+  protocol->getAttrs().add(new (*this) MarkerAttr(/*implicit=*/true));
+
+  // public
+  protocol->setAccess(AccessLevel::Public);
+
+  // Hack to get name lookup to work after synthesizing it into the stdlib.
+  if (stdlib) {
+    cast<SynthesizedFileUnit>(file)->addTopLevelDecl(protocol);
+    stdlib->clearLookupCache();
+  }
+
+  getImpl().InvertibleProtocolDecls[index] = protocol;
+  return protocol;
+}
+
 ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   // Check whether we've already looked for and cached this protocol.
   unsigned index = (unsigned)kind;
@@ -1206,6 +1249,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   SmallVector<ValueDecl *, 1> results;
 
   const ModuleDecl *M;
+  NLKind NameLookupKind = NLKind::UnqualifiedLookup;
   switch (kind) {
   case KnownProtocolKind::BridgedNSError:
   case KnownProtocolKind::BridgedStoredNSError:
@@ -1251,6 +1295,16 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   case KnownProtocolKind::UnsafeCxxMutableRandomAccessIterator:
     M = getLoadedModule(Id_Cxx);
     break;
+  case KnownProtocolKind::Copyable:
+  case KnownProtocolKind::Escapable:
+    // If there's no stdlib, do qualified lookup in the Builtin module,
+    // which will trigger the correct synthesis of the protocols in that module.
+    M = getStdlibModule();
+    if (!M) {
+      NameLookupKind = NLKind::QualifiedLookup;
+      M = TheBuiltinModule;
+    }
+    break;
   default:
     M = getStdlibModule();
     break;
@@ -1259,7 +1313,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   if (!M)
     return nullptr;
   M->lookupValue(getIdentifier(getProtocolName(kind)),
-                 NLKind::UnqualifiedLookup,
+                 NameLookupKind,
                  ModuleLookupFlags::ExcludeMacroExpansions,
                  results);
 
@@ -1268,6 +1322,14 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
       getImpl().KnownProtocols[index] = protocol;
       return protocol;
     }
+  }
+
+  // If the invertible protocol wasn't found in the stdlib, synthesize it there.
+  if (auto ip = getInvertibleProtocolKind(kind)) {
+    assert(M == getStdlibModule());
+    auto *protocol = synthesizeInvertibleProtocolDecl(*ip);
+    getImpl().KnownProtocols[index] = protocol;
+    return protocol;
   }
 
   return nullptr;
@@ -2257,7 +2319,7 @@ void OverriddenDeclsRequest::cacheResult(
   if (value.empty())
     return;
 
-  // Sanity-check the declarations we were given.
+  // Soundness-check the declarations we were given.
   for (auto overriddenDecl : value) {
     assert(overriddenDecl->getKind() == decl->getKind() &&
            "Overridden decl kind mismatch");
@@ -5911,7 +5973,8 @@ ASTContext::getOpenedExistentialSignature(Type type, GenericSignature parentSig)
                           constraint);
   auto genericSig = buildGenericSignature(
       *this, canParentSig,
-      {genericParam}, {requirement});
+      {genericParam}, {requirement},
+      /*allowInverses=*/true);
 
   CanGenericSignature canGenericSig(genericSig);
 
@@ -6023,8 +6086,8 @@ ASTContext::getOpenedElementSignature(CanGenericSignature baseGenericSig,
   }
 
   auto elementSig = buildGenericSignature(
-      *this, GenericSignature(), genericParams, requirements)
-          .getCanonicalSignature();
+      *this, GenericSignature(), genericParams, requirements,
+      /*allowInverses=*/false).getCanonicalSignature();
   sigs[key] = elementSig;
   return elementSig;
 }
@@ -6097,7 +6160,8 @@ ASTContext::getOverrideGenericSignature(const NominalTypeDecl *baseNominal,
 
   auto genericSig = buildGenericSignature(*this, derivedNominalSig,
                                           std::move(addedGenericParams),
-                                          std::move(addedRequirements));
+                                          std::move(addedRequirements),
+                                          /*allowInverses=*/false);
   getImpl().overrideSigCache.insert(std::make_pair(key, genericSig));
   return genericSig;
 }
@@ -6408,7 +6472,7 @@ BuiltinTupleDecl *ASTContext::getBuiltinTupleDecl() {
   if (result)
     return result;
 
-  auto *dc = TheBuiltinModule->getFiles()[0];
+  auto *dc = &TheBuiltinModule->getMainFile(FileUnitKind::Builtin);
 
   result = new (*this) BuiltinTupleDecl(Id_TheTupleType, dc);
   result->setAccess(AccessLevel::Public);

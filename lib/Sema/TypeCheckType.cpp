@@ -1083,6 +1083,14 @@ Type TypeResolution::applyUnboundGenericArguments(
   if (didDiagnoseMoveOnlyGenericArgs(ctx, loc, resultType, genericArgs, dc))
     return ErrorType::get(ctx);
 
+  if (options.contains(TypeResolutionFlags::SILType)) {
+    if (auto nominal = dyn_cast<NominalTypeDecl>(decl)) {
+      if (nominal->isOptionalDecl()) {
+        skipRequirementsCheck = true;
+      }
+    }
+  }
+
   // Get the substitutions for outer generic parameters from the parent
   // type.
   if (parentTy) {
@@ -1989,7 +1997,7 @@ static bool validateAutoClosureAttributeUse(DiagnosticEngine &Diags,
   // If is a parameter declaration marked as @autoclosure.
   if (options.is(TypeResolverContext::FunctionInput)) {
     if (auto *ATR = dyn_cast<AttributedTypeRepr>(TR)) {
-      const auto attrLoc = ATR->getAttrLoc(TAK_autoclosure);
+      const auto attrLoc = ATR->getAttrLoc(TypeAttrKind::Autoclosure);
       if (attrLoc.isValid())
         return validateAutoClosureAttr(Diags, attrLoc, type);
     }
@@ -2961,60 +2969,60 @@ static unsigned countIsolatedParamsUpTo(FunctionTypeRepr* fnTy,
 // is likely also structurally invalid on the value.  (This is useful
 // for that specific case because some of the attributes are used for
 // multiple roles, like `owned`.)
-static constexpr TypeAttrKind TAR_SILValueConvention = TAK_owned;
-static constexpr TypeAttrKind TAR_SILMetatype = TAK_thin;
-static constexpr TypeAttrKind TAR_TypeTransformer = TAK_opened;
-static constexpr TypeAttrKind TAR_SILCoroutine = TAK_yield_once;
-static constexpr TypeAttrKind TAR_SILCalleeConvention = TAK_callee_owned;
-static constexpr TypeAttrKind TAR_SILReferenceStorage = TAK_sil_weak;
+static constexpr TypeAttrKind TAR_SILValueConvention = TypeAttrKind::Owned;
+static constexpr TypeAttrKind TAR_SILMetatype = TypeAttrKind::Thin;
+static constexpr TypeAttrKind TAR_TypeTransformer = TypeAttrKind::Opened;
+static constexpr TypeAttrKind TAR_SILCoroutine = TypeAttrKind::YieldOnce;
+static constexpr TypeAttrKind TAR_SILCalleeConvention =
+    TypeAttrKind::CalleeOwned;
+static constexpr TypeAttrKind TAR_SILReferenceStorage = TypeAttrKind::SILWeak;
 
 TypeAttrKind TypeAttrSet::getRepresentative(TypeAttrKind kind) {
   switch (kind) {
   // Most attributes are singleton for the purposes of this analysis.
   default: return kind;
 
-  case TAK_autoreleased:
-  case TAK_in_guaranteed: 
-  case TAK_in:
-  case TAK_in_constant:
-  case TAK_inout:
-  case TAK_inout_aliasable:
-  case TAK_owned:
-  case TAK_guaranteed:
-  case TAK_pack_owned:
-  case TAK_pack_guaranteed:
-  case TAK_pack_inout:
-  case TAK_out:
-  case TAK_pack_out:
-  case TAK_unowned_inner_pointer:
-  case TAK_error:
-  case TAK_error_indirect:
-  case TAK_error_unowned:
+  case TypeAttrKind::Autoreleased:
+  case TypeAttrKind::InGuaranteed:
+  case TypeAttrKind::In:
+  case TypeAttrKind::InConstant:
+  case TypeAttrKind::Inout:
+  case TypeAttrKind::InoutAliasable:
+  case TypeAttrKind::Owned:
+  case TypeAttrKind::Guaranteed:
+  case TypeAttrKind::PackOwned:
+  case TypeAttrKind::PackGuaranteed:
+  case TypeAttrKind::PackInout:
+  case TypeAttrKind::Out:
+  case TypeAttrKind::PackOut:
+  case TypeAttrKind::UnownedInnerPointer:
+  case TypeAttrKind::Error:
+  case TypeAttrKind::ErrorIndirect:
+  case TypeAttrKind::ErrorUnowned:
     return TAR_SILValueConvention;
 
-  case TAK_thin:
-  case TAK_thick:
-  case TAK_objc_metatype:
+  case TypeAttrKind::Thin:
+  case TypeAttrKind::Thick:
+  case TypeAttrKind::ObjCMetatype:
     return TAR_SILMetatype;
 
-  case TAK_yield_many:
-  case TAK_yield_once:
+  case TypeAttrKind::YieldMany:
+  case TypeAttrKind::YieldOnce:
     return TAR_SILCoroutine;
 
-  case TAK_callee_owned:
-  case TAK_callee_guaranteed:
+  case TypeAttrKind::CalleeOwned:
+  case TypeAttrKind::CalleeGuaranteed:
     return TAR_SILCalleeConvention;
 
-#define REF_STORAGE(Name, name, ...) \
-  case TAK_sil_##name:
+#define REF_STORAGE(Name, name, ...) case TypeAttrKind::SIL##Name:
 #include "swift/AST/ReferenceStorage.def"
     return TAR_SILReferenceStorage;
 
   // These are total transforms on the type, and one of them can apply
   // at once.
-  case TAK_opened:
-  case TAK_pack_element:
-  case TAK__opaqueReturnTypeOf:
+  case TypeAttrKind::Opened:
+  case TypeAttrKind::PackElement:
+  case TypeAttrKind::OpaqueReturnTypeOf:
     return TAR_TypeTransformer;
   };
 }
@@ -3135,10 +3143,9 @@ void TypeAttrSet::diagnoseUnclaimed(CustomAttr *attr,
 
 static bool isSILAttribute(TypeAttrKind attrKind) {
   switch (attrKind) {
-#define SIL_TYPE_ATTR(SPELLING, CLASS) \
-  case TAK_##SPELLING:
-#include "swift/AST/Attr.def"
-  case TAK_noescape: // noescape is only used in SIL now
+#define SIL_TYPE_ATTR(SPELLING, CLASS) case TypeAttrKind::CLASS:
+#include "swift/AST/TypeAttr.def"
+  case TypeAttrKind::NoEscape: // noescape is only used in SIL now
     return true;
 
   default:
@@ -3148,10 +3155,19 @@ static bool isSILAttribute(TypeAttrKind attrKind) {
 
 static bool isFunctionAttribute(TypeAttrKind attrKind) {
   static const TypeAttrKind FunctionAttrs[] = {
-    TAK_convention, TAK_pseudogeneric, TAK_unimplementable,
-    TAK_callee_owned, TAK_callee_guaranteed, TAK_noescape, TAK_autoclosure,
-    TAK_differentiable, TAK_escaping, TAK_Sendable,
-    TAK_yield_once, TAK_yield_many, TAK_async
+      TypeAttrKind::Convention,
+      TypeAttrKind::Pseudogeneric,
+      TypeAttrKind::Unimplementable,
+      TypeAttrKind::CalleeOwned,
+      TypeAttrKind::CalleeGuaranteed,
+      TypeAttrKind::NoEscape,
+      TypeAttrKind::Autoclosure,
+      TypeAttrKind::Differentiable,
+      TypeAttrKind::Escaping,
+      TypeAttrKind::Sendable,
+      TypeAttrKind::YieldOnce,
+      TypeAttrKind::YieldMany,
+      TypeAttrKind::Async,
   };
   return llvm::any_of(FunctionAttrs, [attrKind](TypeAttrKind functionAttr) {
                         return functionAttr == attrKind;
@@ -3347,7 +3363,7 @@ TypeResolver::resolveAttributedType(TypeRepr *repr, TypeResolutionOptions option
 
   if (auto preconcurrencyAttr = claim<PreconcurrencyTypeAttr>(attrs)) {
     auto &ctx = getASTContext();
-    if (ctx.LangOpts.hasFeature(Feature::PreconcurrencyConformances)) {
+    if (ctx.LangOpts.hasFeature(Feature::DynamicActorIsolation)) {
       if (ty->hasError())
         return ty;
 
@@ -3467,7 +3483,7 @@ TypeResolver::resolveAttributedType(TypeRepr *repr, TypeResolutionOptions option
       diagnose(
           noDerivativeAttr->getAtLoc(),
           diag::differentiable_programming_attr_used_without_required_module,
-          TypeAttribute::getAttrName(TAK_noDerivative),
+          TypeAttribute::getAttrName(TypeAttrKind::NoDerivative),
           getASTContext().Id_Differentiation);
     } else if (!isNoDerivativeAllowed) {
       bool isVariadicFunctionParam =
@@ -3494,7 +3510,7 @@ TypeResolver::resolveAttributedType(TypeRepr *repr, TypeResolutionOptions option
     // "recursive structure" of the type constructors.
     attrs.reversedClaimAllWhere([&](TypeAttribute *attr) {
       switch (attrs.getRepresentative(attr->getKind())) {
-      case TAK_dynamic_self:
+      case TypeAttrKind::DynamicSelf:
         ty = rebuildWithDynamicSelf(getASTContext(), ty);
         return true;
 
@@ -3502,21 +3518,21 @@ TypeResolver::resolveAttributedType(TypeRepr *repr, TypeResolutionOptions option
         ty = resolveSILReferenceStorage(attr, ty);
         return true;
 
-      case TAK_block_storage:
+      case TypeAttrKind::BlockStorage:
         if (options & TypeResolutionFlags::SILType) {
           ty = SILBlockStorageType::get(ty->getCanonicalType());;
           return true;
         }
         return false;
 
-      case TAK_box:
+      case TypeAttrKind::Box:
         if (options & TypeResolutionFlags::SILType) {
           ty = SILBoxType::get(ty->getCanonicalType());
           return true;
         }
         return false;
 
-      case TAK_moveOnly:
+      case TypeAttrKind::MoveOnly:
         if (options & TypeResolutionFlags::SILType) {
           ty = SILMoveOnlyWrappedType::get(ty->getCanonicalType());
           return true;
@@ -3692,10 +3708,10 @@ TypeResolver::resolveASTFunctionTypeParams(TupleTypeRepr *inputRepr,
     bool noDerivative = false;
 
     while (auto *ATR = dyn_cast<AttributedTypeRepr>(nestedRepr)) {
-      if (ATR->has(TAK_autoclosure))
+      if (ATR->has(TypeAttrKind::Autoclosure))
         autoclosure = true;
 
-      if (ATR->has(TAK_noDerivative)) {
+      if (ATR->has(TypeAttrKind::NoDerivative)) {
         if (diffKind == DifferentiabilityKind::NonDifferentiable &&
             isDifferentiableProgrammingEnabled(
                 *dc->getParentSourceFile()))
@@ -4404,27 +4420,27 @@ SILParameterInfo TypeResolver::resolveSILParameter(
     attrs->claimAllWhere([&](TypeAttribute *attr) {
       switch (attr->getKind()) {
 
-#define OWNERSHIP(SPELLING, KIND)                   \
-      case TAK_##SPELLING:                          \
-        convention = ParameterConvention::KIND;     \
-        return true;
-      OWNERSHIP(in_guaranteed, Indirect_In_Guaranteed)
-      OWNERSHIP(in, Indirect_In)
-      OWNERSHIP(in_constant, Indirect_In)
-      OWNERSHIP(inout, Indirect_Inout)
-      OWNERSHIP(inout_aliasable, Indirect_InoutAliasable)
-      OWNERSHIP(owned, Direct_Owned)
-      OWNERSHIP(guaranteed, Direct_Guaranteed)
-      OWNERSHIP(pack_owned, Pack_Owned)
-      OWNERSHIP(pack_guaranteed, Pack_Guaranteed)
-      OWNERSHIP(pack_inout, Pack_Inout)
+#define OWNERSHIP(ATTR, KIND)                                                  \
+  case TypeAttrKind::ATTR:                                                     \
+    convention = ParameterConvention::KIND;                                    \
+    return true;
+        OWNERSHIP(InGuaranteed, Indirect_In_Guaranteed)
+        OWNERSHIP(In, Indirect_In)
+        OWNERSHIP(InConstant, Indirect_In)
+        OWNERSHIP(Inout, Indirect_Inout)
+        OWNERSHIP(InoutAliasable, Indirect_InoutAliasable)
+        OWNERSHIP(Owned, Direct_Owned)
+        OWNERSHIP(Guaranteed, Direct_Guaranteed)
+        OWNERSHIP(PackOwned, Pack_Owned)
+        OWNERSHIP(PackGuaranteed, Pack_Guaranteed)
+        OWNERSHIP(PackInout, Pack_Inout)
 #undef OWNERSHIP
 
-      case TAK_noDerivative:
+      case TypeAttrKind::NoDerivative:
         parameterOptions |= SILParameterInfo::NotDifferentiable;
         return true;
 
-      case TAK_isolated:
+      case TypeAttrKind::SILIsolated:
         parameterOptions |= SILParameterInfo::Isolated;
         return true;
 
@@ -4486,24 +4502,24 @@ bool TypeResolver::resolveSingleSILResult(
 
     if (auto conventionAttr = attrs.claim(TAR_SILValueConvention)) {
       switch (conventionAttr->getKind()) {
-#define ERROR(SPELLING, CONVENTION)                 \
-      case TAK_##SPELLING:                          \
-        isErrorResult = true;                       \
-        convention = ResultConvention::CONVENTION;  \
-        break;
-#define NORMAL(SPELLING, CONVENTION)                \
-      case TAK_##SPELLING:                          \
-        convention = ResultConvention::CONVENTION;  \
-        break;
+#define ERROR(ATTR, CONVENTION)                                                \
+  case TypeAttrKind::ATTR:                                                     \
+    isErrorResult = true;                                                      \
+    convention = ResultConvention::CONVENTION;                                 \
+    break;
+#define NORMAL(ATTR, CONVENTION)                                               \
+  case TypeAttrKind::ATTR:                                                     \
+    convention = ResultConvention::CONVENTION;                                 \
+    break;
 
-      ERROR(error, Owned)
-      ERROR(error_indirect, Indirect)
-      ERROR(error_unowned, Unowned)
-      NORMAL(out, Indirect)
-      NORMAL(owned, Owned)
-      NORMAL(unowned_inner_pointer, UnownedInnerPointer)
-      NORMAL(autoreleased, Autoreleased)
-      NORMAL(pack_out, Pack)
+        ERROR(Error, Owned)
+        ERROR(ErrorIndirect, Indirect)
+        ERROR(ErrorUnowned, Unowned)
+        NORMAL(Out, Indirect)
+        NORMAL(Owned, Owned)
+        NORMAL(UnownedInnerPointer, UnownedInnerPointer)
+        NORMAL(Autoreleased, Autoreleased)
+        NORMAL(PackOut, Pack)
 #undef NORMAL
 #undef ERROR
 
@@ -5744,20 +5760,20 @@ public:
     reprStack.push_back(T);
 
     if (T->isInvalid())
-      return Action::SkipChildren();
+      return Action::SkipNode();
     if (auto memberTR = dyn_cast<MemberTypeRepr>(T)) {
       // Only visit the last component to check, because nested typealiases in
       // existentials are okay.
       visit(memberTR->getLastComponent());
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
     // Arbitrary protocol constraints are OK on opaque types.
     if (isa<OpaqueReturnTypeRepr>(T))
-      return Action::SkipChildren();
+      return Action::SkipNode();
 
     // Arbitrary protocol constraints are okay for 'any' types.
     if (isa<ExistentialTypeRepr>(T))
-      return Action::SkipChildren();
+      return Action::SkipNode();
 
     visit(T);
     return Action::Continue();
@@ -5774,11 +5790,11 @@ public:
       return Action::Continue(S);
     }
 
-    return Action::SkipChildren(S);
+    return Action::SkipNode(S);
   }
 
   PreWalkAction walkToDeclPre(Decl *D) override {
-    return Action::SkipChildrenIf(checkStatements);
+    return Action::SkipNodeIf(checkStatements);
   }
 
   PreWalkResult<Expr *> walkToExprPre(Expr *E) override {

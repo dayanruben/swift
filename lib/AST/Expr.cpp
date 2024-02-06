@@ -456,6 +456,7 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(ConditionalBridgeFromObjC, getSubExpr);
   PASS_THROUGH_REFERENCE(UnderlyingToOpaque, getSubExpr);
   PASS_THROUGH_REFERENCE(Unreachable, getSubExpr);
+  PASS_THROUGH_REFERENCE(ActorIsolationErasure, getSubExpr);
   NO_REFERENCE(Coerce);
   NO_REFERENCE(ForcedCheckedCast);
   NO_REFERENCE(ConditionalCheckedCast);
@@ -515,21 +516,21 @@ forEachImmediateChildExpr(llvm::function_ref<Expr *(Expr *)> callback) {
 
       // We're only interested in the immediate children, so don't walk any
       // further.
-      return Action::SkipChildren(E);
+      return Action::SkipNode(E);
     }
     
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
-      return Action::SkipChildren(S);
+      return Action::SkipNode(S);
     }
 
     PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
-      return Action::SkipChildren(P);
+      return Action::SkipNode(P);
     }
     PreWalkAction walkToDeclPre(Decl *D) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
     PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
   };
   
@@ -561,17 +562,17 @@ void Expr::forEachChildExpr(llvm::function_ref<Expr *(Expr *)> callback) {
     }
 
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
-      return Action::SkipChildren(S);
+      return Action::SkipNode(S);
     }
 
     PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
-      return Action::SkipChildren(P);
+      return Action::SkipNode(P);
     }
     PreWalkAction walkToDeclPre(Decl *D) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
     PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
   };
 
@@ -822,6 +823,7 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::BridgeToObjC:
   case ExprKind::UnderlyingToOpaque:
   case ExprKind::Unreachable:
+  case ExprKind::ActorIsolationErasure:
     // Implicit conversion nodes have no syntax of their own; defer to the
     // subexpression.
     return cast<ImplicitConversionExpr>(this)->getSubExpr()
@@ -1029,6 +1031,7 @@ bool Expr::isValidParentOfTypeExpr(Expr *typeExpr) const {
   case ExprKind::TypeJoin:
   case ExprKind::MacroExpansion:
   case ExprKind::CurrentContextIsolation:
+  case ExprKind::ActorIsolationErasure:
     return false;
   }
 
@@ -1562,6 +1565,10 @@ static ValueDecl *getCalledValue(Expr *E, bool skipFunctionConversions) {
   if (skipFunctionConversions) {
     if (auto fnConv = dyn_cast<FunctionConversionExpr>(E))
       return getCalledValue(fnConv->getSubExpr(), skipFunctionConversions);
+
+    if (auto *actorErasure = dyn_cast<ActorIsolationErasureExpr>(E))
+      return getCalledValue(actorErasure->getSubExpr(),
+                            skipFunctionConversions);
   }
 
   Expr *E2 = E->getValueProvidingExpr();

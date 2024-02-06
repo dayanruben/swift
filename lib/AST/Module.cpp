@@ -3664,7 +3664,7 @@ public:
     default:
       break;
     }
-    return PreWalkAction::Continue;
+    return Action::Continue();
   }
 };
 } // namespace
@@ -3934,4 +3934,18 @@ bool IsNonUserModuleRequest::evaluate(Evaluator &evaluator, ModuleDecl *mod) con
   StringRef runtimePath = searchPathOpts.RuntimeResourcePath;
   return (!runtimePath.empty() && pathStartsWith(runtimePath, modulePath)) ||
       (!sdkPath.empty() && pathStartsWith(sdkPath, modulePath));
+}
+
+version::Version ModuleDecl::getLanguageVersionBuiltWith() const {
+  for (auto *F : getFiles()) {
+    auto *LD = dyn_cast<LoadedFile>(F);
+    if (!LD)
+      continue;
+
+    auto version = LD->getLanguageVersionBuiltWith();
+    if (!version.empty())
+      return version;
+  }
+
+  return version::Version();
 }

@@ -360,13 +360,13 @@ PrintOptions PrintOptions::printSwiftInterfaceFile(ModuleDecl *ModuleToPrint,
   result.PrintAccess = true;
 
   result.ExcludeAttrList = {
-    DAK_AccessControl,
-    DAK_SetterAccess,
-    DAK_Lazy,
-    DAK_ObjCImplementation,
-    DAK_StaticInitializeObjCMetadata,
-    DAK_RestatedObjCConformance,
-    DAK_NonSendable,
+      DeclAttrKind::AccessControl,
+      DeclAttrKind::SetterAccess,
+      DeclAttrKind::Lazy,
+      DeclAttrKind::ObjCImplementation,
+      DeclAttrKind::StaticInitializeObjCMetadata,
+      DeclAttrKind::RestatedObjCConformance,
+      DeclAttrKind::NonSendable,
   };
 
   return result;
@@ -801,18 +801,23 @@ class PrintAST : public ASTVisitor<PrintAST> {
   }
 
   void printAccess(const ValueDecl *D) {
-    assert(!llvm::is_contained(Options.ExcludeAttrList, DAK_AccessControl) ||
-           llvm::is_contained(Options.ExcludeAttrList, DAK_SetterAccess));
+    assert(!llvm::is_contained(Options.ExcludeAttrList,
+                               DeclAttrKind::AccessControl) ||
+           llvm::is_contained(Options.ExcludeAttrList,
+                              DeclAttrKind::SetterAccess));
 
     if (!Options.PrintAccess || isa<ProtocolDecl>(D->getDeclContext()))
       return;
     if (D->getAttrs().hasAttribute<AccessControlAttr>() &&
-        !llvm::is_contained(Options.ExcludeAttrList, DAK_AccessControl))
+        !llvm::is_contained(Options.ExcludeAttrList,
+                            DeclAttrKind::AccessControl))
       return;
-
+    if (D->getDeclContext()->isLocalContext())
+      return;
+    
     printAccess(D->getFormalAccess());
     bool shouldSkipSetterAccess =
-      llvm::is_contained(Options.ExcludeAttrList, DAK_SetterAccess);
+        llvm::is_contained(Options.ExcludeAttrList, DeclAttrKind::SetterAccess);
 
     if (auto storageDecl = dyn_cast<AbstractStorageDecl>(D)) {
       if (auto setter = storageDecl->getAccessor(AccessorKind::Set)) {
@@ -933,6 +938,8 @@ class PrintAST : public ASTVisitor<PrintAST> {
   void printTypedPattern(const TypedPattern *TP);
   void printBraceStmt(const BraceStmt *stmt, bool newlineIfEmpty = true);
   void printAccessorDecl(const AccessorDecl *decl);
+  void printKeyPathComponents(KeyPathExpr *expr, ArrayRef<KeyPathExpr::Component> components);
+  void printClosure(AbstractClosureExpr *closure, CaptureListExpr *captureList);
 
 public:
   void printPattern(const Pattern *pattern);
@@ -1012,6 +1019,8 @@ private:
   void printFunctionParameters(AbstractFunctionDecl *AFD);
 
   void printArgument(const Argument &arg);
+  
+  void printArgumentList(ArgumentList *args, bool forSubscript = false);
 
   void printStmtCondition(StmtCondition stmt);
 
@@ -1200,7 +1209,7 @@ void PrintAST::printAttributes(const Decl *D) {
     // Don't print a redundant 'final' if we are printing a 'static' decl.
     if (D->getDeclContext()->getSelfClassDecl() &&
         getCorrectStaticSpelling(D) == StaticSpellingKind::KeywordStatic) {
-      Options.ExcludeAttrList.push_back(DAK_Final);
+      Options.ExcludeAttrList.push_back(DeclAttrKind::Final);
     }
 
     if (auto vd = dyn_cast<VarDecl>(D)) {
@@ -1209,7 +1218,7 @@ void PrintAST::printAttributes(const Decl *D) {
       // @objcImplementation extension (where final properties should appear
       // computed).
       if (vd->isInitExposedToClients() || vd->isResilient() || isInObjCImpl(vd))
-        Options.ExcludeAttrList.push_back(DAK_HasInitialValue);
+        Options.ExcludeAttrList.push_back(DeclAttrKind::HasInitialValue);
 
       if (!Options.PrintForSIL) {
         // Don't print @_hasStorage if the value is simply stored, or the
@@ -1217,31 +1226,32 @@ void PrintAST::printAttributes(const Decl *D) {
         if (vd->isResilient() ||
             (vd->getImplInfo().isSimpleStored() &&
              !hasLessAccessibleSetter(vd)))
-          Options.ExcludeAttrList.push_back(DAK_HasStorage);
+          Options.ExcludeAttrList.push_back(DeclAttrKind::HasStorage);
       }
     }
 
     // Add SPIs to both private and package interfaces
     if (!Options.printPublicInterface() &&
         DeclAttribute::canAttributeAppearOnDeclKind(
-          DAK_SPIAccessControl, D->getKind())) {
+            DeclAttrKind::SPIAccessControl, D->getKind())) {
       interleave(D->getSPIGroups(),
              [&](Identifier spiName) {
                Printer.printAttrName("_spi", true);
                Printer << "(" << spiName << ") ";
              },
              [&] { Printer << ""; });
-      Options.ExcludeAttrList.push_back(DAK_SPIAccessControl);
+      Options.ExcludeAttrList.push_back(DeclAttrKind::SPIAccessControl);
     }
 
     // Don't print any contextual decl modifiers.
     // We will handle 'mutating' and 'nonmutating' separately.
     if (isa<AccessorDecl>(D)) {
-#define EXCLUDE_ATTR(Class) Options.ExcludeAttrList.push_back(DAK_##Class);
+#define EXCLUDE_ATTR(Class)                                                    \
+  Options.ExcludeAttrList.push_back(DeclAttrKind::Class);
 #define CONTEXTUAL_DECL_ATTR(X, Class, Y, Z) EXCLUDE_ATTR(Class)
 #define CONTEXTUAL_SIMPLE_DECL_ATTR(X, Class, Y, Z) EXCLUDE_ATTR(Class)
 #define CONTEXTUAL_DECL_ATTR_ALIAS(X, Class) EXCLUDE_ATTR(Class)
-#include "swift/AST/Attr.def"
+#include "swift/AST/DeclAttr.def"
     }
 
     // If the declaration is implicitly @objc, print the attribute now.
@@ -1270,11 +1280,11 @@ void PrintAST::printAttributes(const Decl *D) {
 
   // We will handle ownership specifiers separately.
   if (isa<FuncDecl>(D)) {
-    Options.ExcludeAttrList.push_back(DAK_Mutating);
-    Options.ExcludeAttrList.push_back(DAK_NonMutating);
-    Options.ExcludeAttrList.push_back(DAK_LegacyConsuming);
-    Options.ExcludeAttrList.push_back(DAK_Consuming);
-    Options.ExcludeAttrList.push_back(DAK_Borrowing);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::Mutating);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::NonMutating);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::LegacyConsuming);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::Consuming);
+    Options.ExcludeAttrList.push_back(DeclAttrKind::Borrowing);
   }
 
   attrs.print(Printer, Options, D);
@@ -2229,24 +2239,24 @@ void PrintAST::printSelfAccessKindModifiersIfNeeded(const FuncDecl *FD) {
   switch (FD->getSelfAccessKind()) {
   case SelfAccessKind::Mutating:
     if ((!AD || AD->isAssumedNonMutating()) &&
-        !Options.excludeAttrKind(DAK_Mutating))
+        !Options.excludeAttrKind(DeclAttrKind::Mutating))
       Printer.printKeyword("mutating", Options, " ");
     break;
   case SelfAccessKind::NonMutating:
     if (AD && AD->isExplicitNonMutating() &&
-        !Options.excludeAttrKind(DAK_NonMutating))
+        !Options.excludeAttrKind(DeclAttrKind::NonMutating))
       Printer.printKeyword("nonmutating", Options, " ");
     break;
   case SelfAccessKind::LegacyConsuming:
-    if (!Options.excludeAttrKind(DAK_LegacyConsuming))
+    if (!Options.excludeAttrKind(DeclAttrKind::LegacyConsuming))
       Printer.printKeyword("__consuming", Options, " ");
     break;
   case SelfAccessKind::Consuming:
-    if (!Options.excludeAttrKind(DAK_Consuming))
+    if (!Options.excludeAttrKind(DeclAttrKind::Consuming))
       Printer.printKeyword("consuming", Options, " ");
     break;
   case SelfAccessKind::Borrowing:
-    if (!Options.excludeAttrKind(DAK_Borrowing))
+    if (!Options.excludeAttrKind(DeclAttrKind::Borrowing))
       Printer.printKeyword("borrowing", Options, " ");
     break;
   }
@@ -2693,7 +2703,7 @@ void PrintAST::printInherited(const Decl *decl) {
     if (inherited.isUnchecked())
       Printer << "@unchecked ";
     if (inherited.isRetroactive() &&
-        !llvm::is_contained(Options.ExcludeAttrList, TAK_retroactive))
+        !llvm::is_contained(Options.ExcludeAttrList, TypeAttrKind::Retroactive))
       Printer << "@retroactive ";
     if (inherited.isPreconcurrency())
       Printer << "@preconcurrency ";
@@ -3348,7 +3358,7 @@ static bool usesFeatureUnsafeInheritExecutor(Decl *decl) {
 static void suppressingFeatureUnsafeInheritExecutor(PrintOptions &options,
                                         llvm::function_ref<void()> action) {
   unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DAK_UnsafeInheritExecutor);
+  options.ExcludeAttrList.push_back(DeclAttrKind::UnsafeInheritExecutor);
   action();
   options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
@@ -3382,7 +3392,7 @@ static void
 suppressingFeatureUnavailableFromAsync(PrintOptions &options,
                                        llvm::function_ref<void()> action) {
   unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DAK_UnavailableFromAsync);
+  options.ExcludeAttrList.push_back(DeclAttrKind::UnavailableFromAsync);
   action();
   options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
@@ -3671,9 +3681,9 @@ static void
 suppressingFeatureLexicalLifetimes(PrintOptions &options,
                                    llvm::function_ref<void()> action) {
   unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DAK_EagerMove);
-  options.ExcludeAttrList.push_back(DAK_NoEagerMove);
-  options.ExcludeAttrList.push_back(DAK_LexicalLifetimes);
+  options.ExcludeAttrList.push_back(DeclAttrKind::EagerMove);
+  options.ExcludeAttrList.push_back(DeclAttrKind::NoEagerMove);
+  options.ExcludeAttrList.push_back(DeclAttrKind::LexicalLifetimes);
   action();
   options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
@@ -3690,7 +3700,7 @@ static void suppressingFeatureRetroactiveAttribute(
   PrintOptions &options,
   llvm::function_ref<void()> action) {
   llvm::SaveAndRestore<PrintOptions> originalOptions(options);
-  options.ExcludeAttrList.push_back(TAK_retroactive);
+  options.ExcludeAttrList.push_back(TypeAttrKind::Retroactive);
   action();
 }
 
@@ -3733,7 +3743,7 @@ static bool usesFeatureNonescapableTypes(Decl *decl) {
     return true;
   }
   auto *fd = dyn_cast<FuncDecl>(decl);
-  if (fd && fd->getAttrs().getAttribute(DAK_ResultDependsOnSelf)) {
+  if (fd && fd->getAttrs().getAttribute(DeclAttrKind::ResultDependsOnSelf)) {
     return true;
   }
   auto *pd = dyn_cast<ParamDecl>(decl);
@@ -3851,7 +3861,7 @@ static bool usesFeatureExtern(Decl *decl) {
 static void suppressingFeatureExtern(PrintOptions &options,
                                      llvm::function_ref<void()> action) {
   unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DAK_Extern);
+  options.ExcludeAttrList.push_back(DeclAttrKind::Extern);
   action();
   options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
@@ -3876,7 +3886,7 @@ static bool usesFeatureTransferringArgsAndResults(Decl *decl) {
   return false;
 }
 
-static bool usesFeaturePreconcurrencyConformances(Decl *decl) {
+static bool usesFeatureDynamicActorIsolation(Decl *decl) {
   auto usesPreconcurrencyConformance = [&](const InheritedTypes &inherited) {
     return llvm::any_of(
         inherited.getEntries(),
@@ -4533,9 +4543,11 @@ static void printParameterFlags(ASTPrinter &printer,
                                 const ParamDecl *param,
                                 ParameterTypeFlags flags,
                                 bool escaping) {
-  if (!options.excludeAttrKind(TAK_autoclosure) && flags.isAutoClosure())
+  if (!options.excludeAttrKind(TypeAttrKind::Autoclosure) &&
+      flags.isAutoClosure())
     printer.printAttrName("@autoclosure ");
-  if (!options.excludeAttrKind(TAK_noDerivative) && flags.isNoDerivative())
+  if (!options.excludeAttrKind(TypeAttrKind::NoDerivative) &&
+      flags.isNoDerivative())
     printer.printAttrName("@noDerivative ");
   if (flags.isTransferring())
     printer.printAttrName("@transferring ");
@@ -4570,7 +4582,7 @@ static void printParameterFlags(ASTPrinter &printer,
   if (flags.hasResultDependsOn())
     printer.printKeyword("_resultDependsOn", options, " ");
 
-  if (!options.excludeAttrKind(TAK_escaping) && escaping)
+  if (!options.excludeAttrKind(TypeAttrKind::Escaping) && escaping)
     printer.printKeyword("@escaping", options, " ");
 
   if (flags.isCompileTimeConst())
@@ -5021,7 +5033,7 @@ void PrintAST::printEnumElement(EnumElementDecl *elt) {
 
     // @escaping is not valid in enum element position, even though the
     // attribute is implicitly added. Ignore it when printing the parameters.
-    Options.ExcludeAttrList.push_back(TAK_escaping);
+    Options.ExcludeAttrList.push_back(TypeAttrKind::Escaping);
     printParameterList(PL, params,
                        /*isAPINameByDefault*/true);
     Options.ExcludeAttrList.pop_back();
@@ -5295,7 +5307,9 @@ void PrintAST::visitPostfixOperatorDecl(PostfixOperatorDecl *decl) {
     });
 }
 
-void PrintAST::visitModuleDecl(ModuleDecl *decl) { }
+void PrintAST::visitModuleDecl(ModuleDecl *decl) {
+  
+}
 
 void PrintAST::visitMissingDecl(MissingDecl *missing) {
   Printer << "missing_decl";
@@ -5452,12 +5466,26 @@ void PrintAST::visitErrorExpr(ErrorExpr *expr) {
   Printer << "<error>";
 }
 
-void PrintAST::visitTernaryExpr(TernaryExpr *expr) {}
+void PrintAST::visitTernaryExpr(TernaryExpr *expr) {
+  if (auto condExpr = expr->getCondExpr()) {
+    visit(expr->getCondExpr());
+  }
+  Printer << " ? ";
+  visit(expr->getThenExpr());
+  Printer << " : ";
+  if (auto elseExpr = expr->getElseExpr()) {
+    visit(expr->getElseExpr());
+  }
+}
 
 void PrintAST::visitIsExpr(IsExpr *expr) {
+  visit(expr->getSubExpr());
+  Printer << " is ";
+  printType(expr->getCastType());
 }
 
 void PrintAST::visitTapExpr(TapExpr *expr) {
+  
 }
 
 void PrintAST::visitTryExpr(TryExpr *expr) {
@@ -5467,18 +5495,7 @@ void PrintAST::visitTryExpr(TryExpr *expr) {
 
 void PrintAST::visitCallExpr(CallExpr *expr) {
   visit(expr->getFn());
-  Printer << "(";
-  auto args = expr->getArgs()->getOriginalArgs();
-  bool isFirst = true;
-  // FIXME: handle trailing closures.
-  for (auto arg : *args) {
-    if (!isFirst) {
-      Printer << ", ";
-    }
-    printArgument(arg);
-    isFirst = false;
-  }
-  Printer << ")";
+  printArgumentList(expr->getArgs()->getOriginalArgs());
 }
 
 void PrintAST::printArgument(const Argument &arg) {
@@ -5491,6 +5508,16 @@ void PrintAST::printArgument(const Argument &arg) {
     Printer << "&";
   }
   visit(arg.getExpr());
+}
+
+void PrintAST::printArgumentList(ArgumentList *args, bool forSubscript) {
+  Printer << (!forSubscript ? "(" : "[");
+  llvm::interleave(args->begin(), args->end(), [&](Argument arg) {
+    printArgument(arg);
+  }, [&] {
+    Printer << ", ";
+  });
+  Printer << (!forSubscript ? ")" : "]");
 }
 
 void PrintAST::visitLoadExpr(LoadExpr *expr) {
@@ -5538,6 +5565,15 @@ void PrintAST::visitDictionaryExpr(DictionaryExpr *expr) {
 }
 
 void PrintAST::visitArrowExpr(ArrowExpr *expr) {
+  visit(expr->getArgsExpr());
+  if (expr->getAsyncLoc().isValid()) {
+    Printer << " async";
+  }
+  if (expr->getThrowsLoc().isValid()) {
+    Printer << " throws";
+  }
+  Printer << " -> ";
+  visit(expr->getResultExpr());
 }
 
 void PrintAST::visitAwaitExpr(AwaitExpr *expr) {
@@ -5585,6 +5621,7 @@ void PrintAST::visitTupleExpr(TupleExpr *expr) {
 }
 
 void PrintAST::visitTypeJoinExpr(TypeJoinExpr *expr) {
+  llvm_unreachable("Not representable in source code");
 }
 
 void PrintAST::visitAssignExpr(AssignExpr *expr) {
@@ -5606,12 +5643,42 @@ void PrintAST::visitBinaryExpr(BinaryExpr *expr) {
 }
 
 void PrintAST::visitCoerceExpr(CoerceExpr *expr) {
+  visit(expr->getSubExpr());
+  Printer << " as ";
+  printType(expr->getCastType());
 }
 
 void PrintAST::visitOneWayExpr(OneWayExpr *expr) {
+  llvm_unreachable("Not representable in source code");
+}
+
+void PrintAST::printClosure(AbstractClosureExpr *closure, CaptureListExpr *captureList) {
+  
 }
 
 void PrintAST::visitClosureExpr(ClosureExpr *expr) {
+  Printer << "{ ";
+  if (auto parameters = expr->getParameters()) {
+    Printer << "(";
+    bool isFirst = true;
+    for (auto &parameter: *parameters) {
+      if (!isFirst) {
+        Printer << ", ";
+      }
+      visit(parameter);
+      isFirst = false;
+    }
+    Printer << ") ";
+    if (expr->hasExplicitResultType()) {
+      Printer << "-> ";
+      printType(expr->getExplicitResultType());
+      Printer << " ";
+    }
+    Printer << "in " << '\n';
+  }
+  auto body = expr->getBody()->getElements();
+  printASTNodes(body);
+  Printer << "\n}";
 }
 
 void PrintAST::visitDeclRefExpr(DeclRefExpr *expr) {
@@ -5627,7 +5694,80 @@ void PrintAST::visitErasureExpr(ErasureExpr *expr) {
   visit(expr->getSubExpr());
 }
 
+void PrintAST::printKeyPathComponents(KeyPathExpr *expr, ArrayRef<KeyPathExpr::Component> components) {
+  using ComponentKind = KeyPathExpr::Component::Kind;
+  
+  if (!components.empty()) {
+    for (auto &component: components) {
+      auto kind = component.getKind();
+
+      switch (kind) {
+        case ComponentKind::Invalid: {
+          break;
+        }
+        case ComponentKind::UnresolvedProperty: {
+          Printer << component.getUnresolvedDeclName();
+          break;
+        }
+        case ComponentKind::UnresolvedSubscript: {
+          auto args = component.getSubscriptArgs();
+          printArgumentList(args, /*forSubscript*/ true);
+          break;
+        }
+        case ComponentKind::Property: {
+          Printer << component.getUnresolvedDeclName();
+          break;
+        }
+        case ComponentKind::Subscript: {
+          auto args = component.getSubscriptArgs();
+          printArgumentList(args, /*forSubscript*/ true);
+          break;
+        }
+        case ComponentKind::OptionalForce: {
+          Printer << "!";
+          break;
+        }
+        case ComponentKind::OptionalChain: {
+          Printer << "?";
+          break;
+        }
+        case ComponentKind::OptionalWrap: {
+          break;
+        }
+        case ComponentKind::Identity: {
+          Printer << "self";
+          break;
+        }
+        case ComponentKind::TupleElement: {
+          Printer << component.getTupleIndex();
+          break;
+        }
+        case ComponentKind::DictionaryKey: {
+          Printer << component.getUnresolvedDeclName();
+          break;
+        }
+        case ComponentKind::CodeCompletion: {
+          break;
+        }
+      }
+    }
+  } else {
+    visit(expr->getParsedPath());
+  }
+}
+
 void PrintAST::visitKeyPathExpr(KeyPathExpr *expr) {
+  // FIXME: The individual components are good, but printKeyPathComponents is not being called into for regular key paths, and missing the dots between components.
+  if (expr->isObjC()) {
+    Printer << "#keyPath(";
+    printKeyPathComponents(expr, expr->getComponents());
+    Printer << ")";
+  } else if (auto rootType = expr->getRootType()) {
+    Printer << "\\";
+    printType(rootType);
+  } else {
+    visit(expr->getParsedRoot());
+  }
 }
 
 void PrintAST::visitSingleValueStmtExpr(SingleValueStmtExpr *expr) {
@@ -5640,9 +5780,16 @@ void PrintAST::visitForceTryExpr(ForceTryExpr *expr) {
 }
 
 void PrintAST::visitSequenceExpr(SequenceExpr *expr) {
+  auto elements = expr->getElements();
+  llvm::interleave(elements, [&](Expr* element) {
+    visit(element);
+  }, [&] {
+    Printer << " ";
+  });
 }
 
 void PrintAST::visitSuperRefExpr(SuperRefExpr *expr) {
+  Printer << "super";
 }
 
 void PrintAST::visitMemberRefExpr(MemberRefExpr *expr) {
@@ -5652,12 +5799,19 @@ void PrintAST::visitMemberRefExpr(MemberRefExpr *expr) {
 }
 
 void PrintAST::visitSubscriptExpr(SubscriptExpr *expr) {
+  visit(expr->getBase());
+  printArgumentList(expr->getArgs()->getOriginalArgs(), /*forSubscript*/ true);
 }
 
 void PrintAST::visitEnumIsCaseExpr(EnumIsCaseExpr *expr) {
+  visit(expr->getSubExpr());
+  Printer << " is ";
+  printTypeLoc(expr->getCaseTypeRepr());
 }
 
 void PrintAST::visitForceValueExpr(ForceValueExpr *expr) {
+  visit(expr->getSubExpr());
+  Printer << "!";
 }
 
 void PrintAST::visitCurrentContextIsolationExpr(
@@ -5667,6 +5821,7 @@ void PrintAST::visitCurrentContextIsolationExpr(
 }
 
 void PrintAST::visitKeyPathDotExpr(KeyPathDotExpr *expr) {
+  Printer << ".";
 }
 
 void PrintAST::visitAutoClosureExpr(AutoClosureExpr *expr) {
@@ -5674,45 +5829,88 @@ void PrintAST::visitAutoClosureExpr(AutoClosureExpr *expr) {
 }
 
 void PrintAST::visitCaptureListExpr(CaptureListExpr *expr) {
+  // FIXME: This should be moved into `printClosure` and merged with the closure.
+  // Printing implementation.
+  auto captureList = expr->getCaptureList();
+  Printer << "[";
+  auto isFirst = true;
+  for (auto &par: captureList) {
+    if (!isFirst) {
+      Printer << ", ";
+    }
+    printAttributes(par.getVar());
+    Printer << par.getVar()->getName();
+    for (auto init: par.PBD->initializers()) {
+      auto initName = init->getReferencedDecl().getDecl()->getName();
+      if (initName != par.getVar()->getName())
+        Printer << " = " << initName;
+    }
+    isFirst = false;
+  }
+  Printer << "]";
 }
 
 void PrintAST::visitDynamicTypeExpr(DynamicTypeExpr *expr) {
+  Printer << "type(of: ";
+  visit(expr->getBase());
+  Printer << ")";
 }
 
 void PrintAST::visitOpaqueValueExpr(OpaqueValueExpr *expr) {
 }
 
 void PrintAST::visitOptionalTryExpr(OptionalTryExpr *expr) {
+  Printer << "try? ";
+  visit(expr->getSubExpr());
 }
 
 void PrintAST::visitPrefixUnaryExpr(PrefixUnaryExpr *expr) {
+  visit(expr->getFn());
+  visit(expr->getOperand());
 }
 
 void PrintAST::visitBindOptionalExpr(BindOptionalExpr *expr) {
+  visit(expr->getSubExpr());
+  Printer << "?";
 }
 
 void PrintAST::visitBridgeToObjCExpr(BridgeToObjCExpr *expr) {
 }
 
 void PrintAST::visitObjCSelectorExpr(ObjCSelectorExpr *expr) {
+  Printer << "#selector";
+  Printer << "(";
+  visit(expr->getSubExpr());
+  Printer << ")";
 }
 
 void PrintAST::visitPostfixUnaryExpr(PostfixUnaryExpr *expr) {
+  visit(expr->getOperand());
+  visit(expr->getFn());
 }
 
 void PrintAST::visitTupleElementExpr(TupleElementExpr *expr) {
+  visit(expr->getBase());
+  Printer << ".";
+  Printer << expr->getFieldNumber();
 }
 
 void PrintAST::visitDerivedToBaseExpr(DerivedToBaseExpr *expr) {
 }
 
 void PrintAST::visitDotSyntaxCallExpr(DotSyntaxCallExpr *expr) {
-  visit(expr->getBase());
-  Printer << ".";
+  auto decl = expr->getFn()->getReferencedDecl().getDecl();
+  if (!decl || !decl->isOperator()) {
+    visit(expr->getBase());
+    Printer << ".";
+  }
   visit(expr->getFn());
 }
 
 void PrintAST::visitObjectLiteralExpr(ObjectLiteralExpr *expr) {
+  Printer << "#";
+  Printer << expr->getLiteralKindRawName();
+  printArgumentList(expr->getArgs());
 }
 
 void PrintAST::visitUnresolvedDotExpr(UnresolvedDotExpr *expr) {
@@ -5778,9 +5976,14 @@ void PrintAST::visitDestructureTupleExpr(DestructureTupleExpr *expr) {
 }
 
 void PrintAST::visitDynamicMemberRefExpr(DynamicMemberRefExpr *expr) {
+  visit(expr->getBase());
+  Printer << ".";
+  Printer << expr->getMember().getDecl()->getName();
 }
 
 void PrintAST::visitDynamicSubscriptExpr(DynamicSubscriptExpr *expr) {
+  visit(expr->getBase());
+  printArgumentList(expr->getArgs()->getOriginalArgs(), /*forSubscript*/ true);
 }
 
 void PrintAST::visitPointerToPointerExpr(PointerToPointerExpr *expr) {
@@ -5788,6 +5991,8 @@ void PrintAST::visitPointerToPointerExpr(PointerToPointerExpr *expr) {
 }
 
 void PrintAST::visitUnresolvedMemberExpr(UnresolvedMemberExpr *expr) {
+  Printer << ".";
+  Printer << expr->getName();
 }
 
 void PrintAST::visitDiscardAssignmentExpr(DiscardAssignmentExpr *expr) {
@@ -5795,6 +6000,7 @@ void PrintAST::visitDiscardAssignmentExpr(DiscardAssignmentExpr *expr) {
 }
 
 void PrintAST::visitEditorPlaceholderExpr(EditorPlaceholderExpr *expr) {
+  Printer << expr->getPlaceholder();
 }
 
 void PrintAST::visitForcedCheckedCastExpr(ForcedCheckedCastExpr *expr) {
@@ -5810,12 +6016,19 @@ void PrintAST::visitConditionalCheckedCastExpr(ConditionalCheckedCastExpr *expr)
 }
 
 void PrintAST::visitOverloadedDeclRefExpr(OverloadedDeclRefExpr *expr) {
+  if (expr->getNameLoc().isCompound()) {
+    Printer << expr->getDecls().front()->getName();
+  } else {
+    Printer << expr->getDecls().front()->getBaseName();
+  }
 }
 
 void PrintAST::visitUnresolvedDeclRefExpr(UnresolvedDeclRefExpr *expr) {
+  Printer << expr->getName();
 }
 
 void PrintAST::visitUnresolvedPatternExpr(UnresolvedPatternExpr *expr) {
+  printPattern(expr->getSubPattern());
 }
 
 void PrintAST::visitAnyHashableErasureExpr(AnyHashableErasureExpr *expr) {
@@ -5840,6 +6053,10 @@ void PrintAST::visitInjectIntoOptionalExpr(InjectIntoOptionalExpr *expr) {
 }
 
 void PrintAST::visitKeyPathApplicationExpr(KeyPathApplicationExpr *expr) {
+  visit(expr->getBase());
+  Printer << "[keyPath: ";
+  visit(expr->getKeyPath());
+  Printer << "]";
 }
 
 void PrintAST::visitMetatypeConversionExpr(MetatypeConversionExpr *expr) {
@@ -5859,6 +6076,9 @@ void PrintAST::visitUnevaluatedInstanceExpr(UnevaluatedInstanceExpr *expr) {
 }
 
 void PrintAST::visitDotSyntaxBaseIgnoredExpr(DotSyntaxBaseIgnoredExpr *expr) {
+  visit(expr->getLHS());
+  Printer << ".";
+  visit(expr->getRHS());
 }
 
 void PrintAST::visitUnresolvedSpecializeExpr(UnresolvedSpecializeExpr *expr) {
@@ -5877,18 +6097,22 @@ void PrintAST::visitDifferentiableFunctionExpr(DifferentiableFunctionExpr *expr)
 }
 
 void PrintAST::visitMagicIdentifierLiteralExpr(MagicIdentifierLiteralExpr *expr) {
+  Printer << expr->getKindString(expr->getKind());
 }
 
 void PrintAST::visitForeignObjectConversionExpr(ForeignObjectConversionExpr *expr) {
 }
 
 void PrintAST::visitOtherConstructorDeclRefExpr(OtherConstructorDeclRefExpr *expr) {
+  Printer << "init";
 }
 
 void PrintAST::visitRebindSelfInConstructorExpr(RebindSelfInConstructorExpr *expr) {
+  visit(expr->getSubExpr());
 }
 
 void PrintAST::visitMakeTemporarilyEscapableExpr(MakeTemporarilyEscapableExpr *expr) {
+  visit(expr->getOriginalExpr());
 }
 
 void PrintAST::visitProtocolMetatypeToObjectExpr(ProtocolMetatypeToObjectExpr *expr) {
@@ -5904,6 +6128,7 @@ void PrintAST::visitCovariantReturnConversionExpr(CovariantReturnConversionExpr 
 }
 
 void PrintAST::visitInterpolatedStringLiteralExpr(InterpolatedStringLiteralExpr *expr) {
+  visit(expr->getInterpolationExpr());
 }
 
 void PrintAST::visitCollectionUpcastConversionExpr(CollectionUpcastConversionExpr *expr) {
@@ -5922,6 +6147,9 @@ void PrintAST::visitLinearFunctionExtractOriginalExpr(swift::LinearFunctionExtra
 }
 
 void PrintAST::visitLinearToDifferentiableFunctionExpr(swift::LinearToDifferentiableFunctionExpr *expr) {
+}
+
+void PrintAST::visitActorIsolationErasureExpr(ActorIsolationErasureExpr *expr) {
 }
 
 void PrintAST::visitPropertyWrapperValuePlaceholderExpr(swift::PropertyWrapperValuePlaceholderExpr *expr) {
@@ -6075,6 +6303,17 @@ void PrintAST::visitForEachStmt(ForEachStmt *stmt) {
   printPattern(stmt->getPattern());
   Printer << " " << tok::kw_in << " ";
   // FIXME: print container
+  if (auto *seq = stmt->getTypeCheckedSequence()) {
+    // Look through the call to '.makeIterator()'
+    
+    if (auto *CE = dyn_cast<CallExpr>(seq)) {
+      if (auto *SAE = dyn_cast<SelfApplyExpr>(CE->getFn()))
+        seq = SAE->getBase();
+    }
+    visit(seq);
+  } else {
+    visit(stmt->getParsedSequence());
+  }
   Printer << " ";
   visit(stmt->getBody());
 }
@@ -6883,7 +7122,7 @@ public:
     if (Options.SkipAttributes)
       return;
 
-    if (!Options.excludeAttrKind(TAK_differentiable)) {
+    if (!Options.excludeAttrKind(TypeAttrKind::Differentiable)) {
       switch (info.getDifferentiabilityKind()) {
       case DifferentiabilityKind::Normal:
         Printer << "@differentiable ";
@@ -6908,8 +7147,7 @@ public:
       Printer << " ";
     }
 
-    if (!Options.excludeAttrKind(TAK_Sendable) &&
-        info.isSendable()) {
+    if (!Options.excludeAttrKind(TypeAttrKind::Sendable) && info.isSendable()) {
       Printer.printSimpleAttr("@Sendable") << " ";
     }
 
@@ -6919,7 +7157,7 @@ public:
       return;
     case PrintOptions::FunctionRepresentationMode::Full:
     case PrintOptions::FunctionRepresentationMode::NameOnly:
-      if (Options.excludeAttrKind(TAK_convention) ||
+      if (Options.excludeAttrKind(TypeAttrKind::Convention) ||
           info.getSILRepresentation() == SILFunctionType::Representation::Thick)
         return;
 
@@ -6988,7 +7226,7 @@ public:
     if (Options.SkipAttributes)
       return;
 
-    if (!Options.excludeAttrKind(TAK_differentiable)) {
+    if (!Options.excludeAttrKind(TypeAttrKind::Differentiable)) {
       switch (info.getDifferentiabilityKind()) {
       case DifferentiabilityKind::Normal:
         Printer << "@differentiable ";
@@ -7013,7 +7251,7 @@ public:
       break;
     case PrintOptions::FunctionRepresentationMode::NameOnly:
     case PrintOptions::FunctionRepresentationMode::Full:
-      if (Options.excludeAttrKind(TAK_convention) ||
+      if (Options.excludeAttrKind(TypeAttrKind::Convention) ||
           info.getRepresentation() == SILFunctionType::Representation::Thick)
         break;
 
@@ -7308,11 +7546,13 @@ public:
 
       GenericSignature sig = substitutions.getGenericSignature();
 
+      // The substituted signature is printed without inverse requirement
+      // desugaring, but also we drop conformances to Copyable and Escapable
+      // when constructing it.
       sub->Printer << "@substituted ";
       sub->printGenericSignature(sig,
                                  PrintAST::PrintParams |
-                                 PrintAST::PrintRequirements |
-                                 PrintAST::PrintInverseRequirements);
+                                 PrintAST::PrintRequirements);
       sub->Printer << " ";
     }
 
@@ -8079,7 +8319,7 @@ void SILParameterInfo::print(ASTPrinter &Printer,
 
   if (options.contains(SILParameterInfo::Isolated)) {
     options -= SILParameterInfo::Isolated;
-    Printer << "@isolated ";
+    Printer << "@sil_isolated ";
   }
 
   // If we did not handle a case in Options, this code was not updated

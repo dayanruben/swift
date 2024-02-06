@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-feature NoncopyableGenerics -warn-redundant-requirements
+// RUN: %target-typecheck-verify-swift -enable-experimental-feature NoncopyableGenerics
 
 // REQUIRES: noncopyable_generics
 
@@ -17,7 +17,7 @@ func more() {
   let _: ~AnyObject // expected-error {{type 'AnyObject' is not invertible}}
 }
 
-struct S4: ~(Copyable & Equatable) {} // expected-error {{type 'Copyable & Equatable' is not invertible}}
+struct S4: ~(Copyable & Equatable) {} // expected-error {{type 'Equatable' is not invertible}}
 
 func blah<T>(_ t: borrowing T) where T: ~Copyable,
                                      T: ~Hashable {}  // expected-error@:41 {{type 'Hashable' is not invertible}}
@@ -25,21 +25,17 @@ func blah<T>(_ t: borrowing T) where T: ~Copyable,
 func foo<T: ~Copyable>(x: borrowing T) {}
 
 struct Buurap<T: ~Copyable> where T: ~Copyable {}
-// expected-warning@-1 {{redundant constraint 'T' : '~Copyable'}}
 
 struct ExtraNoncopyStruct: ~Copyable, ~Copyable {}
 struct ExtraNoncopyEnum: ~Copyable, ~Copyable {}
 
 protocol ExtraNoncopyProto: ~Copyable, ~Copyable {}
-// expected-warning@-1 {{redundant constraint 'Self' : '~Copyable'}}
 
 protocol Foo: ~Copyable
          where Self: ~Copyable {
-         // expected-warning@-1 {{redundant constraint 'Self' : '~Copyable'}}
 
     associatedtype Touch : ~Copyable,
                            ~Copyable
-    // expected-warning@-1 {{redundant constraint 'Self.Touch' : '~Copyable'}}
 
     func test<T>(_ t: T) where T: ~Self  // expected-error {{type 'Self' is not invertible}}
 }
@@ -103,5 +99,5 @@ typealias Z4 = ~Rope<Int> // expected-error {{type 'Rope<Int>' is not invertible
 typealias Z5 = (~Int) -> Void // expected-error {{type 'Int' is not invertible}}
 typealias Z6 = ~() -> () // expected-error {{single argument function types require parentheses}}
                          // expected-error@-1 {{type '()' is not invertible}}
-typealias Z7 = ~(Copyable & Hashable) // expected-error {{type 'Copyable & Hashable' is not invertible}}
+typealias Z7 = ~(Copyable & Hashable) // expected-error {{type 'Hashable' is not invertible}}
 typealias Z8 = ~Copyable & Hashable

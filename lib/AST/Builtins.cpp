@@ -115,7 +115,7 @@ Type swift::getBuiltinType(ASTContext &Context, StringRef Name) {
   if (Name.substr(0, 3) == "Int") {
     unsigned BitWidth;
     if (!Name.substr(3).getAsInteger(10, BitWidth) &&
-        BitWidth <= 2048 && BitWidth != 0)  // Cap to prevent insane things.
+        BitWidth <= 2048 && BitWidth != 0)  // Cap to prevent unsound things.
       return BuiltinIntegerType::get(BitWidth, Context);
   }
   
@@ -310,10 +310,13 @@ synthesizeGenericSignature(SynthesisContext &SC,
   CollectGenericParams collector(SC);
   list.Params.visit(collector);
 
+  // FIXME: Change allowInverses to false and add Copyable/Escapable explicitly
+  // to those builtins that need it.
   return buildGenericSignature(SC.Context,
                                GenericSignature(),
                                std::move(collector.GenericParamTypes),
-                               std::move(collector.AddedRequirements));
+                               std::move(collector.AddedRequirements),
+                               /*allowInverses=*/true);
 }
 
 /// Build a builtin function declaration.
@@ -732,10 +735,13 @@ namespace {
     }
 
     FuncDecl *build(Identifier name) {
+      // FIXME: Change allowInverses to false and add Copyable/Escapable
+      // explicitly to those builtins that need it.
       auto GenericSig = buildGenericSignature(
           Context, GenericSignature(),
           std::move(genericParamTypes),
-          std::move(addedRequirements));
+          std::move(addedRequirements),
+          /*allowInverses=*/true);
       return getBuiltinGenericFunction(name, InterfaceParams,
                                        InterfaceResult,
                                        TheGenericParamList, GenericSig,
@@ -2403,6 +2409,11 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
   // Builtin.TheTupleType resolves to the singleton instance of BuiltinTupleDecl.
   if (Id == Context.Id_TheTupleType)
     return Context.getBuiltinTupleDecl();
+
+  if (Id == Context.Id_Copyable)
+    return Context.synthesizeInvertibleProtocolDecl(InvertibleProtocolKind::Copyable);
+  if (Id == Context.Id_Escapable)
+    return Context.synthesizeInvertibleProtocolDecl(InvertibleProtocolKind::Escapable);
 
   SmallVector<Type, 4> Types;
   StringRef OperationName = getBuiltinBaseName(Context, Id.str(), Types);

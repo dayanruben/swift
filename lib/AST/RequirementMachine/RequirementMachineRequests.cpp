@@ -188,8 +188,8 @@ static void splitConcreteEquivalenceClasses(
                            req.getFirstType(), concreteType);
       Requirement secondReq(RequirementKind::SameType,
                             req.getSecondType(), concreteType);
-      splitRequirements.push_back({firstReq, SourceLoc(), /*inferred=*/false});
-      splitRequirements.push_back({secondReq, SourceLoc(), /*inferred=*/false});
+      splitRequirements.push_back({firstReq, SourceLoc()});
+      splitRequirements.push_back({secondReq, SourceLoc()});
 
       if (debug) {
         llvm::dbgs() << "- First split: ";
@@ -201,7 +201,7 @@ static void splitConcreteEquivalenceClasses(
       continue;
     }
 
-    splitRequirements.push_back({req, SourceLoc(), /*inferred=*/false});
+    splitRequirements.push_back({req, SourceLoc()});
 
     if (debug) {
       llvm::dbgs() << "- Not split: ";
@@ -319,7 +319,7 @@ RequirementSignatureRequest::evaluate(Evaluator &evaluator,
     for (auto req : proto->getStructuralRequirements())
       requirements.push_back(req);
     for (auto req : proto->getTypeAliasRequirements())
-      requirements.push_back({req, SourceLoc(), /*inferred=*/false});
+      requirements.push_back({req, SourceLoc()});
   }
 
   if (rewriteCtx.getDebugOptions().contains(DebugFlags::Timers)) {
@@ -544,7 +544,8 @@ AbstractGenericSignatureRequest::evaluate(
          Evaluator &evaluator,
          const GenericSignatureImpl *baseSignatureImpl,
          SmallVector<GenericTypeParamType *, 2> addedParameters,
-         SmallVector<Requirement, 2> addedRequirements) const {
+         SmallVector<Requirement, 2> addedRequirements,
+         bool allowInverses) const {
   GenericSignature baseSignature = GenericSignature{baseSignatureImpl};
   // If nothing is added to the base signature, just return the base
   // signature.
@@ -594,7 +595,8 @@ AbstractGenericSignatureRequest::evaluate(
         ctx.evaluator,
         AbstractGenericSignatureRequest{
           canBaseSignature.getPointer(), std::move(canAddedParameters),
-          std::move(canAddedRequirements)},
+          std::move(canAddedRequirements),
+          allowInverses},
         GenericSignatureWithError());
     if (!canSignatureResult.getPointer())
       return GenericSignatureWithError();
@@ -638,11 +640,11 @@ AbstractGenericSignatureRequest::evaluate(
   // empty source locations.
   SmallVector<StructuralRequirement, 2> requirements;
   for (auto req : baseSignature.getRequirements())
-    requirements.push_back({req, SourceLoc(), /*wasInferred=*/false});
+    requirements.push_back({req, SourceLoc()});
 
   // Add the new requirements.
   for (auto req : addedRequirements)
-    requirements.push_back({req, SourceLoc(), /*wasInferred=*/false});
+    requirements.push_back({req, SourceLoc()});
 
   // The requirements passed to this request may have been substituted,
   // meaning the subject type might be a concrete type and not a type
@@ -660,8 +662,10 @@ AbstractGenericSignatureRequest::evaluate(
 
   /// Next, we need to expand default requirements and then apply inverses.
   SmallVector<Type, 2> paramsAsTypes;
-  for (auto *gtpt : addedParameters)
-    paramsAsTypes.push_back(gtpt);
+  if (allowInverses) {
+    for (auto *gtpt : addedParameters)
+      paramsAsTypes.push_back(gtpt);
+  }
 
   InverseRequirement::expandDefaults(ctx, paramsAsTypes, requirements);
   applyInverses(ctx, paramsAsTypes, inverses, requirements, errors);
@@ -748,12 +752,18 @@ InferredGenericSignatureRequest::evaluate(
         WhereClauseOwner whereClause,
         SmallVector<Requirement, 2> addedRequirements,
         SmallVector<TypeLoc, 2> inferenceSources,
-        bool allowConcreteGenericParams) const {
+        bool isExtension, bool allowInverses) const {
   GenericSignature parentSig(parentSigImpl);
 
   SmallVector<GenericTypeParamType *, 4> genericParams(
       parentSig.getGenericParams().begin(),
       parentSig.getGenericParams().end());
+
+  unsigned numOuterParams = genericParams.size();
+  if (isExtension) {
+    assert(allowInverses);
+    numOuterParams = 0;
+  }
 
   SmallVector<StructuralRequirement, 2> requirements;
   SmallVector<RequirementError, 2> errors;
@@ -780,7 +790,7 @@ InferredGenericSignatureRequest::evaluate(
   }();
 
   for (const auto &req : parentSig.getRequirements())
-    requirements.push_back({req, loc, /*wasInferred=*/false});
+    requirements.push_back({req, loc});
 
   DeclContext *lookupDC = nullptr;
 
@@ -791,12 +801,9 @@ InferredGenericSignatureRequest::evaluate(
     return false;
   };
 
-  // "Local" generic parameters to which we apply default Copyable and
-  // Escapable.
-  SmallVector<Type, 4> paramTypes;
-
   if (genericParamList) {
-    // Extensions never have a parent signature.
+    // If we have multiple parameter lists, we're in SIL mode, and there's
+    // no parent signature from context.
     assert(genericParamList->getOuterParameters() == nullptr || !parentSig);
 
     // Collect all outer generic parameter lists.
@@ -811,10 +818,6 @@ InferredGenericSignatureRequest::evaluate(
     // We walk them backwards to order outer parameters before inner
     // parameters.
     for (auto *gpList : llvm::reverse(gpLists)) {
-      for (auto *gpDecl : *gpList) {
-        paramTypes.push_back(gpDecl->getDeclaredInterfaceType());
-      }
-
       assert(gpList->size() > 0 &&
              "Parsed an empty generic parameter list?");
 
@@ -868,29 +871,19 @@ InferredGenericSignatureRequest::evaluate(
   // inferred same-type requirements when building the generic signature of
   // an extension whose extended type is a generic typealias.
   for (const auto &req : addedRequirements)
-    requirements.push_back({req, SourceLoc(), /*inferred=*/true});
+    requirements.push_back({req, SourceLoc()});
 
   desugarRequirements(requirements, inverses, errors);
 
-  if (!genericParamList && allowConcreteGenericParams) {
-    for (auto paramTy : genericParams) {
-      paramTypes.push_back(paramTy);
-    }
-  }
-
   // After realizing requirements, expand default requirements only for local
   // generic parameters, as the outer parameters have already been expanded.
+  SmallVector<Type, 4> paramTypes;
+  if (allowInverses) {
+    paramTypes.append(genericParams.begin() + numOuterParams, genericParams.end());
+  }
+
   InverseRequirement::expandDefaults(ctx, paramTypes, requirements);
   applyInverses(ctx, paramTypes, inverses, requirements, errors);
-
-  // Re-order requirements so that inferred requirements appear last. This
-  // ensures that if an inferred requirement is redundant with some other
-  // requirement, it is the inferred requirement that becomes redundant,
-  // which muffles the redundancy diagnostic.
-  std::stable_partition(requirements.begin(), requirements.end(),
-                        [](const StructuralRequirement &req) {
-                          return !req.inferred;
-                        });
 
   auto &rewriteCtx = ctx.getRewriteContext();
 
@@ -956,7 +949,7 @@ InferredGenericSignatureRequest::evaluate(
     if (attempt == 0) {
       machine->computeRequirementDiagnostics(errors, inverses, loc);
       diagnoseRequirementErrors(ctx, errors,
-                                (allowConcreteGenericParams || !genericParamList)
+                                (isExtension || !genericParamList)
                                 ? AllowConcreteTypePolicy::All
                                 : AllowConcreteTypePolicy::AssocTypes);
     }
@@ -987,7 +980,7 @@ InferredGenericSignatureRequest::evaluate(
                                            std::move(machine));
     }
 
-    if (genericParamList && !allowConcreteGenericParams) {
+    if (genericParamList && !isExtension) {
       for (auto genericParam : result.getInnermostGenericParams()) {
         auto reduced = result.getReducedType(genericParam);
 

@@ -3646,7 +3646,8 @@ namespace {
             /*failable=*/false, /*FailabilityLoc=*/SourceLoc(),
             /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
             /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
-            /*ThrownType=*/TypeLoc(), bodyParams, genericParams, dc);
+            /*ThrownType=*/TypeLoc(), bodyParams, genericParams, dc,
+            /*LifetimeDependentReturnTypeRepr*/ nullptr);
       } else {
         auto resultTy = importedType.getType();
 
@@ -6221,7 +6222,8 @@ Decl *SwiftDeclConverter::importGlobalAsInitializer(
       failable, /*FailabilityLoc=*/SourceLoc(),
       /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
       /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(), /*ThrownType=*/TypeLoc(),
-      parameterList, /*GenericParams=*/nullptr, dc);
+      parameterList, /*GenericParams=*/nullptr, dc,
+      /*LifetimeDependentReturnTypeRepr*/ nullptr);
   result->setImplicitlyUnwrappedOptional(isIUO);
   result->getASTContext().evaluator.cacheOutput(InitKindRequest{result},
                                                 std::move(initKind));
@@ -6735,7 +6737,8 @@ ConstructorDecl *SwiftDeclConverter::importConstructor(
       /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
       /*Throws=*/importedName.getErrorInfo().has_value(),
       /*ThrowsLoc=*/SourceLoc(), /*ThrownType=*/TypeLoc(), bodyParams,
-      /*GenericParams=*/nullptr, const_cast<DeclContext *>(dc));
+      /*GenericParams=*/nullptr, const_cast<DeclContext *>(dc),
+      /*LifetimeDependentReturnTypeRepr*/ nullptr);
 
   addObjCAttribute(result, selector);
   recordMemberInContext(dc, result);
@@ -8865,7 +8868,8 @@ GenericSignature ClangImporter::Implementation::buildGenericSignature(
   return swift::buildGenericSignature(
       SwiftContext, GenericSignature(),
       std::move(genericParamTypes),
-      std::move(requirements));
+      std::move(requirements),
+      /*allowInverses=*/true);
 }
 
 Decl *
@@ -9336,7 +9340,7 @@ static void loadMembersOfBaseImportedFromClang(ExtensionDecl *ext) {
     return;
   base->loadAllMembers();
 
-  // Sanity check: make sure we don't jump over to a category /while/
+  // Soundness check: make sure we don't jump over to a category /while/
   // loading the original class's members. Right now we only check if this
   // happens on the first member.
   if (auto *clangContainer = dyn_cast<clang::ObjCContainerDecl>(clangBase))

@@ -934,6 +934,13 @@ public:
 
   ClassDecl *getStaticArrayStorageDecl();
 
+#define FEATURE(N, V)                                           \
+  bool is##N##FeatureAvailable(const ASTContext &context);      \
+  inline bool is##N##FeatureAvailable() {                       \
+    return is##N##FeatureAvailable(Context);                    \
+  }
+  #include "swift/AST/FeatureAvailability.def"
+
   bool canUseObjCSymbolicReferences();
 
   Size getAtomicBoolSize() const { return AtomicBoolSize; }
@@ -1168,7 +1175,8 @@ public:
                                             ArrayRef<llvm::Type*> paramTypes,
                         llvm::function_ref<void(IRGenFunction &IGF)> generate,
                         bool setIsNoInline = false,
-                        bool forPrologue = false);
+                        bool forPrologue = false,
+                        bool isPerformanceConstraint = false);
 
   llvm::Constant *getOrCreateRetainFunction(const TypeInfo &objectTI, SILType t,
                               llvm::Type *llvmType, Atomicity atomicity);
@@ -1429,6 +1437,14 @@ public:
   const char *getReflectionStringsSectionName();
   const char *getReflectionTypeRefSectionName();
   const char *getMultiPayloadEnumDescriptorSectionName();
+
+  /// Returns the special builtin types that should be emitted in the stdlib
+  /// module.
+  llvm::ArrayRef<CanType> getOrCreateSpecialStlibBuiltinTypes();
+
+private:
+  /// The special builtin types that should be emitted in the stdlib module.
+  llvm::SmallVector<CanType, 7> SpecialStdlibBuiltinTypes;
 
 //--- Runtime ---------------------------------------------------------------
 public:

@@ -126,8 +126,9 @@ UPCOMING_FEATURE(InternalImportsByDefault, 409, 6)
 UPCOMING_FEATURE(IsolatedDefaultValues, 411, 6)
 UPCOMING_FEATURE(GlobalConcurrency, 412, 6)
 UPCOMING_FEATURE(FullTypedThrows, 413, 6)
-
 UPCOMING_FEATURE(ExistentialAny, 335, 7)
+UPCOMING_FEATURE(InferSendableFromCaptures, 418, 6)
+
 
 EXPERIMENTAL_FEATURE(StaticAssert, false)
 EXPERIMENTAL_FEATURE(NamedOpaqueTypes, false)
@@ -246,10 +247,6 @@ EXPERIMENTAL_FEATURE(StructLetDestructuring, true)
 /// lifetime-dependent results.
 EXPERIMENTAL_FEATURE(NonescapableTypes, true)
 
-// Infer Sendability of unapplied and partial applied methods,
-// global functions and key paths.
-EXPERIMENTAL_FEATURE(InferSendableFromCaptures, false)
-
 // Allow optional isolated parameters.
 EXPERIMENTAL_FEATURE(OptionalIsolatedParameters, true)
 
@@ -271,8 +268,10 @@ EXPERIMENTAL_FEATURE(GroupActorErrors, true)
 // Allow for the 'transferring' keyword to be applied to arguments and results.
 EXPERIMENTAL_FEATURE(TransferringArgsAndResults, true)
 
-// Enable `@preconcurrency` attribute on protocol conformances.
-EXPERIMENTAL_FEATURE(PreconcurrencyConformances, false)
+// Enable `@preconcurrency` attribute on protocol conformances and runtime checks
+// of actor isolation in @obj thunks and arguments of APIs that haven't yet adopted
+// strict concurrency checking.
+EXPERIMENTAL_FEATURE(DynamicActorIsolation, false)
 
 // Allow for `switch` of noncopyable values to be borrowing or consuming.
 EXPERIMENTAL_FEATURE(BorrowingSwitch, true)

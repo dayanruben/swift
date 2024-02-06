@@ -1280,7 +1280,14 @@ The clang node owner.
 
 Specifies the performance constraints for the function, which defines which type
 of runtime functions are allowed to be called from the function.
+::
 
+  sil-function-attribute ::= '[perf_constraint]'
+
+Specifies that the optimizer and IRGen must not add runtime calls which are not
+in the function originally. This attribute is set for functions with performance
+constraints or functions which are called from functions with performance
+constraints.
 
 Argument Effects
 ````````````````
@@ -5151,7 +5158,7 @@ end_unpaired_access
   sil-enforcement ::= static
   sil-enforcement ::= dynamic
   sil-enforcement ::= unsafe
-  %1 = end_unpaired_access [dynamic] %0 : $*Builtin.UnsafeValueBuffer
+  end_unpaired_access [dynamic] %0 : $*Builtin.UnsafeValueBuffer
 
 Ends an access. This has the same semantics and constraints as ``end_access`` with the following exceptions:
 

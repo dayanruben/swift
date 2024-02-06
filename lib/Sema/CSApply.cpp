@@ -4971,20 +4971,18 @@ namespace {
       // Resolve each of the components.
       bool didOptionalChain = false;
       bool isFunctionType = false;
-      Type baseTy, leafTy;
+      auto baseTy = cs.simplifyType(solution.getKeyPathRootType(E));
+      Type leafTy;
       Type exprType = cs.getType(E);
       if (auto fnTy = exprType->getAs<FunctionType>()) {
-        baseTy = fnTy->getParams()[0].getParameterType();
         leafTy = fnTy->getResult();
         isFunctionType = true;
       } else if (auto *existential = exprType->getAs<ExistentialType>()) {
         auto layout = existential->getExistentialLayout();
         auto keyPathTy = layout.explicitSuperclass->castTo<BoundGenericType>();
-        baseTy = keyPathTy->getGenericArgs()[0];
         leafTy = keyPathTy->getGenericArgs()[1];
       } else {
         auto keyPathTy = exprType->castTo<BoundGenericType>();
-        baseTy = keyPathTy->getGenericArgs()[0];
         leafTy = keyPathTy->getGenericArgs()[1];
       }
 
@@ -5103,13 +5101,11 @@ namespace {
         assert(!resolvedComponents.empty());
         componentTy = resolvedComponents.back().getComponentType();
       }
-      
+
       // Wrap a non-optional result if there was chaining involved.
       if (didOptionalChain && componentTy &&
           !componentTy->hasUnresolvedType() &&
           !componentTy->getWithoutSpecifierType()->isEqual(leafTy)) {
-        assert(leafTy->getOptionalObjectType()->isEqual(
-            componentTy->getWithoutSpecifierType()));
         auto component = KeyPathExpr::Component::forOptionalWrap(leafTy);
         resolvedComponents.push_back(component);
         componentTy = leafTy;
@@ -5122,11 +5118,6 @@ namespace {
       // See whether there's an equivalent ObjC key path string we can produce
       // for interop purposes.
       checkAndSetObjCKeyPathString(E);
-      
-      // The final component type ought to line up with the leaf type of the
-      // key path.
-      assert(!componentTy || componentTy->hasUnresolvedType()
-             || componentTy->getWithoutSpecifierType()->isEqual(leafTy));
 
       if (!isFunctionType)
         return E;
@@ -7416,6 +7407,61 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
       }
     }
 
+    if (ctx.LangOpts.hasFeature(Feature::DynamicActorIsolation)) {
+      // Passing a synchronous global actor-isolated function value and
+      // parameter that expects a synchronous non-isolated function type could
+      // require a runtime check to ensure that function is always called in
+      // expected context.
+      if (!toEI.getGlobalActor() && fromEI.getGlobalActor() &&
+          !toEI.isAsync()) {
+        // Runtime check is required when isolation function value
+        // is passed to an API that comes from a module that doesn't
+        // have full static concurrency checking enabled.
+        auto requiresRuntimeCheck = [&]() {
+          if (!locator.endsWith<LocatorPathElt::ApplyArgToParam>())
+            return false;
+
+          ConstraintLocator *calleeLoc = nullptr;
+          if (auto *call = getAsExpr<ApplyExpr>(locator.getAnchor())) {
+            calleeLoc = CalleeLocators[call];
+          } else {
+            calleeLoc =
+                solution.getCalleeLocator(cs.getConstraintLocator(locator));
+          }
+
+          auto overload = solution.getOverloadChoiceIfAvailable(calleeLoc);
+          if (!(overload && overload->choice.isDecl()))
+            return false;
+
+          auto *decl = overload->choice.getDecl();
+          // Function values passed to C/ObjC APIs are already thunked
+          // and that's where the check is going to go.
+          if (decl->hasClangNode())
+            return false;
+
+          auto declaredIn = decl->findImport(dc);
+          if (!declaredIn)
+            return false;
+
+          return !declaredIn->module.importedModule->isConcurrencyChecked();
+        };
+
+        if (requiresRuntimeCheck()) {
+          auto isolatedToType =
+              FunctionType::get(toFunc->getParams(), toFunc->getResult(),
+                                toEI.withGlobalActor(fromEI.getGlobalActor()));
+
+          // Global actor might not be the only difference, let's introduce
+          // a function conversion first but with matching isolation.
+          expr = cs.cacheType(new (ctx)
+                                  FunctionConversionExpr(expr, isolatedToType));
+
+          return cs.cacheType(new (ctx)
+                                  ActorIsolationErasureExpr(expr, toType));
+        }
+      }
+    }
+
     maybeDiagnoseUnsupportedFunctionConversion(cs, expr, toFunc);
 
     return cs.cacheType(new (ctx) FunctionConversionExpr(expr, toType));
@@ -7582,6 +7628,12 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   abort();
 }
 
+static bool isSelfRefInInitializer(Expr *baseExpr,
+                                   DeclContext *useDC) {
+  auto *CD = dyn_cast<ConstructorDecl>(useDC);
+  return CD && baseExpr->isSelfExprOf(CD);
+}
+
 /// Detect whether an assignment to \c baseExpr.member in the given
 /// decl context can potentially be initialization of a property wrapper.
 static bool isPotentialPropertyWrapperInit(Expr *baseExpr,
@@ -7594,15 +7646,19 @@ static bool isPotentialPropertyWrapperInit(Expr *baseExpr,
 
   // Assignment to a wrapped property can only be re-written to
   // initialization in an init.
-  auto *CD = dyn_cast<ConstructorDecl>(UseDC);
-  if (!CD)
+  return isSelfRefInInitializer(baseExpr, UseDC);
+}
+
+/// Detect whether an assignment to \c baseExpr.member in the given
+/// decl context can potentially be initialization via an init accessor.
+static bool isPotentialInitViaInitAccessor(Expr *baseExpr,
+                                           ValueDecl *member,
+                                           DeclContext *useDC) {
+  auto *VD = dyn_cast<VarDecl>(member);
+  if (!(VD && VD->hasInitAccessor()))
     return false;
 
-  // This is not an assignment on self
-  if (!baseExpr->isSelfExprOf(CD))
-    return false;
-
-  return true;
+  return isSelfRefInInitializer(baseExpr, useDC);
 }
 
 /// Adjust the given type to become the self type when referring to
@@ -7639,12 +7695,13 @@ static Type adjustSelfTypeForMember(Expr *baseExpr,
 
   // If neither the property's getter nor its setter are mutating,
   // the base can be an rvalue unless the assignment is potentially
-  // initializing a property wrapper. If the assignment can be re-
-  // written to property wrapper initialization, the base type should
-  // be an lvalue.
+  // initializing a property wrapper or using init accessor. If the
+  // assignment can be re-written to property wrapper or init accessor
+  // initialization, the base type should be an lvalue.
   if (!SD->isGetterMutating() &&
       (!isSettableFromHere || !SD->isSetterMutating()) &&
-      !isPotentialPropertyWrapperInit(baseExpr, member, UseDC))
+      !isPotentialPropertyWrapperInit(baseExpr, member, UseDC) &&
+      !isPotentialInitViaInitAccessor(baseExpr, member, UseDC))
     return baseObjectTy;
 
   if (isa<SubscriptDecl>(member))
@@ -8513,12 +8570,12 @@ namespace {
 
     /// Ignore statements.
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *stmt) override {
-      return Action::SkipChildren(stmt);
+      return Action::SkipNode(stmt);
     }
 
     /// Ignore declarations.
     PreWalkAction walkToDeclPre(Decl *decl) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
   };
 
@@ -8594,20 +8651,20 @@ namespace {
         rewriteFunction(closure);
 
         if (AnyFunctionRef(closure).hasExternalPropertyWrapperParameters()) {
-          return Action::SkipChildren(rewriteClosure(closure));
+          return Action::SkipNode(rewriteClosure(closure));
         }
 
-        return Action::SkipChildren(closure);
+        return Action::SkipNode(closure);
       }
 
       if (auto *SVE = dyn_cast<SingleValueStmtExpr>(expr)) {
         rewriteSingleValueStmtExpr(SVE);
-        return Action::SkipChildren(SVE);
+        return Action::SkipNode(SVE);
       }
 
       if (auto tap = dyn_cast_or_null<TapExpr>(expr)) {
         rewriteTapExpr(tap);
-        return Action::SkipChildren(tap);
+        return Action::SkipNode(tap);
       }
 
       if (auto captureList = dyn_cast<CaptureListExpr>(expr)) {
@@ -8631,12 +8688,12 @@ namespace {
 
     /// Ignore statements.
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *stmt) override {
-      return Action::SkipChildren(stmt);
+      return Action::SkipNode(stmt);
     }
 
     /// Ignore declarations.
     PreWalkAction walkToDeclPre(Decl *decl) override {
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
 
     NullablePtr<Pattern>
@@ -9152,7 +9209,7 @@ static llvm::Optional<SequenceIterationInfo> applySolutionToForEachStmt(
                   C, /*tryLoc=*/call->getStartLoc(), call, call->getType());
               // Cannot stop here because we need to make sure that
               // the new expression gets injected into AST.
-              return Action::SkipChildren(tryExpr);
+              return Action::SkipNode(tryExpr);
             }
           }
 
@@ -9234,7 +9291,7 @@ static llvm::Optional<PackIterationInfo> applySolutionToForEachStmt(
 
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
       if (isa<ForEachStmt>(S)) {
-        return Action::SkipChildren(S);
+        return Action::SkipNode(S);
       }
       return Action::Continue(S);
     }
@@ -9244,10 +9301,10 @@ static llvm::Optional<PackIterationInfo> applySolutionToForEachStmt(
         decl->setOpenedElementEnvironment(Environment);
       }
       if (isa<AbstractFunctionDecl>(D)) {
-        return Action::SkipChildren();
+        return Action::SkipNode();
       }
       if (isa<NominalTypeDecl>(D)) {
-        return Action::SkipChildren();
+        return Action::SkipNode();
       }
       return Action::Continue();
     }
@@ -9780,6 +9837,21 @@ Type Solution::getType(ASTNode node) const {
 Type Solution::getType(const KeyPathExpr *KP, unsigned I) const {
   assert(hasType(KP, I) && "Expected type to have been set!");
   return keyPathComponentTypes.find(std::make_pair(KP, I))->second;
+}
+
+TypeVariableType *
+Solution::getKeyPathRootType(const KeyPathExpr *keyPath) const {
+  auto result = getKeyPathRootTypeIfAvailable(keyPath);
+  assert(result);
+  return result;
+}
+
+TypeVariableType *
+Solution::getKeyPathRootTypeIfAvailable(const KeyPathExpr *keyPath) const {
+  auto result = KeyPaths.find(keyPath);
+  if (result != KeyPaths.end())
+    return std::get<0>(result->second);
+  return nullptr;
 }
 
 Type Solution::getResolvedType(ASTNode node) const {

@@ -507,7 +507,7 @@ private:
     // tree to indicate that the subtree should be expanded lazily when it
     // needs to be traversed.
     if (buildLazyContextForDecl(D))
-      return Action::SkipChildren();
+      return Action::SkipNode();
 
     // Adds in a TRC that covers the entire declaration.
     if (auto DeclTRC = getNewContextForSignatureOfDecl(D)) {
@@ -548,6 +548,10 @@ private:
     // not eagerly expand the attached property wrappers to avoid request
     // cycles.
     if (isa<PatternBindingDecl>(D)) {
+      return true;
+    }
+
+    if (isa<ExtensionDecl>(D)) {
       return true;
     }
 
@@ -828,17 +832,17 @@ private:
 
     if (auto *IS = dyn_cast<IfStmt>(S)) {
       buildIfStmtRefinementContext(IS);
-      return Action::SkipChildren(S);
+      return Action::SkipNode(S);
     }
 
     if (auto *RS = dyn_cast<GuardStmt>(S)) {
       buildGuardStmtRefinementContext(RS);
-      return Action::SkipChildren(S);
+      return Action::SkipNode(S);
     }
 
     if (auto *WS = dyn_cast<WhileStmt>(S)) {
       buildWhileStmtRefinementContext(WS);
-      return Action::SkipChildren(S);
+      return Action::SkipNode(S);
     }
 
     return Action::Continue(S);
@@ -1505,7 +1509,7 @@ public:
     // inside the target range. Once we have found such a node, there is no
     // need to traverse any deeper.
     if (FoundTarget)
-      return Action::SkipChildren(Node);
+      return Action::SkipNode(Node);
 
     // If we haven't found our target yet and the node we are pre-visiting
     // doesn't have a valid range, we still have to traverse it because its
@@ -1519,11 +1523,11 @@ public:
     FoundTarget = SM.rangeContains(TargetRange, Range);
 
     if (FoundTarget)
-      return Action::SkipChildren(Node);
+      return Action::SkipNode(Node);
 
     // Search the subtree if the target range is inside its range.
     if (!SM.rangeContains(Range, TargetRange))
-      return Action::SkipChildren(Node);
+      return Action::SkipNode(Node);
 
     return Action::Continue(Node);
   }
@@ -1667,10 +1671,8 @@ static const Decl *ancestorMemberLevelDeclForAvailabilityFixit(const Decl *D) {
   while (D) {
     D = relatedDeclForAvailabilityFixit(D);
 
-    if (!D->isImplicit() &&
-        D->getDeclContext()->isTypeContext() &&
-        DeclAttribute::canAttributeAppearOnDecl(DeclAttrKind::DAK_Available,
-                                                D)) {
+    if (!D->isImplicit() && D->getDeclContext()->isTypeContext() &&
+        DeclAttribute::canAttributeAppearOnDecl(DeclAttrKind::Available, D)) {
       break;
     }
 
@@ -1685,8 +1687,7 @@ static const Decl *ancestorMemberLevelDeclForAvailabilityFixit(const Decl *D) {
 /// type, an extension, or a global function) and can support an @available
 /// attribute.
 static bool isTypeLevelDeclForAvailabilityFixit(const Decl *D) {
-  if (!DeclAttribute::canAttributeAppearOnDecl(DeclAttrKind::DAK_Available,
-                                               D)) {
+  if (!DeclAttribute::canAttributeAppearOnDecl(DeclAttrKind::Available, D)) {
     return false;
   }
 
@@ -3191,11 +3192,6 @@ public:
 
     ExprStack.push_back(E);
 
-    auto skipChildren = [&]() {
-      ExprStack.pop_back();
-      return Action::SkipChildren(E);
-    };
-
     if (auto DR = dyn_cast<DeclRefExpr>(E)) {
       diagnoseDeclRefAvailability(DR->getDeclRef(), DR->getSourceRange(),
                                   getEnclosingApplyExpr(), llvm::None);
@@ -3203,7 +3199,7 @@ public:
     }
     if (auto MR = dyn_cast<MemberRefExpr>(E)) {
       walkMemberRef(MR);
-      return skipChildren();
+      return Action::SkipChildren(E);
     }
     if (auto OCDR = dyn_cast<OtherConstructorDeclRefExpr>(E))
       diagnoseDeclRefAvailability(OCDR->getDeclRef(),
@@ -3255,11 +3251,11 @@ public:
     }
     if (auto A = dyn_cast<AssignExpr>(E)) {
       walkAssignExpr(A);
-      return skipChildren();
+      return Action::SkipChildren(E);
     }
     if (auto IO = dyn_cast<InOutExpr>(E)) {
       walkInOutExpr(IO);
-      return skipChildren();
+      return Action::SkipChildren(E);
     }
     if (auto T = dyn_cast<TypeExpr>(E)) {
       if (!T->isImplicit()) {
@@ -3285,7 +3281,7 @@ public:
     if (AbstractClosureExpr *closure = dyn_cast<AbstractClosureExpr>(E)) {
       if (shouldWalkIntoClosure(closure)) {
         walkAbstractClosure(closure);
-        return skipChildren();
+        return Action::SkipChildren(E);
       }
     }
     
@@ -3319,7 +3315,7 @@ public:
     // since these availability for these statements is not diagnosed from
     // typeCheckStmt() as usual.
     diagnoseStmtAvailability(S, Where.getDeclContext(), /*walkRecursively=*/true);
-    return Action::SkipChildren(S);
+    return Action::SkipNode(S);
   }
 
   bool
@@ -3837,7 +3833,7 @@ public:
 
   PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
     if (!WalkRecursively && isa<BraceStmt>(S))
-      return Action::SkipChildren(S);
+      return Action::SkipNode(S);
 
     return Action::Continue(S);
   }
@@ -3845,13 +3841,13 @@ public:
   PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
     if (WalkRecursively)
       diagnoseExprAvailability(E, DC);
-    return Action::SkipChildren(E);
+    return Action::SkipNode(E);
   }
 
   PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
     auto where = ExportContext::forFunctionBody(DC, T->getStartLoc());
     diagnoseTypeReprAvailability(T, where);
-    return Action::SkipChildren();
+    return Action::SkipNode();
   }
 
   PreWalkResult<Pattern *> walkToPatternPre(Pattern *P) override {
@@ -3940,11 +3936,11 @@ public:
     if (auto *identBase = dyn_cast<IdentTypeRepr>(baseComp)) {
       if (checkIdentTypeRepr(identBase)) {
         foundAnyIssues = true;
-        return Action::SkipChildren();
+        return Action::SkipNode();
       }
     } else if (diagnoseTypeReprAvailability(baseComp, where, flags)) {
       foundAnyIssues = true;
-      return Action::SkipChildren();
+      return Action::SkipNode();
     }
 
     if (auto *memberTR = dyn_cast<MemberTypeRepr>(T)) {
@@ -3961,7 +3957,7 @@ public:
 
     // We've already visited all the children above, so we don't
     // need to recurse.
-    return Action::SkipChildren();
+    return Action::SkipNode();
   }
 };
 

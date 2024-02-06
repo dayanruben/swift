@@ -510,14 +510,14 @@ BodyInitKindRequest::evaluate(Evaluator &evaluator,
 
     PreWalkAction walkToDeclPre(class Decl *D) override {
       // Don't walk into further nominal decls.
-      return Action::SkipChildrenIf(isa<NominalTypeDecl>(D));
+      return Action::SkipNodeIf(isa<NominalTypeDecl>(D));
     }
     
     PreWalkResult<Expr *> walkToExprPre(Expr *E) override {
       // Don't walk into closures.
       if (isa<ClosureExpr>(E))
-        return Action::SkipChildren(E);
-      
+        return Action::SkipNode(E);
+
       // Look for calls of a constructor on self or super.
       auto apply = dyn_cast<ApplyExpr>(E);
       if (!apply)
@@ -954,10 +954,6 @@ InvertibleAnnotationRequest::evaluate(Evaluator &evaluator,
   if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics))
     return InverseMarking::forInverse(Kind::None);
 
-  // FIXME: just never allow lexical-lifetimes to be disabled?
-  if (!ctx.supportsMoveOnlyTypes())
-    decl->diagnose(diag::moveOnly_requires_lexical_lifetimes);
-
   /// The invertible protocol being targeted by this annotation request.
 
   std::function<bool(Type)> isTarget = [&](Type t) -> bool {
@@ -1164,7 +1160,7 @@ IsStaticRequest::evaluate(Evaluator &evaluator, FuncDecl *decl) const {
 bool
 IsDynamicRequest::evaluate(Evaluator &evaluator, ValueDecl *decl) const {
   // If we can't infer dynamic here, don't.
-  if (!DeclAttribute::canAttributeAppearOnDecl(DAK_Dynamic, decl))
+  if (!DeclAttribute::canAttributeAppearOnDecl(DeclAttrKind::Dynamic, decl))
     return false;
 
   // Add dynamic if -enable-implicit-dynamic was requested.

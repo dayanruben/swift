@@ -1903,24 +1903,37 @@ populateLookupTableEntryFromMacroExpansions(ASTContext &ctx,
     // Collect all macro introduced names, along with its corresponding macro
     // reference. We need the macro reference to prevent adding auxiliary decls
     // that weren't introduced by the macro.
-    MacroIntroducedNameTracker nameTracker;
-    if (auto *med = dyn_cast<MacroExpansionDecl>(member)) {
-      forEachPotentialResolvedMacro(
-          dc->getModuleScopeContext(), med->getMacroName(),
-          MacroRole::Declaration, nameTracker);
-    } else if (auto *vd = dyn_cast<ValueDecl>(member)) {
-      nameTracker.attachedTo = dyn_cast<ValueDecl>(member);
-      forEachPotentialAttachedMacro(member, MacroRole::Peer, nameTracker);
-    }
 
-    // Expand macros on this member.
-    if (nameTracker.shouldExpandForName(name)) {
-      member->visitAuxiliaryDecls([&](Decl *decl) {
-        auto *sf = module->getSourceFileContainingLocation(decl->getLoc());
-        // Bail out if the auxiliary decl was not produced by a macro.
-        if (!sf || sf->Kind != SourceFileKind::MacroExpansion) return;
-        table.addMember(decl);
-      });
+    std::deque<Decl *> mightIntroduceNames;
+    mightIntroduceNames.push_back(member);
+
+    while (!mightIntroduceNames.empty()) {
+      auto *member = mightIntroduceNames.front();
+
+      MacroIntroducedNameTracker nameTracker;
+      if (auto *med = dyn_cast<MacroExpansionDecl>(member)) {
+        forEachPotentialResolvedMacro(
+            dc->getModuleScopeContext(), med->getMacroName(),
+            MacroRole::Declaration, nameTracker);
+      } else if (auto *vd = dyn_cast<ValueDecl>(member)) {
+        nameTracker.attachedTo = dyn_cast<ValueDecl>(member);
+        forEachPotentialAttachedMacro(member, MacroRole::Peer, nameTracker);
+      }
+
+      // Expand macros on this member.
+      if (nameTracker.shouldExpandForName(name)) {
+        member->visitAuxiliaryDecls([&](Decl *decl) {
+          auto *sf = module->getSourceFileContainingLocation(decl->getLoc());
+          // Bail out if the auxiliary decl was not produced by a macro.
+          if (!sf || sf->Kind != SourceFileKind::MacroExpansion)
+            return;
+
+          mightIntroduceNames.push_back(decl);
+          table.addMember(decl);
+        });
+      }
+
+      mightIntroduceNames.pop_front();
     }
   }
 }
@@ -3364,27 +3377,27 @@ CollectedOpaqueReprs swift::collectOpaqueTypeReprs(TypeRepr *r, ASTContext &ctx,
 
       // Don't allow variadic opaque parameter or return types.
       if (isa<PackExpansionTypeRepr>(repr) || isa<VarargTypeRepr>(repr))
-        return Action::SkipChildren();
+        return Action::SkipNode();
 
       if (auto opaqueRepr = dyn_cast<OpaqueReturnTypeRepr>(repr)) {
         Reprs.push_back(opaqueRepr);
         if (Ctx.LangOpts.hasFeature(Feature::ImplicitSome))
-          return Action::SkipChildren();
+          return Action::SkipNode();
       }
 
       if (!Ctx.LangOpts.hasFeature(Feature::ImplicitSome))
         return Action::Continue();
       
       if (auto existential = dyn_cast<ExistentialTypeRepr>(repr)) {
-        return Action::SkipChildren();
+        return Action::SkipNode();
       } else if (auto composition = dyn_cast<CompositionTypeRepr>(repr)) {
         if (!composition->isTypeReprAny())
           Reprs.push_back(composition);
-        return Action::SkipChildren();
+        return Action::SkipNode();
       } else if (auto generic = dyn_cast<GenericIdentTypeRepr>(repr)) {
         if (generic->isProtocolOrProtocolComposition(dc)){
           Reprs.push_back(generic);
-          return Action::SkipChildren();
+          return Action::SkipNode();
         }
         return Action::Continue();
       } else if (auto declRef = dyn_cast<DeclRefTypeRepr>(repr)) {
@@ -3692,8 +3705,8 @@ void swift::getDirectlyInheritedNominalTypeDecls(
   auto inheritedTypes = InheritedTypes(decl);
   if (TypeRepr *typeRepr = inheritedTypes.getTypeRepr(i)) {
     loc = typeRepr->getLoc();
-    uncheckedLoc = typeRepr->findAttrLoc(TAK_unchecked);
-    preconcurrencyLoc = typeRepr->findAttrLoc(TAK_preconcurrency);
+    uncheckedLoc = typeRepr->findAttrLoc(TypeAttrKind::Unchecked);
+    preconcurrencyLoc = typeRepr->findAttrLoc(TypeAttrKind::Preconcurrency);
   }
 
   // Form the result.

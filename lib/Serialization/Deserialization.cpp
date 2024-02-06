@@ -3540,7 +3540,8 @@ public:
                                                /*ThrowsLoc=*/SourceLoc(),
                                                TypeLoc::withoutLoc(thrownType),
                                                /*BodyParams=*/nullptr,
-                                               genericParams, parent);
+                                               genericParams, parent,
+                                               nullptr);
     declOrOffset = ctor;
 
     ctor->setGenericSignature(MF.getGenericSignature(genericSigID));
@@ -3553,6 +3554,15 @@ public:
     auto *bodyParams = MF.readParameterList();
     assert(bodyParams && "missing parameters for constructor");
     ctor->setParameters(bodyParams);
+
+    SmallVector<LifetimeDependenceSpecifier> specifierList;
+    if (MF.maybeReadLifetimeDependence(specifierList, bodyParams->size())) {
+      auto SelfType = ctor->getDeclaredInterfaceType();
+      auto typeRepr = new (ctx) FixedTypeRepr(SelfType, SourceLoc());
+      auto lifetimeTypeRepr =
+          LifetimeDependentReturnTypeRepr::create(ctx, typeRepr, specifierList);
+      ctor->setDeserializedResultTypeLoc(TypeLoc(lifetimeTypeRepr, SelfType));
+    }
 
     if (auto errorConvention = MF.maybeReadForeignErrorConvention())
       ctor->setForeignErrorConvention(*errorConvention);
@@ -5219,6 +5229,7 @@ public:
 
       // Macro replacements block.
       SmallVector<ExpandedMacroReplacement, 2> replacements;
+      SmallVector<ExpandedMacroReplacement, 2> genericReplacements;
       if (hasReplacements) {
         llvm::BitstreamEntry entry =
             MF.fatalIfUnexpected(
@@ -5243,12 +5254,26 @@ public:
               replacements.push_back(replacement);
             }
           }
+
+          ArrayRef<uint64_t> serializedGenericReplacements;
+          decls_block::ExpandedMacroReplacementsLayout::readRecord(
+              scratch, serializedGenericReplacements);
+          if (serializedGenericReplacements.size() % 3 == 0) {
+            for (unsigned i : range(0, serializedGenericReplacements.size() / 3)) {
+              ExpandedMacroReplacement genericReplacement{
+                static_cast<unsigned>(serializedGenericReplacements[3*i]),
+                static_cast<unsigned>(serializedGenericReplacements[3*i + 1]),
+                static_cast<unsigned>(serializedGenericReplacements[3*i + 2])
+              };
+              genericReplacements.push_back(genericReplacement);
+            }
+          }
         }
       }
 
       ctx.evaluator.cacheOutput(
           MacroDefinitionRequest{macro},
-          MacroDefinition::forExpanded(ctx, expansionText, replacements)
+          MacroDefinition::forExpanded(ctx, expansionText, replacements, genericReplacements)
       );
     }
 
@@ -6109,7 +6134,7 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
         Attr = new (ctx) CLASS##Attr(isImplicit); \
         break; \
       }
-#include "swift/AST/Attr.def"
+#include "swift/AST/DeclAttr.def"
 
       default:
         // We don't know how to deserialize this kind of attribute.
