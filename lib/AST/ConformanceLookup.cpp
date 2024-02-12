@@ -47,14 +47,20 @@ using namespace swift;
 ArrayRef<ProtocolConformanceRef>
 ModuleDecl::collectExistentialConformances(CanType fromType,
                                            CanType existential,
-                                           bool skipConditionalRequirements,
                                            bool allowMissing) {
-  CollectExistentialConformancesRequest request{this,
-                                                fromType,
-                                                existential,
-                                                skipConditionalRequirements,
-                                                allowMissing};
-  return evaluateOrDefault(getASTContext().evaluator, request, /*default=*/{});
+  assert(existential.isAnyExistentialType());
+
+  auto layout = existential.getExistentialLayout();
+  auto protocols = layout.getProtocols();
+
+  SmallVector<ProtocolConformanceRef, 4> conformances;
+  for (auto *proto : protocols) {
+    auto conformance = lookupConformance(fromType, proto, allowMissing);
+    assert(conformance);
+    conformances.push_back(conformance);
+  }
+
+  return getASTContext().AllocateCopy(conformances);
 }
 
 ProtocolConformanceRef
@@ -172,7 +178,6 @@ ProtocolConformanceRef ModuleDecl::lookupConformance(Type type,
       ImplicitKnownProtocolConformanceRequest icvRequest{nominal, *kp};
       if (getASTContext().evaluator.hasActiveRequest(icvRequest) ||
           getASTContext().evaluator.hasActiveRequest(request)) {
-        assert(!getInvertibleProtocolKind(*kp));
         return ProtocolConformanceRef::forInvalid();
       }
     }
@@ -199,6 +204,9 @@ static ProtocolConformanceRef getBuiltinTupleTypeConformance(
   ASTContext &ctx = protocol->getASTContext();
 
   auto *tupleDecl = ctx.getBuiltinTupleDecl();
+
+  // Ignore @lvalue's within the tuple.
+  type = type->getRValueType();
 
   // Find the (unspecialized) conformance.
   SmallVector<ProtocolConformance *, 2> conformances;
@@ -274,14 +282,21 @@ static bool isSendableFunctionType(EitherFunctionType eitherFnTy) {
 
 /// Whether the given function type conforms to Escapable.
 static bool isEscapableFunctionType(EitherFunctionType eitherFnTy) {
-  if (auto silFnTy = eitherFnTy.dyn_cast<const SILFunctionType *>()) {
-    return !silFnTy->isNoEscape();
-  }
+//  if (auto silFnTy = eitherFnTy.dyn_cast<const SILFunctionType *>()) {
+//    return !silFnTy->isNoEscape();
+//  }
+//
+//  auto functionType = eitherFnTy.get<const FunctionType *>();
+//
+//  // TODO: what about autoclosures?
+//  return !functionType->isNoEscape();
 
-  auto functionType = eitherFnTy.get<const FunctionType *>();
-
-  // TODO: what about autoclosures?
-  return !functionType->isNoEscape();
+  // FIXME: unify TypeBase::isNoEscape with TypeBase::isEscapable
+  // LazyConformanceEmitter::visitDestroyValueInst chokes on these instructions
+  // destroy_value %2 : $@convention(block) @noescape () -> ()
+  //
+  // Wrongly claim that all functions today conform to Escapable for now:
+  return true;
 }
 
 static bool isBitwiseCopyableFunctionType(EitherFunctionType eitherFnTy) {
@@ -550,13 +565,16 @@ LookupConformanceInModuleRequest::evaluate(
 #ifndef NDEBUG
   // Ensure we haven't missed queries for the specialty SIL types
   // in the AST in conformance to one of the invertible protocols.
-  if (auto kp = protocol->getKnownProtocolKind())
-    if (getInvertibleProtocolKind(*kp))
+  if (auto kp = protocol->getKnownProtocolKind()) {
+    if (getInvertibleProtocolKind(*kp)) {
       assert(!(type->is<SILFunctionType,
                         SILBoxType,
                         SILMoveOnlyWrappedType,
                         SILPackType,
                         SILTokenType>()));
+      assert(!type->is<ReferenceStorageType>());
+    }
+  }
 #endif
 
   auto nominal = type->getAnyNominal();
@@ -830,6 +848,8 @@ static bool conformsToInvertible(CanType type, InvertibleProtocolKind ip) {
 
   // Must not have a type parameter!
   assert(!type->hasTypeParameter() && "caller forgot to mapTypeIntoContext!");
+
+  assert(!type->hasUnboundGenericType() && "a UGT has no conformances!");
 
   assert(!type->is<PackExpansionType>());
 

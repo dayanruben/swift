@@ -4010,8 +4010,21 @@ SILGenModule::emitKeyPathComponentForDecl(SILLocation loc,
           getRepresentativeAccessorForKeyPath(baseDecl), expansion);
       if (representative.isForeign)
         return false;
-      if (representative.getLinkage(ForDefinition) > SILLinkage::PublicNonABI)
+
+      switch (representative.getLinkage(ForDefinition)) {
+      case SILLinkage::Public:
+      case SILLinkage::PublicNonABI:
+      case SILLinkage::Package:
+      case SILLinkage::PackageNonABI:
+        break;
+      case SILLinkage::Hidden:
+      case SILLinkage::Shared:
+      case SILLinkage::Private:
+      case SILLinkage::PublicExternal:
+      case SILLinkage::PackageExternal:
+      case SILLinkage::HiddenExternal:
         return false;
+      }
     }
     
     return true;
@@ -5890,7 +5903,7 @@ public:
     // above the retain. We are doing unmanaged things here so we need to be
     // extra careful.
     ownedMV = SGF.B.createMarkDependence(loc, ownedMV, base,
-                                         /*isNonEscaping*/false);
+                                         MarkDependenceKind::Escaping);
 
     // Then reassign the mark dependence into the +1 storage.
     ownedMV.assignInto(SGF, loc, base.getUnmanagedValue());
@@ -6206,7 +6219,7 @@ SILGenFunction::emitArrayToPointer(SILLocation loc, ManagedValue array,
   auto owner = resultScalars[0];
   auto pointer = resultScalars[1].forward(*this);
   pointer = B.createMarkDependence(loc, pointer, owner.getValue(),
-                                   /*isNonEscaping*/false);
+                                   MarkDependenceKind::Escaping);
 
   // The owner's already in its own cleanup.  Return the pointer.
   return {ManagedValue::forObjectRValueWithoutOwnership(pointer), owner};
@@ -6242,7 +6255,7 @@ SILGenFunction::emitStringToPointer(SILLocation loc, ManagedValue stringValue,
   auto owner = results[0];
   auto pointer = results[1].forward(*this);
   pointer = B.createMarkDependence(loc, pointer, owner.getValue(),
-                                   /*isNonEscaping*/false);
+                                   MarkDependenceKind::Escaping);
 
   return {ManagedValue::forObjectRValueWithoutOwnership(pointer), owner};
 }

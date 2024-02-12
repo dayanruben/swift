@@ -2955,7 +2955,7 @@ void SILCloner<ImplClass>::visitMarkDependenceInst(MarkDependenceInst *Inst) {
                 getBuilder().hasOwnership()
                 ? Inst->getForwardingOwnershipKind()
                 : ValueOwnershipKind(OwnershipKind::None),
-                /*isNonEscaping*/false));
+                Inst->dependenceKind()));
 }
 
 template<typename ImplClass>
@@ -3124,10 +3124,9 @@ void SILCloner<ImplClass>::visitIncrementProfilerCounterInst(
 }
 
 template <typename ImplClass>
-void SILCloner<ImplClass>::visitTestSpecificationInst(
-    TestSpecificationInst *Inst) {
+void SILCloner<ImplClass>::visitSpecifyTestInst(SpecifyTestInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
-  recordClonedInstruction(Inst, getBuilder().createTestSpecificationInst(
+  recordClonedInstruction(Inst, getBuilder().createSpecifyTestInst(
                                     getOpLocation(Inst->getLoc()),
                                     Inst->getArgumentsSpecification()));
 }

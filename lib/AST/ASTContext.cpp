@@ -2902,13 +2902,18 @@ static void maybeEmitFallbackConformanceDiagnostic(
   if (diagnostics.HadError)
     return;
 
-  diagnostics.HadError = true;
-
   auto *proto = conformance->getProtocol();
   auto *dc = conformance->getDeclContext();
   auto *sf = dc->getParentSourceFile();
+
+  // FIXME: There should probably still be a diagnostic even without a file.
+  if (!sf)
+    return;
+
   auto *mod = sf->getParentModule();
   assert(mod->isMainModule());
+
+  diagnostics.HadError = true;
 
   // If we have at least one primary file and the conformance is declared in a
   // non-primary file, emit a fallback diagnostic.
@@ -4490,9 +4495,13 @@ GenericFunctionType *GenericFunctionType::get(GenericSignature sig,
   if (globalActor && !sig->isReducedType(globalActor))
     isCanonical = false;
 
+  bool hasLifetimeDependenceInfo =
+      info.has_value() && !info.value().getLifetimeDependenceInfo().empty();
+
   unsigned numTypes = (globalActor ? 1 : 0) + (thrownError ? 1 : 0);
-  size_t allocSize = totalSizeToAlloc<AnyFunctionType::Param, Type>(
-      params.size(), numTypes);
+  size_t allocSize =
+      totalSizeToAlloc<AnyFunctionType::Param, Type, LifetimeDependenceInfo>(
+          params.size(), numTypes, hasLifetimeDependenceInfo ? 1 : 0);
   void *mem = ctx.Allocate(allocSize, alignof(GenericFunctionType));
 
   auto properties = getGenericFunctionRecursiveProperties(params, result);
@@ -4522,6 +4531,11 @@ GenericFunctionType::GenericFunctionType(
     }
     if (Type thrownError = info->getThrownError())
       getTrailingObjects<Type>()[thrownErrorIndex] = thrownError;
+
+    auto lifetimeDependenceInfo = info->getLifetimeDependenceInfo();
+    if (!lifetimeDependenceInfo.empty()) {
+      *getTrailingObjects<LifetimeDependenceInfo>() = lifetimeDependenceInfo;
+    }
   }
 }
 
@@ -6592,9 +6606,4 @@ Type ASTContext::getNamedSwiftType(ModuleDecl *module, StringRef name) {
   if (auto *nominalDecl = dyn_cast<NominalTypeDecl>(decl))
     return nominalDecl->getDeclaredType();
   return decl->getDeclaredInterfaceType();
-}
-
-bool ASTContext::supportsMoveOnlyTypes() const {
-  // currently the only thing holding back whether the types can appear is this.
-  return SILOpts.LexicalLifetimes != LexicalLifetimesOption::Off;
 }

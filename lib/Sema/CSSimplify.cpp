@@ -3040,6 +3040,132 @@ matchFunctionThrowing(ConstraintSystem &cs,
   }
 }
 
+bool
+ConstraintSystem::matchFunctionIsolations(FunctionType *func1,
+                                          FunctionType *func2,
+                                          ConstraintKind kind,
+                                          TypeMatchOptions flags,
+                                          ConstraintLocatorBuilder locator) {
+  auto isolation1 = func1->getIsolation(), isolation2 = func2->getIsolation();
+
+  // If we have a difference in isolation kind, we need a conversion.
+  // Make sure that we're looking for a conversion, and increase the
+  // function-conversion score to make sure this solution is worse than
+  // an exact match.
+  // FIXME: there may be a better way. see https://github.com/apple/swift/pull/62514
+  auto matchIfConversion = [&]() -> bool {
+    if (kind < ConstraintKind::Subtype)
+      return false;
+    increaseScore(SK_FunctionConversion, locator);
+    return true;
+  };
+
+  switch (isolation2.getKind()) {
+
+  // Converting to a non-isolated type.
+  case FunctionTypeIsolation::Kind::NonIsolated:
+    switch (isolation1.getKind()) {
+    // Exact match.
+    case FunctionTypeIsolation::Kind::NonIsolated:
+      return true;
+
+    // Erasing global-actor isolation to non-isolation can admit data
+    // races; such violations are diagnosed by the actor isolation checker.
+    // We deliberately do not allow actor isolation violations to influence
+    // overload resolution to preserve the property that an expression can
+    // be re-checked against a different isolation context for isolation
+    // violations.
+    //
+    // This also applies to @isolated(any) because we want to be able to
+    // decide that we contextually isolated to the function's dynamic
+    // isolation.
+    case FunctionTypeIsolation::Kind::GlobalActor:
+    case FunctionTypeIsolation::Kind::Erased:
+      return matchIfConversion();
+
+    // Parameter isolation is value-dependent and cannot be erased.
+    case FunctionTypeIsolation::Kind::Parameter:
+      return false;
+    }
+    llvm_unreachable("bad kind");
+
+  // Converting to a global-actor-isolated type.
+  case FunctionTypeIsolation::Kind::GlobalActor:
+    switch (isolation1.getKind()) {
+    // Both types are global-actor-isolated.  We *could* allow this as a
+    // conversion even for different global actors if the destination type
+    // is async, but we've decided we don't want to as a policy.
+    case FunctionTypeIsolation::Kind::GlobalActor: {
+      const auto subflags = getDefaultDecompositionOptions(flags);
+      auto result = matchTypes(
+          isolation1.getGlobalActorType(), isolation2.getGlobalActorType(),
+          ConstraintKind::Equal, subflags,
+          locator.withPathElement(LocatorPathElt::GlobalActorType()));
+      return result != SolutionKind::Error;
+    }
+
+    // Adding global actor isolation to a non-isolated function is fine,
+    // whether synchronous or asynchronous.
+    case FunctionTypeIsolation::Kind::NonIsolated:
+      return matchIfConversion();
+
+    // Parameter isolation cannot be altered in the same way.
+    case FunctionTypeIsolation::Kind::Parameter:
+      return false;
+
+    // Don't allow dynamically-isolated function types to convert to
+    // any specific isolation for the same policy reasons that we don't
+    // want to allow global-actors to change.
+    case FunctionTypeIsolation::Kind::Erased:
+      return false;
+    }
+    llvm_unreachable("bad kind");
+
+  // Converting to a parameter-isolated type.
+  case FunctionTypeIsolation::Kind::Parameter:
+    switch (isolation1.getKind()) {
+    // Exact match.  We'll check that the isolated parameters match up later,
+    // when we're looking at the parameters.
+    case FunctionTypeIsolation::Kind::Parameter:
+      return true;
+
+    // Adding global actor isolation to a non-isolated function is fine,
+    // whether synchronous or asynchronous.
+    case FunctionTypeIsolation::Kind::NonIsolated:
+    case FunctionTypeIsolation::Kind::GlobalActor:
+      return matchIfConversion();
+
+    // Don't allow dynamically-isolated function types to convert to
+    // any specific isolation for the same policy reasons that we don't
+    // want to allow global-actors to change.
+    case FunctionTypeIsolation::Kind::Erased:
+      return false;
+    }
+    llvm_unreachable("bad kind");
+
+  case FunctionTypeIsolation::Kind::Erased:
+    switch (isolation1.getKind()) {
+    // Exact match.
+    case FunctionTypeIsolation::Kind::Erased:
+      return true;
+
+    // We can statically erase any kind of static isolation to dynamic
+    // isolation as a conversion.
+    case FunctionTypeIsolation::Kind::NonIsolated:
+    case FunctionTypeIsolation::Kind::GlobalActor:
+      return matchIfConversion();
+
+    // Parameter isolation is value-dependent and can't be erased in the
+    // abstract, though.  We need to be able to recover the isolation from
+    // a value.
+    case FunctionTypeIsolation::Kind::Parameter:
+      return false;
+    }
+    llvm_unreachable("bad kind");
+  }
+  llvm_unreachable("bad kind");
+}
+
 ConstraintSystem::TypeMatchResult
 ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
                                      ConstraintKind kind, TypeMatchOptions flags,
@@ -3099,38 +3225,8 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
       return getTypeMatchFailure(locator);
   }
 
-  // Check the global-actor isolation on each of the function types. Two
-  // different global-actor attributes never match, but function conversions
-  // that add or remove global-actor attributes are okay.
-  //
-  // Some function conversions that erase global-actor isolation can admit
-  // data races; such violations are diagnosed by the actor isolation checker.
-  // We deliberately do not allow actor isolation violations to influence
-  // overload resolution to preserve the property that an expression can be
-  // re-checked against a different isolation context for isolation violations.
-  if (func1->getGlobalActor() || func2->getGlobalActor()) {
-    if (func1->getGlobalActor() && func2->getGlobalActor()) {
-      // If both have a global actor, match them.
-      const auto subflags = getDefaultDecompositionOptions(flags);
-      auto result = matchTypes(
-          func1->getGlobalActor(), func2->getGlobalActor(),
-          ConstraintKind::Equal, subflags,
-          locator.withPathElement(LocatorPathElt::GlobalActorType()));
-      if (result == SolutionKind::Error)
-        return getTypeMatchFailure(locator);
-
-    } else if (kind < ConstraintKind::Subtype) {
-      return getTypeMatchFailure(locator);
-    } else {
-      // It is possible to convert from a function without a global actor to a
-      // similar function type that does have a global actor. But, since there
-      // is a function conversion going on here, let's increase the score to
-      // avoid ambiguity when solver can also match a global actor matching
-      // function type.
-      // FIXME: there may be a better way. see https://github.com/apple/swift/pull/62514
-      increaseScore(SK_FunctionConversion, locator);
-    }
-  }
+  if (!matchFunctionIsolations(func1, func2, kind, flags, locator))
+    return getTypeMatchFailure(locator);
 
   // To contextual type increase the score to avoid ambiguity when solver can
   // find more than one viable binding different only in representation e.g.
@@ -3914,11 +4010,9 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
   // we need to disallow conversions from types containing @noescape
   // functions to Any.
 
-  // Conformance to 'Any' always holds.
-  if (type2->isAny()) {
-    if (!type1->isNoEscape())
-      return getTypeMatchSuccess();
-
+  // FIXME: special case for nonescaping functions and tuples containing them
+  // shouldn't be needed, as functions have conformances to Escapable/Copyable.
+  if (type2->isAny() && type1->isNoEscape()) {
     if (shouldAttemptFixes()) {
       auto *fix = MarkExplicitlyEscaping::create(*this, type1, type2,
                                                  getConstraintLocator(locator));
@@ -6077,8 +6171,7 @@ bool ConstraintSystem::repairFailures(
       return true;
 
     auto purpose = getContextualTypePurpose(anchor);
-    if (rhs->isVoid() &&
-        (purpose == CTP_ReturnStmt || purpose == CTP_ImpliedReturnStmt)) {
+    if (rhs->isVoid() && purpose == CTP_ReturnStmt) {
       conversionsOrFixes.push_back(
           RemoveReturn::create(*this, lhs, getConstraintLocator(locator)));
       return true;
@@ -7854,50 +7947,40 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
   }
 
   // Allow '() -> T' to '() -> ()' and '() -> Never' to '() -> T' for closure
-  // literals and expressions representing an implicit return type of the single
-  // expression functions.
+  // literals and expressions representing an implied result of closures and
+  // if/switch expressions.
   if (auto elt = locator.last()) {
     if (kind >= ConstraintKind::Subtype &&
         (type1->isUninhabited() || type2->isVoid())) {
-      // A conversion from closure body type to its signature result type.
-      if (auto resultElt = elt->getAs<LocatorPathElt::ClosureBody>()) {
-        // If a single statement closure has explicit `return` let's
-        // forbid conversion to `Void` and report an error instead to
-        // honor user's intent.
-        if (type1->isUninhabited() || resultElt->hasImpliedReturn()) {
-          increaseScore(SK_FunctionConversion, locator);
-          return getTypeMatchSuccess();
-        }
-      }
-
-      // Function with an implied `return`, e.g a single expression body.
-      if (auto contextualType = elt->getAs<LocatorPathElt::ContextualType>()) {
-        if (contextualType->isFor(CTP_ImpliedReturnStmt)) {
-          increaseScore(SK_FunctionConversion, locator);
-          return getTypeMatchSuccess();
-        }
-      }
-
-      // We also need to propagate this conversion into the branches for single
-      // value statements.
+      // Implied results can occur for closure bodies, returns, and if/switch
+      // expression branches.
       //
-      // As with the previous checks, we only allow the Void conversion in
-      // an implicit single-expression closure. In the more general case for
-      // implicit branches, we only allow the Never conversion. For explicit
-      // branches, no conversions are allowed.
+      // We only allow the Void conversion for implied results in a closure
+      // context. In the more general case, we only allow the Never conversion.
+      // For explicit branches, no conversions are allowed, unless this is for
+      // a single expression body closure, in which case we still allow the
+      // Never conversion.
       auto *loc = getConstraintLocator(locator);
-      if (auto branchKind = loc->isForSingleValueStmtBranch()) {
+      if (elt->is<LocatorPathElt::ClosureBody>() || 
+          loc->isForContextualType(CTP_ReturnStmt) ||
+          loc->isForContextualType(CTP_ClosureResult) ||
+          loc->isForSingleValueStmtBranch()) {
         bool allowConversion = false;
-        switch (*branchKind) {
-        case SingleValueStmtBranchKind::Explicit:
-          allowConversion = false;
-          break;
-        case SingleValueStmtBranchKind::Implicit:
-          allowConversion = type1->isUninhabited();
-          break;
-        case SingleValueStmtBranchKind::ImplicitInSingleExprClosure:
-          allowConversion = true;
-          break;
+        if (auto *E = getAsExpr(simplifyLocatorToAnchor(loc))) {
+          if (auto kind = isImpliedResult(E)) {
+            switch (*kind) {
+            case ImpliedResultKind::Regular:
+              allowConversion = type1->isUninhabited();
+              break;
+            case ImpliedResultKind::ForClosure:
+              allowConversion = true;
+              break;
+            }
+          } else if (elt->is<LocatorPathElt::ClosureBody>()) {
+            // Even if explicit, we always allow uninhabited types in single
+            // expression closures.
+            allowConversion = type1->isUninhabited();
+          }
         }
         if (allowConversion) {
           increaseScore(SK_FunctionConversion, locator);
@@ -8467,7 +8550,6 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
   case ConstraintKind::SelfObjectOfProtocol: {
     auto conformance = TypeChecker::containsProtocol(
         type, protocol, DC->getParentModule(),
-        /*skipConditionalRequirements=*/true,
         /*allowMissing=*/true);
     if (conformance) {
       return recordConformance(conformance);
@@ -8705,7 +8787,8 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
     }
 
     // If this is a failure to conform to Copyable, tailor the error message.
-    if (protocol->isSpecificProtocol(KnownProtocolKind::Copyable)) {
+    if (kind == ConstraintKind::ConformsTo &&
+        protocol->isSpecificProtocol(KnownProtocolKind::Copyable)) {
       auto *fix =
           MustBeCopyable::create(*this,
                                  type,
@@ -10536,8 +10619,8 @@ static bool inferEnumMemberThroughTildeEqualsOperator(
   auto &ctx = cs.getASTContext();
 
   // Retrieve a corresponding ExprPattern which we can solve with ~=.
-  auto *EP =
-      llvm::cantFail(ctx.evaluator(EnumElementExprPatternRequest{pattern}));
+  auto *EP = evaluateOrFatal(ctx.evaluator,
+                             EnumElementExprPatternRequest{pattern});
 
   auto target = SyntacticElementTarget::forExprPattern(EP);
 
@@ -10719,7 +10802,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
       // Handle `next` reference.
       if (getContextualTypePurpose(baseExpr) == CTP_ForEachSequence &&
           (isRefTo(memberRef, ctx.Id_next, /*labels=*/{}) ||
-           isRefTo(memberRef, ctx.Id_next, /*labels=*/{StringRef()}))) {
+           isRefTo(memberRef, ctx.Id_next, /*labels=*/{ "isolation" }))) {
         auto *iteratorProto = cast<ProtocolDecl>(
             getContextualType(baseExpr, /*forConstraint=*/false)
                 ->getAnyNominal());
@@ -11908,9 +11991,10 @@ ConstraintSystem::simplifyBridgingConstraint(Type type1,
   if (type1->isTypeVariableOrMember() || type2->isTypeVariableOrMember())
     return formUnsolved();
 
-  // Noncopyable types can't be involved in bridging conversions since a bridged
-  // type assumes the ability to copy.
-  if (type1->isNoncopyable()) {
+  // Noncopyable & Nonescapable types can't be involved in bridging conversions
+  // since a bridged type assumes such abilities are granted.
+  if (!type1->hasTypeVariable()
+      && (type1->isNoncopyable() || !type1->isEscapable())) {
     return SolutionKind::Error;
   }
 
@@ -15602,7 +15686,6 @@ void ConstraintSystem::addContextualConversionConstraint(
   auto constraintKind = ConstraintKind::Conversion;
   switch (purpose) {
   case CTP_ReturnStmt:
-  case CTP_ImpliedReturnStmt:
   case CTP_Initialization: {
     if (conversionType->is<OpaqueTypeArchetypeType>())
       constraintKind = ConstraintKind::Equal;

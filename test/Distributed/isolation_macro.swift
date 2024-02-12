@@ -5,6 +5,7 @@
 // REQUIRES: concurrency
 // REQUIRES: asserts
 // REQUIRES: distributed
+// REQUIRES: swift_swift_parser
 
 import Distributed
 
@@ -16,7 +17,7 @@ extension DistributedActor {
     // CHECK: rewritten=current_context_isolation_expr
     // CHECK-NEXT: inject_into_optional
     // CHECK: member_ref_expr{{.*}}asLocalActor
-    // CHECK: declref_expr implicit type="Self"
+    // CHECK: declref_expr type="Self"
     _ = #isolation
   }
 }

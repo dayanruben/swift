@@ -2360,6 +2360,32 @@ public:
     Where = wasWhere.withExported(hasExportedMembers ||
                                   !ED->getInherited().empty());
     checkConstrainedExtensionRequirements(ED, hasExportedMembers);
+
+    if (!hasExportedMembers &&
+        !ED->getInherited().empty()) {
+      // If we haven't already visited the extended nominal visit it here.
+      // This logic is too wide but prevents false reports of an unused public
+      // import. We should instead check for public generic requirements
+      // similarly to ShouldPrintForModuleInterface::shouldPrint.
+      auto DC = Where.getDeclContext();
+      ImportAccessLevel import = extendedType->getImportAccessFrom(DC);
+      if (import.has_value()) {
+        auto SF = DC->getParentSourceFile();
+        if (SF)
+          SF->registerAccessLevelUsingImport(import.value(),
+                                             AccessLevel::Public);
+
+        auto &ctx = DC->getASTContext();
+        if (ctx.LangOpts.EnableModuleApiImportRemarks) {
+          ModuleDecl *importedVia = import->module.importedModule,
+                     *sourceModule = ED->getModuleContext();
+          ED->diagnose(diag::module_api_import,
+                       ED, importedVia, sourceModule,
+                       importedVia == sourceModule,
+                       /*isImplicit*/false);
+        }
+      }
+    }
   }
 
   void checkPrecedenceGroup(const PrecedenceGroupDecl *PGD,
@@ -2470,6 +2496,10 @@ void swift::diagnoseUnnecessaryPublicImports(SourceFile &SF) {
     // The top module will be reported if it's not used.
     auto importedModule = import.module.importedModule;
     if (importedModule->getTopLevelModule() != importedModule)
+      continue;
+
+    // Ignore @_exported as by themselves the import is meaningful.
+    if (import.options.contains(ImportFlags::Exported))
       continue;
 
     AccessLevel levelUsed = SF.getMaxAccessLevelUsingImport(importedModule);

@@ -2530,7 +2530,12 @@ public:
     *this << getIDAndType(CBOI->getOperand());
   }
   void visitMarkDependenceInst(MarkDependenceInst *MDI) {
-    if (MDI->isNonEscaping()) {
+    switch (MDI->dependenceKind()) {
+    case MarkDependenceKind::Unresolved:
+      *this << "[unresolved] ";
+    case MarkDependenceKind::Escaping:
+      break;
+    case MarkDependenceKind::NonEscaping:
       *this << "[nonescaping] ";
     }
     *this << getIDAndType(MDI->getValue()) << " on "
@@ -2679,7 +2684,7 @@ public:
     *this << getIDAndType(RI->getOperand());
   }
 
-  void visitTestSpecificationInst(TestSpecificationInst *TSI) {
+  void visitSpecifyTestInst(SpecifyTestInst *TSI) {
     *this << QuotedString(TSI->getArgumentsSpecification());
   }
 
@@ -3104,6 +3109,7 @@ public:
     *this << "] ";
     if (auto witnessGenSig = witness->getDerivativeGenericSignature()) {
       auto subPrinter = PrintOptions::printSIL();
+      subPrinter.PrintInverseRequirements = true;
       witnessGenSig->print(PrintState.OS, subPrinter);
       *this << " ";
     }
@@ -3220,10 +3226,13 @@ static StringRef getLinkageString(SILLinkage linkage) {
   switch (linkage) {
   case SILLinkage::Public: return "public ";
   case SILLinkage::PublicNonABI: return "non_abi ";
+  case SILLinkage::Package: return "package ";
+  case SILLinkage::PackageNonABI: return "package_non_abi ";
   case SILLinkage::Hidden: return "hidden ";
   case SILLinkage::Shared: return "shared ";
   case SILLinkage::Private: return "private ";
   case SILLinkage::PublicExternal: return "public_external ";
+  case SILLinkage::PackageExternal: return "package_external ";
   case SILLinkage::HiddenExternal: return "hidden_external ";
   }
   llvm_unreachable("bad linkage");
@@ -4178,6 +4187,7 @@ void SILDifferentiabilityWitness::print(llvm::raw_ostream &OS,
   // (<...>)?
   if (auto derivativeGenSig = getDerivativeGenericSignature()) {
     auto subPrinter = PrintOptions::printSIL();
+    subPrinter.PrintInverseRequirements = true;
     derivativeGenSig->print(OS, subPrinter);
     OS << " ";
   }

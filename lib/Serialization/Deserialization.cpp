@@ -468,6 +468,7 @@ getActualActorIsolationKind(uint8_t raw) {
   CASE(Nonisolated)
   CASE(NonisolatedUnsafe)
   CASE(GlobalActor)
+  CASE(Erased)
 #undef CASE
   case serialization::ActorIsolation::GlobalActorUnsafe:
     return swift::ActorIsolation::GlobalActor;
@@ -3879,6 +3880,10 @@ public:
         isolation = ActorIsolation::forUnspecified();
         break;
 
+      case ActorIsolation::Erased:
+        isolation = ActorIsolation::forErased();
+        break;
+
       case ActorIsolation::GlobalActor:
         // 'unsafe' or 'preconcurrency' doesn't mean anything for isolated
         // default arguments.
@@ -6741,8 +6746,8 @@ detail::function_deserializer::deserialize(ModuleFile &MF,
     // do nothing
   } else if (rawIsolation == unsigned(FunctionTypeIsolation::Parameter)) {
     isolation = swift::FunctionTypeIsolation::forParameter();
-  } else if (rawIsolation == unsigned(FunctionTypeIsolation::Dynamic)) {
-    isolation = swift::FunctionTypeIsolation::forDynamic();
+  } else if (rawIsolation == unsigned(FunctionTypeIsolation::Erased)) {
+    isolation = swift::FunctionTypeIsolation::forErased();
   } else {
     TypeID globalActorTypeID =
       rawIsolation - unsigned(FunctionTypeIsolation::GlobalActorOffset);
@@ -8605,12 +8610,11 @@ bool ModuleFile::maybeReadLifetimeDependence(
     return false;
   }
 
-  bool hasInheritLifetimeParamIndices, hasBorrowLifetimeParamIndices,
-      hasMutateLifetimeParamIndices;
+  bool hasInheritLifetimeParamIndices, hasBorrowLifetimeParamIndices;
   ArrayRef<uint64_t> lifetimeDependenceData;
-  LifetimeDependenceLayout::readRecord(
-      scratch, hasInheritLifetimeParamIndices, hasBorrowLifetimeParamIndices,
-      hasMutateLifetimeParamIndices, lifetimeDependenceData);
+  LifetimeDependenceLayout::readRecord(scratch, hasInheritLifetimeParamIndices,
+                                       hasBorrowLifetimeParamIndices,
+                                       lifetimeDependenceData);
 
   unsigned startIndex = 0;
   auto pushData = [&](LifetimeDependenceKind kind) {
@@ -8629,9 +8633,6 @@ bool ModuleFile::maybeReadLifetimeDependence(
   }
   if (hasBorrowLifetimeParamIndices) {
     pushData(LifetimeDependenceKind::Borrow);
-  }
-  if (hasMutateLifetimeParamIndices) {
-    pushData(LifetimeDependenceKind::Mutate);
   }
   return true;
 }

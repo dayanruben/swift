@@ -603,6 +603,11 @@ RequirementMatch swift::matchWitness(
       }
 
       case PolymorphicEffectKind::Always:
+        // If the witness is using typed throws in a manner that looks
+        // like rethrows, allow it.
+        if (isRethrowLikeTypedThrows(funcWitness))
+          break;
+
         return RequirementMatch(witness, MatchKind::RethrowsConflict);
       }
     }
@@ -1169,6 +1174,43 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
   // Match a type in the requirement to a type in the witness.
   auto matchTypes = [&](Type reqType,
                         Type witnessType) -> llvm::Optional<RequirementMatch> {
+    // `swift_attr` attributes in the type context were ignored before,
+    // which means that we need to maintain status quo to avoid breaking
+    // witness matching by stripping everything concurrency related from
+    // inner types.
+    auto shouldStripConcurrency = [&]() {
+      if (!req->isObjC())
+        return false;
+
+      auto &ctx = dc->getASTContext();
+      return !(ctx.isSwiftVersionAtLeast(6) ||
+               ctx.LangOpts.StrictConcurrencyLevel ==
+                   StrictConcurrency::Complete);
+    };
+
+    if (shouldStripConcurrency()) {
+      if (reqType->is<FunctionType>()) {
+        auto *fnTy = reqType->castTo<FunctionType>();
+        SmallVector<AnyFunctionType::Param, 4> params;
+        llvm::transform(fnTy->getParams(), std::back_inserter(params),
+                        [&](const AnyFunctionType::Param &param) {
+                          return param.withType(
+                              param.getPlainType()->stripConcurrency(
+                                  /*recursive=*/true,
+                                  /*dropGlobalActor=*/true));
+                        });
+
+        auto resultTy =
+            fnTy->getResult()->stripConcurrency(/*recursive=*/true,
+                                                /*dropGlobalActor=*/true);
+
+        reqType = FunctionType::get(params, resultTy, fnTy->getExtInfo());
+      } else {
+        reqType = reqType->stripConcurrency(/*recursive=*/true,
+                                            /*dropGlobalActor=*/true);
+      }
+    }
+
     cs->addConstraint(ConstraintKind::Bind, reqType, witnessType, locator);
     // FIXME: Check whether this has already failed.
     return llvm::None;
@@ -2389,29 +2431,6 @@ checkIndividualConformance(NormalProtocolConformance *conformance) {
     }
   }
 
-  // Except in specific hardcoded cases for Foundation/Swift
-  // standard library compatibility, an _ObjectiveCBridgeable
-  // conformance must appear in the same module as the definition of
-  // the conforming type.
-  //
-  // Note that we check the module name to smooth over the difference
-  // between an imported Objective-C module and its overlay.
-  if (Proto->isSpecificProtocol(KnownProtocolKind::ObjectiveCBridgeable)) {
-    auto nominal = DC->getSelfNominalTypeDecl();
-    if (!Context.isTypeBridgedInExternalModule(nominal)) {
-      auto clangLoader = Context.getClangModuleLoader();
-      if (nominal->getParentModule() != DC->getParentModule() &&
-          !(clangLoader &&
-            clangLoader->isInOverlayModuleForImportedModule(DC, nominal))) {
-        auto nominalModule = nominal->getParentModule();
-        Context.Diags.diagnose(conformance->getLoc(),
-                               diag::nonlocal_bridged_to_objc,
-                               nominal->getName(), Proto->getName(),
-                               nominalModule->getName());
-      }
-    }
-  }
-
   // Check that T conforms to all inherited protocols.
   for (auto InheritedProto : Proto->getInheritedProtocols()) {
     auto InheritedConformance =
@@ -3120,6 +3139,12 @@ ConformanceChecker::checkActorIsolation(ValueDecl *requirement,
       break;
     }
 
+    // Witnessing `async` requirement with an isolated synchronous
+    // declaration is done via async witness thunk which requires
+    // a hop to the expected concurrency domain.
+    if (isAsyncDecl(requirement) && !isAsyncDecl(witness))
+      return refResult.isolation;
+
     // Otherwise, we're done.
     return llvm::None;
 
@@ -3254,6 +3279,19 @@ ConformanceChecker::checkActorIsolation(ValueDecl *requirement,
     // an explicitly isolated witness should not suppress diagnostics.
     behavior = SendableCheckContext(
         witness->getInnermostDeclContext()).defaultDiagnosticBehavior();
+  }
+
+  // If the witness is a non-Sendable 'let', compiler versions <= 5.10
+  // didn't diagnose this code, so downgrade the error to an warning
+  // until Swift 6.
+  if (auto *var = dyn_cast<VarDecl>(witness)) {
+    ActorReferenceResult::Options options = llvm::None;
+    isLetAccessibleAnywhere(
+        witness->getDeclContext()->getParentModule(),
+        var, options);
+    if (options.contains(ActorReferenceResult::Flags::Preconcurrency)) {
+      behavior = DiagnosticBehavior::Warning;
+    }
   }
 
   // Complain that this witness cannot conform to the requirement due to
@@ -5242,7 +5280,6 @@ void swift::diagnoseConformanceFailure(Type T,
 
 ProtocolConformanceRef
 TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M,
-                              bool skipConditionalRequirements,
                               bool allowMissing) {
   // Existential types don't need to conform, i.e., they only need to
   // contain the protocol.
@@ -5267,10 +5304,8 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M,
     // would result in a missing conformance if type is `& Sendable`
     // protocol composition. It's handled for type as a whole below.
     if (auto superclass = layout.getSuperclass()) {
-      auto result =
-          (skipConditionalRequirements
-               ? M->lookupConformance(superclass, Proto, /*allowMissing=*/false)
-               : M->checkConformance(superclass, Proto, /*allowMissing=*/false));
+      auto result = M->lookupConformance(superclass, Proto,
+                                         /*allowMissing=*/false);
       if (result) {
         return result;
       }
@@ -5293,9 +5328,7 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto, ModuleDecl *M,
   }
 
   // For non-existential types, this is equivalent to checking conformance.
-  return (skipConditionalRequirements
-          ? M->lookupConformance(T, Proto, allowMissing)
-          : M->checkConformance(T, Proto, allowMissing));
+  return M->lookupConformance(T, Proto, allowMissing);
 }
 
 bool TypeChecker::conformsToKnownProtocol(

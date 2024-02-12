@@ -96,6 +96,25 @@ PolymorphicEffectRequirementsRequest::evaluate(Evaluator &evaluator,
                                           ctx.AllocateCopy(conformances));
 }
 
+/// Determine whether the given protocol inherits from either
+/// AsyncIteratorProtocol or AsyncSequence.
+static bool inheritsFromAsyncSequenceProtocol(ProtocolDecl *proto) {
+  // If it's exactly one of these, shortcut.
+  if (proto->isSpecificProtocol(KnownProtocolKind::AsyncIteratorProtocol) ||
+      proto->isSpecificProtocol(KnownProtocolKind::AsyncSequence))
+    return false;
+
+  auto &ctx = proto->getASTContext();
+  if (auto iter = ctx.getProtocol(KnownProtocolKind::AsyncIteratorProtocol))
+    if (proto->inheritsFrom(iter))
+      return true;
+  if (auto seq = ctx.getProtocol(KnownProtocolKind::AsyncSequence))
+    if (proto->inheritsFrom(seq))
+      return true;
+
+  return false;
+}
+
 PolymorphicEffectKind
 PolymorphicEffectKindRequest::evaluate(Evaluator &evaluator,
                                        EffectKind kind,
@@ -117,6 +136,13 @@ PolymorphicEffectKindRequest::evaluate(Evaluator &evaluator,
       auto proto = req.getProtocolDecl();
 
       if (proto->hasPolymorphicEffect(kind)) {
+        // @rethrows protocols that inherit from AsyncIteratorProtocol or
+        // AsyncSequence should be categorized like AsyncIteratorProtocol or
+        // AsyncSequence.
+        if (kind == EffectKind::Throws &&
+            inheritsFromAsyncSequenceProtocol(proto))
+          return PolymorphicEffectKind::AsyncSequenceRethrows;
+
         return PolymorphicEffectKind::ByConformance;
       }
 
@@ -708,14 +734,9 @@ static Expr *removeErasureToExistentialError(Expr *expr) {
 
   return expr;
 }
+}
 
-/// Determine whether the given function uses typed throws in a manner
-/// than is structurally similar to 'rethrows', e.g.,
-///
-/// \code
-/// func map<T, E>(_ body: (Element) throws(E) -> T) throws(E) -> [T]
-/// \endcode
-static bool isRethrowLikeTypedThrows(AbstractFunctionDecl *func) {
+bool swift::isRethrowLikeTypedThrows(AbstractFunctionDecl *func) {
   // This notion is only for compatibility in Swift 5 and is disabled
   // when FullTypedThrows is enabled.
   ASTContext &ctx = func->getASTContext();
@@ -761,6 +782,8 @@ static bool isRethrowLikeTypedThrows(AbstractFunctionDecl *func) {
 
   return true;
 }
+
+namespace {
 
 /// Determine whether the given rethrows context is only allowed to be
 /// rethrowing because of the historically-rethrowing behavior of

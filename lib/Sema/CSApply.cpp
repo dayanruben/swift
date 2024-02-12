@@ -78,7 +78,8 @@ static bool isOpenedAnyObject(Type type) {
     return false;
 
   return (archetype->requiresClass() &&
-          !archetype->hasRequirements());
+          archetype->getConformsTo().empty() &&
+          !archetype->getSuperclass());
 }
 
 SubstitutionMap
@@ -113,8 +114,8 @@ Solution::computeSubstitutions(GenericSignature sig,
     }
 
     // FIXME: Retrieve the conformance from the solution itself.
-    return getConstraintSystem().DC->getParentModule()->checkConformance(
-        replacement, protoType);
+    return getConstraintSystem().DC->getParentModule()->lookupConformance(
+        replacement, protoType, /*allowMissing=*/true);
   };
 
   return SubstitutionMap::get(sig,
@@ -6671,12 +6672,6 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
   /// because most protocols do not conform to themselves -- however we still
   /// allow the conversion here, except the ErasureExpr ends up with trivial
   /// conformances.
-  auto conformances =
-      dc->getParentModule()
-        ->collectExistentialConformances(fromInstanceType->getCanonicalType(),
-                                         toInstanceType->getCanonicalType(),
-                                         /*skipConditionalRequirements=*/false,
-                                         /*allowMissing=*/true);
 
   // Use the requirements of any parameterized protocols to build out fake
   // argument conversions that can be used to infer opaque types.
@@ -6738,6 +6733,16 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
     auto *archetypeVal = cs.cacheType(
         new (ctx) OpaqueValueExpr(expr->getSourceRange(), fromType));
 
+    fromInstanceType = fromType;
+    while (auto *metatypeType = fromInstanceType->getAs<MetatypeType>())
+      fromInstanceType = metatypeType->getInstanceType();
+
+    auto conformances =
+        dc->getParentModule()
+          ->collectExistentialConformances(fromInstanceType->getCanonicalType(),
+                                           toInstanceType->getCanonicalType(),
+                                           /*allowMissing=*/true);
+
     auto *result = cs.cacheType(ErasureExpr::create(ctx, archetypeVal, toType,
                                                     conformances,
                                                     argConversions));
@@ -6752,6 +6757,12 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
       expr = cs.coerceToRValue(expr);
     }
   }
+
+  auto conformances =
+      dc->getParentModule()
+        ->collectExistentialConformances(fromInstanceType->getCanonicalType(),
+                                         toInstanceType->getCanonicalType(),
+                                         /*allowMissing=*/true);
 
   return cs.cacheType(ErasureExpr::create(ctx, expr, toType,
                                           conformances, argConversions));
@@ -9430,7 +9441,6 @@ ExprWalker::rewriteTarget(SyntacticElementTarget target) {
     case CTP_ExprPattern:
     case CTP_ForEachStmt:
     case CTP_ForEachSequence:
-    case CTP_ImpliedReturnStmt:
     case CTP_YieldByValue:
     case CTP_YieldByReference:
     case CTP_ThrowStmt:
@@ -9637,7 +9647,7 @@ ExprWalker::rewriteTarget(SyntacticElementTarget target) {
 
       if (solution.simplifyType(convertType)->isVoid()) {
         auto contextPurpose = cs.getContextualTypePurpose(target.getAsExpr());
-        if (contextPurpose == CTP_ImpliedReturnStmt ||
+        if (contextPurpose == CTP_ClosureResult ||
             contextPurpose == CTP_SingleValueStmtBranch) {
           return false;
         }

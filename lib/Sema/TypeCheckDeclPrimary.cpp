@@ -1689,8 +1689,10 @@ static void diagnoseRetroactiveConformances(
               extTypeModule->isSameModuleLookingThroughOverlays(module);
           auto incorrectTypeName = typeIsSameModule ? 
               extendedNominalDecl->getName() : proto->getName();
-          diags.diagnose(loc, diag::retroactive_attr_does_not_apply, 
-              incorrectTypeName)
+          diags
+              .diagnose(loc, diag::retroactive_attr_does_not_apply,
+                        incorrectTypeName)
+              .warnUntilSwiftVersion(6)
               .fixItRemove(SourceRange(loc, loc.getAdvancedLoc(1)));
           return TypeWalker::Action::Stop;
         }
@@ -2497,8 +2499,7 @@ public:
 
     // @_staticExclusiveOnly types cannot be put into 'var's, only 'let'.
     if (auto SD = VD->getInterfaceType()->getStructOrBoundGenericStruct()) {
-      if (Ctx.LangOpts.hasFeature(Feature::StaticExclusiveOnly) &&
-          SD->getAttrs().hasAttribute<StaticExclusiveOnlyAttr>() &&
+      if (SD->getAttrs().hasAttribute<StaticExclusiveOnlyAttr>() &&
           !VD->isLet()) {
         Ctx.Diags.diagnoseWithNotes(
           VD->diagnose(diag::attr_static_exclusive_only_let_only,
@@ -3677,6 +3678,16 @@ public:
     return true;
   }
 
+  /// Compiler-known marker protocols cannot be extended with members.
+  static void diagnoseExtensionOfMarkerProtocol(ExtensionDecl *ED) {
+    auto *nominal = ED->getExtendedNominal();
+    if (auto *proto = dyn_cast_or_null<ProtocolDecl>(nominal)) {
+      if (proto->getKnownProtocolKind() && proto->isMarkerProtocol()) {
+        ED->diagnose(diag::cannot_extend_nominal, nominal);
+      }
+    }
+  }
+
   static void checkTupleExtension(ExtensionDecl *ED) {
     auto *nominal = ED->getExtendedNominal();
     if (!nominal || !isa<BuiltinTupleDecl>(nominal))
@@ -3879,6 +3890,7 @@ public:
       TypeChecker::checkDistributedActor(SF, nominal);
 
     diagnoseIncompatibleProtocolsForMoveOnlyType(ED);
+    diagnoseExtensionOfMarkerProtocol(ED);
 
     checkTupleExtension(ED);
   }
@@ -4214,8 +4226,7 @@ void TypeChecker::checkParameterList(ParameterList *params,
     // @_staticExclusiveOnly types cannot be passed as 'inout', only as either
     // a borrow or as consuming.
     if (auto SD = param->getInterfaceType()->getStructOrBoundGenericStruct()) {
-      if (SD->getASTContext().LangOpts.hasFeature(Feature::StaticExclusiveOnly) &&
-          SD->getAttrs().hasAttribute<StaticExclusiveOnlyAttr>() &&
+      if (SD->getAttrs().hasAttribute<StaticExclusiveOnlyAttr>() &&
           param->isInOut()) {
         SD->getASTContext().Diags.diagnoseWithNotes(
           param->diagnose(diag::attr_static_exclusive_only_let_only_param,

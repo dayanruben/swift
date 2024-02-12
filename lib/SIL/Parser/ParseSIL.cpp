@@ -469,9 +469,12 @@ static bool parseSILLinkage(llvm::Optional<SILLinkage> &Result, Parser &P) {
   // Then use a string switch to try and parse the identifier.
   Result = llvm::StringSwitch<llvm::Optional<SILLinkage>>(P.Tok.getText())
                .Case("non_abi", SILLinkage::PublicNonABI)
+               .Case("package_non_abi", SILLinkage::PackageNonABI)
+               .Case("package", SILLinkage::Package)
                .Case("hidden", SILLinkage::Hidden)
                .Case("shared", SILLinkage::Shared)
                .Case("public_external", SILLinkage::PublicExternal)
+               .Case("package_external", SILLinkage::PackageExternal)
                .Case("hidden_external", SILLinkage::HiddenExternal)
                .Default(llvm::None);
 
@@ -1756,6 +1759,7 @@ static bool getConformancesForSubstitution(Parser &P,
               SourceLoc loc,
               SmallVectorImpl<ProtocolConformanceRef> &conformances) {
   auto M = P.SF.getParentModule();
+  subReplacement = subReplacement->getReferenceStorageReferent();
 
   for (auto protoDecl : protocols) {
     auto conformance = M->lookupConformance(subReplacement, protoDecl);
@@ -1811,6 +1815,7 @@ SubstitutionMap getApplySubstitutionsFromParsed(
       [&](CanType dependentType, Type replacementType,
           ProtocolDecl *proto) -> ProtocolConformanceRef {
         auto M = SP.P.SF.getParentModule();
+        replacementType = replacementType->getReferenceStorageReferent();
         if (auto conformance = M->lookupConformance(replacementType, proto))
           return conformance;
 
@@ -3410,7 +3415,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     ResultVal = B.createDebugStep(InstLoc);
     break;
 
-  case SILInstructionKind::TestSpecificationInst: {
+  case SILInstructionKind::SpecifyTestInst: {
     // Parse the specification string.
     if (P.Tok.getKind() != tok::string_literal) {
       P.diagnose(P.Tok, diag::expected_sil_specify_test_body);
@@ -3421,7 +3426,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     auto ArgumentsSpecification =
       P.Tok.getText().drop_front(numQuotes).drop_back(numQuotes).trim();
     P.consumeToken(tok::string_literal);
-    auto *tsi = B.createTestSpecificationInst(InstLoc, ArgumentsSpecification);
+    auto *tsi = B.createSpecifyTestInst(InstLoc, ArgumentsSpecification);
     SmallVector<StringRef, 4> components;
     test::getTestSpecificationComponents(ArgumentsSpecification, components);
     for (auto component : components) {
@@ -3769,20 +3774,30 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
   }
 
   case SILInstructionKind::MarkDependenceInst: {
-    bool nonEscaping = false;
+    llvm::Optional<MarkDependenceKind> dependenceKind;
     SILValue Base;
-    if (parseSILOptional(nonEscaping, *this, "nonescaping")
+    auto parseDependenceKind = [](StringRef Str) {
+      return llvm::StringSwitch<llvm::Optional<MarkDependenceKind>>(Str)
+        .Case("unresolved", MarkDependenceKind::Unresolved)
+        .Case("nonescaping", MarkDependenceKind::NonEscaping)
+        .Default(llvm::None);
+    };
+    if (parseSILQualifier<MarkDependenceKind>(dependenceKind,
+                                              parseDependenceKind)
         || parseTypedValueRef(Val, B) || parseVerbatim("on")
-        || parseTypedValueRef(Base, B))
+        || parseTypedValueRef(Base, B)) { 
       return true;
-
+    }
+    if (!dependenceKind) {
+      dependenceKind = MarkDependenceKind::Escaping;
+    }
     ValueOwnershipKind forwardingOwnership = Val->getOwnershipKind();
     if (parseForwardingOwnershipKind(forwardingOwnership)
         || parseSILDebugLocation(InstLoc, B))
       return true;
 
     ResultVal = B.createMarkDependence(InstLoc, Val, Base, forwardingOwnership,
-                                       nonEscaping);
+                                       dependenceKind.value());
     break;
   }
 

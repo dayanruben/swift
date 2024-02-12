@@ -137,7 +137,16 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   P.addAddressLowering();
 
   P.addFlowIsolation();
+
+  //===---
+  // Passes that depend on region analysis information
+  //
+
   P.addTransferNonSendable();
+
+  // Now that we have completed running passes that use region analysis, clear
+  // region analysis.
+  P.addRegionAnalysisInvalidationTransform();
   // Lower tuple addr constructor. Eventually this can be merged into later
   // passes. This ensures we do not need to update later passes for something
   // that is only needed by TransferNonSendable().
@@ -174,12 +183,21 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   if (EnableDeinitDevirtualizer)
     P.addDeinitDevirtualizer();
 
+  // FIXME: rdar://122701694 (`consuming` keyword causes verification error on
+  //        invalid SIL types)
+  //
   // Lower move only wrapped trivial types.
-  P.addTrivialMoveOnlyTypeEliminator();
+  //   P.addTrivialMoveOnlyTypeEliminator();
+
   // Check no uses after consume operator of a value in an address.
   P.addConsumeOperatorCopyableAddressesChecker();
   // No uses after consume operator of copyable value.
   P.addConsumeOperatorCopyableValuesChecker();
+
+  // As a temporary measure, we also eliminate move only for non-trivial types
+  // until we can audit the later part of the pipeline. Eventually, this should
+  // occur before IRGen.
+  P.addMoveOnlyTypeEliminator();
 
   //
   // End Ownership Optimizations
@@ -245,11 +263,6 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
 
   // Canonical swift requires all non cond_br critical edges to be split.
   P.addSplitNonCondBrCriticalEdges();
-
-  // As a temporary measure, we also eliminate move only for non-trivial types
-  // until we can audit the later part of the pipeline. Eventually, this should
-  // occur before IRGen.
-  P.addMoveOnlyTypeEliminator();
 
   // For embedded Swift: Specialize generic class vtables.
   P.addVTableSpecializer();

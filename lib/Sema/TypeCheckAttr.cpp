@@ -2390,9 +2390,6 @@ void AttributeChecker::visitFinalAttr(FinalAttr *attr) {
 }
 
 void AttributeChecker::visitMoveOnlyAttr(MoveOnlyAttr *attr) {
-  if (!D->getASTContext().supportsMoveOnlyTypes())
-    D->diagnose(diag::moveOnly_requires_lexical_lifetimes);
-
   if (isa<StructDecl>(D) || isa<EnumDecl>(D))
     return;
 
@@ -3073,6 +3070,7 @@ SerializeAttrGenericSignatureRequest::evaluate(Evaluator &evaluator,
       WhereClauseOwner(const_cast<AbstractFunctionDecl *>(FD), attr),
       /*addedRequirements=*/{},
       /*inferenceSources=*/{},
+      attr->getLocation(),
       /*isExtension=*/false,
       /*allowInverses=*/true};
 
@@ -5596,6 +5594,7 @@ bool resolveDifferentiableAttrDerivativeGenericSignature(
         WhereClauseOwner(original, attr),
         /*addedRequirements=*/{},
         /*inferenceSources=*/{},
+        attr->getLocation(),
         /*isExtension=*/false,
         /*allowInverses=*/true};
 

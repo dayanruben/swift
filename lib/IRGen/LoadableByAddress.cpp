@@ -2854,7 +2854,7 @@ bool LoadableByAddress::recreateConvInstr(SILInstruction &I,
     auto instr = cast<MarkDependenceInst>(convInstr);
     newInstr = convBuilder.createMarkDependence(
       instr->getLoc(), instr->getValue(), instr->getBase(),
-      instr->isNonEscaping());
+      instr->dependenceKind());
     break;
   }
   case SILInstructionKind::DifferentiableFunctionInst: {
@@ -3885,7 +3885,7 @@ protected:
     auto builder = assignment.getBuilder(m->getIterator());
     auto opdAddr = assignment.getAddressForValue(m->getBase());
     auto newValue = builder.createMarkDependence(m->getLoc(), m->getValue(),
-                                                 opdAddr, m->isNonEscaping());
+                                                 opdAddr, m->dependenceKind());
     m->replaceAllUsesWith(newValue);
     assignment.markForDeletion(m);
   }
@@ -4266,8 +4266,11 @@ static void runPeepholesAndReg2Mem(SILPassManager *pm, SILModule *silMod,
       // switch_enum.
       if (auto *pred = bb.getSinglePredecessorBlock()) {
         // switch_enum handles the basic block arguments independently.
-        if (isa<SwitchEnumInst>(pred->getTerminator()))
-          continue;
+        if (auto sw = dyn_cast<SwitchEnumInst>(pred->getTerminator())) {
+          if (assignment.isLargeLoadableType(sw->getOperand()->getType())) {
+              continue;
+          }
+        }
       }
 
       // Handle all other basic block arguments.
@@ -4282,7 +4285,8 @@ static void runPeepholesAndReg2Mem(SILPassManager *pm, SILModule *silMod,
           // Large try apply results have to be stored to their stack location
           // in the success block.
           if (auto *pred = bb.getSinglePredecessorBlock()) {
-            if (auto *term = dyn_cast<TryApplyInst>(pred->getTerminator())) {
+            if (isa<TryApplyInst>(pred->getTerminator()) ||
+                isa<SwitchEnumInst>(pred->getTerminator())) {
               assert(bb.getArguments().size() == 1);
               shouldDeleteBlockArgument = false;
               // We will emit the store to initialize after parsing all other

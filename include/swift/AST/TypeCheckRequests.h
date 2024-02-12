@@ -323,30 +323,6 @@ public:
   void cacheResult(bool value) const;
 };
 
-class CollectExistentialConformancesRequest
-    : public SimpleRequest<CollectExistentialConformancesRequest,
-                           ArrayRef<ProtocolConformanceRef>(ModuleDecl*,
-                                                            CanType,
-                                                            CanType,
-                                                            bool,
-                                                            bool),
-                           RequestFlags::Uncached> { // TODO: maybe cache this?
-public:
-  using SimpleRequest::SimpleRequest;
-
-private:
-  friend SimpleRequest;
-
-  // Evaluation.
-  ArrayRef<ProtocolConformanceRef>
-      evaluate(Evaluator &evaluator,
-               ModuleDecl *module,
-               CanType fromType,
-               CanType existential,
-               bool skipConditionalRequirements,
-               bool allowMissing) const;
-};
-
 /// Determine whether an existential type conforming to this protocol
 /// requires the \c any syntax.
 class HasSelfOrAssociatedTypeRequirementsRequest :
@@ -2008,9 +1984,9 @@ class InferredGenericSignatureRequest :
                                                     GenericParamList *,
                                                     WhereClauseOwner,
                                                     SmallVector<Requirement, 2>,
-                                                    SmallVector<TypeLoc, 2>,
-                                                    bool, bool),
-                         RequestFlags::Cached> {
+                                                    SmallVector<TypeBase *, 2>,
+                                                    SourceLoc, bool, bool),
+                         RequestFlags::Uncached> {
 public:
   using SimpleRequest::SimpleRequest;
 
@@ -2024,13 +2000,10 @@ private:
            GenericParamList *genericParams,
            WhereClauseOwner whereClause,
            SmallVector<Requirement, 2> addedRequirements,
-           SmallVector<TypeLoc, 2> inferenceSources,
-           bool isExtension, bool allowInverses) const;
+           SmallVector<TypeBase *, 2> inferenceSources,
+           SourceLoc loc, bool isExtension, bool allowInverses) const;
 
 public:
-  // Separate caching.
-  bool isCached() const { return true; }
-
   /// Inferred generic signature requests don't have source-location info.
   SourceLoc getNearestLoc() const {
     return SourceLoc();
@@ -3397,10 +3370,10 @@ public:
   bool isCached() const { return true; }
 };
 
-/// Determine whether closure body has any explicit `return`
+/// Determine whether closure body has any `return`
 /// statements which could produce a non-void result.
-class ClosureHasExplicitResultRequest
-    : public SimpleRequest<ClosureHasExplicitResultRequest, bool(ClosureExpr *),
+class ClosureHasResultExprRequest
+    : public SimpleRequest<ClosureHasResultExprRequest, bool(ClosureExpr *),
                            RequestFlags::Cached> {
 public:
   using SimpleRequest::SimpleRequest;
@@ -4258,8 +4231,12 @@ public:
     return InvalidJumps;
   }
 
-  explicit operator bool() const {
+  bool isValid() const {
     return TheKind == Kind::Valid;
+  }
+
+  explicit operator bool() const {
+    return isValid();
   }
 };
 

@@ -244,15 +244,10 @@ HasCircularInheritedProtocolsRequest::evaluate(Evaluator &evaluator,
       continue;
 
     // If we have a cycle, handle it and return true.
-    auto result = evaluator(HasCircularInheritedProtocolsRequest{protoDecl});
-    if (!result) {
-      using Error = CyclicalRequestError<HasCircularInheritedProtocolsRequest>;
-      llvm::handleAllErrors(result.takeError(), [](const Error &E) {});
-      return true;
-    }
-
-    // If the underlying request handled a cycle and returned true, bail.
-    if (*result)
+    auto result = evaluateOrDefault(evaluator,
+                                    HasCircularInheritedProtocolsRequest{protoDecl},
+                                    true);
+    if (result)
       return true;
   }
   return false;
@@ -269,13 +264,7 @@ HasCircularRawValueRequest::evaluate(Evaluator &evaluator,
     return false;
 
   // If we have a cycle, handle it and return true.
-  auto result = evaluator(HasCircularRawValueRequest{inherited});
-  if (!result) {
-    using Error = CyclicalRequestError<HasCircularRawValueRequest>;
-    llvm::handleAllErrors(result.takeError(), [](const Error &E) {});
-    return true;
-  }
-  return result.get();
+  return evaluateOrDefault(evaluator, HasCircularRawValueRequest{inherited}, true);
 }
 
 namespace {
@@ -688,8 +677,14 @@ bool
 ExistentialConformsToSelfRequest::evaluate(Evaluator &evaluator,
                                            ProtocolDecl *decl) const {
   // Marker protocols always self-conform.
-  if (decl->isMarkerProtocol())
+  if (decl->isMarkerProtocol()) {
+    // Except for BitwiseCopyable an existential of which is non-trivial.
+    if (decl->getASTContext().LangOpts.hasFeature(Feature::BitwiseCopyable) &&
+        decl->getKnownProtocolKind() == KnownProtocolKind::BitwiseCopyable) {
+      return false;
+    }
     return true;
+  }
 
   // Otherwise, if it's not @objc, it conforms to itself only if it has a
   // self-conformance witness table.
@@ -927,17 +922,12 @@ InvertibleAnnotationRequest::evaluate(Evaluator &evaluator,
 
   switch (TARGET) {
   case InvertibleProtocolKind::Copyable:
-    // Handle the legacy '@_moveOnly' attribute
-    if (auto attr = decl->getAttrs().getAttribute<MoveOnlyAttr>()) {
-      assert((isa<StructDecl, EnumDecl, ClassDecl>(decl)));
-
-      // FIXME: just never allow lexical-lifetimes to be disabled?
-      if (!ctx.supportsMoveOnlyTypes())
-        decl->diagnose(diag::moveOnly_requires_lexical_lifetimes);
-
-      return InverseMarking::forInverse(Kind::LegacyExplicit,
-                                        attr->getLocation());
-    }
+    // Handle the legacy '@_moveOnly' for types they can validly appear.
+    // TypeCheckAttr handles the illegal situations for us.
+    if (auto attr = decl->getAttrs().getAttribute<MoveOnlyAttr>())
+      if (isa<StructDecl, EnumDecl, ClassDecl>(decl))
+        return InverseMarking::forInverse(Kind::LegacyExplicit,
+                                          attr->getLocation());
     break;
 
   case InvertibleProtocolKind::Escapable:
@@ -1714,16 +1704,20 @@ static PrecedenceGroupDecl *lookupPrecedenceGroupForRelation(
     PrecedenceGroupDescriptor::PathDirection direction) {
   auto &ctx = dc->getASTContext();
   PrecedenceGroupDescriptor desc{dc, rel.Name, rel.NameLoc, direction};
-  auto result = ctx.evaluator(ValidatePrecedenceGroupRequest{desc});
-  if (!result) {
+
+  bool hadCycle = false;
+  auto result = ctx.evaluator(ValidatePrecedenceGroupRequest{desc},
+                              [&hadCycle]() -> TinyPtrVector<PrecedenceGroupDecl *> {
+                                hadCycle = true;
+                                return {};
+                              });
+  if (hadCycle) {
     // Handle a cycle error specially. We don't want to default to an empty
     // result, as we don't want to emit an error about not finding a precedence
     // group.
-    using Error = CyclicalRequestError<ValidatePrecedenceGroupRequest>;
-    llvm::handleAllErrors(result.takeError(), [](const Error &E) {});
     return nullptr;
   }
-  return PrecedenceGroupLookupResult(dc, rel.Name, std::move(*result))
+  return PrecedenceGroupLookupResult(dc, rel.Name, std::move(result))
       .getSingleOrDiagnose(rel.NameLoc);
 }
 
@@ -2563,7 +2557,8 @@ static Type validateParameterType(ParamDecl *decl) {
   }
 
   // Validate the presence of ownership for a parameter with an inverse applied.
-  if (diagnoseMissingOwnership(ctx, dc, ownership,
+  if (!Ty->hasUnboundGenericType() &&
+      diagnoseMissingOwnership(ctx, dc, ownership,
                                decl->getTypeRepr(), Ty, options)) {
     decl->setInvalid();
     return ErrorType::get(ctx);
@@ -2664,7 +2659,7 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
     }
 
     if (!PD->getTypeRepr())
-      return Type();
+      return ErrorType::get(Context);
 
     return validateParameterType(PD);
   }

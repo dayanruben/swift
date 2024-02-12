@@ -667,8 +667,10 @@ AbstractGenericSignatureRequest::evaluate(
       paramsAsTypes.push_back(gtpt);
   }
 
-  InverseRequirement::expandDefaults(ctx, paramsAsTypes, requirements);
-  applyInverses(ctx, paramsAsTypes, inverses, requirements, errors);
+  SmallVector<StructuralRequirement, 2> defaults;
+  InverseRequirement::expandDefaults(ctx, paramsAsTypes, defaults);
+  applyInverses(ctx, paramsAsTypes, inverses, defaults, errors);
+  requirements.append(defaults);
 
   auto &rewriteCtx = ctx.getRewriteContext();
 
@@ -751,8 +753,8 @@ InferredGenericSignatureRequest::evaluate(
         GenericParamList *genericParamList,
         WhereClauseOwner whereClause,
         SmallVector<Requirement, 2> addedRequirements,
-        SmallVector<TypeLoc, 2> inferenceSources,
-        bool isExtension, bool allowInverses) const {
+        SmallVector<TypeBase *, 2> inferenceSources,
+        SourceLoc loc, bool isExtension, bool allowInverses) const {
   GenericSignature parentSig(parentSigImpl);
 
   SmallVector<GenericTypeParamType *, 4> genericParams(
@@ -768,26 +770,6 @@ InferredGenericSignatureRequest::evaluate(
   SmallVector<StructuralRequirement, 2> requirements;
   SmallVector<RequirementError, 2> errors;
   SmallVector<InverseRequirement, 2> inverses;
-
-  SourceLoc loc = [&]() {
-    if (genericParamList) {
-      auto loc = genericParamList->getLAngleLoc();
-      if (loc.isValid())
-        return loc;
-    }
-    if (whereClause) {
-      auto loc = whereClause.getLoc();
-      if (loc.isValid())
-        return loc;
-    }
-    for (auto sourcePair : inferenceSources) {
-      auto *typeRepr = sourcePair.getTypeRepr();
-      auto loc = typeRepr ? typeRepr->getStartLoc() : SourceLoc();
-      if (loc.isValid())
-        return loc;
-    }
-    return SourceLoc();
-  }();
 
   for (const auto &req : parentSig.getRequirements())
     requirements.push_back({req, loc});
@@ -859,12 +841,8 @@ InferredGenericSignatureRequest::evaluate(
 
   // Perform requirement inference from function parameter and result
   // types and such.
-  for (auto sourcePair : inferenceSources) {
-    auto *typeRepr = sourcePair.getTypeRepr();
-    auto typeLoc = typeRepr ? typeRepr->getStartLoc() : SourceLoc();
-
-    inferRequirements(sourcePair.getType(), typeLoc, moduleForInference,
-                      lookupDC, requirements);
+  for (auto source : inferenceSources) {
+    inferRequirements(source, moduleForInference, lookupDC, requirements);
   }
 
   // Finish by adding any remaining requirements. This is used to introduce
@@ -882,8 +860,10 @@ InferredGenericSignatureRequest::evaluate(
     paramTypes.append(genericParams.begin() + numOuterParams, genericParams.end());
   }
 
-  InverseRequirement::expandDefaults(ctx, paramTypes, requirements);
-  applyInverses(ctx, paramTypes, inverses, requirements, errors);
+  SmallVector<StructuralRequirement, 2> defaults;
+  InverseRequirement::expandDefaults(ctx, paramTypes, defaults);
+  applyInverses(ctx, paramTypes, inverses, defaults, errors);
+  requirements.append(defaults);
 
   auto &rewriteCtx = ctx.getRewriteContext();
 

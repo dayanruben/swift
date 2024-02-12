@@ -137,61 +137,21 @@ void AccessFilteringDeclConsumer::foundDecl(
   ChainedConsumer.foundDecl(D, reason, dynamicLookupInfo);
 }
 
-void UsableFilteringDeclConsumer::foundDecl(ValueDecl *D,
-    DeclVisibilityKind reason, DynamicLookupInfo dynamicLookupInfo) {
-  // Skip when Loc is within the decl's own initializer
-  if (auto *VD = dyn_cast<VarDecl>(D)) {
-    Expr *init = VD->getParentInitializer();
-    if (auto *PD = dyn_cast<ParamDecl>(D)) {
-      init = PD->getStructuralDefaultExpr();
-    }
-
-    // Only check if the VarDecl has the same (or parent) context to avoid
-    // grabbing the end location for every decl with an initializer
-    if (init != nullptr) {
-      auto *varContext = VD->getDeclContext();
-      if (DC == varContext || DC->isChildContextOf(varContext)) {
-        auto initRange = Lexer::getCharSourceRangeFromSourceRange(
-            SM, init->getSourceRange());
-        if (initRange.isValid() && initRange.contains(Loc))
-          return;
-      }
-    }
-  }
-
+void UsableFilteringDeclConsumer::foundDecl(
+    ValueDecl *D, DeclVisibilityKind reason,
+    DynamicLookupInfo dynamicLookupInfo) {
   switch (reason) {
-  case DeclVisibilityKind::LocalVariable:
+  case DeclVisibilityKind::LocalDecl:
   case DeclVisibilityKind::FunctionParameter:
-    // Skip if Loc is before the found decl if the decl is a var/let decl.
-    // Type and func decls can be referenced before its declaration, or from
-    // within nested type decls.
-    if (isa<VarDecl>(D)) {
-      if (reason == DeclVisibilityKind::LocalVariable) {
-        // Workaround for fast-completion. A loc in the current context might be
-        // in a loc
-        auto tmpLoc = Loc;
-        if (D->getDeclContext() != DC) {
-          if (auto *contextD = DC->getAsDecl())
-            tmpLoc = contextD->getStartLoc();
-        }
-        auto declLoc = DC->getParentModule()->getOriginalLocation(D->getLoc()).second;
-        if (!SM.isBeforeInBuffer(declLoc, tmpLoc))
-          return;
-      }
-
-      // A type context cannot close over values defined in outer type contexts.
-      if (D->getDeclContext()->getInnermostTypeContext() != typeContext)
-        return;
+    // A type context cannot close over variables defined in outer type
+    // contexts.
+    if (isa<VarDecl>(D) &&
+        D->getDeclContext()->getInnermostTypeContext() != typeContext) {
+      return;
     }
     break;
 
   case DeclVisibilityKind::MemberOfOutsideNominal:
-    // A type context cannot close over members of outer type contexts, except
-    // for type decls.
-    if (!isa<TypeDecl>(D) && !D->isStatic())
-      return;
-    break;
-
   case DeclVisibilityKind::MemberOfCurrentNominal:
   case DeclVisibilityKind::MemberOfSuper:
   case DeclVisibilityKind::MemberOfProtocolConformedToByCurrentNominal:
@@ -204,10 +164,25 @@ void UsableFilteringDeclConsumer::foundDecl(ValueDecl *D,
     // Generic params are type decls and are always usable from nested context.
     break;
 
-  case DeclVisibilityKind::VisibleAtTopLevel:
-    // The rest of the file is currently skipped, so no need to check
-    // decl location for VisibleAtTopLevel.
+  case DeclVisibilityKind::VisibleAtTopLevel: {
+    // Skip when Loc is within the decl's own initializer. We only need to do
+    // this for top-level decls since local decls are already excluded from
+    // their own initializer by virtue of the ASTScope lookup.
+    if (auto *VD = dyn_cast<VarDecl>(D)) {
+      // Only check if the VarDecl has the same (or parent) context to avoid
+      // grabbing the end location for every decl with an initializer
+      if (auto *init = VD->getParentInitializer()) {
+        auto *varContext = VD->getDeclContext();
+        if (DC == varContext || DC->isChildContextOf(varContext)) {
+          auto initRange = Lexer::getCharSourceRangeFromSourceRange(
+              SM, init->getSourceRange());
+          if (initRange.isValid() && initRange.contains(Loc))
+            return;
+        }
+      }
+    }
     break;
+  }
   }
 
   // Filter out shadowed decls. Do this for only usable values even though
@@ -240,7 +215,7 @@ void UsableFilteringDeclConsumer::foundDecl(ValueDecl *D,
       return;
 
     switch (shadowingReason) {
-    case DeclVisibilityKind::LocalVariable:
+    case DeclVisibilityKind::LocalDecl:
     case DeclVisibilityKind::FunctionParameter:
       // Local func and var/let with a conflicting name.
       //   func foo() {
@@ -251,7 +226,7 @@ void UsableFilteringDeclConsumer::foundDecl(ValueDecl *D,
       // So, for confilicting local values in the same decl context, even if the
       // 'var value' is reported after 'func value', don't shadow it, but we
       // shadow everything with the name after that.
-      if (reason == DeclVisibilityKind::LocalVariable &&
+      if (reason == DeclVisibilityKind::LocalDecl &&
           isa<VarDecl>(D) && !isa<VarDecl>(shadowingD) &&
           shadowingD->getDeclContext() == D->getDeclContext()) {
         // Replace the shadowing decl so we shadow subsequent conflicting decls.
@@ -1277,6 +1252,10 @@ public:
   /// Add the given members to the lookup table.
   void addMembers(DeclRange members);
 
+  /// Add the members of the extension to the lookup table, if necessary
+  /// registering it for future lazy member loading.
+  void addExtension(ExtensionDecl *ext);
+
   void addExtensionWithLazyMembers(ExtensionDecl *ext) {
     ExtensionsWithLazyMembers.push_back(ext);
   }
@@ -1467,6 +1446,21 @@ void MemberLookupTable::addMembers(DeclRange members) {
   }
 }
 
+void MemberLookupTable::addExtension(ExtensionDecl *ext) {
+  // If we can lazy-load this extension, only take the members we've loaded
+  // so far.
+  if (ext->hasLazyMembers()) {
+    addMembers(ext->getCurrentMembersWithoutLoading());
+    clearLazilyCompleteCache();
+    clearLazilyCompleteForMacroExpansionCache();
+    addExtensionWithLazyMembers(ext);
+  } else {
+    // Else, load all the members into the table.
+    addMembers(ext->getMembers());
+  }
+  addContainerWithMacroExpansions(ext);
+}
+
 void NominalTypeDecl::addedExtension(ExtensionDecl *ext) {
   if (!LookupTable.getInt())
     return;
@@ -1474,16 +1468,7 @@ void NominalTypeDecl::addedExtension(ExtensionDecl *ext) {
   auto *table = LookupTable.getPointer();
   assert(table);
 
-  if (ext->wasDeserialized() || ext->hasClangNode()) {
-    table->addMembers(ext->getCurrentMembersWithoutLoading());
-    table->clearLazilyCompleteCache();
-    table->clearLazilyCompleteForMacroExpansionCache();
-    table->addExtensionWithLazyMembers(ext);
-  } else {
-    table->addMembers(ext->getMembers());
-  }
-
-  table->addContainerWithMacroExpansions(ext);
+  table->addExtension(ext);
 }
 
 void NominalTypeDecl::addedMember(Decl *member) {
@@ -1603,8 +1588,6 @@ populateLookupTableEntryFromExtensions(ASTContext &ctx,
       continue;
     }
 
-    assert(e->wasDeserialized() || e->hasClangNode() &&
-           "Extension without deserializable content has lazy members!");
     assert(!e->hasUnparsedMembers());
 
     populateLookupTableEntryFromLazyIDCLoader(ctx, table, name, e);
@@ -1965,21 +1948,7 @@ void NominalTypeDecl::prepareLookupTable() {
 
   // Note: this calls prepareExtensions()
   for (auto e : getExtensions()) {
-    // If we can lazy-load this extension, only take the members we've loaded
-    // so far.
-    //
-    // FIXME: This should be 'e->hasLazyMembers()' but that crashes` because
-    // some imported extensions don't have a Clang node, and only support
-    // LazyMemberLoader::loadAllMembers() and not
-    // LazyMemberLoader::loadNamedMembers().
-    if (e->wasDeserialized() || e->hasClangNode()) {
-      table->addMembers(e->getCurrentMembersWithoutLoading());
-      table->addExtensionWithLazyMembers(e);
-      continue;
-    }
-
-    // Else, load all the members into the table.
-    table->addMembers(e->getMembers());
+    table->addExtension(e);
   }
 
   // Any extensions added after this point will add their members to the
@@ -3206,16 +3175,10 @@ SuperclassDeclRequest::evaluate(Evaluator &evaluator,
     // inheritance hierarchy by evaluating its superclass. This forces the
     // diagnostic at this point and then suppresses the superclass failure.
     if (superclass) {
-      auto result = Ctx.evaluator(SuperclassDeclRequest{superclass});
-      bool hadCycle = false;
-      if (auto err = result.takeError()) {
-        llvm::handleAllErrors(std::move(err),
-          [&hadCycle](const CyclicalRequestError<SuperclassDeclRequest> &E) {
-          hadCycle = true;
-          });
-
-        if (hadCycle)
-          return nullptr;
+      if (evaluateOrDefault(Ctx.evaluator,
+                            SuperclassDeclRequest{superclass},
+                            superclass) == superclass) {
+        return nullptr;
       }
 
       return superclass;
@@ -3913,238 +3876,6 @@ FuncDecl *LookupIntrinsicRequest::evaluate(Evaluator &evaluator,
     return nullptr;
 
   return dyn_cast<FuncDecl>(decls[0]);
-}
-
-void FindLocalVal::checkPattern(const Pattern *Pat, DeclVisibilityKind Reason) {
-  Pat->forEachVariable([&](VarDecl *VD) { checkValueDecl(VD, Reason); });
-}
-void FindLocalVal::checkValueDecl(ValueDecl *D, DeclVisibilityKind Reason) {
-  if (!D)
-    return;
-  if (auto var = dyn_cast<VarDecl>(D)) {
-    auto dc = var->getDeclContext();
-    if ((isa<AbstractFunctionDecl>(dc) || isa<ClosureExpr>(dc)) &&
-        var->hasAttachedPropertyWrapper()) {
-      // FIXME: This is currently required to set the interface type of the
-      // auxiliary variables (unless 'var' is a closure param).
-      (void)var->getPropertyWrapperBackingPropertyType();
-
-      auto vars = var->getPropertyWrapperAuxiliaryVariables();
-      if (vars.backingVar) {
-        Consumer.foundDecl(vars.backingVar, Reason);
-      }
-      if (vars.projectionVar) {
-        Consumer.foundDecl(vars.projectionVar, Reason);
-      }
-      if (vars.localWrappedValueVar) {
-        Consumer.foundDecl(vars.localWrappedValueVar, Reason);
-
-        // If 'localWrappedValueVar' exists, the original var is shadowed.
-        return;
-      }
-    }
-  }
-  Consumer.foundDecl(D, Reason);
-}
-
-void FindLocalVal::checkParameterList(const ParameterList *params) {
-  for (auto param : *params) {
-    checkValueDecl(param, DeclVisibilityKind::FunctionParameter);
-  }
-}
-
-void FindLocalVal::checkGenericParams(GenericParamList *Params) {
-  if (!Params)
-    return;
-
-  for (auto P : *Params) {
-    if (P->isOpaqueType()) {
-      // Generic param for 'some' parameter type is not "visible".
-      continue;
-    }
-    checkValueDecl(P, DeclVisibilityKind::GenericParameter);
-  }
-}
-
-void FindLocalVal::checkSourceFile(const SourceFile &SF) {
-  for (Decl *D : SF.getTopLevelDecls())
-    if (auto *TLCD = dyn_cast<TopLevelCodeDecl>(D))
-      visitBraceStmt(TLCD->getBody(), /*isTopLevel=*/true);
-}
-
-void FindLocalVal::checkStmtCondition(const StmtCondition &Cond) {
-  SourceLoc start = SourceLoc();
-  for (auto entry : Cond) {
-    if (start.isInvalid())
-      start = entry.getStartLoc();
-    if (auto *P = entry.getPatternOrNull()) {
-      SourceRange previousConditionsToHere = SourceRange(start, entry.getEndLoc());
-      if (!isReferencePointInRange(previousConditionsToHere))
-        checkPattern(P, DeclVisibilityKind::LocalVariable);
-    }
-  }
-}
-
-void FindLocalVal::visitIfStmt(IfStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
-    return;
-
-  if (!S->getElseStmt() ||
-      !isReferencePointInRange(S->getElseStmt()->getSourceRange())) {
-    checkStmtCondition(S->getCond());
-  }
-
-  visit(S->getThenStmt());
-  if (S->getElseStmt())
-    visit(S->getElseStmt());
-}
-
-void FindLocalVal::visitGuardStmt(GuardStmt *S) {
-  if (SM.isBeforeInBuffer(Loc, S->getStartLoc()))
-    return;
-
-  // Names in the guard aren't visible until after the body.
-  if (S->getBody()->isImplicit() ||
-      !isReferencePointInRange(S->getBody()->getSourceRange()))
-    checkStmtCondition(S->getCond());
-
-  visit(S->getBody());
-}
-
-void FindLocalVal::visitWhileStmt(WhileStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
-    return;
-
-  checkStmtCondition(S->getCond());
-  visit(S->getBody());
-}
-void FindLocalVal::visitRepeatWhileStmt(RepeatWhileStmt *S) {
-  visit(S->getBody());
-}
-void FindLocalVal::visitDoStmt(DoStmt *S) {
-  visit(S->getBody());
-}
-
-void FindLocalVal::visitForEachStmt(ForEachStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
-    return;
-  visit(S->getBody());
-  if (!isReferencePointInRange(S->getParsedSequence()->getSourceRange()))
-    checkPattern(S->getPattern(), DeclVisibilityKind::LocalVariable);
-}
-
-void FindLocalVal::visitBraceStmt(BraceStmt *S, bool isTopLevelCode) {
-  if (isTopLevelCode) {
-    if (SM.isBeforeInBuffer(Loc, S->getStartLoc()))
-      return;
-  } else {
-    SourceRange CheckRange = S->getSourceRange();
-    if (S->isImplicit()) {
-      // If the brace statement is implicit, it doesn't have an explicit '}'
-      // token. Thus, the last token in the brace stmt could be a string
-      // literal token, which can *contain* its interpolation segments.
-      // If one of these interpolation segments is the reference point, we'd
-      // return false from `isReferencePointInRange` because the string
-      // literal token's start location is before the interpolation token.
-      // To fix this, adjust the range we are checking to range until the end of
-      // the potential string interpolation token.
-      CheckRange.End = Lexer::getLocForEndOfToken(SM, CheckRange.End);
-    }
-    if (!isReferencePointInRange(CheckRange))
-      return;
-  }
-
-  // Visit inner statements first before reporting local decls in the current
-  // scope.
-  for (auto elem : S->getElements()) {
-    // If we have a SingleValueStmtExpr, there may be local bindings in the
-    // wrapped statement.
-    if (auto *E = elem.dyn_cast<Expr *>()) {
-      if (auto *SVE = dyn_cast<SingleValueStmtExpr>(E))
-        visit(SVE->getStmt());
-      continue;
-    }
-
-    if (auto *S = elem.dyn_cast<Stmt*>()) {
-      visit(S);
-      continue;
-    }
-  }
-
-  std::function<void(Decl *)> visitDecl;
-  visitDecl = [&](Decl *D) {
-    if (auto *VD = dyn_cast<ValueDecl>(D))
-      checkValueDecl(VD, DeclVisibilityKind::LocalVariable);
-    D->visitAuxiliaryDecls(visitDecl);
-  };
-  for (auto elem : S->getElements()) {
-    if (auto *E = elem.dyn_cast<Expr *>()) {
-      // 'MacroExpansionExpr' at code-item position may introduce value decls.
-      // NOTE: the expression must be type checked.
-      // FIXME: In code-completion local expressions are _not_ type checked.
-      if (auto *mee = dyn_cast<MacroExpansionExpr>(E)) {
-        if (auto *med = mee->getSubstituteDecl()) {
-          visitDecl(med);
-        }
-      }
-      continue;
-    }
-    if (auto *D = elem.dyn_cast<Decl*>()) {
-      visitDecl(D);
-      continue;
-    }
-  }
-}
-  
-void FindLocalVal::visitSwitchStmt(SwitchStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
-    return;
-  for (CaseStmt *C : S->getCases()) {
-    visit(C);
-  }
-}
-
-void FindLocalVal::visitCaseStmt(CaseStmt *S) {
-  // The last token in a case stmt can be a string literal token, which can
-  // *contain* its interpolation segments. If one of these interpolation
-  // segments is the reference point, we'd return false from
-  // `isReferencePointInRange` because the string literal token's start location
-  // is before the interpolation token. To fix this, adjust the range we are
-  // checking to range until the end of the potential string interpolation
-  // token.
-  SourceRange CheckRange = {S->getStartLoc(),
-                            Lexer::getLocForEndOfToken(SM, S->getEndLoc())};
-  if (!isReferencePointInRange(CheckRange))
-    return;
-  // Pattern names aren't visible in the patterns themselves,
-  // just in the body or in where guards.
-  bool inPatterns = isReferencePointInRange(S->getLabelItemsRange());
-  auto items = S->getCaseLabelItems();
-  if (inPatterns) {
-    for (const auto &CLI : items) {
-      auto guard = CLI.getGuardExpr();
-      if (guard && isReferencePointInRange(guard->getSourceRange())) {
-        checkPattern(CLI.getPattern(), DeclVisibilityKind::LocalVariable);
-        break;
-      }
-    }
-  }
-
-  if (!inPatterns && !items.empty()) {
-    for (auto *vd : S->getCaseBodyVariablesOrEmptyArray()) {
-      checkValueDecl(vd, DeclVisibilityKind::LocalVariable);
-    }
-  }
-  visit(S->getBody());
-}
-
-void FindLocalVal::visitDoCatchStmt(DoCatchStmt *S) {
-  if (!isReferencePointInRange(S->getSourceRange()))
-    return;
-  visit(S->getBody());
-  for (CaseStmt *C : S->getCatches()) {
-    visit(C);
-  }
 }
 
 void swift::simple_display(llvm::raw_ostream &out, NLKind kind) {

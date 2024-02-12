@@ -102,13 +102,16 @@ static bool requiresFlowIsolation(ActorIsolation typeIso,
 
   // Otherwise, if it's an actor instance, then it depends on async-ness.
   switch (typeIso.getKind()) {
-    case ActorIsolation::GlobalActor:
-    case ActorIsolation::Unspecified:
-    case ActorIsolation::Nonisolated:
-    case ActorIsolation::NonisolatedUnsafe:
+  case ActorIsolation::GlobalActor:
+  case ActorIsolation::Unspecified:
+  case ActorIsolation::Nonisolated:
+  case ActorIsolation::NonisolatedUnsafe:
     return false;
 
-    case ActorIsolation::ActorInstance:
+  case ActorIsolation::Erased:
+    llvm_unreachable("constructor cannot have erased isolation");
+
+  case ActorIsolation::ActorInstance:
       return !(ctor->hasAsync()); // need flow-isolation for non-async.
   };
 }
@@ -521,6 +524,9 @@ static bool varIsSafeAcrossActors(const ModuleDecl *fromModule,
   case ActorIsolation::Unspecified:
     // if nonisolated, it's OK
     return true;
+
+  case ActorIsolation::Erased:
+    llvm_unreachable("variable cannot have erased isolation");
 
   case ActorIsolation::ActorInstance:
   case ActorIsolation::GlobalActor:
@@ -1650,6 +1656,9 @@ static bool wasLegacyEscapingUseRestriction(AbstractFunctionDecl *fn) {
       assert(fn->hasAsync());
       return false;
 
+    case ActorIsolation::Erased:
+      llvm_unreachable("function decl cannot have erased isolation");
+
     case ActorIsolation::Unspecified:
       // this is basically just objc-marked inits.
       break;
@@ -1860,6 +1869,9 @@ static ActorIsolation getInnermostIsolatedContext(
   case ActorIsolation::Unspecified:
     return isolation;
 
+  case ActorIsolation::Erased:
+    llvm_unreachable("closure cannot originally have dynamic isolation");
+
   case ActorIsolation::GlobalActor:
     return ActorIsolation::forGlobalActor(
         dc->mapTypeIntoContext(isolation.getGlobalActor()))
@@ -1903,12 +1915,19 @@ static bool safeToDropGlobalActor(
   if (!funcTy)
     return false;
 
+  auto otherIsolation = funcTy->getIsolation();
+
   // can't add a different global actor
-  if (auto otherGA = funcTy->getGlobalActor()) {
-    assert(otherGA->getCanonicalType() != globalActor->getCanonicalType()
+  if (otherIsolation.isGlobalActor()) {
+    assert(otherIsolation.getGlobalActorType()->getCanonicalType()
+             != globalActor->getCanonicalType()
            && "not even dropping the actor?");
     return false;
   }
+
+  // Converting to an isolation-erased function type is fine.
+  if (otherIsolation.isErased())
+    return true;
 
   // We currently allow unconditional dropping of global actors from
   // async function types, despite this confusing Sendable checking
@@ -2084,6 +2103,9 @@ namespace {
           case ActorIsolation::Nonisolated:
           case ActorIsolation::NonisolatedUnsafe:
               return false;
+
+          case ActorIsolation::Erased:
+            llvm_unreachable("function cannot have erased isolation");
 
           case ActorIsolation::Unspecified:
             if (behavior != DiagnosticBehavior::Note) {
@@ -2415,6 +2437,7 @@ namespace {
       case ActorIsolation::NonisolatedUnsafe:
         return;
 
+      case ActorIsolation::Erased:
       case ActorIsolation::GlobalActor:
       case ActorIsolation::ActorInstance:
         break;
@@ -2437,6 +2460,7 @@ namespace {
         // which the declaration occurred, it's okay.
         auto decl = capture.getDecl();
         auto *context = localFunc.getAsDeclContext();
+        auto fnType = localFunc.getType()->getAs<AnyFunctionType>();
         if (!mayExecuteConcurrentlyWith(context, decl->getDeclContext()))
           continue;
 
@@ -2469,11 +2493,19 @@ namespace {
                                      diag::implicit_non_sendable_capture,
                                      decl->getName());
           }
+        } else if (fnType->isSendable()) {
+          diagnoseNonSendableTypes(type, getDeclContext(),
+                                   /*inDerivedConformance*/Type(),
+                                   capture.getLoc(),
+                                   diag::non_sendable_capture,
+                                   decl->getName(),
+                                   /*closure=*/closure != nullptr);
         } else {
           diagnoseNonSendableTypes(type, getDeclContext(),
                                    /*inDerivedConformance*/Type(),
                                    capture.getLoc(),
-                                   diag::non_sendable_capture, decl->getName(),
+                                   diag::non_sendable_isolated_capture,
+                                   decl->getName(),
                                    /*closure=*/closure != nullptr);
         }
       }
@@ -2856,6 +2888,9 @@ namespace {
           case ActorIsolation::GlobalActor:
             return ReferencedActor::forGlobalActor(
                 var, isPotentiallyIsolated, isolation.getGlobalActor());
+
+          case ActorIsolation::Erased:
+            llvm_unreachable("closure cannot have erased isolation");
           }
         }
 
@@ -2903,6 +2938,9 @@ namespace {
           }
 
           return ReferencedActor(var, isPotentiallyIsolated, ReferencedActor::NonIsolatedContext);
+
+        case ActorIsolation::Erased:
+          llvm_unreachable("context cannot have erased isolation");
 
         case ActorIsolation::GlobalActor:
           return ReferencedActor::forGlobalActor(
@@ -3242,15 +3280,21 @@ namespace {
       bool mayExitToNonisolated = true;
       Expr *argForIsolatedParam = nullptr;
       auto calleeDecl = apply->getCalledValue(/*skipFunctionConversions=*/true);
-      if (Type globalActor = fnType->getGlobalActor()) {
+
+      auto fnTypeIsolation = fnType->getIsolation();
+      if (fnTypeIsolation.isGlobalActor()) {
         // If the function type is global-actor-qualified, determine whether
         // we are within that global actor already.
+        Type globalActor = fnTypeIsolation.getGlobalActorType();
         if (!(getContextIsolation().isGlobalActor() &&
-            getContextIsolation().getGlobalActor()->isEqual(globalActor))) {
+            getContextIsolation().getGlobalActor()->isEqual(globalActor)))
           unsatisfiedIsolation = ActorIsolation::forGlobalActor(globalActor);
-        }
-
         mayExitToNonisolated = false;
+
+      } else if (fnTypeIsolation.isErased()) {
+        unsatisfiedIsolation = ActorIsolation::forErased();
+        mayExitToNonisolated = false;
+
       } else if (auto *selfApplyFn = dyn_cast<SelfApplyExpr>(
                     apply->getFn()->getValueProvidingExpr())) {
         // If we're calling a member function, check whether the function
@@ -3477,6 +3521,12 @@ namespace {
       auto isolation = getActorIsolationOfContext(
           const_cast<DeclContext *>(getDeclContext()),
                                     getClosureActorIsolation);
+      auto *dc = const_cast<DeclContext *>(getDeclContext());
+
+      // Note that macro expansions are never implicit. They have
+      // valid source locations in their macro expansion buffer, they
+      // do not cause implicit 'self' capture diagnostics, etc.
+
       Expr *actorExpr = nullptr;
       Type optionalAnyActorType = isolationExpr->getType();
       switch (isolation) {
@@ -3498,7 +3548,7 @@ namespace {
         }
         actorExpr = new (ctx) DeclRefExpr(
             const_cast<VarDecl *>(var), DeclNameLoc(loc),
-            /*Implicit=*/true);
+            /*implicit=*/false);
 
         // For a distributed actor, we need to retrieve the local
         // actor.
@@ -3512,24 +3562,28 @@ namespace {
         // Form a <global actor type>.shared reference.
         Type globalActorType = getDeclContext()->mapTypeIntoContext(
             isolation.getGlobalActor());
-        auto typeExpr = TypeExpr::createImplicit(globalActorType, ctx);
+        auto typeExpr = TypeExpr::createForDecl(
+            DeclNameLoc(loc), globalActorType->getAnyNominal(), dc);
         actorExpr = new (ctx) UnresolvedDotExpr(
-            typeExpr, loc, DeclNameRef(ctx.Id_shared), DeclNameLoc(),
-            /*implicit=*/true);
+            typeExpr, loc, DeclNameRef(ctx.Id_shared), DeclNameLoc(loc),
+            /*implicit=*/false);
         break;
       }
+
+      case ActorIsolation::Erased:
+        llvm_unreachable("context cannot have erased isolation");
 
       case ActorIsolation::Unspecified:
       case ActorIsolation::Nonisolated:
       case ActorIsolation::NonisolatedUnsafe:
-        actorExpr = new (ctx) NilLiteralExpr(loc, /*implicit=*/true);
+        actorExpr = new (ctx) NilLiteralExpr(loc, /*implicit=*/false);
         break;
       }
 
 
       // Convert the actor argument to the appropriate type.
       (void)TypeChecker::typeCheckExpression(
-          actorExpr, const_cast<DeclContext *>(getDeclContext()),
+          actorExpr, dc,
           constraints::ContextualTypeInfo(
             optionalAnyActorType, CTP_CallArgument));
 
@@ -3645,6 +3699,9 @@ namespace {
           case ActorIsolation::NonisolatedUnsafe:
           case ActorIsolation::Unspecified:
             break;
+
+          case ActorIsolation::Erased:
+            llvm_unreachable("component cannot have erased isolation");
 
           case ActorIsolation::GlobalActor: {
             auto result = ActorReferenceResult::forReference(
@@ -3830,6 +3887,9 @@ namespace {
             refKind = ReferencedActor::Isolated;
             break;
 
+          case ActorIsolation::Erased:
+            llvm_unreachable("context cannot have erased isolation");
+
           case ActorIsolation::GlobalActor:
             refGlobalActor = contextIsolation.getGlobalActor();
             refKind = isMainActor(refGlobalActor)
@@ -3945,6 +4005,9 @@ namespace {
                                               ActorIsolation::NonisolatedUnsafe)
             .withPreconcurrency(preconcurrency);
 
+      case ActorIsolation::Erased:
+        llvm_unreachable("context cannot have erased isolation");
+
       case ActorIsolation::GlobalActor: {
         Type globalActor = closure->mapTypeIntoContext(
             parentIsolation.getGlobalActor()->mapTypeOutOfContext());
@@ -3972,15 +4035,30 @@ bool ActorIsolationChecker::mayExecuteConcurrentlyWith(
   if (useContext == defContext)
     return false;
 
-  // If both contexts are isolated to the same actor, then they will not
-  // execute concurrently.
+  bool isolatedStateMayEscape = false;
+
   auto useIsolation = getActorIsolationOfContext(
       const_cast<DeclContext *>(useContext), getClosureActorIsolation);
   if (useIsolation.isActorIsolated()) {
     auto defIsolation = getActorIsolationOfContext(
         const_cast<DeclContext *>(defContext), getClosureActorIsolation);
+    // If both contexts are isolated to the same actor, then they will not
+    // execute concurrently.
     if (useIsolation == defIsolation)
       return false;
+
+    // If the local function is not Sendable, its isolation differs
+    // from that of the context, and both contexts are actor isolated,
+    // then capturing non-Sendable values allows the closure to stash
+    // those values into actor isolated state. The original context
+    // may also stash those values into isolated state, enabling concurrent
+    // access later on.
+    auto &ctx = useContext->getASTContext();
+    bool regionIsolationEnabled =
+        ctx.LangOpts.hasFeature(Feature::RegionBasedIsolation);
+    isolatedStateMayEscape =
+        (!regionIsolationEnabled &&
+        useIsolation.isActorIsolated() && defIsolation.isActorIsolated());
   }
 
   // Walk the context chain from the use to the definition.
@@ -3989,12 +4067,18 @@ bool ActorIsolationChecker::mayExecuteConcurrentlyWith(
     if (auto closure = dyn_cast<AbstractClosureExpr>(useContext)) {
       if (isSendableClosure(closure, /*forActorIsolation=*/false))
         return true;
+
+      if (isolatedStateMayEscape)
+        return true;
     }
 
     if (auto func = dyn_cast<FuncDecl>(useContext)) {
       if (func->isLocalCapture()) {
         // If the function is @Sendable... it can be run concurrently.
         if (func->isSendable())
+          return true;
+
+        if (isolatedStateMayEscape)
           return true;
       }
     }
@@ -4197,6 +4281,9 @@ getIsolationFromWitnessedRequirements(ValueDecl *value) {
       case ActorIsolation::Unspecified:
         continue;
 
+      case ActorIsolation::Erased:
+        llvm_unreachable("requirement cannot have erased isolation");
+
       case ActorIsolation::GlobalActor:
       case ActorIsolation::Nonisolated:
       case ActorIsolation::NonisolatedUnsafe:
@@ -4231,6 +4318,9 @@ getIsolationFromWitnessedRequirements(ValueDecl *value) {
 
         sawActorIndependent = true;
         return false;
+
+      case ActorIsolation::Erased:
+        llvm_unreachable("requirements cannot have erased isolation");
 
       case ActorIsolation::Unspecified:
         return true;
@@ -4276,6 +4366,9 @@ getIsolationFromConformances(NominalTypeDecl *nominal) {
     case ActorIsolation::Nonisolated:
     case ActorIsolation::NonisolatedUnsafe:
       break;
+
+    case ActorIsolation::Erased:
+      llvm_unreachable("protocol cannot have erased isolation");
 
     case ActorIsolation::GlobalActor:
       if (!foundIsolation) {
@@ -4333,6 +4426,9 @@ getIsolationFromWrappers(NominalTypeDecl *nominal) {
     case ActorIsolation::Nonisolated:
     case ActorIsolation::NonisolatedUnsafe:
       break;
+
+    case ActorIsolation::Erased:
+      llvm_unreachable("variable cannot have erased isolation");
 
     case ActorIsolation::GlobalActor:
       if (!foundIsolation) {
@@ -4525,6 +4621,9 @@ static bool checkClassGlobalActorIsolation(
     downgradeToWarning = true;
     break;
 
+  case ActorIsolation::Erased:
+    llvm_unreachable("class cannot have erased isolation");
+
   case ActorIsolation::ActorInstance:
     // This is an error that will be diagnosed later. Ignore it here.
     return false;
@@ -4697,27 +4796,8 @@ ActorIsolation ActorIsolationRequest::evaluate(
     checkDeclWithIsolatedParameter(value);
 
     ParamDecl *param = getParameterList(value)->get(*paramIdx);
-    Type paramType = param->getInterfaceType();
-    if (paramType->isTypeParameter()) {
-      paramType = param->getDeclContext()->mapTypeIntoContext(paramType);
-
-      auto &ctx = value->getASTContext();
-      auto conformsTo = [&](KnownProtocolKind kind) {
-        if (auto *proto = ctx.getProtocol(kind))
-          return value->getModuleContext()->checkConformance(paramType, proto);
-        return ProtocolConformanceRef::forInvalid();
-      };
-
-      // The type parameter must be bound by Actor or DistributedActor, as they
-      // have an unownedExecutor. AnyActor does NOT have an unownedExecutor!
-      if (!conformsTo(KnownProtocolKind::Actor)
-          && !conformsTo(KnownProtocolKind::DistributedActor)) {
-        ctx.Diags.diagnose(param->getLoc(),
-                           diag::isolated_parameter_no_actor_conformance,
-                           paramType);
-      }
-    }
-
+    Type paramType = param->getDeclContext()->mapTypeIntoContext(
+        param->getInterfaceType());
     Type actorType;
     if (auto wrapped = paramType->getOptionalObjectType()) {
       actorType = wrapped;
@@ -4873,6 +4953,9 @@ ActorIsolation ActorIsolationRequest::evaluate(
             inferred == ActorIsolation::NonisolatedUnsafe, /*implicit=*/true));
         break;
 
+      case ActorIsolation::Erased:
+        llvm_unreachable("cannot infer erased isolation");
+
       case ActorIsolation::GlobalActor: {
         // Stored properties of a struct don't need global-actor isolation.
         if (ctx.isSwiftVersionAtLeast(6))
@@ -4925,6 +5008,9 @@ ActorIsolation ActorIsolationRequest::evaluate(
       case ActorIsolation::Unspecified:
         // Do nothing.
         break;
+
+      case ActorIsolation::Erased:
+        llvm_unreachable("context cannot have erased isolation");
 
       case ActorIsolation::ActorInstance:
         if (auto param = func->getCaptureInfo().getIsolatedParamCapture())
@@ -5100,6 +5186,9 @@ bool HasIsolatedSelfRequest::evaluate(
 
     case ActorIsolation::GlobalActor:
       return false;
+
+    case ActorIsolation::Erased:
+      llvm_unreachable("property cannot have erased isolation");
 
     case ActorIsolation::ActorInstance:
       if (isolation.getActor() != selfTypeDecl)
@@ -5488,6 +5577,9 @@ bool swift::checkSendableConformance(
   case ActorIsolation::Nonisolated:
   case ActorIsolation::NonisolatedUnsafe:
     break;
+
+  case ActorIsolation::Erased:
+    llvm_unreachable("type cannot have erased isolation");
 
   case ActorIsolation::GlobalActor:
     return false;
@@ -5971,6 +6063,9 @@ AnyFunctionType *swift::adjustFunctionTypeForConcurrency(
       assert(fnType->getIsolation().isNonIsolated());
       return fnType;
 
+    case ActorIsolation::Erased:
+      llvm_unreachable("declaration cannot have erased isolation");
+
     case ActorIsolation::GlobalActor:
       // For preconcurrency, only treat as global-actor-qualified
       // within code that has adopted Swift Concurrency features.
@@ -6258,6 +6353,9 @@ bool swift::isAccessibleAcrossActors(
     case ActorIsolation::NonisolatedUnsafe:
     case ActorIsolation::Unspecified:
       return true;
+
+    case ActorIsolation::Erased:
+      llvm_unreachable("declaration cannot have erased isolation");
 
     case ActorIsolation::GlobalActor:
       return false;

@@ -1330,16 +1330,9 @@ static GenericSignature getPlaceholderGenericSignature(
 GenericSignature GenericContext::getGenericSignature() const {
   // Don't use evaluateOrDefault() here, because getting the 'default value'
   // is slightly expensive here so we don't want to do it eagerly.
-  auto result = getASTContext().evaluator(
-      GenericSignatureRequest{const_cast<GenericContext *>(this)});
-  if (auto err = result.takeError()) {
-    llvm::handleAllErrors(std::move(err),
-      [](const CyclicalRequestError<GenericSignatureRequest> &E) {
-        // cycle detected
-      });
-    return getPlaceholderGenericSignature(this);
-  }
-  return *result;
+  return getASTContext().evaluator(
+      GenericSignatureRequest{const_cast<GenericContext *>(this)},
+      [this]() { return getPlaceholderGenericSignature(this); });
 }
 
 GenericEnvironment *GenericContext::getGenericEnvironment() const {
@@ -2492,6 +2485,7 @@ static bool deferMatchesEnclosingAccess(const FuncDecl *defer) {
 
           case ActorIsolation::ActorInstance:
           case ActorIsolation::Nonisolated:
+          case ActorIsolation::Erased: // really can't happen
             return true;
         }
       }
@@ -3866,12 +3860,8 @@ bool ValueDecl::isRecursiveValidation() const {
 
 Type ValueDecl::getInterfaceType() const {
   auto &ctx = getASTContext();
-  if (auto type =
-          evaluateOrDefault(ctx.evaluator,
-                            InterfaceTypeRequest{const_cast<ValueDecl *>(this)},
-                            Type()))
-    return type;
-  return ErrorType::get(ctx);
+  return ctx.evaluator(InterfaceTypeRequest{const_cast<ValueDecl *>(this)},
+                       [&ctx]() { return ErrorType::get(ctx); });
 }
 
 void ValueDecl::setInterfaceType(Type type) {
@@ -6741,7 +6731,6 @@ bool ProtocolDecl::isComputingRequirementSignature() const {
 }
 
 void ProtocolDecl::setRequirementSignature(RequirementSignature requirementSig) {
-  assert(!RequirementSig && "requirement signature already set");
   RequirementSig = requirementSig;
 }
 
@@ -10919,8 +10908,14 @@ Type ClassDecl::getSuperclass() const {
 
 ClassDecl *ClassDecl::getSuperclassDecl() const {
   ASTContext &ctx = getASTContext();
-  return evaluateOrDefault(ctx.evaluator,
-    SuperclassDeclRequest{const_cast<ClassDecl *>(this)}, nullptr);
+  auto result = evaluateOrDefault(ctx.evaluator,
+    SuperclassDeclRequest{const_cast<ClassDecl *>(this)},
+    const_cast<ClassDecl *>(this));
+
+  if (result == this)
+    return nullptr;
+
+  return result;
 }
 
 void ClassDecl::setSuperclass(Type superclass) {
@@ -10953,6 +10948,7 @@ bool VarDecl::isSelfParamCaptureIsolated() const {
       case ActorIsolation::Nonisolated:
       case ActorIsolation::NonisolatedUnsafe:
       case ActorIsolation::GlobalActor:
+      case ActorIsolation::Erased:
         return false;
 
       case ActorIsolation::ActorInstance:
@@ -11413,6 +11409,13 @@ bool ActorIsolation::isEqual(const ActorIsolation &lhs,
   case NonisolatedUnsafe:
   case Unspecified:
     return true;
+
+  case Erased:
+    // Different functions with erased isolation have the same *kind* of
+    // isolation, but we must generally assume that they're not isolated
+    // the *same way*, which is what this function is apparently supposed
+    // to answer.
+    return false;
 
   case ActorInstance: {
     auto *lhsActor = lhs.getActorInstance();

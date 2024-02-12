@@ -596,7 +596,8 @@ SILGenModule::getKeyPathProjectionCoroutine(bool isReadAccess,
 
   SILGenFunctionBuilder builder(*this);
   fn = builder.createFunction(
-      SILLinkage::PublicExternal, functionName, functionTy, env,
+      SILLinkage::PublicExternal, 
+                              functionName, functionTy, env,
       /*location*/ llvm::None, IsNotBare, IsNotTransparent, IsNotSerialized,
       IsNotDynamic, IsNotDistributed, IsNotRuntimeAccessible);
 
@@ -1898,7 +1899,7 @@ static bool canStorageUseTrivialDescriptor(SILGenModule &SGM,
     if (!setter)
       return true;
 
-    if (setter->getFormalAccessScope(nullptr, true).isPublic())
+    if (setter->getFormalAccessScope(nullptr, true).isPublicOrPackage())
       return true;
 
     return false;
@@ -2108,7 +2109,7 @@ ASTLoweringRequest::evaluate(Evaluator &evaluator,
                              ASTLoweringDescriptor desc) const {
   // If we have a .sil file to parse, defer to the parsing request.
   if (desc.getSourceFileToParse()) {
-    return llvm::cantFail(evaluator(ParseSILModuleRequest{desc}));
+    return evaluateOrFatal(evaluator, ParseSILModuleRequest{desc});
   }
 
   // For leak detection.
@@ -2161,8 +2162,8 @@ swift::performASTLowering(ModuleDecl *mod, Lowering::TypeConverter &tc,
                           const IRGenOptions *irgenOptions) {
   auto desc = ASTLoweringDescriptor::forWholeModule(mod, tc, options,
                                                     llvm::None, irgenOptions);
-  return llvm::cantFail(
-      mod->getASTContext().evaluator(ASTLoweringRequest{desc}));
+  return evaluateOrFatal(mod->getASTContext().evaluator,
+                         ASTLoweringRequest{desc});
 }
 
 std::unique_ptr<SILModule> swift::performASTLowering(CompilerInstance &CI,
@@ -2174,7 +2175,8 @@ std::unique_ptr<SILModule> swift::performASTLowering(CompilerInstance &CI,
   auto &TC = CI.getSILTypes();
   auto Desc = ASTLoweringDescriptor::forWholeModule(
       M, TC, SILOpts, std::move(Sources), &IRGenOpts);
-  return llvm::cantFail(M->getASTContext().evaluator(ASTLoweringRequest{Desc}));
+  return evaluateOrFatal(M->getASTContext().evaluator,
+                         ASTLoweringRequest{Desc});
 }
 
 std::unique_ptr<SILModule>
@@ -2183,5 +2185,6 @@ swift::performASTLowering(FileUnit &sf, Lowering::TypeConverter &tc,
                           const IRGenOptions *irgenOptions) {
   auto desc =
       ASTLoweringDescriptor::forFile(sf, tc, options, llvm::None, irgenOptions);
-  return llvm::cantFail(sf.getASTContext().evaluator(ASTLoweringRequest{desc}));
+  return evaluateOrFatal(sf.getASTContext().evaluator,
+                         ASTLoweringRequest{desc});
 }

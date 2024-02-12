@@ -1217,15 +1217,11 @@ Type ConstraintSystem::openOpaqueType(Type type, ContextualTypePurpose context,
   if (!type || !type->hasOpaqueArchetype())
     return type;
 
-  auto inReturnContext = [](ContextualTypePurpose context) {
-    return context == CTP_ReturnStmt || context == CTP_ImpliedReturnStmt;
-  };
-
-  if (!(context == CTP_Initialization || inReturnContext(context)))
+  if (!(context == CTP_Initialization || context == CTP_ReturnStmt))
     return type;
 
   auto shouldOpen = [&](OpaqueTypeArchetypeType *opaqueType) {
-    if (!inReturnContext(context))
+    if (context != CTP_ReturnStmt)
       return true;
 
     if (auto *func = dyn_cast<AbstractFunctionDecl>(DC))
@@ -4423,7 +4419,6 @@ size_t Solution::getTotalMemory() const {
          size_in_bytes(PackEnvironments) +
          PackElementGenericEnvironments.size() +
          (DefaultedConstraints.size() * sizeof(void *)) +
-         ImplicitCallAsFunctionRoots.getMemorySize() +
          nodeTypes.getMemorySize() +
          keyPathComponentTypes.getMemorySize() +
          size_in_bytes(KeyPaths) +
@@ -6675,10 +6670,10 @@ bool constraints::isTypeErasedKeyPathType(Type type) {
   return superclass ? isTypeErasedKeyPathType(superclass) : false;
 }
 
-bool constraints::hasExplicitResult(ClosureExpr *closure) {
+bool constraints::hasResultExpr(ClosureExpr *closure) {
   auto &ctx = closure->getASTContext();
-  return evaluateOrDefault(ctx.evaluator,
-                           ClosureHasExplicitResultRequest{closure}, false);
+  return evaluateOrDefault(ctx.evaluator, ClosureHasResultExprRequest{closure},
+                           false);
 }
 
 Type constraints::getConcreteReplacementForProtocolSelfType(ValueDecl *member) {
@@ -7034,7 +7029,7 @@ Expr *ConstraintSystem::buildAutoClosureExpr(Expr *expr,
 Expr *ConstraintSystem::buildTypeErasedExpr(Expr *expr, DeclContext *dc,
                                             Type contextualType,
                                             ContextualTypePurpose purpose) {
-  if (!(purpose == CTP_ReturnStmt || purpose == CTP_ImpliedReturnStmt))
+  if (purpose != CTP_ReturnStmt)
     return expr;
 
   auto *decl = dyn_cast_or_null<ValueDecl>(dc->getAsDecl());
@@ -7724,6 +7719,9 @@ ConstraintSystem::inferKeyPathLiteralCapability(KeyPathExpr *keyPath) {
       case ActorIsolation::Nonisolated:
       case ActorIsolation::NonisolatedUnsafe:
         break;
+
+      case ActorIsolation::Erased:
+        llvm_unreachable("storage cannot have opaque isolation");
 
       // A reference to an actor isolated state make key path non-Sendable.
       case ActorIsolation::ActorInstance:
