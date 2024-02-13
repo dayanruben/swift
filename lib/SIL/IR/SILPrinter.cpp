@@ -2114,6 +2114,9 @@ public:
   void visitMarkUnresolvedNonCopyableValueInst(
       MarkUnresolvedNonCopyableValueInst *I) {
     using CheckKind = MarkUnresolvedNonCopyableValueInst::CheckKind;
+    if (I->isStrict()) {
+      *this << "[strict] ";
+    }
     switch (I->getCheckKind()) {
     case CheckKind::Invalid:
       llvm_unreachable("Invalid?!");
@@ -2533,10 +2536,12 @@ public:
     switch (MDI->dependenceKind()) {
     case MarkDependenceKind::Unresolved:
       *this << "[unresolved] ";
+      break;
     case MarkDependenceKind::Escaping:
       break;
     case MarkDependenceKind::NonEscaping:
       *this << "[nonescaping] ";
+      break;
     }
     *this << getIDAndType(MDI->getValue()) << " on "
           << getIDAndType(MDI->getBase());
@@ -3391,12 +3396,6 @@ void SILFunction::print(SILPrintContext &PrintCtx) const {
   if (auto *replacedFun = getDynamicallyReplacedFunction()) {
     OS << "[dynamic_replacement_for \"";
     OS << replacedFun->getName();
-    OS << "\"] ";
-  }
-
-  if (auto *usedFunc = getReferencedAdHocRequirementWitnessFunction()) {
-    OS << "[ref_adhoc_requirement_witness \"";
-    OS << usedFunc->getName();
     OS << "\"] ";
   }
 
