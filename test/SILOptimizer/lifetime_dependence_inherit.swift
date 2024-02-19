@@ -7,6 +7,7 @@
 // RUN:   -enable-experimental-feature NonescapableTypes \
 // RUN:   -Xllvm -enable-lifetime-dependence-diagnostics
 
+// REQUIRES: asserts
 // REQUIRES: swift_in_compiler
 
 @_nonescapable
@@ -39,8 +40,6 @@ struct NE {
 }
 
 // Test lifetime inheritance through chained consumes.
-//
-// This requires an inherit_lifetime marker on the argument.
 func bv_derive(bv: consuming BV) -> _consume(bv) BV {
   bv.derive()
 }

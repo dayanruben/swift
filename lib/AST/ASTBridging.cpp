@@ -869,6 +869,8 @@ BridgedParamDecl BridgedParamDecl_createParsed(
           paramDecl->setIsolated(true);
         else if (isa<CompileTimeConstTypeRepr>(STR))
           paramDecl->setCompileTimeConst(true);
+        else if (isa<TransferringTypeRepr>(STR))
+          paramDecl->setTransferring(true);
 
         unwrappedType = STR->getBase();
         continue;
@@ -1353,6 +1355,25 @@ bool BridgedNominalTypeDecl_isStructWithUnreferenceableStorage(
 // MARK: Exprs
 //===----------------------------------------------------------------------===//
 
+BridgedArgumentList BridgedArgumentList_createParsed(
+    BridgedASTContext cContext, BridgedSourceLoc cLParenLoc,
+    BridgedArrayRef cArgs, BridgedSourceLoc cRParenLoc,
+    size_t cFirstTrailingClosureIndex) {
+  SmallVector<Argument> arguments;
+  arguments.reserve(cArgs.unbridged<BridgedCallArgument>().size());
+  for (auto &arg : cArgs.unbridged<BridgedCallArgument>()) {
+    arguments.push_back(arg.unbridged());
+  }
+
+  std::optional<unsigned int> firstTrailingClosureIndex;
+  if (cFirstTrailingClosureIndex < arguments.size())
+    firstTrailingClosureIndex = cFirstTrailingClosureIndex;
+
+  return ArgumentList::createParsed(
+      cContext.unbridged(), cLParenLoc.unbridged(), arguments,
+      cRParenLoc.unbridged(), firstTrailingClosureIndex);
+}
+
 BridgedArrayExpr BridgedArrayExpr_createParsed(BridgedASTContext cContext,
                                                BridgedSourceLoc cLLoc,
                                                BridgedArrayRef elements,
@@ -1402,25 +1423,15 @@ BridgedBorrowExpr BridgedBorrowExpr_createParsed(BridgedASTContext cContext,
 
 BridgedCallExpr BridgedCallExpr_createParsed(BridgedASTContext cContext,
                                              BridgedExpr fn,
-                                             BridgedTupleExpr args) {
-  ASTContext &context = cContext.unbridged();
-  TupleExpr *TE = args.unbridged();
-  SmallVector<Argument, 8> arguments;
-  for (unsigned i = 0; i < TE->getNumElements(); ++i) {
-    arguments.emplace_back(TE->getElementNameLoc(i), TE->getElementName(i),
-                           TE->getElement(i));
-  }
-  auto *argList = ArgumentList::create(context, TE->getLParenLoc(), arguments,
-                                       TE->getRParenLoc(), llvm::None,
-                                       /*isImplicit*/ false);
-  return CallExpr::create(context, fn.unbridged(), argList,
+                                             BridgedArgumentList cArguments) {
+  return CallExpr::create(cContext.unbridged(), fn.unbridged(),
+                          cArguments.unbridged(),
                           /*implicit*/ false);
 }
 
-BridgedClosureExpr
-BridgedClosureExpr_createParsed(BridgedASTContext cContext,
-                                BridgedDeclContext cDeclContext,
-                                BridgedBraceStmt body) {
+BridgedClosureExpr BridgedClosureExpr_createParsed(
+    BridgedASTContext cContext, BridgedDeclContext cDeclContext,
+    BridgedParameterList cParamList, BridgedBraceStmt body) {
   DeclAttributes attributes;
   SourceRange bracketRange;
   SourceLoc asyncLoc;
@@ -1431,13 +1442,11 @@ BridgedClosureExpr_createParsed(BridgedASTContext cContext,
   ASTContext &context = cContext.unbridged();
   DeclContext *declContext = cDeclContext.unbridged();
 
-  auto params = ParameterList::create(context, inLoc, {}, inLoc);
-
   auto *out = new (context) ClosureExpr(
-      attributes, bracketRange, nullptr, nullptr, asyncLoc, throwsLoc,
+      attributes, bracketRange, nullptr, cParamList.unbridged(), asyncLoc,
+      throwsLoc,
       /*FIXME:thrownType=*/nullptr, arrowLoc, inLoc, nullptr, declContext);
   out->setBody(body.unbridged());
-  out->setParameterList(params);
   return out;
 }
 
@@ -2175,8 +2184,7 @@ BridgedSpecifierTypeRepr BridgedSpecifierTypeRepr_createParsed(
         OwnershipTypeRepr(baseType, ParamSpecifier::LegacyOwned, loc);
   }
   case BridgedAttributedTypeSpecifierTransferring: {
-    return new (context)
-        OwnershipTypeRepr(baseType, ParamSpecifier::Transferring, loc);
+    return new (context) TransferringTypeRepr(baseType, loc);
   }
   case BridgedAttributedTypeSpecifierConst: {
     return new (context) CompileTimeConstTypeRepr(baseType, loc);
@@ -2225,15 +2233,19 @@ BridgedTupleTypeRepr BridgedTupleTypeRepr_createParsed(
                                SourceRange{lParen, rParen});
 }
 
-BridgedTypeRepr
-BridgedMemberTypeRepr_createParsed(BridgedASTContext cContext,
-                                   BridgedTypeRepr baseComponent,
-                                   BridgedArrayRef bridgedMemberComponents) {
+BridgedDeclRefTypeRepr BridgedDeclRefTypeRepr_createParsed(
+    BridgedASTContext cContext, BridgedTypeRepr cBase, BridgedIdentifier cName,
+    BridgedSourceLoc cLoc, BridgedArrayRef cGenericArguments,
+    BridgedSourceRange cAngleRange) {
   ASTContext &context = cContext.unbridged();
-  auto memberComponents = bridgedMemberComponents.unbridged<IdentTypeRepr *>();
+  auto genericArguments = cGenericArguments.unbridged<TypeRepr *>();
+  auto angleRange = cAngleRange.unbridged();
 
-  return MemberTypeRepr::create(context, baseComponent.unbridged(),
-                                memberComponents);
+  assert(angleRange.isValid() || genericArguments.empty());
+
+  return DeclRefTypeRepr::create(
+      context, cBase.unbridged(), DeclNameLoc(cLoc.unbridged()),
+      DeclNameRef(cName.unbridged()), genericArguments, angleRange);
 }
 
 BridgedCompositionTypeRepr

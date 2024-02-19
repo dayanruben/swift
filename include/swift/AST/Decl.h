@@ -356,7 +356,7 @@ protected:
   // for the inline bitfields.
   union { uint64_t OpaqueBits;
 
-  SWIFT_INLINE_BITFIELD_BASE(Decl, bitmax(NumDeclKindBits,8)+1+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD_BASE(Decl, bitmax(NumDeclKindBits,8)+1+1+1+1+1+1+1,
     Kind : bitmax(NumDeclKindBits,8),
 
     /// Whether this declaration is invalid.
@@ -382,7 +382,12 @@ protected:
     Hoisted : 1,
 
     /// Whether the set of semantic attributes has been computed.
-    SemanticAttrsComputed : 1
+    SemanticAttrsComputed : 1,
+
+    /// True if \c ObjCInterfaceAndImplementationRequest has been computed
+    /// and did \em not find anything. This is the fast path where we can bail
+    /// out without checking other caches or computing anything.
+    LacksObjCInterfaceOrImplementation : 1
   );
 
   SWIFT_INLINE_BITFIELD_FULL(PatternBindingDecl, Decl, 1+1+2+16,
@@ -502,7 +507,7 @@ protected:
   );
 
   SWIFT_INLINE_BITFIELD(FuncDecl, AbstractFunctionDecl,
-                        1+1+2+1+1+NumSelfAccessKindBits+1,
+                        1+1+2+1+1+NumSelfAccessKindBits+1+1,
     /// Whether we've computed the 'static' flag yet.
     IsStaticComputed : 1,
 
@@ -524,7 +529,10 @@ protected:
     /// Whether this is a top-level function which should be treated
     /// as if it were in local context for the purposes of capture
     /// analysis.
-    HasTopLevelLocalContextCaptures : 1
+    HasTopLevelLocalContextCaptures : 1,
+
+    /// Set to true if this FuncDecl has a transferring result.
+    HasTransferringResult : 1
   );
 
   SWIFT_INLINE_BITFIELD(AccessorDecl, FuncDecl, 4 + 1 + 1,
@@ -810,13 +818,6 @@ protected:
 private:
   llvm::PointerUnion<DeclContext *, ASTContext *> Context;
 
-  /// The imported Clang declaration representing the \c @_objcInterface for
-  /// this declaration (or vice versa), or \c nullptr if there is none.
-  ///
-  /// If \c this (an otherwise nonsensical value), the value has not yet been
-  /// computed.
-  Decl *CachedObjCImplementationDecl;
-
   Decl(const Decl&) = delete;
   void operator=(const Decl&) = delete;
   SourceLoc getLocFromSource() const;
@@ -834,7 +835,7 @@ private:
 protected:
 
   Decl(DeclKind kind, llvm::PointerUnion<DeclContext *, ASTContext *> context)
-    : Context(context), CachedObjCImplementationDecl(this) {
+    : Context(context) {
     Bits.OpaqueBits = 0;
     Bits.Decl.Kind = unsigned(kind);
     Bits.Decl.Invalid = false;
@@ -842,6 +843,7 @@ protected:
     Bits.Decl.FromClang = false;
     Bits.Decl.EscapedFromIfConfig = false;
     Bits.Decl.Hoisted = false;
+    Bits.Decl.LacksObjCInterfaceOrImplementation = false;
   }
 
   /// Get the Clang node associated with this declaration.
@@ -1162,10 +1164,23 @@ public:
   }
 
   /// If this is the Swift implementation of a declaration imported from ObjC,
-  /// returns the imported declaration. Otherwise return \c nullptr.
+  /// returns the imported declaration. (If there are several, only the main
+  /// class body will be returned.) Otherwise return \c nullptr.
   ///
   /// \seeAlso ExtensionDecl::isObjCInterface()
-  Decl *getImplementedObjCDecl() const;
+  Decl *getImplementedObjCDecl() const {
+    auto impls = getAllImplementedObjCDecls();
+    if (impls.empty())
+      return nullptr;
+    return impls.front();
+  }
+
+  /// If this is the Swift implementation of a declaration imported from ObjC,
+  /// returns the imported declarations. (There may be several for a main class
+  /// body; if so, the first will be the class itself.) Otherwise return an empty list.
+  ///
+  /// \seeAlso ExtensionDecl::isObjCInterface()
+  llvm::TinyPtrVector<Decl *> getAllImplementedObjCDecls() const;
 
   /// If this is the ObjC interface of a declaration implemented in Swift,
   /// returns the implementating declaration. Otherwise return \c nullptr.
@@ -1173,18 +1188,12 @@ public:
   /// \seeAlso ExtensionDecl::isObjCInterface()
   Decl *getObjCImplementationDecl() const;
 
-  llvm::Optional<Decl *> getCachedObjCImplementationDecl() const {
-    if (CachedObjCImplementationDecl == this)
-      return llvm::None;
-    return CachedObjCImplementationDecl;
+  bool getCachedLacksObjCInterfaceOrImplementation() const {
+    return Bits.Decl.LacksObjCInterfaceOrImplementation;
   }
 
-  void setCachedObjCImplementationDecl(Decl *decl) {
-    assert((CachedObjCImplementationDecl == this
-              || CachedObjCImplementationDecl == decl)
-               && "can't change CachedObjCInterfaceDecl once it's computed");
-    assert(decl != this && "can't form circular reference");
-    CachedObjCImplementationDecl = decl;
+  void setCachedLacksObjCInterfaceOrImplementation(bool value) {
+    Bits.Decl.LacksObjCInterfaceOrImplementation = value;
   }
 
   /// Return the GenericContext if the Decl has one.
@@ -1280,7 +1289,8 @@ public:
   getSemanticAvailableRangeAttr() const;
 
   /// Retrieve the @available attribute that makes this declaration unavailable,
-  /// if any.
+  /// if any. If \p ignoreAppExtensions is true then attributes for app
+  /// extension platforms are ignored.
   ///
   /// This attribute may come from an enclosing decl since availability is
   /// inherited. The second member of the returned pair is the decl that owns
@@ -1289,7 +1299,7 @@ public:
   /// Note that this notion of unavailability is broader than that which is
   /// checked by \c AvailableAttr::isUnavailable.
   llvm::Optional<std::pair<const AvailableAttr *, const Decl *>>
-  getSemanticUnavailableAttr() const;
+  getSemanticUnavailableAttr(bool ignoreAppExtensions = false) const;
 
   /// Returns true if this declaration should be considered available during
   /// SIL/IR lowering. A declaration would not be available during lowering if,
@@ -1846,8 +1856,8 @@ public:
   bool isEquivalentToExtendedContext() const;
 
   /// Returns the name of the category specified by the \c \@_objcImplementation
-  /// attribute, or \c None if the name is invalid. Do not call unless
-  /// \c isObjCImplementation() returns \c true.
+  /// attribute, or \c None if the name is invalid or
+  /// \c isObjCImplementation() is false.
   llvm::Optional<Identifier> getCategoryNameForObjCImplementation() const;
 
   /// If this extension represents an imported Objective-C category, returns the
@@ -2763,6 +2773,12 @@ public:
     Bits.ValueDecl.Synthesized = value;
   }
 
+  /// Does this have a 'distributed' modifier?
+  ///
+  /// Only member methods and computed properties of a `distributed actor`
+  /// can be distributed.
+  bool isDistributed() const;
+
   bool hasName() const { return bool(Name); }
   bool isOperator() const { return Name.isOperator(); }
 
@@ -2914,9 +2930,10 @@ public:
   /// if the base declaration is \c open, the override might have to be too.
   bool hasOpenAccess(const DeclContext *useDC) const;
 
-  /// Returns whether this declaration should be treated as having the \c
-  /// package access level.
-  bool hasPackageAccess() const;
+  /// True if opted in for bypassing resilience within a package. Allowed only on
+  /// access from the \p accessingModule to a package decl in the defining
+  /// binary (not interface) module within the same package.
+  bool bypassResilienceInPackage(ModuleDecl *accessingModule) const;
 
   /// FIXME: This is deprecated.
   bool isRecursiveValidation() const;
@@ -4962,11 +4979,14 @@ public:
   /// the Objective-C runtime.
   StringRef getObjCRuntimeName(llvm::SmallVectorImpl<char> &buffer) const;
 
-  /// Return the imported declaration for the category with the given name; this
-  /// will always be an Objective-C-backed \c ExtensionDecl or, if \p name is
-  /// empty, \c ClassDecl. Returns \c nullptr if the class was not imported from
-  /// Objective-C or does not have an imported category by that name.
-  IterableDeclContext *getImportedObjCCategory(Identifier name) const;
+  /// Return the imported declaration(s) for the category with the given name; this
+  /// will either be a single imported \c ExtensionDecl, an imported
+  /// \c ClassDecl followed by zero or more imported \c ExtensionDecl s (if
+  /// \p name is empty; the extensions are for any class extensions), or empty
+  /// if the class was not imported from Objective-C or does not have a
+  /// category by that name.
+  llvm::TinyPtrVector<Decl *>
+  getImportedObjCCategory(Identifier name) const;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) {
@@ -5837,13 +5857,6 @@ public:
                                    ModuleDecl *module,
                                    ResilienceExpansion expansion) const;
 
-  /// Should this declaration behave as if it must be accessed
-  /// resiliently, even when we're building a non-resilient module?
-  ///
-  /// This is used for diagnostics, because we do not want a behavior
-  /// change between builds with resilience enabled and disabled.
-  bool isFormallyResilient() const;
-
   /// Do we need to use resilient access patterns outside of this
   /// property's resilience domain?
   bool isResilient() const;
@@ -5866,9 +5879,6 @@ public:
   bool hasDidSetOrWillSetDynamicReplacement() const;
 
   bool hasAnyNativeDynamicAccessors() const;
-
-  /// Does this have a 'distributed' modifier?
-  bool isDistributed() const;
 
   /// Return a distributed thunk if this computed property is marked as
   /// 'distributed' and and nullptr otherwise.
@@ -6459,8 +6469,6 @@ class ParamDecl : public VarDecl {
   SourceLoc ArgumentNameLoc;
   SourceLoc SpecifierLoc;
 
-  TypeRepr *TyRepr = nullptr;
-
   struct alignas(1 << StoredDefaultArgumentAlignInBits) StoredDefaultArgument {
     PointerUnion<Expr *, VarDecl *> DefaultArg;
 
@@ -6479,7 +6487,9 @@ class ParamDecl : public VarDecl {
   /// argument without triggering a request.
   llvm::Optional<Initializer *> getCachedDefaultArgumentInitContext() const;
 
-  enum class Flags : uint8_t {
+  /// NOTE: This is stored using bits from TyReprAndFlags and
+  /// DefaultValueAndFlags.
+  enum class Flag : uint8_t {
     /// Whether or not this parameter is vargs.
     IsVariadic = 1 << 0,
 
@@ -6491,11 +6501,65 @@ class ParamDecl : public VarDecl {
 
     /// Whether or not this paramater is '_resultDependsOn'
     IsResultDependsOn = 1 << 3,
+
+    /// Whether or not this parameter is 'transferring'.
+    IsTransferring = 1 << 4,
   };
 
-  /// The default value, if any, along with flags.
-  llvm::PointerIntPair<StoredDefaultArgument *, 3, OptionSet<Flags>>
+  /// The type repr and 3 bits used for flags.
+  llvm::PointerIntPair<TypeRepr *, 3, std::underlying_type<Flag>::type>
+      TyReprAndFlags;
+
+  /// The default value, if any, along with 3 bits for flags.
+  llvm::PointerIntPair<StoredDefaultArgument *, 3,
+                       std::underlying_type<Flag>::type>
       DefaultValueAndFlags;
+
+  OptionSet<Flag> getOptions() const {
+    uint8_t result = 0;
+    result |= TyReprAndFlags.getInt();
+    result |= DefaultValueAndFlags.getInt() << 3;
+    return OptionSet<Flag>(result);
+  }
+
+  /// Set the current set of options to \p newFlags.
+  void setOptions(OptionSet<Flag> newFlags) {
+    uint8_t bits = newFlags.toRaw();
+    TyReprAndFlags.setInt(bits & 0x7);
+    DefaultValueAndFlags.setInt(bits >> 3);
+  }
+
+  void setOptionsAndPointers(TypeRepr *tyRepr,
+                             StoredDefaultArgument *storedArgs,
+                             OptionSet<Flag> newFlags) {
+    uint8_t bits = newFlags.toRaw();
+    TyReprAndFlags.setPointerAndInt(tyRepr, bits & 0x7);
+    DefaultValueAndFlags.setPointerAndInt(storedArgs, bits >> 3);
+  }
+
+  void addFlag(Flag newFlag) {
+    auto flagBits = uint8_t(newFlag);
+    if (uint8_t(newFlag) < (1 << 3)) {
+      flagBits &= 0x7;
+      TyReprAndFlags.setInt(TyReprAndFlags.getInt() | flagBits);
+      return;
+    }
+
+    flagBits >>= 3;
+    DefaultValueAndFlags.setInt(DefaultValueAndFlags.getInt() | flagBits);
+  }
+
+  void removeFlag(Flag newFlag) {
+    auto flagBits = uint8_t(newFlag);
+    if (uint8_t(newFlag) < (1 << 3)) {
+      flagBits &= 0x7;
+      TyReprAndFlags.setInt(TyReprAndFlags.getInt() & ~flagBits);
+      return;
+    }
+
+    flagBits >>= 3;
+    DefaultValueAndFlags.setInt(DefaultValueAndFlags.getInt() & ~flagBits);
+  }
 
   friend class ParamSpecifierRequest;
 
@@ -6542,8 +6606,8 @@ public:
   SourceLoc getSpecifierLoc() const { return SpecifierLoc; }
 
   /// Retrieve the TypeRepr corresponding to the parsed type of the parameter, if it exists.
-  TypeRepr *getTypeRepr() const { return TyRepr; }
-  void setTypeRepr(TypeRepr *repr) { TyRepr = repr; }
+  TypeRepr *getTypeRepr() const { return TyReprAndFlags.getPointer(); }
+  void setTypeRepr(TypeRepr *repr) { TyReprAndFlags.setPointer(repr); }
 
   bool isDestructured() const {
     auto flags = ArgumentNameAndFlags.getInt();
@@ -6665,30 +6729,44 @@ public:
   /// Whether or not this parameter is old-style variadic.
   bool isVariadic() const;
   void setVariadic(bool value = true) {
-    auto flags = DefaultValueAndFlags.getInt();
-    DefaultValueAndFlags.setInt(value ? flags | Flags::IsVariadic
-                                      : flags - Flags::IsVariadic);
+    if (value)
+      addFlag(Flag::IsVariadic);
+    else
+      removeFlag(Flag::IsVariadic);
   }
 
   /// Whether or not this parameter is marked with `@autoclosure`.
   bool isAutoClosure() const {
-    return DefaultValueAndFlags.getInt().contains(Flags::IsAutoClosure);
+    return getOptions().contains(Flag::IsAutoClosure);
   }
+
   void setAutoClosure(bool value = true) {
-    auto flags = DefaultValueAndFlags.getInt();
-    DefaultValueAndFlags.setInt(value ? flags | Flags::IsAutoClosure
-                                      : flags - Flags::IsAutoClosure);
+    if (value)
+      addFlag(Flag::IsAutoClosure);
+    else
+      removeFlag(Flag::IsAutoClosure);
   }
 
   /// Whether or not this parameter is marked with 'isolated'.
-  bool isIsolated() const {
-    return DefaultValueAndFlags.getInt().contains(Flags::IsIsolated);
-  }
+  bool isIsolated() const { return getOptions().contains(Flag::IsIsolated); }
 
   void setIsolated(bool value = true) {
-    auto flags = DefaultValueAndFlags.getInt();
-    DefaultValueAndFlags.setInt(value ? flags | Flags::IsIsolated
-                                      : flags - Flags::IsIsolated);
+    if (value)
+      addFlag(Flag::IsIsolated);
+    else
+      removeFlag(Flag::IsIsolated);
+  }
+
+  /// Whether or not this parameter is marked with 'transferring'.
+  bool isTransferring() const {
+    return getOptions().contains(Flag::IsTransferring);
+  }
+
+  void setTransferring(bool value = true) {
+    if (value)
+      addFlag(Flag::IsTransferring);
+    else
+      removeFlag(Flag::IsTransferring);
   }
 
   /// Whether or not this parameter is marked with '_const'.
@@ -6767,7 +6845,7 @@ public:
       return true;
     case Specifier::Consuming:
     case Specifier::InOut:
-    case Specifier::Transferring:
+    case Specifier::ImplicitlyCopyableConsuming:
       return false;
     }
     llvm_unreachable("unhandled specifier");
@@ -6785,7 +6863,7 @@ public:
     case ParamSpecifier::LegacyShared:
       return ValueOwnership::Shared;
     case ParamSpecifier::Consuming:
-    case ParamSpecifier::Transferring:
+    case ParamSpecifier::ImplicitlyCopyableConsuming:
     case ParamSpecifier::LegacyOwned:
       return ValueOwnership::Owned;
     case ParamSpecifier::Default:
@@ -7309,9 +7387,6 @@ public:
   /// Returns if the function is 'rethrows' or 'reasync'.
   bool hasPolymorphicEffect(EffectKind kind) const;
 
-  /// Returns 'true' if the function is distributed.
-  bool isDistributed() const;
-
   /// Is this a thunk function used to access a distributed method
   /// or computed property outside of its actor isolation context?
   bool isDistributedThunk() const {
@@ -7457,6 +7532,15 @@ public:
     return getBodyKind() == BodyKind::SILSynthesize &&
            getSILSynthesizeKind() == SILSynthesizeKind::DistributedActorFactory;
   }
+
+  /// Return a vector of distributed requirements that this distributed method
+  /// is implementing.
+  ///
+  /// If the method is witness to multiple requirements this is incorrect and
+  /// should be diagnosed during type-checking as it may make remoteCalls
+  /// ambiguous.
+  llvm::ArrayRef<ValueDecl *>
+  getDistributedMethodWitnessedProtocolRequirements() const;
 
   /// Determines whether this function is a 'remoteCall' function,
   /// which is used as ad-hoc protocol requirement by the
@@ -7710,6 +7794,7 @@ protected:
     Bits.FuncDecl.IsStaticComputed = false;
     Bits.FuncDecl.IsStatic = false;
     Bits.FuncDecl.HasTopLevelLocalContextCaptures = false;
+    Bits.FuncDecl.HasTransferringResult = false;
   }
 
   void setResultInterfaceType(Type type);
@@ -7864,6 +7949,16 @@ public:
   }
   void setForcedStaticDispatch(bool flag) {
     Bits.FuncDecl.ForcedStaticDispatch = flag;
+  }
+
+  /// Returns true if this FuncDecl has a transferring result... returns false
+  /// otherwise.
+  bool hasTransferringResult() const {
+    return Bits.FuncDecl.HasTransferringResult;
+  }
+
+  void setTransferringResult(bool newValue = true) {
+    Bits.FuncDecl.HasTransferringResult = newValue;
   }
 
   static bool classof(const Decl *D) {

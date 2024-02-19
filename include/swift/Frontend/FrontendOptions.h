@@ -129,33 +129,6 @@ public:
   /// The module for which we should verify all of the generic signatures.
   std::string VerifyGenericSignaturesInModule;
 
-  /// Enable compiler caching.
-  bool EnableCaching = false;
-
-  /// Enable compiler caching remarks.
-  bool EnableCachingRemarks = false;
-
-  /// Skip replaying outputs from cache.
-  bool CacheSkipReplay = false;
-
-  /// CASOptions
-  clang::CASOptions CASOpts;
-
-  /// CASFS Root.
-  std::vector<std::string> CASFSRootIDs;
-
-  /// Clang Include Trees.
-  std::vector<std::string> ClangIncludeTrees;
-
-  /// CacheKey for input file.
-  std::string InputFileKey;
-
-  /// Enable using the LLVM MCCAS backend for object file output.
-  bool UseCASBackend = false;
-
-  /// The output mode for the CAS Backend.
-  llvm::CASBackendMode CASObjMode;
-
   /// Emit a .casid file next to the object file if CAS Backend is used.
   bool EmitCASIDFile = false;
 
@@ -362,6 +335,9 @@ public:
   /// Disable building Swift modules from textual interfaces. This should be
   /// for testing purposes only.
   bool DisableBuildingInterface = false;
+
+  /// Is this frontend configuration of an interface dependency scan sub-invocation
+  bool DependencyScanningSubInvocation = false;
 
   /// When performing a dependency scanning action, only identify and output all imports
   /// of the main Swift module's source files.

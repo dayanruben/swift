@@ -76,6 +76,8 @@
 
 #define DEBUG_TYPE "Serialization"
 
+#pragma clang optimize off
+
 using namespace swift;
 using namespace swift::serialization;
 using namespace llvm::support;
@@ -1415,6 +1417,7 @@ static uint8_t getRawStableDefaultArgumentKind(swift::DefaultArgumentKind kind) 
   CASE(EmptyArray)
   CASE(EmptyDictionary)
   CASE(StoredProperty)
+  CASE(ExpressionMacro)
 #undef CASE
   }
 
@@ -2547,8 +2550,9 @@ static uint8_t getRawStableParamDeclSpecifier(swift::ParamDecl::Specifier sf) {
     return uint8_t(serialization::ParamDeclSpecifier::LegacyShared);
   case swift::ParamDecl::Specifier::LegacyOwned:
     return uint8_t(serialization::ParamDeclSpecifier::LegacyOwned);
-  case swift::ParamDecl::Specifier::Transferring:
-    return uint8_t(serialization::ParamDeclSpecifier::Transferring);
+  case swift::ParamDecl::Specifier::ImplicitlyCopyableConsuming:
+    return uint8_t(
+        serialization::ParamDeclSpecifier::ImplicitlyCopyableConsuming);
   }
   llvm_unreachable("bad param decl specifier kind");
 }
@@ -3019,6 +3023,9 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
           S.Out, S.ScratchRecord, abbrCode, false, /*implicit flag*/
           S.addDeclRef(afd), pieces.size(), pieces);
       return;
+    }
+    case DeclAttrKind::DistributedThunkTarget: {
+      assert(false && "not implemented");
     }
 
     case DeclAttrKind::TypeEraser: {
@@ -4402,12 +4409,14 @@ public:
 
     swift::DefaultArgumentKind argKind = param->getDefaultArgumentKind();
     if (argKind == swift::DefaultArgumentKind::Normal ||
-        argKind == swift::DefaultArgumentKind::StoredProperty) {
+        argKind == swift::DefaultArgumentKind::StoredProperty ||
+        argKind == swift::DefaultArgumentKind::ExpressionMacro) {
       defaultArgumentText =
         param->getDefaultValueStringRepresentation(scratch);
 
       // Serialize the type of the default expression (if any).
-      defaultExprType = param->getTypeOfDefaultExpr();
+      if (!param->hasCallerSideDefaultExpr())
+        defaultExprType = param->getTypeOfDefaultExpr();
     }
 
     auto isolation = param->getInitializerIsolation();
@@ -4427,6 +4436,7 @@ public:
         param->isAutoClosure(),
         param->isIsolated(),
         param->isCompileTimeConst(),
+        param->isTransferring(),
         getRawStableDefaultArgumentKind(argKind),
         S.addTypeRef(defaultExprType),
         getRawStableActorIsolationKind(isolation.getKind()),
@@ -4458,7 +4468,6 @@ public:
     Type ty = fn->getInterfaceType();
     for (auto dependency : collectDependenciesFromType(ty->getCanonicalType()))
       nameComponentsAndDependencies.push_back(S.addTypeRef(dependency));
-
     FuncLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode,
                            contextID.getOpaqueValue(),
                            fn->isImplicit(),
@@ -4486,6 +4495,7 @@ public:
                            S.addDeclRef(fn->getOpaqueResultTypeDecl()),
                            fn->isUserAccessible(),
                            fn->isDistributedThunk(),
+                           fn->hasTransferringResult(),
                            nameComponentsAndDependencies);
 
     writeGenericParams(fn->getGenericParams());
@@ -5113,6 +5123,11 @@ getRawSILParameterInfoOptions(swift::SILParameterInfo::Options options) {
     result |= SILParameterInfoFlags::Isolated;
   }
 
+  if (options.contains(SILParameterInfo::Transferring)) {
+    options -= SILParameterInfo::Transferring;
+    result |= SILParameterInfoFlags::Transferring;
+  }
+
   // If we still have options left, this code is out of sync... return none.
   if (bool(options))
     return {};
@@ -5517,7 +5532,8 @@ public:
         fnTy->isThrowing(),
         S.addTypeRef(fnTy->getThrownError()),
         getRawStableDifferentiabilityKind(fnTy->getDifferentiabilityKind()),
-        isolation);
+        isolation,
+        fnTy->hasTransferringResult());
 
     serializeFunctionTypeParams(fnTy);
   }
@@ -5534,7 +5550,7 @@ public:
         fnTy->isSendable(), fnTy->isAsync(), fnTy->isThrowing(),
         S.addTypeRef(fnTy->getThrownError()),
         getRawStableDifferentiabilityKind(fnTy->getDifferentiabilityKind()),
-        isolation,
+        isolation, fnTy->hasTransferringResult(),
         S.addGenericSignatureRef(genericSig));
 
     serializeFunctionTypeParams(fnTy);
@@ -5620,8 +5636,9 @@ public:
         S.Out, S.ScratchRecord, abbrCode, fnTy->isSendable(),
         fnTy->isAsync(), stableCoroutineKind, stableCalleeConvention,
         stableRepresentation, fnTy->isPseudogeneric(), fnTy->isNoEscape(),
-        fnTy->isUnimplementable(),
-        stableDiffKind, fnTy->hasErrorResult(), fnTy->getParameters().size(),
+        fnTy->isUnimplementable(), fnTy->hasErasedIsolation(),
+        stableDiffKind, fnTy->hasErrorResult(), fnTy->hasTransferringResult(),
+        fnTy->getParameters().size(),
         fnTy->getNumYields(), fnTy->getNumResults(),
         invocationSigID, invocationSubstMapID, patternSubstMapID,
         clangTypeID, variableData);

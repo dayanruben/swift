@@ -54,6 +54,7 @@ class ASTContext;
 struct PrintOptions;
 class CustomAttr;
 class Decl;
+class DeclRefTypeRepr;
 class AbstractFunctionDecl;
 class FuncDecl;
 class ClassDecl;
@@ -1766,7 +1767,7 @@ public:
   ///
   /// For an identifier type repr, return a pair of `nullptr` and the
   /// identifier.
-  std::pair<IdentTypeRepr *, IdentTypeRepr *> destructureMacroRef();
+  std::pair<IdentTypeRepr *, DeclRefTypeRepr *> destructureMacroRef();
 
   /// Whether the attribute has any arguments.
   bool hasArgs() const { return argList != nullptr; }
@@ -2603,6 +2604,28 @@ public:
   }
 };
 
+/// The @_distributedThunkTarget(for:) attribute.
+class DistributedThunkTargetAttr final
+    : public DeclAttribute {
+
+  AbstractFunctionDecl *TargetFunction;
+
+public:
+  DistributedThunkTargetAttr(AbstractFunctionDecl *target)
+      : DeclAttribute(DeclAttrKind::DistributedThunkTarget, SourceLoc(),
+                      SourceRange(),
+                      /*Implicit=*/false),
+        TargetFunction(target) {}
+
+  AbstractFunctionDecl *getTargetFunction() const {
+    return TargetFunction;
+  }
+
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DeclAttrKind::DistributedThunkTarget;
+  }
+};
+
 /// Predicate used to filter MatchingAttributeRange.
 template <typename ATTR, bool AllowInvalid> struct ToAttributeKind {
   ToAttributeKind() {}
@@ -2655,7 +2678,8 @@ public:
   /// Finds the most-specific platform-specific attribute that is
   /// active for the current platform.
   const AvailableAttr *
-  findMostSpecificActivePlatform(const ASTContext &ctx) const;
+  findMostSpecificActivePlatform(const ASTContext &ctx,
+                                 bool ignoreAppExtensions = false) const;
 
   /// Returns the first @available attribute that indicates
   /// a declaration is unavailable, or the first one that indicates it's
@@ -2664,7 +2688,8 @@ public:
 
   /// Returns the first @available attribute that indicates
   /// a declaration is unavailable, or null otherwise.
-  const AvailableAttr *getUnavailable(const ASTContext &ctx) const;
+  const AvailableAttr *getUnavailable(const ASTContext &ctx,
+                                      bool ignoreAppExtensions = false) const;
 
   /// Returns the first @available attribute that indicates
   /// a declaration is deprecated on all deployment targets, or null otherwise.

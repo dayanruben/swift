@@ -2843,16 +2843,18 @@ public:
 
     // Did we actually match this extension to an interface? (In invalid code,
     // we might not have.)
-    auto interfaceDecl = ext->getImplementedObjCDecl();
-    if (!interfaceDecl)
+    auto interfaceDecls = ext->getAllImplementedObjCDecls();
+    if (interfaceDecls.empty())
       return;
 
     // Add the @_objcImplementation extension's members as candidates.
     addCandidates(ext);
 
     // Add its interface's members as requirements.
-    auto interface = cast<IterableDeclContext>(interfaceDecl);
-    addRequirements(interface);
+    for (auto interfaceDecl : interfaceDecls) {
+      auto interface = cast<IterableDeclContext>(interfaceDecl);
+      addRequirements(interface);
+    }
   }
 
 private:
@@ -3281,17 +3283,25 @@ private:
           if (reqParams.size() != implParams.size())
             return false;
 
-          auto implParamList =
-              cast<AbstractFunctionDecl>(implDecl)->getParameters();
+          ParameterList *implParamList = nullptr;
+          if (auto afd = dyn_cast<AbstractFunctionDecl>(implDecl))
+            implParamList = afd->getParameters();
 
           for (auto i : indices(reqParams)) {
             const auto &reqParam = reqParams[i];
             const auto &implParam = implParams[i];
-            ParamDecl *implParamDecl = implParamList->get(i);
-
-            if (!matchParamTypes(reqParam.getOldType(), implParam.getOldType(),
-                                 implParamDecl))
-              return false;
+            if (implParamList) {
+              // Some of the parameters may be IUOs; apply special logic.
+              if (!matchParamTypes(reqParam.getOldType(),
+                                   implParam.getOldType(),
+                                   implParamList->get(i)))
+                return false;
+            } else {
+              // IUOs not allowed here; apply ordinary logic.
+              if (!reqParam.getOldType()->matchesParameter(
+                      implParam.getOldType(), matchOpts))
+                return false;
+            }
           }
 
           return matchTypes(funcReqTy->getResult(), funcImplTy->getResult(),
@@ -3335,9 +3345,9 @@ private:
 
     // Check only applies to members of implementations, not implementations in
     // their own right.
-    if (!cand->isObjCImplementation()
-          && cand->getDeclContext()->getImplementedObjCContext()
-                 != req->getDeclContext())
+    if (!cand->isObjCImplementation() &&
+          getCategoryName(cand->getDeclContext()->getImplementedObjCContext())
+               != getCategoryName(req->getDeclContext()))
       return MatchOutcome::WrongCategory;
 
     if (cand->getKind() != req->getKind())

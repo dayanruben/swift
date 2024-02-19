@@ -20,6 +20,7 @@
 #include "SILFormat.h"
 #include "SILSerializationFunctionBuilder.h"
 
+#include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
@@ -392,7 +393,8 @@ SILDeserializer::getSILDifferentiabilityWitnessForReference(
 
 /// Helper function to find a SILFunction, given its name and type.
 SILFunction *SILDeserializer::getFuncForReference(StringRef name,
-                                                  SILType type) {
+                                                  SILType type,
+                                                  TypeExpansionContext context) {
   // Check to see if we have a function by this name already.
   SILFunction *fn = SILMod.lookUpFunction(name);
   if (!fn) {
@@ -410,11 +412,27 @@ SILFunction *SILDeserializer::getFuncForReference(StringRef name,
     }
   }
 
-  // FIXME: check for matching types.
-
   // At this point, if fn is set, we know that we have a good function to use.
-  if (fn)
+  if (fn) {
+    SILType fnType = fn->getLoweredTypeInContext(context);
+    if (fnType != type &&
+        // It can happen that opaque return types cause a mismatch when merging
+        // modules, without causing any further assertion failures.
+        // TODO: fix the underlying problem
+        fnType.hasOpaqueArchetype() == type.hasOpaqueArchetype()) {
+      StringRef fnName = fn->getName();
+      if (auto *dc = fn->getDeclContext()) {
+        if (auto *decl = dyn_cast_or_null<AbstractFunctionDecl>(dc->getAsDecl()))
+          fnName = decl->getNameStr();
+      }
+      fn->getModule().getASTContext().Diags.diagnose(
+        fn->getLocation().getSourceLoc(),
+        diag::deserialize_function_type_mismatch,
+        fnName, fnType.getASTType(), type.getASTType());
+      exit(1);
+    }
     return fn;
+  }
 
   // Otherwise, create a function declaration with the right type and a bogus
   // source location. This ensures that we can at least parse the rest of the
@@ -1823,7 +1841,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     auto Ty = MF->getType(TyID);
     auto Ty2 = MF->getType(TyID2);
     SILType FnTy = getSILType(Ty, SILValueCategory::Object, Fn);
-    SILType closureTy = getSILType(Ty2, SILValueCategory::Object, Fn);
+    auto closureTy = getSILType(Ty2, SILValueCategory::Object, Fn)
+                       .castTo<SILFunctionType>();
 
     SubstitutionMap Substitutions = MF->getSubstitutionMap(NumSubs);
 
@@ -1846,13 +1865,14 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
           ListOfValues[I],
           fnConv.getSILArgumentType(I + unappliedArgs,
                                     Builder.getTypeExpansionContext())));
-    auto onStack = closureTy.castTo<SILFunctionType>()->isNoEscape()
+    auto onStack = closureTy->isNoEscape()
                        ? PartialApplyInst::OnStackKind::OnStack
                        : PartialApplyInst::OnStackKind::NotOnStack;
+
     // FIXME: Why the arbitrary order difference in IRBuilder type argument?
     ResultInst = Builder.createPartialApply(
         Loc, FnVal, Substitutions, Args,
-        closureTy.castTo<SILFunctionType>()->getCalleeConvention(), onStack);
+        closureTy->getCalleeConvention(), closureTy->getIsolation(), onStack);
     break;
   }
   case SILInstructionKind::BuiltinInst: {
@@ -1967,7 +1987,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     ResultInst = Builder.createFunctionRef(
         Loc,
         getFuncForReference(
-            FuncName, getSILType(Ty, (SILValueCategory)TyCategory, nullptr)));
+            FuncName, getSILType(Ty, (SILValueCategory)TyCategory, nullptr),
+            Builder.getTypeExpansionContext()));
     break;
   }
   case SILInstructionKind::DynamicFunctionRefInst: {
@@ -1976,7 +1997,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     ResultInst = Builder.createDynamicFunctionRef(
         Loc,
         getFuncForReference(
-            FuncName, getSILType(Ty, (SILValueCategory)TyCategory, nullptr)));
+            FuncName, getSILType(Ty, (SILValueCategory)TyCategory, nullptr),
+            Builder.getTypeExpansionContext()));
     break;
   }
   case SILInstructionKind::PreviousDynamicFunctionRefInst: {
@@ -1985,7 +2007,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     ResultInst = Builder.createPreviousDynamicFunctionRef(
         Loc,
         getFuncForReference(
-            FuncName, getSILType(Ty, (SILValueCategory)TyCategory, nullptr)));
+            FuncName, getSILType(Ty, (SILValueCategory)TyCategory, nullptr),
+            Builder.getTypeExpansionContext()));
     break;
   }
   case SILInstructionKind::MarkDependenceInst: {
@@ -2192,6 +2215,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
   UNARY_INSTRUCTION(AbortApply)
   UNARY_INSTRUCTION(EndApply)
   UNARY_INSTRUCTION(ExtractExecutor)
+  UNARY_INSTRUCTION(FunctionExtractIsolation)
 #undef UNARY_INSTRUCTION
 #undef REFCOUNTING_INSTRUCTION
 

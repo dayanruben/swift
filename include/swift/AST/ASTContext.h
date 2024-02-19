@@ -27,6 +27,7 @@
 #include "swift/AST/Type.h"
 #include "swift/AST/TypeAlignments.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/CASOptions.h"
 #include "swift/Basic/LangOptions.h"
 #include "swift/Basic/Located.h"
 #include "swift/Basic/Malloc.h"
@@ -239,10 +240,9 @@ class ASTContext final {
       LangOptions &langOpts, TypeCheckerOptions &typecheckOpts,
       SILOptions &silOpts, SearchPathOptions &SearchPathOpts,
       ClangImporterOptions &ClangImporterOpts,
-      symbolgraphgen::SymbolGraphOptions &SymbolGraphOpts,
+      symbolgraphgen::SymbolGraphOptions &SymbolGraphOpts, CASOptions &casOpts,
       SourceManager &SourceMgr, DiagnosticEngine &Diags,
-      llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend> OutBackend = nullptr
-      );
+      llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend> OutBackend = nullptr);
 
 public:
   // Members that should only be used by ASTContext.cpp.
@@ -257,10 +257,9 @@ public:
   get(LangOptions &langOpts, TypeCheckerOptions &typecheckOpts,
       SILOptions &silOpts, SearchPathOptions &SearchPathOpts,
       ClangImporterOptions &ClangImporterOpts,
-      symbolgraphgen::SymbolGraphOptions &SymbolGraphOpts,
+      symbolgraphgen::SymbolGraphOptions &SymbolGraphOpts, CASOptions &casOpts,
       SourceManager &SourceMgr, DiagnosticEngine &Diags,
-      llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend> OutBackend = nullptr
-      );
+      llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend> OutBackend = nullptr);
   ~ASTContext();
 
   /// Optional table of counters to report, nullptr when not collecting.
@@ -286,6 +285,9 @@ public:
 
   /// The symbol graph generation options used by this AST context.
   symbolgraphgen::SymbolGraphOptions &SymbolGraphOpts;
+
+  /// The CAS options used by this AST context.
+  const CASOptions &CASOpts;
 
   /// The source manager object.
   SourceManager &SourceMgr;
@@ -1247,6 +1249,13 @@ public:
   /// Insert an externally-sourced module into the set of known loaded modules
   /// in this context.
   void addLoadedModule(ModuleDecl *M);
+
+  /// Remove an externally-sourced module from the set of known loaded modules
+  /// in this context. Modules are added to the cache before being loaded to
+  /// avoid loading a module twice when there is a cyclic dependency between an
+  /// overlay and its Clang module. If a module import fails, the non-imported
+  /// module should be removed from the cache again.
+  void removeLoadedModule(Identifier RealName);
 
   /// Change the behavior of all loaders to ignore swiftmodules next to
   /// swiftinterfaces.

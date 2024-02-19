@@ -12,7 +12,7 @@
 // RUN: -enable-experimental-feature NoncopyableGenerics \
 // RUN: -enable-experimental-lifetime-dependence-inference | %FileCheck %s
 
-// REQUIRES: noncopyable_generics
+
 
 import def_implicit_lifetime_dependence
 
@@ -46,8 +46,22 @@ func unsafetest(_ ptr: UnsafeRawBufferPointer) {
   use(view3)
 }
 
-// CHECK: sil @$s32def_implicit_lifetime_dependence6deriveyAA10BufferViewVADF : $@convention(thin) (@guaranteed BufferView) -> _scope(1) @owned BufferView
-// CHECK: sil @$s32def_implicit_lifetime_dependence16consumeAndCreateyAA10BufferViewVADnF : $@convention(thin) (@owned BufferView) -> _inherit(1) @owned BufferView
-// CHECK: sil @$s32def_implicit_lifetime_dependence15borrowAndCreateyAA10BufferViewVADF : $@convention(thin) (@guaranteed BufferView) -> _scope(1) @owned BufferView
-// CHECK: sil @$s32def_implicit_lifetime_dependence10BufferViewVyA2ChcfC : $@convention(method) (@guaranteed BufferView, @thin BufferView.Type) -> _scope(1) @owned BufferView
+func testGetter() {
+  let capacity = 4
+  let a = Array(0..<capacity)
+  a.withUnsafeBytes {
+    let c = Container($0)
+    let view = c.view
+    use(view)
+  }
+}
 
+// CHECK: sil @$s32def_implicit_lifetime_dependence6deriveyAA10BufferViewVADYlsF : $@convention(thin) (@guaranteed BufferView) -> _scope(1) @owned BufferView
+
+// CHECK: sil @$s32def_implicit_lifetime_dependence16consumeAndCreateyAA10BufferViewVADnYliF : $@convention(thin) (@owned BufferView) -> _inherit(1) @owned BufferView
+
+// CHECK: sil @$s32def_implicit_lifetime_dependence15borrowAndCreateyAA10BufferViewVADYlsF : $@convention(thin) (@guaranteed BufferView) -> _scope(1) @owned BufferView
+
+// CHECK: sil @$s32def_implicit_lifetime_dependence10BufferViewVyA2ChYlscfC : $@convention(method) (@guaranteed BufferView, @thin BufferView.Type) -> _scope(1) @owned BufferView
+
+// CHECK: sil @$s32def_implicit_lifetime_dependence9ContainerV4viewAA10BufferViewVvg : $@convention(method) (@guaranteed Container) -> _scope(0) @owned BufferView

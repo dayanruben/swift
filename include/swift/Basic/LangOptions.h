@@ -186,6 +186,9 @@ namespace swift {
     /// Disable API availability checking.
     bool DisableAvailabilityChecking = false;
 
+    /// Enable optimization to bypass resilience checks in a package
+    bool EnableBypassResilienceInPackage = false;
+
     /// Optimization mode for unavailable declarations.
     llvm::Optional<UnavailableDeclOptimization> UnavailableDeclOptimizationMode;
 
@@ -883,12 +886,6 @@ namespace swift {
     /// The optimization setting.  This doesn't typically matter for
     /// import, but it can affect Clang's IR generation of static functions.
     std::string Optimization;
-
-    /// clang CASOptions.
-    llvm::Optional<clang::CASOptions> CASOpts;
-
-    /// Cache key for imported bridging header.
-    std::string BridgingHeaderPCHCacheKey;
 
     /// Disable validating the persistent PCH.
     bool PCHDisableValidation = false;

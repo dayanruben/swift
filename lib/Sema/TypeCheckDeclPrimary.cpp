@@ -54,6 +54,7 @@
 #include "swift/AST/TypeWalker.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/Statistic.h"
+#include "swift/Bridging/ASTGen.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/Parse/Parser.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
@@ -1019,6 +1020,25 @@ static void checkInheritedDefaultValueRestrictions(ParamDecl *PD) {
   }
 }
 
+static bool checkExpressionMacroDefaultValueRestrictions(ParamDecl *param) {
+  assert(param->getDefaultArgumentKind() ==
+         DefaultArgumentKind::ExpressionMacro);
+  auto &ctx = param->getASTContext();
+  auto *initExpr = param->getStructuralDefaultExpr();
+  assert(initExpr);
+
+#if SWIFT_BUILD_SWIFT_SYNTAX
+  auto *DC = param->getInnermostDeclContext();
+  const SourceFile *SF = DC->getParentSourceFile();
+  return swift_ASTGen_checkDefaultArgumentMacroExpression(
+      &ctx.Diags, SF->getExportedSourceFile(),
+      initExpr->getLoc().getOpaquePointerValue());
+#else
+  ctx.Diags.diagnose(initExpr->getLoc(), diag::macro_unsupported));
+  return false;
+#endif
+}
+
 void TypeChecker::notePlaceholderReplacementTypes(Type writtenType,
                                                   Type inferredType) {
   assert(writtenType && inferredType &&
@@ -1132,11 +1152,12 @@ Expr *DefaultArgumentExprRequest::evaluate(Evaluator &evaluator,
   auto *initExpr = param->getStructuralDefaultExpr();
   assert(initExpr);
 
-  // Prohibit default argument that is a non-built-in macro to avoid confusion.
-  if (isa<MacroExpansionExpr>(initExpr)) {
-    ctx.Diags.diagnose(initExpr->getLoc(), diag::macro_as_default_argument);
+  auto isMacroExpansionExpr =
+      param->getDefaultArgumentKind() == DefaultArgumentKind::ExpressionMacro;
+
+  if (isMacroExpansionExpr &&
+      !checkExpressionMacroDefaultValueRestrictions(param))
     return new (ctx) ErrorExpr(initExpr->getSourceRange(), ErrorType::get(ctx));
-  }
 
   // If the param has an error type, there's no point type checking the default
   // expression, unless we are type checking for code completion, in which case
@@ -1148,9 +1169,14 @@ Expr *DefaultArgumentExprRequest::evaluate(Evaluator &evaluator,
   assert(dc);
 
   if (!TypeChecker::typeCheckParameterDefault(initExpr, dc, paramTy,
-                                              param->isAutoClosure())) {
+                                              param->isAutoClosure(),
+                                              /*atCallerSide=*/false)) {
     return new (ctx) ErrorExpr(initExpr->getSourceRange(), ErrorType::get(ctx));
   }
+
+  // Expression macro default arguments are checked at caller side
+  if (isMacroExpansionExpr)
+    return initExpr;
 
   // Walk the checked initializer and contextualize any closures
   // we saw there.
@@ -1545,6 +1571,7 @@ static void maybeDiagnoseClassWithoutInitializers(ClassDecl *classDecl) {
     case SourceFileKind::SIL:
     case SourceFileKind::Interface:
       return;
+    case SourceFileKind::DefaultArgument:
     case SourceFileKind::Library:
     case SourceFileKind::Main:
     case SourceFileKind::MacroExpansion:
@@ -1583,12 +1610,7 @@ static bool isModuleQualified(TypeRepr *repr, ModuleDecl *module) {
 
   // FIXME(ModQual): This needs to be updated once we have an explicit
   //                 module qualification syntax.
-  IdentTypeRepr *baseIdent =
-      dyn_cast<IdentTypeRepr>(memberTy->getBaseComponent());
-  if (!baseIdent) {
-    return false;
-  }
-  return baseIdent->getNameRef().isSimpleName(module->getName());
+  return memberTy->getRoot()->isSimpleUnqualifiedIdentifier(module->getName());
 }
 
 /// If the provided type is an AttributedTypeRepr, unwraps it and provides both
@@ -1641,6 +1663,7 @@ static void diagnoseRetroactiveConformances(
   // At this point, we know we're extending a type declared outside this module.
   // We better only be conforming it to protocols declared within this module.
   llvm::SmallSetVector<ProtocolDecl *, 8> externalProtocols;
+  llvm::SmallSet<ProtocolDecl *, 8> protocolsWithRetroactiveAttr;
   for (const InheritedEntry &entry : ext->getInherited().getEntries()) {
     if (entry.getType().isNull() || !entry.getTypeRepr()) {
       continue;
@@ -1665,7 +1688,6 @@ static void diagnoseRetroactiveConformances(
       auto conformanceRef = ext->getParentModule()->lookupConformance(
           extendedType, decl);
       if (!conformanceRef.isConcrete()) {
-
         return TypeWalker::Action::Continue;
       }
       auto conformance = conformanceRef.getConcrete();
@@ -1701,6 +1723,10 @@ static void diagnoseRetroactiveConformances(
 
       // If it's marked @retroactive, no need to warn.
       if (entry.isRetroactive()) {
+        // Note that we encountered this protocol through a conformance marked
+        // @retroactive in case multiple clauses cause the protocol to be
+        // inherited.
+        protocolsWithRetroactiveAttr.insert(decl);
         return TypeWalker::Action::Continue;
       }
 
@@ -1710,6 +1736,11 @@ static void diagnoseRetroactiveConformances(
 
       return TypeWalker::Action::Continue;
     });
+  }
+
+  // Remove protocols that are reachable through a @retroactive conformance.
+  for (auto *proto : protocolsWithRetroactiveAttr) {
+    externalProtocols.remove(proto);
   }
 
   // If we didn't find any violations, we're done.
@@ -2609,6 +2640,7 @@ public:
           case SourceFileKind::Interface:
           case SourceFileKind::SIL:
             return;
+          case SourceFileKind::DefaultArgument:
           case SourceFileKind::Main:
           case SourceFileKind::Library:
           case SourceFileKind::MacroExpansion:
@@ -2631,6 +2663,7 @@ public:
           case SourceFileKind::Interface:
           case SourceFileKind::SIL:
             return;
+          case SourceFileKind::DefaultArgument:
           case SourceFileKind::Library:
           case SourceFileKind::MacroExpansion:
             break;
@@ -3183,6 +3216,29 @@ public:
     }
   }
 
+  static void diagnoseInverseOnClass(ClassDecl *decl) {
+    auto &ctx = decl->getASTContext();
+
+    for (auto ip : InvertibleProtocolSet::full()) {
+      auto marking = decl->getMarking(ip);
+
+      // Inferred inverses are already ignored for classes.
+      // FIXME: we can also diagnose @_moveOnly here if we use `isAnyExplicit`
+      if (!marking.getInverse().is(InverseMarking::Kind::Explicit))
+        continue;
+
+      // Allow ~Copyable when MoveOnlyClasses is enabled
+      if (ip == InvertibleProtocolKind::Copyable
+          && ctx.LangOpts.hasFeature(Feature::MoveOnlyClasses))
+        continue;
+
+
+      ctx.Diags.diagnose(marking.getInverse().getLoc(),
+                         diag::inverse_on_class,
+                         getProtocolName(getKnownProtocolKind(ip)));
+    }
+  }
+
   /// check to see if a move-only type can ever conform to the given type.
   /// \returns true iff a diagnostic was emitted because it was not compatible
   static bool diagnoseIncompatibleWithMoveOnlyType(SourceLoc loc,
@@ -3415,6 +3471,7 @@ public:
 
     diagnoseIncompatibleProtocolsForMoveOnlyType(CD);
 
+    diagnoseInverseOnClass(CD);
   }
 
   void visitProtocolDecl(ProtocolDecl *PD) {

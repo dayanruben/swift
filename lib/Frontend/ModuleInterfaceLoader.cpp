@@ -318,8 +318,8 @@ struct ModuleRebuildInfo {
       return "compiled with a different version of the compiler";
     case Status::NotInOSSA:
       return "module was not built with OSSA";
-    case Status::NotUsingNoncopyableGenerics:
-      return "module was not built with NoncopyableGenerics";
+    case Status::NoncopyableGenericsMismatch:
+      return "module was not built with matching NoncopyableGenerics feature";
     case Status::MissingDependency:
       return "missing dependency";
     case Status::MissingUnderlyingModule:
@@ -869,7 +869,10 @@ class ModuleInterfaceLoaderImpl {
                    loadMode == ModuleLoadingMode::PreferSerialized &&
                    !version::isCurrentCompilerTagged() &&
                    rebuildInfo.getOrInsertCandidateModule(adjacentMod).serializationStatus !=
-                     serialization::Status::SDKMismatch) {
+                     serialization::Status::SDKMismatch &&
+                     // FIXME(kavon): temporary while we bootstrap NoncopyableGenerics.
+                   rebuildInfo.getOrInsertCandidateModule(adjacentMod).serializationStatus !=
+                     serialization::Status::NoncopyableGenericsMismatch) {
           // Special-case here: If we're loading a .swiftmodule from the resource
           // dir adjacent to the compiler, defer to the serialized loader instead
           // of falling back. This is to support local development of Swift,
@@ -1053,7 +1056,7 @@ class ModuleInterfaceLoaderImpl {
     }
     InterfaceSubContextDelegateImpl astDelegate(
         ctx.SourceMgr, &ctx.Diags, ctx.SearchPathOpts, ctx.LangOpts,
-        ctx.ClangImporterOpts, Opts,
+        ctx.ClangImporterOpts, ctx.CASOpts, Opts,
         /*buildModuleCacheDirIfAbsent*/ true, cacheDir, prebuiltCacheDir,
         backupInterfaceDir,
         /*serializeDependencyHashes*/ false, trackSystemDependencies,
@@ -1379,17 +1382,16 @@ bool ModuleInterfaceCheckerImpl::tryEmitForwardingModule(
 bool ModuleInterfaceLoader::buildSwiftModuleFromSwiftInterface(
     SourceManager &SourceMgr, DiagnosticEngine &Diags,
     const SearchPathOptions &SearchPathOpts, const LangOptions &LangOpts,
-    const ClangImporterOptions &ClangOpts, StringRef CacheDir,
-    StringRef PrebuiltCacheDir, StringRef BackupInterfaceDir,
-    StringRef ModuleName, StringRef InPath,
-    StringRef OutPath, StringRef ABIOutputPath,
-    bool SerializeDependencyHashes,
+    const ClangImporterOptions &ClangOpts, const CASOptions &CASOpts,
+    StringRef CacheDir, StringRef PrebuiltCacheDir,
+    StringRef BackupInterfaceDir, StringRef ModuleName, StringRef InPath,
+    StringRef OutPath, StringRef ABIOutputPath, bool SerializeDependencyHashes,
     bool TrackSystemDependencies, ModuleInterfaceLoaderOptions LoaderOpts,
     RequireOSSAModules_t RequireOSSAModules,
     RequireNoncopyableGenerics_t RequireNCGenerics,
     bool silenceInterfaceDiagnostics) {
   InterfaceSubContextDelegateImpl astDelegate(
-      SourceMgr, &Diags, SearchPathOpts, LangOpts, ClangOpts, LoaderOpts,
+      SourceMgr, &Diags, SearchPathOpts, LangOpts, ClangOpts, CASOpts, LoaderOpts,
       /*CreateCacheDirIfAbsent*/ true, CacheDir, PrebuiltCacheDir,
       BackupInterfaceDir,
       SerializeDependencyHashes, TrackSystemDependencies,
@@ -1565,7 +1567,7 @@ void ModuleInterfaceLoader::collectVisibleTopLevelModuleNames(
 
 void InterfaceSubContextDelegateImpl::inheritOptionsForBuildingInterface(
     const SearchPathOptions &SearchPathOpts, const LangOptions &LangOpts,
-    const ClangImporterOptions &clangImporterOpts,
+    const ClangImporterOptions &clangImporterOpts, const CASOptions &casOpts,
     bool suppressRemarks, RequireOSSAModules_t RequireOSSAModules,
     RequireNoncopyableGenerics_t requireNCGenerics) {
   GenericArgs.push_back("-frontend");
@@ -1681,23 +1683,11 @@ void InterfaceSubContextDelegateImpl::inheritOptionsForBuildingInterface(
     GenericArgs.push_back(clangImporterOpts.BuildSessionFilePath);
   }
 
-  if (clangImporterOpts.CASOpts) {
-    genericSubInvocation.getClangImporterOptions().CASOpts =
-        clangImporterOpts.CASOpts;
-    GenericArgs.push_back("-cache-compile-job");
-    if (!clangImporterOpts.CASOpts->CASPath.empty()) {
-      GenericArgs.push_back("-cas-path");
-      GenericArgs.push_back(clangImporterOpts.CASOpts->CASPath);
-    }
-    if (!clangImporterOpts.CASOpts->PluginPath.empty()) {
-      GenericArgs.push_back("-cas-plugin-path");
-      GenericArgs.push_back(clangImporterOpts.CASOpts->PluginPath);
-      for (auto Opt : clangImporterOpts.CASOpts->PluginOptions) {
-        GenericArgs.push_back("-cas-plugin-option");
-        std::string pair = (llvm::Twine(Opt.first) + "=" + Opt.second).str();
-        GenericArgs.push_back(ArgSaver.save(pair));
-      }
-    }
+  if (casOpts.EnableCaching) {
+    genericSubInvocation.getCASOptions().EnableCaching = casOpts.EnableCaching;
+    genericSubInvocation.getCASOptions().CASOpts = casOpts.CASOpts;
+    casOpts.enumerateCASConfigurationFlags(
+        [&](StringRef Arg) { GenericArgs.push_back(ArgSaver.save(Arg)); });
   }
 
   if (!clangImporterOpts.UseClangIncludeTree) {
@@ -1733,7 +1723,7 @@ bool InterfaceSubContextDelegateImpl::extractSwiftInterfaceVersionAndArgs(
 InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
     SourceManager &SM, DiagnosticEngine *Diags,
     const SearchPathOptions &searchPathOpts, const LangOptions &langOpts,
-    const ClangImporterOptions &clangImporterOpts,
+    const ClangImporterOptions &clangImporterOpts, const CASOptions &casOpts,
     ModuleInterfaceLoaderOptions LoaderOpts, bool buildModuleCacheDirIfAbsent,
     StringRef moduleCachePath, StringRef prebuiltCachePath,
     StringRef backupModuleInterfaceDir,
@@ -1743,7 +1733,7 @@ InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
     : SM(SM), Diags(Diags), ArgSaver(Allocator) {
   genericSubInvocation.setMainExecutablePath(LoaderOpts.mainExecutablePath);
   inheritOptionsForBuildingInterface(searchPathOpts, langOpts,
-                                     clangImporterOpts,
+                                     clangImporterOpts, casOpts,
                                      Diags->getSuppressRemarks(),
                                      requireOSSAModules,
                                      requireNCGenerics);
@@ -1794,13 +1784,17 @@ InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
   StringRef explicitSwiftModuleMap = searchPathOpts.ExplicitSwiftModuleMap;
   genericSubInvocation.getSearchPathOptions().ExplicitSwiftModuleMap =
     explicitSwiftModuleMap.str();
+
+  // Load plugin libraries for macro expression as default arguments
+  genericSubInvocation.getSearchPathOptions().PluginSearchOpts =
+      searchPathOpts.PluginSearchOpts;
+
   auto &subClangImporterOpts = genericSubInvocation.getClangImporterOptions();
   // Respect the detailed-record preprocessor setting of the parent context.
   // This, and the "raw" clang module format it implicitly enables, are
   // required by sourcekitd.
   subClangImporterOpts.DetailedPreprocessingRecord =
     clangImporterOpts.DetailedPreprocessingRecord;
-  subClangImporterOpts.CASOpts = clangImporterOpts.CASOpts;
 
   std::vector<std::string> inheritedParentContextClangArgs;
   if (LoaderOpts.requestedAction ==
@@ -1817,6 +1811,8 @@ InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
     // in the Swift compile commands, when different.
     inheritedParentContextClangArgs =
         clangImporterOpts.getReducedExtraArgsForSwiftModuleDependency();
+    genericSubInvocation.getFrontendOptions()
+        .DependencyScanningSubInvocation = true;
   } else if (LoaderOpts.strictImplicitModuleContext) {
     // If the compiler has been asked to be strict with ensuring downstream
     // dependencies get the parent invocation's context, inherit the extra Clang
@@ -1936,11 +1932,21 @@ InterfaceSubContextDelegateImpl::getCacheHash(StringRef useInterfacePath,
       // invalidation behavior of this cache item.
       genericSubInvocation.getFrontendOptions().shouldTrackSystemDependencies(),
 
+      // Whether or not caching is enabled affects if the instance is able to
+      // correctly load the dependencies.
+      genericSubInvocation.getCASOptions().getModuleScanningHashComponents(),
+
       // Whether or not OSSA modules are enabled.
       //
       // If OSSA modules are enabled, we use a separate namespace of modules to
       // ensure that we compile all swift interface files with the option set.
-      unsigned(genericSubInvocation.getSILOptions().EnableOSSAModules));
+      unsigned(genericSubInvocation.getSILOptions().EnableOSSAModules),
+
+      // Whether or not NoncopyableGenerics are enabled, as that influences
+      // many things like generic signatures and conformances.
+      unsigned(genericSubInvocation.getLangOptions()
+               .hasFeature(Feature::NoncopyableGenerics))
+      );
 
   return llvm::toString(llvm::APInt(64, H), 36, /*Signed=*/false);
 }

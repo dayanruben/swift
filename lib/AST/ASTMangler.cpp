@@ -922,6 +922,8 @@ void ASTMangler::appendSymbolKind(SymbolKind SKind) {
     case SymbolKind::DistributedThunk: return appendOperator("TE");
     case SymbolKind::DistributedAccessor: return appendOperator("TF");
     case SymbolKind::AccessibleFunctionRecord: return appendOperator("HF");
+    case SymbolKind::AccessibleProtocolRequirementFunctionRecord:
+    return appendOperator("HpF");
     case SymbolKind::BackDeploymentThunk: return appendOperator("Twb");
     case SymbolKind::BackDeploymentFallback: return appendOperator("TwB");
     case SymbolKind::HasSymbolQuery: return appendOperator("TwS");
@@ -1987,6 +1989,14 @@ void ASTMangler::appendImplFunctionType(SILFunctionType *fn,
   if (!fn->isNoEscape())
     OpArgs.push_back('e');
 
+  switch (fn->getIsolation()) {
+  case SILFunctionTypeIsolation::Unknown:
+    break;
+  case SILFunctionTypeIsolation::Erased:
+    OpArgs.push_back('A');
+    break;
+  }
+
   // Differentiability kind.
   auto diffKind = fn->getExtInfo().getDifferentiabilityKind();
   if (diffKind != DifferentiabilityKind::NonDifferentiable) {
@@ -2801,7 +2811,8 @@ void ASTMangler::appendFunctionSignature(AnyFunctionType *fn,
                                          const ValueDecl *forDecl,
                                          FunctionManglingKind functionMangling) {
   appendFunctionResultType(fn->getResult(), sig, forDecl);
-  appendFunctionInputType(fn->getParams(), sig, forDecl);
+  appendFunctionInputType(fn->getParams(), fn->getLifetimeDependenceInfo(), sig,
+                          forDecl);
   if (fn->isAsync())
     appendOperator("Ya");
   if (fn->isSendable())
@@ -2831,9 +2842,32 @@ void ASTMangler::appendFunctionSignature(AnyFunctionType *fn,
     break;
   }
 
-  if (Type globalActor = fn->getGlobalActor()) {
-    appendType(globalActor, sig);
+  auto isolation = fn->getIsolation();
+  switch (isolation.getKind()) {
+  case FunctionTypeIsolation::Kind::NonIsolated:
+    break;
+  case FunctionTypeIsolation::Kind::Parameter:
+    // Parameter isolation is already mangled in the parameters.
+    break;
+  case FunctionTypeIsolation::Kind::GlobalActor:
+    appendType(isolation.getGlobalActorType(), sig);
     appendOperator("Yc");
+    break;
+  case FunctionTypeIsolation::Kind::Erased:
+    appendOperator("YA");
+    break;
+  }
+
+  if (auto *afd = dyn_cast_or_null<AbstractFunctionDecl>(forDecl)) {
+    if (afd->hasImplicitSelfDecl()) {
+      auto lifetimeDependenceKind =
+          fn->getLifetimeDependenceInfo().getLifetimeDependenceOnParam(
+              /*paramIndex*/ 0);
+      if (lifetimeDependenceKind) {
+        appendLifetimeDependenceKind(*lifetimeDependenceKind,
+                                     /*isSelfDependence*/ true);
+      }
+    }
   }
 }
 
@@ -2879,7 +2913,7 @@ getParameterFlagsForMangling(ParameterTypeFlags flags,
   case ParamSpecifier::InOut:
     return flags;
 
-  case ParamSpecifier::Transferring:
+  case ParamSpecifier::ImplicitlyCopyableConsuming:
   case ParamSpecifier::Consuming:
   case ParamSpecifier::Borrowing:
     // Only mangle the ownership if it diverges from the default.
@@ -2892,7 +2926,7 @@ getParameterFlagsForMangling(ParameterTypeFlags flags,
 
 void ASTMangler::appendFunctionInputType(
     ArrayRef<AnyFunctionType::Param> params,
-    GenericSignature sig,
+    LifetimeDependenceInfo lifetimeDependenceInfo, GenericSignature sig,
     const ValueDecl *forDecl) {
   auto defaultSpecifier = getDefaultOwnership(forDecl);
   
@@ -2913,10 +2947,12 @@ void ASTMangler::appendFunctionInputType(
       // of the input is no longer directly the type of the declaration, so we
       // don't want it to pick up contextual behavior, such as default ownership,
       // from the top-level declaration type.
-      appendTypeListElement(Identifier(), type,
-                        getParameterFlagsForMangling(param.getParameterFlags(),
-                                                     defaultSpecifier),
-                        sig, nullptr);
+      appendParameterTypeListElement(
+          Identifier(), type,
+          getParameterFlagsForMangling(param.getParameterFlags(),
+                                       defaultSpecifier),
+          lifetimeDependenceInfo.getLifetimeDependenceOnParam(/*paramIndex*/ 1),
+          sig, nullptr);
       break;
     }
 
@@ -2927,16 +2963,20 @@ void ASTMangler::appendFunctionInputType(
 
   default:
     bool isFirstParam = true;
+    unsigned paramIndex = 1; /* 0 is reserved for self*/
     for (auto &param : params) {
       // Note that we pass `nullptr` as the `forDecl` argument, since the type
       // of the input is no longer directly the type of the declaration, so we
       // don't want it to pick up contextual behavior, such as default ownership,
       // from the top-level declaration type.
-      appendTypeListElement(Identifier(), param.getPlainType(),
-                        getParameterFlagsForMangling(param.getParameterFlags(),
-                                                     defaultSpecifier),
-                        sig, nullptr);
+      appendParameterTypeListElement(
+          Identifier(), param.getPlainType(),
+          getParameterFlagsForMangling(param.getParameterFlags(),
+                                       defaultSpecifier),
+          lifetimeDependenceInfo.getLifetimeDependenceOnParam(paramIndex), sig,
+          nullptr);
       appendListSeparator(isFirstParam);
+      paramIndex++;
     }
     appendOperator("t");
     break;
@@ -2956,9 +2996,8 @@ void ASTMangler::appendTypeList(Type listTy, GenericSignature sig,
       return appendOperator("y");
     bool firstField = true;
     for (auto &field : tuple->getElements()) {
-      appendTypeListElement(field.getName(), field.getType(),
-                            ParameterTypeFlags(),
-                            sig, forDecl);
+      appendTupleTypeListElement(field.getName(), field.getType(), sig,
+                                 forDecl);
       appendListSeparator(firstField);
     }
   } else {
@@ -2967,10 +3006,10 @@ void ASTMangler::appendTypeList(Type listTy, GenericSignature sig,
   }
 }
 
-void ASTMangler::appendTypeListElement(Identifier name, Type elementType,
-                                       ParameterTypeFlags flags,
-                                       GenericSignature sig,
-                                       const ValueDecl *forDecl) {
+void ASTMangler::appendParameterTypeListElement(
+    Identifier name, Type elementType, ParameterTypeFlags flags,
+    std::optional<LifetimeDependenceKind> lifetimeDependenceKind,
+    GenericSignature sig, const ValueDecl *forDecl) {
   if (auto *fnType = elementType->getAs<FunctionType>())
     appendFunctionType(fnType, sig, flags.isAutoClosure(), forDecl);
   else
@@ -2999,10 +3038,51 @@ void ASTMangler::appendTypeListElement(Identifier name, Type elementType,
   if (flags.isCompileTimeConst())
     appendOperator("Yt");
 
+  if (lifetimeDependenceKind) {
+    appendLifetimeDependenceKind(*lifetimeDependenceKind,
+                                 /*isSelfDependence*/ false);
+  }
+
   if (!name.empty())
     appendIdentifier(name.str());
   if (flags.isVariadic())
     appendOperator("d");
+}
+
+void ASTMangler::appendLifetimeDependenceKind(LifetimeDependenceKind kind,
+                                              bool isSelfDependence) {
+  // If we converge on dependsOn(borrowed: paramName)/dependsOn(paramName)
+  // syntax, this can be a single case value check.
+  if (kind == LifetimeDependenceKind::Borrow ||
+      kind == LifetimeDependenceKind::Mutate) {
+    if (isSelfDependence) {
+      appendOperator("YLs");
+    } else {
+      appendOperator("Yls");
+    }
+  } else {
+    // If we converge on dependsOn(borrowed: paramName)/dependsOn(paramName)
+    // syntax, this can be a single case value check.
+    assert(kind == LifetimeDependenceKind::Copy ||
+           kind == LifetimeDependenceKind::Consume);
+    if (isSelfDependence) {
+      appendOperator("YLi");
+    } else {
+      appendOperator("Yli");
+    }
+  }
+}
+
+void ASTMangler::appendTupleTypeListElement(Identifier name, Type elementType,
+                                            GenericSignature sig,
+                                            const ValueDecl *forDecl) {
+  if (auto *fnType = elementType->getAs<FunctionType>())
+    appendFunctionType(fnType, sig, /*isAutoClosure*/ false, forDecl);
+  else
+    appendType(elementType, sig, forDecl);
+
+  if (!name.empty())
+    appendIdentifier(name.str());
 }
 
 bool ASTMangler::appendGenericSignature(GenericSignature sig,
@@ -3877,6 +3957,7 @@ void ASTMangler::appendMacroExpansionContext(
 
   case GeneratedSourceInfo::PrettyPrinted:
   case GeneratedSourceInfo::ReplacedFunctionBody:
+  case GeneratedSourceInfo::DefaultArgument:
     return appendContext(origDC, StringRef());
   }
   
@@ -3927,6 +4008,7 @@ void ASTMangler::appendMacroExpansionContext(
 
   case GeneratedSourceInfo::PrettyPrinted:
   case GeneratedSourceInfo::ReplacedFunctionBody:
+  case GeneratedSourceInfo::DefaultArgument:
     llvm_unreachable("Exited above");
   }
 

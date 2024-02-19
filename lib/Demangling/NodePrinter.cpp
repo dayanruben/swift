@@ -424,6 +424,7 @@ private:
     case Node::Kind::IVarDestroyer:
     case Node::Kind::ImplDifferentiabilityKind:
     case Node::Kind::ImplEscaping:
+    case Node::Kind::ImplErasedIsolation:
     case Node::Kind::ImplConvention:
     case Node::Kind::ImplParameterResultDifferentiability:
     case Node::Kind::ImplFunctionAttribute:
@@ -629,6 +630,7 @@ private:
     case Node::Kind::AsyncAwaitResumePartialFunction:
     case Node::Kind::AsyncSuspendResumePartialFunction:
     case Node::Kind::AccessibleFunctionRecord:
+    case Node::Kind::AccessibleProtocolRequirementFunctionRecord:
     case Node::Kind::BackDeploymentThunk:
     case Node::Kind::BackDeploymentFallback:
     case Node::Kind::ExtendedExistentialTypeShape:
@@ -638,6 +640,8 @@ private:
     case Node::Kind::SymbolicExtendedExistentialType:
     case Node::Kind::HasSymbolQuery:
     case Node::Kind::ObjectiveCProtocolSymbolicReference:
+    case Node::Kind::ParamLifetimeDependence:
+    case Node::Kind::SelfLifetimeDependence:
       return false;
     }
     printer_unreachable("bad node kind");
@@ -882,7 +886,7 @@ private:
     }
     if (node->getChild(startIndex)->getKind()
             == Node::Kind::IsolatedAnyFunctionType) {
-      Printer << "@isolated(any) ";
+      print(node->getChild(startIndex), depth + 1);
       ++startIndex;
     }
     if (node->getChild(startIndex)->getKind() ==
@@ -894,6 +898,11 @@ private:
         Node::Kind::DifferentiableFunctionType) {
       diffKind =
           (MangledDifferentiabilityKind)node->getChild(startIndex)->getIndex();
+      ++startIndex;
+    }
+    if (node->getChild(startIndex)->getKind() ==
+        Node::Kind::SelfLifetimeDependence) {
+      print(node->getChild(startIndex), depth + 1);
       ++startIndex;
     }
 
@@ -1709,6 +1718,33 @@ NodePointer NodePrinter::print(NodePointer Node, unsigned depth,
     Printer << "@noDerivative ";
     print(Node->getChild(0), depth + 1);
     return nullptr;
+  case Node::Kind::ParamLifetimeDependence: {
+    Printer << "lifetime dependence: ";
+    auto kind = (MangledLifetimeDependenceKind)Node->getChild(0)->getIndex();
+    switch (kind) {
+    case MangledLifetimeDependenceKind::Inherit:
+      Printer << "inherit ";
+      break;
+    case MangledLifetimeDependenceKind::Scope:
+      Printer << "scope ";
+      break;
+    }
+    print(Node->getChild(1), depth + 1);
+    return nullptr;
+  }
+  case Node::Kind::SelfLifetimeDependence: {
+    Printer << "(self lifetime dependence: ";
+    auto kind = (MangledLifetimeDependenceKind)Node->getIndex();
+    switch (kind) {
+    case MangledLifetimeDependenceKind::Inherit:
+      Printer << "inherit) ";
+      break;
+    case MangledLifetimeDependenceKind::Scope:
+      Printer << "scope) ";
+      break;
+    }
+    return nullptr;
+  }
   case Node::Kind::NonObjCAttribute:
     Printer << "@nonobjc ";
     return nullptr;
@@ -2259,6 +2295,11 @@ NodePointer NodePrinter::print(NodePointer Node, unsigned depth,
       Printer << "accessible function runtime record for ";
     }
     return nullptr;
+  case Node::Kind::AccessibleProtocolRequirementFunctionRecord:
+    if (!Options.ShortenThunk) {
+      Printer << "accessible distributed function runtime record for ";
+    }
+    return nullptr;
   case Node::Kind::DynamicallyReplaceableFunctionKey:
     if (!Options.ShortenThunk) {
       Printer << "dynamically replaceable key for ";
@@ -2693,6 +2734,9 @@ NodePointer NodePrinter::print(NodePointer Node, unsigned depth,
     return nullptr;
   case Node::Kind::ImplEscaping:
     Printer << "@escaping";
+    return nullptr;
+  case Node::Kind::ImplErasedIsolation:
+    Printer << "@isolated(any)";
     return nullptr;
   case Node::Kind::ImplConvention:
     Printer << Node->getText();

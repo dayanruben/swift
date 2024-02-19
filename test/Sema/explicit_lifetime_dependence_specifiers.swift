@@ -1,11 +1,19 @@
-// RUN: %target-typecheck-verify-swift -disable-availability-checking -enable-experimental-feature NonescapableTypes -disable-experimental-parser-round-trip   -enable-experimental-feature NoncopyableGenerics -enable-builtin-module
+// RUN: %target-typecheck-verify-swift -disable-availability-checking -enable-experimental-feature NonescapableTypes -disable-experimental-parser-round-trip   -enable-experimental-feature NoncopyableGenerics -enable-builtin-module -enable-experimental-feature BitwiseCopyable
 // REQUIRES: noncopyable_generics
 import Builtin
+
+struct Container {
+  let ptr: UnsafeRawBufferPointer
+}
 
 struct BufferView : ~Escapable {
   let ptr: UnsafeRawBufferPointer
   init(_ ptr: UnsafeRawBufferPointer) {
     self.ptr = ptr
+  }
+  init(_ c: borrowing Container) -> _borrow(c) Self { // expected-error{{invalid lifetime dependence on bitwise copyable type}}
+    self.ptr = c.ptr
+    return self
   }
 }
 
@@ -127,5 +135,29 @@ struct Wrapper : ~Escapable {
 
   mutating func mutatingMethodInvalidLifetimeDependence2() -> _consume(self) BufferView { // expected-error{{invalid use of consume lifetime dependence for inout ownership}}
     return view
+  } 
+}
+
+public struct GenericBufferView<Element> : ~Escapable {
+  public typealias Index = Int
+  public typealias Pointer = UnsafePointer<Element>
+
+  public let baseAddress: Pointer
+  public let count: Int
+
+  public init<Storage>(unsafeBuffer: UnsafeBufferPointer<Element>,
+                       storage: borrowing Storage)
+    -> _borrow(storage) Self {
+    let baseAddress = unsafeBuffer.baseAddress!
+    self = GenericBufferView<Element>(baseAddress: baseAddress,
+                                      count: unsafeBuffer.count)
+    return self
+  }
+  // unsafe private API
+  @_unsafeNonescapableResult
+  init(baseAddress: Pointer, count: Int) {
+    precondition(count >= 0, "Count must not be negative")
+    self.baseAddress = baseAddress
+    self.count = count
   } 
 }

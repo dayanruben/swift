@@ -1244,6 +1244,7 @@ public:
     SourceLoc IsolatedLoc;
     SourceLoc ConstLoc;
     SourceLoc ResultDependsOnLoc;
+    SourceLoc TransferringLoc;
     SmallVector<TypeOrCustomAttr> Attributes;
     SmallVector<LifetimeDependenceSpecifier> lifetimeDependenceSpecifiers;
 
@@ -1463,12 +1464,13 @@ public:
   /// \endverbatim
   ParserResult<TypeRepr> parseQualifiedDeclNameBaseType();
 
-  /// Parse an identifier type, e.g 'Foo' or 'Bar<Int>'.
+  /// Parse a single type identifier, possibly followed by a generic argument
+  /// list, e.g `Foo` or `Bar<Int>`.
   ///
   /// \verbatim
   /// type-identifier: identifier generic-args?
   /// \endverbatim
-  ParserResult<IdentTypeRepr> parseTypeIdentifier();
+  ParserResult<DeclRefTypeRepr> parseTypeIdentifier(TypeRepr *Base);
 
   /// Parse a dotted type, e.g. 'Foo<X>.Y.Z', 'P.Type', '[X].Y'.
   ParserResult<TypeRepr> parseTypeDotted(ParserResult<TypeRepr> Base);
@@ -1560,6 +1562,9 @@ public:
 
     /// The location of the '_resultDependsOn' keyword, if present.
     SourceLoc ResultDependsOnLoc;
+
+    /// The location of the 'transferring' keyword if present.
+    SourceLoc TransferringLoc;
 
     /// The type following the ':'.
     TypeRepr *Type = nullptr;

@@ -5,6 +5,7 @@
 // RUN:   -enable-experimental-feature NonescapableTypes \
 // RUN:   -Xllvm -enable-lifetime-dependence-diagnostics
 
+// REQUIRES: asserts
 // REQUIRES: swift_in_compiler
 
 // Future tests for LifetimeDependenceDiagnostics.
@@ -12,17 +13,10 @@
 
 
 // =============================================================================
-// Diagnostics that should not fail.
-
-// Recognize nested accesses as part of the same dependence scope.
-func bv_get_mutate(container: inout NC) -> _mutate(container) BV {
-  container.getBV()
-}
-
-// =============================================================================
 // Diagnostics that should fail.
 
-// Test that an unsafe dependence requires Builtin.lifetime_dependence.
+// @_unsafeResultDependsOn: Test that an unsafe dependence requires
+// Builtin.lifetime_dependence.
 //
 func bv_derive_local(bv: consuming BV) -> _consume(bv) BV {
   let bv2 = BV(bv.p, bv.i)

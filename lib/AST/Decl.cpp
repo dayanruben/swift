@@ -1813,11 +1813,9 @@ bool Decl::isObjCImplementation() const {
 
 llvm::Optional<Identifier>
 ExtensionDecl::getCategoryNameForObjCImplementation() const {
-  assert(isObjCImplementation());
-
   auto attr = getAttrs()
                   .getAttribute<ObjCImplementationAttr>(/*AllowInvalid=*/true);
-  if (attr->isCategoryNameInvalid())
+  if (!attr || attr->isCategoryNameInvalid())
     return llvm::None;
 
   return attr->CategoryName;
@@ -2283,9 +2281,8 @@ static bool isDefaultInitializable(const TypeRepr *typeRepr, ASTContext &ctx) {
 
   // Also support the desugared 'Optional<T>' spelling.
   if (!ctx.isSwiftVersionAtLeast(5)) {
-    if (auto *identRepr = dyn_cast<SimpleIdentTypeRepr>(typeRepr)) {
-      if (identRepr->getNameRef().getBaseIdentifier() == ctx.Id_Void)
-        return true;
+    if (typeRepr->isSimpleUnqualifiedIdentifier(ctx.Id_Void)) {
+      return true;
     }
 
     if (auto *identRepr = dyn_cast<GenericIdentTypeRepr>(typeRepr)) {
@@ -2954,28 +2951,21 @@ bool Decl::isOutermostPrivateOrFilePrivateScope() const {
          !isInPrivateOrLocalContext(this);
 }
 
-bool AbstractStorageDecl::isFormallyResilient() const {
+bool AbstractStorageDecl::isResilient() const {
   // Check for an explicit @_fixed_layout attribute.
   if (getAttrs().hasAttribute<FixedLayoutAttr>())
     return false;
 
   // If we're an instance property of a nominal type, query the type.
-  auto *dc = getDeclContext();
   if (!isStatic())
-    if (auto *nominalDecl = dc->getSelfNominalTypeDecl())
+    if (auto *nominalDecl = getDeclContext()->getSelfNominalTypeDecl())
       return nominalDecl->isResilient();
 
   // Non-public global and static variables always have a
   // fixed layout.
-  if (!getFormalAccessScope(/*useDC=*/nullptr,
-                            /*treatUsableFromInlineAsPublic=*/true).isPublicOrPackage())
-    return false;
-
-  return true;
-}
-
-bool AbstractStorageDecl::isResilient() const {
-  if (!isFormallyResilient())
+  auto accessScope = getFormalAccessScope(/*useDC=*/nullptr,
+                                          /*treatUsableFromInlineAsPublic=*/true);
+  if (!accessScope.isPublicOrPackage())
     return false;
 
   return getModuleContext()->isResilient();
@@ -2987,7 +2977,12 @@ bool AbstractStorageDecl::isResilient(ModuleDecl *M,
   case ResilienceExpansion::Minimal:
     return isResilient();
   case ResilienceExpansion::Maximal:
-    return M != getModuleContext() && isResilient();
+    if (M == getModuleContext())
+      return false;
+    // Non-resilient if bypass optimization in package is enabled
+    if (bypassResilienceInPackage(M))
+      return false;
+    return isResilient();
   }
   llvm_unreachable("bad resilience expansion");
 }
@@ -4209,11 +4204,12 @@ bool ValueDecl::hasOpenAccess(const DeclContext *useDC) const {
   return access == AccessLevel::Open;
 }
 
-bool ValueDecl::hasPackageAccess() const {
-  AccessLevel access =
-      getAdjustedFormalAccess(this, /*useDC*/ nullptr,
-                              /*treatUsableFromInlineAsPublic*/ false);
-  return access == AccessLevel::Package;
+bool ValueDecl::bypassResilienceInPackage(ModuleDecl *accessingModule) const {
+  return getASTContext().LangOpts.EnableBypassResilienceInPackage &&
+          getModuleContext()->inSamePackage(accessingModule) &&
+          !getModuleContext()->isBuiltFromInterface() &&
+          getFormalAccessScope(/*useDC=*/nullptr,
+                               /*treatUsableFromInlineAsPublic=*/true).isPackage();
 }
 
 /// Given the formal access level for using \p VD, compute the scope where
@@ -5056,7 +5052,6 @@ bool NominalTypeDecl::isFormallyResilient() const {
 bool NominalTypeDecl::isResilient() const {
   if (!isFormallyResilient())
     return false;
-
   return getModuleContext()->isResilient();
 }
 
@@ -5088,9 +5083,12 @@ bool NominalTypeDecl::isResilient(ModuleDecl *M,
   case ResilienceExpansion::Maximal:
     // We can access declarations from the same module
     // non-resiliently in a maximal context.
-    if (M == getModuleContext()) {
+    if (M == getModuleContext())
       return false;
-    }
+    // Non-resilient if bypass optimization in package is enabled
+    if (bypassResilienceInPackage(M))
+      return false;
+
     // If a protocol is originally declared in the current module, then we
     // directly expose protocol witness tables and their contents for any
     // conformances in the same module as symbols. If the protocol later
@@ -6377,7 +6375,11 @@ bool EnumDecl::isFormallyExhaustive(const DeclContext *useDC) const {
   // Non-public, non-versioned enums are always exhaustive.
   AccessScope accessScope = getFormalAccessScope(/*useDC*/nullptr,
                                                  /*respectVersioned*/true);
-  if (!accessScope.isPublic())
+  // Both public and package enums should behave the same unless
+  // package enum is optimized with bypassing resilience checks.
+  if (!accessScope.isPublicOrPackage())
+    return true;
+  if (useDC && bypassResilienceInPackage(useDC->getParentModule()))
     return true;
 
   // All other checks are use-site specific; with no further information, the
@@ -6634,6 +6636,11 @@ bool ProtocolDecl::requiresInvertible(InvertibleProtocolKind ip) const {
     // There is no implicit inheritance of an invertible protocol requirement
     // on an invertible protocol itself.
     if (proto->getInvertibleProtocolKind())
+      return TypeWalker::Action::Continue;
+
+    // HACK: claim that Sendable also doesn't implicitly inherit Copyable, etc.
+    // This shouldn't be needed after Swift 6.0
+    if (proto->isSpecificProtocol(KnownProtocolKind::Sendable))
       return TypeWalker::Action::Continue;
 
     // Otherwise, check to see if there's an inverse on this protocol.
@@ -7776,7 +7783,7 @@ void ParamDecl::setSpecifier(Specifier specifier) {
   // `inout` and `consuming` parameters are locally mutable.
   case ParamSpecifier::InOut:
   case ParamSpecifier::Consuming:
-  case ParamSpecifier::Transferring:
+  case ParamSpecifier::ImplicitlyCopyableConsuming:
     introducer = VarDecl::Introducer::Var;
     break;
   }
@@ -7801,8 +7808,7 @@ bool ParamDecl::isAnonClosureParam() const {
 
 bool ParamDecl::isVariadic() const {
   (void) getInterfaceType();
-
-  return DefaultValueAndFlags.getInt().contains(Flags::IsVariadic);
+  return getOptions().contains(Flag::IsVariadic);
 }
 
 ParamDecl::Specifier ParamDecl::getSpecifier() const {
@@ -7840,8 +7846,8 @@ StringRef ParamDecl::getSpecifierSpelling(ParamSpecifier specifier) {
     return "__shared";
   case ParamSpecifier::LegacyOwned:
     return "__owned";
-  case ParamSpecifier::Transferring:
-    return "transferring";
+  case ParamSpecifier::ImplicitlyCopyableConsuming:
+    return "implicitly_copyable_consuming";
   }
   llvm_unreachable("invalid ParamSpecifier");
 }
@@ -8224,8 +8230,7 @@ ParamDecl *ParamDecl::cloneWithoutType(const ASTContext &Ctx, ParamDecl *PD) {
   auto *Clone = new (Ctx) ParamDecl(
       SourceLoc(), SourceLoc(), PD->getArgumentName(),
       SourceLoc(), PD->getParameterName(), PD->getDeclContext());
-  Clone->DefaultValueAndFlags.setPointerAndInt(
-      nullptr, PD->DefaultValueAndFlags.getInt());
+  Clone->setOptionsAndPointers(nullptr, nullptr, PD->getOptions());
   Clone->Bits.ParamDecl.defaultArgumentKind =
       PD->Bits.ParamDecl.defaultArgumentKind;
 
@@ -8278,6 +8283,9 @@ DefaultArgumentKind swift::getDefaultArgKind(Expr *init) {
   // checking.
   if (isa<NilLiteralExpr>(init))
     return DefaultArgumentKind::NilLiteral;
+
+  if (isa<MacroExpansionExpr>(init))
+    return DefaultArgumentKind::ExpressionMacro;
 
   auto magic = dyn_cast<MagicIdentifierLiteralExpr>(init);
   if (!magic)
@@ -8443,8 +8451,7 @@ AnyFunctionType::Param ParamDecl::toFunctionParam(Type type) const {
   auto flags = ParameterTypeFlags::fromParameterType(
       type, isVariadic(), isAutoClosure(), isNonEphemeral(), getSpecifier(),
       isIsolated(), /*isNoDerivative*/ false, isCompileTimeConst(),
-      hasResultDependsOn(),
-      getSpecifier() == ParamDecl::Specifier::Transferring /*is transferring*/);
+      hasResultDependsOn(), isTransferring());
   return AnyFunctionType::Param(type, label, flags, internalLabel);
 }
 
@@ -8478,6 +8485,7 @@ bool ParamDecl::hasDefaultExpr() const {
 #define MAGIC_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
   case DefaultArgumentKind::NAME:
 #include "swift/AST/MagicIdentifierKinds.def"
+  case DefaultArgumentKind::ExpressionMacro:
   case DefaultArgumentKind::NilLiteral:
   case DefaultArgumentKind::EmptyArray:
   case DefaultArgumentKind::EmptyDictionary:
@@ -8501,6 +8509,7 @@ bool ParamDecl::hasCallerSideDefaultExpr() const {
   case DefaultArgumentKind::NilLiteral:
   case DefaultArgumentKind::EmptyArray:
   case DefaultArgumentKind::EmptyDictionary:
+  case DefaultArgumentKind::ExpressionMacro:
     return true;
   }
   llvm_unreachable("invalid default argument kind");
@@ -8697,6 +8706,7 @@ ParamDecl::getDefaultValueStringRepresentation(
   switch (getDefaultArgumentKind()) {
   case DefaultArgumentKind::None:
     llvm_unreachable("called on a ParamDecl with no default value");
+  case DefaultArgumentKind::ExpressionMacro:
   case DefaultArgumentKind::Normal: {
     assert(DefaultValueAndFlags.getPointer() &&
            "default value not provided yet");
@@ -8789,7 +8799,8 @@ ParamDecl::getDefaultValueStringRepresentation(
 void
 ParamDecl::setDefaultValueStringRepresentation(StringRef stringRepresentation) {
   assert(getDefaultArgumentKind() == DefaultArgumentKind::Normal ||
-         getDefaultArgumentKind() == DefaultArgumentKind::StoredProperty);
+         getDefaultArgumentKind() == DefaultArgumentKind::StoredProperty ||
+         getDefaultArgumentKind() == DefaultArgumentKind::ExpressionMacro);
   assert(!stringRepresentation.empty());
 
   if (!DefaultValueAndFlags.getPointer()) {
@@ -10067,6 +10078,8 @@ FuncDecl *FuncDecl::create(ASTContext &Context, SourceLoc StaticLoc,
       ClangNode());
   FD->setParameters(BodyParams);
   FD->FnRetType = TypeLoc(ResultTyR);
+  if (llvm::isa_and_nonnull<TransferringTypeRepr>(ResultTyR))
+    FD->setTransferringResult();
   return FD;
 }
 
@@ -11338,7 +11351,8 @@ ActorIsolation::forActorInstanceSelf(ValueDecl *decl) {
 }
 
 NominalTypeDecl *ActorIsolation::getActor() const {
-  assert(getKind() == ActorInstance);
+  assert(getKind() == ActorInstance ||
+         getKind() == GlobalActor);
 
   if (silParsed)
     return nullptr;
@@ -12011,6 +12025,7 @@ MacroDiscriminatorContext MacroDiscriminatorContext::getParentOf(
 #include "swift/Basic/MacroRoles.def"
   case GeneratedSourceInfo::PrettyPrinted:
   case GeneratedSourceInfo::ReplacedFunctionBody:
+  case GeneratedSourceInfo::DefaultArgument:
     return origDC;
   }
 }

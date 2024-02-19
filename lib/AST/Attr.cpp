@@ -337,7 +337,8 @@ DeclAttributes::isUnavailableInSwiftVersion(
 }
 
 const AvailableAttr *
-DeclAttributes::findMostSpecificActivePlatform(const ASTContext &ctx) const{
+DeclAttributes::findMostSpecificActivePlatform(const ASTContext &ctx,
+                                               bool ignoreAppExtensions) const {
   const AvailableAttr *bestAttr = nullptr;
 
   for (auto attr : *this) {
@@ -352,6 +353,9 @@ DeclAttributes::findMostSpecificActivePlatform(const ASTContext &ctx) const{
       continue;
 
     if (!avAttr->isActivePlatform(ctx))
+      continue;
+
+    if (ignoreAppExtensions && isApplicationExtensionPlatform(avAttr->Platform))
       continue;
 
     // We have an attribute that is active for the platform, but
@@ -407,10 +411,12 @@ DeclAttributes::getPotentiallyUnavailable(const ASTContext &ctx) const {
   return potential;
 }
 
-const AvailableAttr *DeclAttributes::getUnavailable(
-                          const ASTContext &ctx) const {
+const AvailableAttr *
+DeclAttributes::getUnavailable(const ASTContext &ctx,
+                               bool ignoreAppExtensions) const {
   const AvailableAttr *conditional = nullptr;
-  const AvailableAttr *bestActive = findMostSpecificActivePlatform(ctx);
+  const AvailableAttr *bestActive =
+      findMostSpecificActivePlatform(ctx, ignoreAppExtensions);
 
   for (auto Attr : *this)
     if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
@@ -427,6 +433,10 @@ const AvailableAttr *DeclAttributes::getUnavailable(
       if (!AvAttr->isActivePlatform(ctx) &&
           !AvAttr->isLanguageVersionSpecific() &&
           !AvAttr->isPackageDescriptionVersionSpecific())
+        continue;
+
+      if (ignoreAppExtensions &&
+          isApplicationExtensionPlatform(AvAttr->Platform))
         continue;
 
       // Unconditional unavailable.
@@ -1888,6 +1898,8 @@ StringRef DeclAttribute::getAttrName() const {
     return "_section";
   case DeclAttrKind::Documentation:
     return "_documentation";
+  case DeclAttrKind::DistributedThunkTarget:
+    return "_distributedThunkTarget";
   case DeclAttrKind::Nonisolated:
     if (cast<NonisolatedAttr>(this)->isUnsafe()) {
         return "nonisolated(unsafe)";
@@ -2737,18 +2749,18 @@ CustomAttr *CustomAttr::create(ASTContext &ctx, SourceLoc atLoc, TypeExpr *type,
       CustomAttr(atLoc, range, type, initContext, argList, implicit);
 }
 
-std::pair<IdentTypeRepr *, IdentTypeRepr *> CustomAttr::destructureMacroRef() {
+std::pair<IdentTypeRepr *, DeclRefTypeRepr *>
+CustomAttr::destructureMacroRef() {
   TypeRepr *typeRepr = getTypeRepr();
   if (!typeRepr)
     return {nullptr, nullptr};
   if (auto *identType = dyn_cast<IdentTypeRepr>(typeRepr))
     return {nullptr, identType};
-  if (auto *memType = dyn_cast<MemberTypeRepr>(typeRepr))
-    if (auto *base = dyn_cast<IdentTypeRepr>(memType->getBaseComponent()))
-      if (memType->getMemberComponents().size() == 1)
-        if (auto first =
-                dyn_cast<IdentTypeRepr>(memType->getMemberComponents().front()))
-          return {base, first};
+  if (auto *memType = dyn_cast<MemberTypeRepr>(typeRepr)) {
+    if (auto *base = dyn_cast<SimpleIdentTypeRepr>(memType->getBase())) {
+      return {base, memType};
+    }
+  }
   return {nullptr, nullptr};
 }
 

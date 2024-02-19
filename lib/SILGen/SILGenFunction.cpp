@@ -344,6 +344,7 @@ static MacroInfo getMacroInfo(GeneratedSourceInfo &Info,
   }
   case GeneratedSourceInfo::PrettyPrinted:
   case GeneratedSourceInfo::ReplacedFunctionBody:
+  case GeneratedSourceInfo::DefaultArgument:
     break;
   }
   return Result;
@@ -1191,6 +1192,10 @@ void SILGenFunction::emitArtificialTopLevel(Decl *mainDecl) {
     CanType anyObjectMetaTy = CanExistentialMetatypeType::get(anyObjectTy,
                                                   MetatypeRepresentation::ObjC);
 
+    auto conformances =
+        SGM.SwiftModule->collectExistentialConformances(mainClassMetaty,
+                                                        anyObjectMetaTy);
+
     auto paramConvention = ParameterConvention::Direct_Unowned;
     auto params = {SILParameterInfo(anyObjectMetaTy, paramConvention)};
     std::array<SILResultInfo, 1> resultInfos = {
@@ -1217,7 +1222,7 @@ void SILGenFunction::emitArtificialTopLevel(Decl *mainDecl) {
                              SILType::getPrimitiveObjectType(mainClassMetaty));
     metaTy = B.createInitExistentialMetatype(mainClass, metaTy,
                           SILType::getPrimitiveObjectType(anyObjectMetaTy),
-                          {});
+                          conformances);
     SILValue optNameValue = B.createApply(
         mainClass, NSStringFromClass, {}, metaTy);
     ManagedValue optName = emitManagedRValueWithCleanup(optNameValue);
@@ -1789,6 +1794,7 @@ SILGenFunction::emitApplyOfSetterToBase(SILLocation loc, SILDeclRef setter,
   PartialApplyInst *setterPAI =
       B.createPartialApply(loc, setterFRef, substitutions, capturedArgs,
                            ParameterConvention::Direct_Guaranteed,
+                           SILFunctionTypeIsolation::Unknown,
                            PartialApplyInst::OnStackKind::OnStack);
   return emitManagedRValueWithCleanup(setterPAI).getValue();
 }
@@ -1840,6 +1846,7 @@ void SILGenFunction::emitAssignOrInit(SILLocation loc, ManagedValue selfValue,
   PartialApplyInst *initPAI =
       B.createPartialApply(loc, initFRef, substitutions, selfMetatype,
                            ParameterConvention::Direct_Guaranteed,
+                           SILFunctionTypeIsolation::Unknown,
                            PartialApplyInst::OnStackKind::OnStack);
   initFRef = emitManagedRValueWithCleanup(initPAI).getValue();
 

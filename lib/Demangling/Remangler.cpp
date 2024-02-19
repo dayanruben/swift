@@ -1776,6 +1776,11 @@ ManglingError Remangler::mangleImplEscaping(Node *node, unsigned depth) {
   return ManglingError::Success;
 }
 
+ManglingError Remangler::mangleImplErasedIsolation(Node *node, unsigned depth) {
+  Buffer << 'A';
+  return ManglingError::Success;
+}
+
 ManglingError Remangler::mangleImplConvention(Node *node, unsigned depth) {
   char ConvCh = llvm::StringSwitch<char>(node->getText())
                   .Case("@callee_unowned", 'y')
@@ -1930,6 +1935,9 @@ ManglingError Remangler::mangleImplFunctionType(Node *node, unsigned depth) {
         break;
       case Node::Kind::ImplEscaping:
         Buffer << 'e';
+        break;
+      case Node::Kind::ImplErasedIsolation:
+        Buffer << 'A';
         break;
       case Node::Kind::ImplConvention: {
         char ConvCh = llvm::StringSwitch<char>(Child->getText())
@@ -2087,6 +2095,19 @@ ManglingError Remangler::mangleOwned(Node *node, unsigned depth) {
 ManglingError Remangler::mangleNoDerivative(Node *node, unsigned depth) {
   RETURN_IF_ERROR(mangleSingleChildNode(node, depth + 1));
   Buffer << "Yk";
+  return ManglingError::Success;
+}
+
+ManglingError Remangler::mangleParamLifetimeDependence(Node *node,
+                                                       unsigned depth) {
+  RETURN_IF_ERROR(mangleChildNode(node, 1, depth + 1));
+  Buffer << "Yl" << (char)node->getFirstChild()->getIndex();
+  return ManglingError::Success;
+}
+
+ManglingError Remangler::mangleSelfLifetimeDependence(Node *node,
+                                                      unsigned depth) {
+  Buffer << "YL" << (char)node->getIndex();
   return ManglingError::Success;
 }
 
@@ -3688,6 +3709,13 @@ ManglingError Remangler::mangleGlobalVariableOnceDeclList(Node *node,
 ManglingError Remangler::mangleAccessibleFunctionRecord(Node *node,
                                                         unsigned depth) {
   Buffer << "HF";
+  return ManglingError::Success;
+}
+
+ManglingError
+Remangler::mangleAccessibleProtocolRequirementFunctionRecord(Node *node,
+                                                             unsigned depth) {
+  Buffer << "HpF";
   return ManglingError::Success;
 }
 

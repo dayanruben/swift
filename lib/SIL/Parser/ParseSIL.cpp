@@ -3279,6 +3279,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     UNARY_INSTRUCTION(DestructureStruct)
     UNARY_INSTRUCTION(DestructureTuple)
     UNARY_INSTRUCTION(ExtractExecutor)
+    UNARY_INSTRUCTION(FunctionExtractIsolation)
     UNARY_INSTRUCTION(EndInitLetRef)
     REFCOUNTING_INSTRUCTION(UnmanagedReleaseValue)
     REFCOUNTING_INSTRUCTION(UnmanagedRetainValue)
@@ -6564,8 +6565,10 @@ bool SILParser::parseCallInstruction(SILLocation InstLoc,
   SmallVector<UnresolvedValueName, 4> ArgNames;
 
   auto PartialApplyConvention = ParameterConvention::Direct_Owned;
+  auto PartialApplyIsolation = SILFunctionTypeIsolation::Unknown;
   ApplyOptions ApplyOpts;
   bool IsNoEscape = false;
+
   StringRef AttrName;
   SourceLoc AttrLoc;
   SILOptionalAttrValue AttrValue;
@@ -6588,6 +6591,12 @@ bool SILParser::parseCallInstruction(SILLocation InstLoc,
     if (AttrName.equals("callee_guaranteed")) {
       assert(!bool(AttrValue));
       PartialApplyConvention = ParameterConvention::Direct_Guaranteed;
+      continue;
+    }
+
+    if (AttrName.equals("isolated_any")) {
+      assert(!bool(AttrValue));
+      PartialApplyIsolation = SILFunctionTypeIsolation::Erased;
       continue;
     }
 
@@ -6777,6 +6786,7 @@ bool SILParser::parseCallInstruction(SILLocation InstLoc,
     // FIXME: Why the arbitrary order difference in IRBuilder type argument?
     ResultVal = B.createPartialApply(
         InstLoc, FnVal, subs, Args, PartialApplyConvention,
+        PartialApplyIsolation,
         IsNoEscape ? PartialApplyInst::OnStackKind::OnStack
                    : PartialApplyInst::OnStackKind::NotOnStack);
     break;
@@ -7442,27 +7452,39 @@ bool SILParserState::parseSILVTable(Parser &P) {
                            nullptr, nullptr, VTableState, M))
     return true;
 
-  // Parse the class name.
-  Identifier Name;
-  SourceLoc Loc;
-  if (VTableState.parseSILIdentifier(Name, Loc,
-                                     diag::expected_sil_value_name))
-    return true;
 
-  // Find the class decl.
-  llvm::PointerUnion<ValueDecl*, ModuleDecl *> Res =
-    lookupTopDecl(P, Name, /*typeLookup=*/true);
-  assert(Res.is<ValueDecl*>() && "Class look-up should return a Decl");
-  ValueDecl *VD = Res.get<ValueDecl*>();
-  if (!VD) {
-    P.diagnose(Loc, diag::sil_vtable_class_not_found, Name);
-    return true;
-  }
+  ClassDecl *theClass = nullptr;
+  SILType specializedClassTy;
+  if (P.Tok.isNot(tok::sil_dollar)) {
+    // Parse the class name.
+    Identifier Name;
+    SourceLoc Loc;
+    if (VTableState.parseSILIdentifier(Name, Loc,
+                                       diag::expected_sil_value_name))
+      return true;
 
-  auto *theClass = dyn_cast<ClassDecl>(VD);
-  if (!theClass) {
-    P.diagnose(Loc, diag::sil_vtable_class_not_found, Name);
-    return true;
+    // Find the class decl.
+    llvm::PointerUnion<ValueDecl*, ModuleDecl *> Res =
+      lookupTopDecl(P, Name, /*typeLookup=*/true);
+    assert(Res.is<ValueDecl*>() && "Class look-up should return a Decl");
+    ValueDecl *VD = Res.get<ValueDecl*>();
+    if (!VD) {
+      P.diagnose(Loc, diag::sil_vtable_class_not_found, Name);
+      return true;
+    }
+
+    theClass = dyn_cast<ClassDecl>(VD);
+    if (!theClass) {
+      P.diagnose(Loc, diag::sil_vtable_class_not_found, Name);
+      return true;
+    }
+  } else {
+    if (SILParser(P).parseSILType(specializedClassTy))
+      return true;
+    theClass = specializedClassTy.getClassOrBoundGenericClass();
+    if (!theClass) {
+      return true;
+    }
   }
 
   SourceLoc LBraceLoc = P.Tok.getLoc();
@@ -7530,7 +7552,7 @@ bool SILParserState::parseSILVTable(Parser &P) {
   P.parseMatchingToken(tok::r_brace, RBraceLoc, diag::expected_sil_rbrace,
                        LBraceLoc);
 
-  SILVTable::create(M, theClass, Serialized, vtableEntries);
+  SILVTable::create(M, theClass, specializedClassTy, Serialized, vtableEntries);
   return false;
 }
 

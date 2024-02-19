@@ -1903,12 +1903,21 @@ static ManagedValue convertFunctionRepresentation(SILGenFunction &SGF,
   llvm_unreachable("bad representation");
 }
 
+/// Whether the given abstraction pattern as an opaque thrown error.
+static bool hasOpaqueThrownError(const AbstractionPattern &pattern) {
+  if (auto thrownPattern = pattern.getFunctionThrownErrorType())
+    return thrownPattern->isTypeParameterOrOpaqueArchetype();
+
+  return false;
+}
+
 // Ideally our prolog/epilog emission would be able to handle all possible
 // reabstractions and conversions. Until then, this returns true if a closure
 // literal of type `literalType` can be directly emitted by SILGen as
 // `convertedType`.
-static bool canPeepholeLiteralClosureConversion(Type literalType,
-                                                Type convertedType) {
+static bool canPeepholeLiteralClosureConversion(
+    Type literalType, Type convertedType,
+    const std::optional<AbstractionPattern> &closurePattern) {
   auto literalFnType = literalType->getAs<FunctionType>();
   auto convertedFnType = convertedType->getAs<FunctionType>();
   
@@ -1919,7 +1928,7 @@ static bool canPeepholeLiteralClosureConversion(Type literalType,
   if (literalFnType->isEqual(convertedFnType)) {
     return true;
   }
-  
+
   // Are the types equivalent aside from effects (throws) or coeffects
   // (escaping)? Then we should emit the literal as having the destination type
   // (co)effects, even if it doesn't exercise them.
@@ -1927,14 +1936,20 @@ static bool canPeepholeLiteralClosureConversion(Type literalType,
   // TODO: We could also in principle let `async` through here, but that
   // interferes with the implementation of `reasync`.
   auto literalWithoutEffects = literalFnType->getExtInfo().intoBuilder()
-    .withThrows(false, Type())
     .withNoEscape(false)
     .build();
     
   auto convertedWithoutEffects = convertedFnType->getExtInfo().intoBuilder()
-    .withThrows(false, Type())
     .withNoEscape(false)
     .build();
+
+  // If the closure pattern has an abstract thrown error, we are unable to
+  // emit the literal with a difference in the thrown error type.
+  if (!(closurePattern && hasOpaqueThrownError(*closurePattern))) {
+    literalWithoutEffects = literalWithoutEffects.withThrows(false, Type());
+    convertedWithoutEffects = convertedWithoutEffects.withThrows(false, Type());
+  }
+
   if (literalFnType->withExtInfo(literalWithoutEffects)
         ->isEqual(convertedFnType->withExtInfo(convertedWithoutEffects))) {
     return true;
@@ -2000,7 +2015,8 @@ RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
   
   if ((isa<AbstractClosureExpr>(subExpr) || isa<CaptureListExpr>(subExpr))
       && canPeepholeLiteralClosureConversion(subExpr->getType(),
-                                             e->getType())) {
+                                             e->getType(),
+                                             C.getAbstractionPattern())) {
     // If we're emitting into a context with a preferred abstraction pattern
     // already, carry that along.
     auto origType = C.getAbstractionPattern();
@@ -6581,6 +6597,41 @@ RValue RValueEmitter::visitMacroExpansionExpr(MacroExpansionExpr *E,
 RValue RValueEmitter::visitCurrentContextIsolationExpr(
     CurrentContextIsolationExpr *E, SGFContext C) {
   return visit(E->getActor(), C);
+}
+
+ManagedValue
+SILGenFunction::emitExtractFunctionIsolation(SILLocation loc,
+                                             ArgumentSource &&fnSource,
+                                             SGFContext C) {
+  std::optional<Scope> scope;
+
+  // Emit the function value in its own scope unless we're going
+  // to return it at +0.
+  if (!C.isGuaranteedPlusZeroOk())
+    scope.emplace(Cleanups, CleanupLocation(loc));
+
+  // Emit a borrow of the function value.  Isolation extraction is a kind
+  // of projection, so we can emit the function with the same context as
+  // we got.
+  auto fnLoc = fnSource.getLocation();
+  auto fn = std::move(fnSource).getAsSingleValue(*this,
+                                                 C.withFollowingProjection());
+  fn = fn.borrow(*this, fnLoc);
+
+  // Extract the isolation value.
+  SILValue isolation = B.createFunctionExtractIsolation(loc, fn.getValue());
+
+  // If we can return the isolation at +0, do so.
+  if (C.isGuaranteedPlusZeroOk())
+    return ManagedValue::forBorrowedObjectRValue(isolation);
+
+  // Otherwise, copy it.
+  isolation = B.createCopyValue(loc, isolation);
+
+  // Manage the copy and exit the scope we entered earlier.
+  auto isolationMV = emitManagedRValueWithCleanup(isolation);
+  isolationMV = scope->popPreservingValue(isolationMV);
+  return isolationMV;
 }
 
 RValue SILGenFunction::emitRValue(Expr *E, SGFContext C) {

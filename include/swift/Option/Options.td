@@ -516,6 +516,10 @@ def unavailable_decl_optimization_EQ : Joined<["-"], "unavailable-decl-optimizat
            "value may be 'none' (no optimization) or 'complete' (code is not "
            "generated at all unavailable declarations)">;
 
+def experimental_package_bypass_resilience : Flag<["-"], "experimental-package-bypass-resilience">,
+  Flags<[FrontendOption]>,
+  HelpText<"Enable optimization to bypass resilience within a package">;
+
 def library_level : Separate<["-"], "library-level">,
   MetaVarName<"<level>">,
   Flags<[HelpHidden, FrontendOption, ModuleInterfaceOption]>,

@@ -270,10 +270,6 @@ setIRGenOutputOptsFromFrontendOptions(IRGenOptions &IRGenOpts,
     }
   }(FrontendOpts.RequestedAction);
 
-  IRGenOpts.UseCASBackend = FrontendOpts.UseCASBackend;
-  IRGenOpts.CASObjMode = FrontendOpts.CASObjMode;
-  IRGenOpts.EmitCASIDFile = FrontendOpts.EmitCASIDFile;
-
   // If we're in JIT mode, set the requisite flags.
   if (FrontendOpts.RequestedAction == FrontendOptions::ActionType::Immediate) {
     IRGenOpts.UseJIT = true;
@@ -531,6 +527,50 @@ parseStrictConcurrency(StringRef value) {
       .Default(llvm::None);
 }
 
+static bool ParseCASArgs(CASOptions &Opts, ArgList &Args,
+                         DiagnosticEngine &Diags,
+                         const FrontendOptions &FrontendOpts) {
+  using namespace options;
+  Opts.EnableCaching |= Args.hasArg(OPT_cache_compile_job);
+  Opts.EnableCachingRemarks |= Args.hasArg(OPT_cache_remarks);
+  Opts.CacheSkipReplay |= Args.hasArg(OPT_cache_disable_replay);
+  if (const Arg *A = Args.getLastArg(OPT_cas_path))
+    Opts.CASOpts.CASPath = A->getValue();
+  else if (Opts.CASOpts.CASPath.empty())
+    Opts.CASOpts.CASPath = llvm::cas::getDefaultOnDiskCASPath();
+
+  if (const Arg *A = Args.getLastArg(OPT_cas_plugin_path))
+    Opts.CASOpts.PluginPath = A->getValue();
+
+  for (StringRef Opt : Args.getAllArgValues(OPT_cas_plugin_option)) {
+    StringRef Name, Value;
+    std::tie(Name, Value) = Opt.split('=');
+    Opts.CASOpts.PluginOptions.emplace_back(std::string(Name),
+                                            std::string(Value));
+  }
+
+  for (const auto &A : Args.getAllArgValues(OPT_cas_fs))
+    Opts.CASFSRootIDs.emplace_back(A);
+  for (const auto &A : Args.getAllArgValues(OPT_clang_include_tree_root))
+    Opts.ClangIncludeTrees.emplace_back(A);
+
+  if (const Arg *A = Args.getLastArg(OPT_input_file_key))
+    Opts.InputFileKey = A->getValue();
+
+  if (const Arg*A = Args.getLastArg(OPT_bridging_header_pch_key))
+    Opts.BridgingHeaderPCHCacheKey = A->getValue();
+
+  if (Opts.EnableCaching && Opts.CASFSRootIDs.empty() &&
+      Opts.ClangIncludeTrees.empty() &&
+      FrontendOptions::supportCompilationCaching(
+          FrontendOpts.RequestedAction)) {
+    Diags.diagnose(SourceLoc(), diag::error_caching_no_cas_fs);
+    return true;
+  }
+
+  return false;
+}
+
 static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                           DiagnosticEngine &Diags,
                           const FrontendOptions &FrontendOpts) {
@@ -630,6 +670,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   // Either the env var and the flag has to be set to enable package interface load
   Opts.EnablePackageInterfaceLoad = Args.hasArg(OPT_experimental_package_interface_load) ||
                                     ::getenv("SWIFT_ENABLE_PACKAGE_INTERFACE_LOAD");
+
+  Opts.EnableBypassResilienceInPackage = Args.hasArg(OPT_experimental_package_bypass_resilience);
 
   Opts.DisableAvailabilityChecking |=
       Args.hasArg(OPT_disable_availability_checking);
@@ -1560,7 +1602,8 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts, ArgList &Args,
                                    DiagnosticEngine &Diags,
                                    StringRef workingDirectory,
                                    const LangOptions &LangOpts,
-                                   const FrontendOptions &FrontendOpts) {
+                                   const FrontendOptions &FrontendOpts,
+                                   const CASOptions &CASOpts) {
   using namespace options;
 
   if (const Arg *a = Args.getLastArg(OPT_tools_directory)) {
@@ -1628,8 +1671,8 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts, ArgList &Args,
     Opts.ExtraArgs.push_back("-ffile-compilation-dir=" + Val);
   }
 
-  if (FrontendOpts.CASFSRootIDs.empty() &&
-      FrontendOpts.ClangIncludeTrees.empty()) {
+  if (CASOpts.CASFSRootIDs.empty() &&
+      CASOpts.ClangIncludeTrees.empty()) {
     if (!workingDirectory.empty()) {
       // Provide a working directory to Clang as well if there are any -Xcc
       // options, in case some of them are search-related. But do it at the
@@ -1656,8 +1699,6 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts, ArgList &Args,
 
   if (auto *A = Args.getLastArg(OPT_import_objc_header))
     Opts.BridgingHeader = A->getValue();
-  Opts.BridgingHeaderPCHCacheKey =
-      Args.getLastArgValue(OPT_bridging_header_pch_key);
   Opts.DisableSwiftBridgeAttr |= Args.hasArg(OPT_disable_swift_bridge_attr);
 
   Opts.DisableOverlayModules |= Args.hasArg(OPT_emit_imported_modules);
@@ -1693,12 +1734,11 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts, ArgList &Args,
 
   // Forward the FrontendOptions to clang importer option so it can be
   // accessed when creating clang module compilation invocation.
-  if (FrontendOpts.EnableCaching) {
-    Opts.CASOpts = FrontendOpts.CASOpts;
+  if (CASOpts.EnableCaching) {
     // Only set UseClangIncludeTree when caching is enabled since it is not
     // useful in non-caching context.
-    Opts.UseClangIncludeTree = !Args.hasArg(OPT_no_clang_include_tree);
-    Opts.HasClangIncludeTreeRoot = Args.hasArg(OPT_clang_include_tree_root);
+    Opts.UseClangIncludeTree |= !Args.hasArg(OPT_no_clang_include_tree);
+    Opts.HasClangIncludeTreeRoot |= Args.hasArg(OPT_clang_include_tree_root);
   }
 
   return false;
@@ -3021,6 +3061,17 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
         .Default(llvm::CallingConv::C);
   }
 
+  if (Arg *A = Args.getLastArg(OPT_cas_backend_mode)) {
+    Opts.CASObjMode = llvm::StringSwitch<llvm::CASBackendMode>(A->getValue())
+                          .Case("native", llvm::CASBackendMode::Native)
+                          .Case("casid", llvm::CASBackendMode::CASID)
+                          .Case("verify", llvm::CASBackendMode::Verify)
+                          .Default(llvm::CASBackendMode::Native);
+  }
+
+  Opts.UseCASBackend |= Args.hasArg(OPT_cas_backend);
+  Opts.EmitCASIDFile |= Args.hasArg(OPT_cas_emit_casid_file);
+
   return false;
 }
 
@@ -3155,6 +3206,10 @@ bool CompilerInvocation::parseArgs(
   ParseModuleInterfaceArgs(ModuleInterfaceOpts, ParsedArgs);
   SaveModuleInterfaceArgs(ModuleInterfaceOpts, FrontendOpts, ParsedArgs, Diags);
 
+  if (ParseCASArgs(CASOpts, ParsedArgs, Diags, FrontendOpts)) {
+    return true;
+  }
+
   if (ParseLangArgs(LangOpts, ParsedArgs, Diags, FrontendOpts)) {
     return true;
   }
@@ -3164,7 +3219,8 @@ bool CompilerInvocation::parseArgs(
   }
 
   if (ParseClangImporterArgs(ClangImporterOpts, ParsedArgs, Diags,
-                             workingDirectory, LangOpts, FrontendOpts)) {
+                             workingDirectory, LangOpts, FrontendOpts,
+                             CASOpts)) {
     return true;
   }
 
@@ -3216,6 +3272,8 @@ bool CompilerInvocation::parseArgs(
     SILOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.CMOMode = CrossModuleOptimizationMode::Everything;
     SILOpts.EmbeddedSwift = true;
+    // OSSA modules are required for deinit de-virtualization.
+    SILOpts.EnableOSSAModules = true;
   } else {
     if (SILOpts.NoAllocations) {
       Diags.diagnose(SourceLoc(), diag::no_allocations_without_embedded);

@@ -36,8 +36,11 @@ static const LibPrespecializedData<InProcess> *findLibPrespecialized() {
   auto path = runtime::environment::SWIFT_DEBUG_LIB_PRESPECIALIZED_PATH();
   if (path && path[0]) {
     void *handle = dlopen(path, RTLD_LAZY);
-    if (!handle)
+    if (!handle) {
+      swift::warning(0, "Failed to load prespecializations library: %s\n",
+                     dlerror());
       return nullptr;
+    }
 
     dataPtr = dlsym(handle, LIB_PRESPECIALIZED_TOP_LEVEL_SYMBOL_NAME);
   }
@@ -69,6 +72,20 @@ const LibPrespecializedData<InProcess> *swift::getLibPrespecializedData() {
   return SWIFT_LAZY_CONSTANT(findLibPrespecialized());
 }
 
+// Returns true if the type has any arguments that aren't plain types (packs or
+// unknown kinds).
+static bool hasNonTypeGenericArguments(const TypeContextDescriptor *description) {
+  auto generics = description->getGenericContext();
+  if (!generics)
+    return false;
+
+  for (auto param : generics->getGenericParams())
+    if (param.getKind() != GenericParamKind::Type)
+      return true;
+
+  return false;
+}
+
 static bool disableForValidation = false;
 
 Metadata *
@@ -81,8 +98,23 @@ swift::getLibPrespecializedMetadata(const TypeContextDescriptor *description,
   if (!data)
     return nullptr;
 
+  // We don't support types with pack parameters yet (and especially not types
+  // with unknown parameter kinds) so don't even try to look those up.
+  if (hasNonTypeGenericArguments(description))
+    return nullptr;
+
   Demangler dem;
   auto mangleNode = _buildDemanglingForGenericType(description, arguments, dem);
+  if (!mangleNode) {
+    if (SWIFT_UNLIKELY(runtime::environment::
+                           SWIFT_DEBUG_ENABLE_LIB_PRESPECIALIZED_LOGGING()))
+      fprintf(stderr,
+              "Prespecializations library: failed to build demangling with "
+              "descriptor %p.\n",
+              description);
+    return nullptr;
+  }
+
   if (mangleNode->getKind() != Node::Kind::Global) {
     auto wrapper = dem.createNode(Node::Kind::Global);
     wrapper->addChild(mangleNode, dem);

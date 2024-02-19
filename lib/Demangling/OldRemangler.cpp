@@ -1725,6 +1725,11 @@ ManglingError Remangler::mangleImplEscaping(Node *node, unsigned depth) {
   return ManglingError::Success;
 }
 
+ManglingError Remangler::mangleImplErasedIsolation(Node *node, unsigned depth) {
+  // The old mangler does not encode @isolated(any).
+  return ManglingError::Success;
+}
+
 ManglingError Remangler::mangleImplPatternSubstitutions(Node *node,
                                                         unsigned depth) {
   // The old mangler does not encode substituted function types.
@@ -1890,6 +1895,16 @@ ManglingError Remangler::mangleCompileTimeConst(Node *node, unsigned depth) {
 ManglingError Remangler::mangleNoDerivative(Node *node, unsigned depth) {
   Buffer << 'k';
   return mangleSingleChildNode(node, depth + 1); // type
+}
+
+ManglingError Remangler::mangleParamLifetimeDependence(Node *node,
+                                                       unsigned depth) {
+  return MANGLING_ERROR(ManglingError::UnsupportedNodeKind, node);
+}
+
+ManglingError Remangler::mangleSelfLifetimeDependence(Node *node,
+                                                      unsigned depth) {
+  return MANGLING_ERROR(ManglingError::UnsupportedNodeKind, node);
 }
 
 ManglingError Remangler::mangleTuple(Node *node, unsigned depth) {
@@ -2974,6 +2989,13 @@ Demangle::mangleNodeAsObjcCString(NodePointer node,
 ManglingError Remangler::mangleAccessibleFunctionRecord(Node *node,
                                                         unsigned depth) {
   Buffer << "HF";
+  return ManglingError::Success;
+}
+
+ManglingError
+Remangler::mangleAccessibleProtocolRequirementFunctionRecord(Node *node,
+                                                             unsigned depth) {
+  Buffer << "HpF";
   return ManglingError::Success;
 }
 

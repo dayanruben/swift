@@ -615,6 +615,7 @@ static void diagSyntacticUseRestrictions(const Expr *E, const DeclContext *DC,
       case DefaultArgumentKind::EmptyArray:
       case DefaultArgumentKind::EmptyDictionary:
       case DefaultArgumentKind::StoredProperty:
+      case DefaultArgumentKind::ExpressionMacro:
         return llvm::None;
       }
 
@@ -710,7 +711,7 @@ static void diagSyntacticUseRestrictions(const Expr *E, const DeclContext *DC,
           } else if (auto *TE = dyn_cast<TypeExpr>(E)) {
             if (auto *TR =
                     dyn_cast_or_null<MemberTypeRepr>(TE->getTypeRepr())) {
-              if (!isa<IdentTypeRepr>(TR->getBaseComponent())) {
+              if (!isa<IdentTypeRepr>(TR->getRoot())) {
                 behavior = DiagnosticBehavior::Warning;
               }
             }

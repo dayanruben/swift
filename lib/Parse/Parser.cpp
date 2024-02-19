@@ -325,6 +325,7 @@ static LexerMode sourceFileKindToLexerMode(SourceFileKind kind) {
     case swift::SourceFileKind::Library:
     case swift::SourceFileKind::Main:
     case swift::SourceFileKind::MacroExpansion:
+    case swift::SourceFileKind::DefaultArgument:
       return LexerMode::Swift;
   }
   llvm_unreachable("covered switch");
@@ -1130,6 +1131,7 @@ struct ParserUnit::Implementation {
   SearchPathOptions SearchPathOpts;
   ClangImporterOptions clangImporterOpts;
   symbolgraphgen::SymbolGraphOptions symbolGraphOpts;
+  CASOptions CASOpts;
   DiagnosticEngine Diags;
   ASTContext &Ctx;
   SourceFile *SF;
@@ -1138,10 +1140,10 @@ struct ParserUnit::Implementation {
   Implementation(SourceManager &SM, SourceFileKind SFKind, unsigned BufferID,
                  const LangOptions &Opts, const TypeCheckerOptions &TyOpts,
                  const SILOptions &silOpts, StringRef ModuleName)
-      : LangOpts(Opts),
-        TypeCheckerOpts(TyOpts), SILOpts(silOpts), Diags(SM),
+      : LangOpts(Opts), TypeCheckerOpts(TyOpts), SILOpts(silOpts), Diags(SM),
         Ctx(*ASTContext::get(LangOpts, TypeCheckerOpts, SILOpts, SearchPathOpts,
-                             clangImporterOpts, symbolGraphOpts, SM, Diags)) {
+                             clangImporterOpts, symbolGraphOpts, CASOpts, SM,
+                             Diags)) {
     registerParseRequestFunctions(Ctx.evaluator);
 
     auto parsingOpts = SourceFile::getDefaultParsingOptions(LangOpts);

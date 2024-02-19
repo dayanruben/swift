@@ -131,6 +131,7 @@ CONTEXT_NODE(IVarDestroyer)
 NODE(ImplEscaping)
 NODE(ImplConvention)
 NODE(ImplDifferentiabilityKind)
+NODE(ImplErasedIsolation)
 NODE(ImplParameterResultDifferentiability)
 NODE(ImplFunctionAttribute)
 NODE(ImplFunctionConvention)
@@ -357,6 +358,9 @@ NODE(AsyncSuspendResumePartialFunction)
 NODE(AccessibleFunctionRecord)
 NODE(CompileTimeConst)
 
+// Added in Swift 5.11
+NODE(AccessibleProtocolRequirementFunctionRecord)
+
 // Added in Swift 5.7
 NODE(BackDeploymentThunk)
 NODE(BackDeploymentFallback)
@@ -381,6 +385,8 @@ NODE(AsyncRemoved)
 
 // Added in Swift 5.TBD
 NODE(ObjectiveCProtocolSymbolicReference)
+NODE(ParamLifetimeDependence)
+NODE(SelfLifetimeDependence)
 
 NODE(OutlinedInitializeWithCopyNoValueWitness)
 NODE(OutlinedAssignWithTakeNoValueWitness)

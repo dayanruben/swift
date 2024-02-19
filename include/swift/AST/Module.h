@@ -106,6 +106,7 @@ enum class SourceFileKind {
   SIL,      ///< Came from a .sil file.
   Interface, ///< Came from a .swiftinterface file, representing another module.
   MacroExpansion, ///< Came from a macro expansion.
+  DefaultArgument, ///< Came from default argument at caller side
 };
 
 /// Contains information about where a particular path is used in
@@ -478,6 +479,12 @@ public:
     if (auto pkg = getPackage())
       return pkg->getName();
     return Identifier();
+  }
+
+  bool inSamePackage(ModuleDecl *other) {
+    return other != nullptr &&
+           !getPackageName().empty() &&
+           getPackageName() == other->getPackageName();
   }
 
   /// Get the package associated with this module

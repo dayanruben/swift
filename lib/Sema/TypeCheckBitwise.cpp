@@ -57,8 +57,7 @@ getImplicitCheckForNominal(NominalTypeDecl *nominal) {
   if (!nominal
            ->getFormalAccessScope(
                /*useDC=*/nullptr, /*treatUsableFromInlineAsPublic=*/true)
-           .isPublic() ||
-      !nominal->isResilient())
+           .isPublicOrPackage())
     return {BitwiseCopyableCheck::Implicit};
 
   if (nominal->hasClangNode() ||
@@ -329,6 +328,7 @@ bool DeriveImplicitBitwiseCopyableConformance::allowedForFile() {
 
     case SourceFileKind::Library:
     case SourceFileKind::MacroExpansion:
+    case SourceFileKind::DefaultArgument:
     case SourceFileKind::Main:
     case SourceFileKind::SIL:
       return true;

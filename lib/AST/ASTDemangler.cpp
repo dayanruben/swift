@@ -469,14 +469,13 @@ Type ASTBuilder::createFunctionType(
                                                  representation);
 
   // TODO: Handle LifetimeDependenceInfo here.
-  auto einfo =
-      FunctionType::ExtInfoBuilder(representation, noescape, flags.isThrowing(),
-                                   thrownError, resultDiffKind,
-                                   clangFunctionType, isolation,
-                                   LifetimeDependenceInfo())
-          .withAsync(flags.isAsync())
-          .withConcurrent(flags.isSendable())
-          .build();
+  auto einfo = FunctionType::ExtInfoBuilder(
+                   representation, noescape, flags.isThrowing(), thrownError,
+                   resultDiffKind, clangFunctionType, isolation,
+                   LifetimeDependenceInfo(), false /*is transferring*/)
+                   .withAsync(flags.isAsync())
+                   .withConcurrent(flags.isSendable())
+                   .build();
 
   return FunctionType::get(funcParams, output, einfo);
 }
@@ -614,6 +613,10 @@ Type ASTBuilder::createImplFunctionType(
   #undef SIMPLE_CASE
   }
 
+  auto isolation = SILFunctionTypeIsolation::Unknown;
+  if (flags.hasErasedIsolation())
+    isolation = SILFunctionTypeIsolation::Erased;
+
   // There's no representation of this in the mangling because it can't
   // occur in well-formed programs.
   bool unimplementable = false;
@@ -655,7 +658,8 @@ Type ASTBuilder::createImplFunctionType(
   auto einfo = SILFunctionType::ExtInfoBuilder(
                    representation, flags.isPseudogeneric(), !flags.isEscaping(),
                    flags.isSendable(), flags.isAsync(), unimplementable,
-                   diffKind, clangFnType, LifetimeDependenceInfo())
+                   isolation, diffKind, clangFnType, LifetimeDependenceInfo(),
+                   false /*has transferring result*/)
                    .build();
 
   return SILFunctionType::get(genericSig, einfo, funcCoroutineKind,
@@ -838,7 +842,7 @@ Type ASTBuilder::createSILBoxTypeWithLayout(
     ArrayRef<BuiltSubstitution> Substitutions,
     ArrayRef<BuiltRequirement> Requirements) {
   SmallVector<Type, 4> replacements;
-  SmallVector<GenericTypeParamType *, 4> genericTypeParams;
+  SmallVector<GenericTypeParamType *, 2> genericTypeParams;
   for (const auto &s : Substitutions) {
     if (auto *t = dyn_cast_or_null<GenericTypeParamType>(s.first.getPointer()))
       genericTypeParams.push_back(t);
@@ -846,8 +850,14 @@ Type ASTBuilder::createSILBoxTypeWithLayout(
   }
 
   GenericSignature signature;
-  if (!genericTypeParams.empty())
-    signature = GenericSignature::get(genericTypeParams, Requirements);
+  if (!genericTypeParams.empty()) {
+    SmallVector<BuiltRequirement, 2> RequirementsVec(Requirements);
+    signature = swift::buildGenericSignature(Ctx,
+                                             signature,
+                                             genericTypeParams,
+                                             std::move(RequirementsVec),
+                                             /*allowInverses=*/true);
+  }
   SmallVector<SILField, 4> silFields;
   for (auto field: fields)
     silFields.emplace_back(field.getPointer()->getCanonicalType(),

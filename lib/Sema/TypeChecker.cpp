@@ -372,6 +372,7 @@ void swift::performWholeModuleTypeChecking(SourceFile &SF) {
   FrontendStatsTracer tracer(Ctx.Stats,
                              "perform-whole-module-type-checking");
   switch (SF.Kind) {
+  case SourceFileKind::DefaultArgument:
   case SourceFileKind::Library:
   case SourceFileKind::Main:
   case SourceFileKind::MacroExpansion:
@@ -418,6 +419,7 @@ void swift::loadDerivativeConfigurations(SourceFile &SF) {
   };
 
   switch (SF.Kind) {
+  case SourceFileKind::DefaultArgument:
   case SourceFileKind::Library:
   case SourceFileKind::MacroExpansion:
   case SourceFileKind::Main: {
@@ -487,14 +489,13 @@ namespace {
     }
 
     PreWalkAction walkToTypeReprPre(TypeRepr *T) override {
-    if (auto *declRefTR = dyn_cast<DeclRefTypeRepr>(T)) {
-      if (auto *identBase =
-              dyn_cast<IdentTypeRepr>(declRefTR->getBaseComponent())) {
-        auto name = identBase->getNameRef().getBaseIdentifier();
-        if (auto *paramDecl = params->lookUpGenericParam(name))
-          identBase->setValue(paramDecl, dc);
+      // Only unqualified identifiers can reference generic parameters.
+      if (auto *simpleIdentTR = dyn_cast<SimpleIdentTypeRepr>(T)) {
+        auto name = simpleIdentTR->getNameRef().getBaseIdentifier();
+        if (auto *paramDecl = params->lookUpGenericParam(name)) {
+          simpleIdentTR->setValue(paramDecl, dc);
+        }
       }
-    }
 
       return Action::Continue();
     }
