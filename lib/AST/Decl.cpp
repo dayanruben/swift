@@ -1301,9 +1301,10 @@ bool GenericContext::isComputingGenericSignature() const {
 
 /// If we hit a cycle while building the generic signature, we can't return
 /// nullptr, since this breaks invariants elsewhere. Instead, build a dummy
-/// signature with no requirements.
+/// signature where everything is Copyable and Escapable, to avoid spurious
+/// downstream diagnostics concerning move-only types.
 static GenericSignature getPlaceholderGenericSignature(
-    const DeclContext *DC) {
+    ASTContext &ctx, const DeclContext *DC) {
   SmallVector<GenericParamList *, 2> gpLists;
   DC->forEachGenericContext([&](GenericParamList *genericParams) {
     gpLists.push_back(genericParams);
@@ -1316,23 +1317,32 @@ static GenericSignature getPlaceholderGenericSignature(
   for (unsigned i : indices(gpLists))
     gpLists[i]->setDepth(i);
 
-  SmallVector<GenericTypeParamType *, 2> result;
-  for (auto *genericParams : gpLists) {
-    for (auto *genericParam : *genericParams) {
-      result.push_back(genericParam->getDeclaredInterfaceType()
-                                   ->castTo<GenericTypeParamType>());
+  SmallVector<GenericTypeParamType *, 2> genericParams;
+  SmallVector<Requirement, 2> requirements;
+
+  for (auto *gpList : gpLists) {
+    for (auto *genericParam : *gpList) {
+      auto type = genericParam->getDeclaredInterfaceType();
+      genericParams.push_back(type->castTo<GenericTypeParamType>());
+
+      if (ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
+        for (auto ip : InvertibleProtocolSet::full()) {
+          auto proto = ctx.getProtocol(getKnownProtocolKind(ip));
+          requirements.emplace_back(RequirementKind::Conformance, type,
+                                    proto->getDeclaredInterfaceType());
+        }
+      }
     }
   }
 
-  return GenericSignature::get(result, {});
+  return GenericSignature::get(genericParams, requirements);
 }
 
 GenericSignature GenericContext::getGenericSignature() const {
-  // Don't use evaluateOrDefault() here, because getting the 'default value'
-  // is slightly expensive here so we don't want to do it eagerly.
-  return getASTContext().evaluator(
+  auto &ctx = getASTContext();
+  return ctx.evaluator(
       GenericSignatureRequest{const_cast<GenericContext *>(this)},
-      [this]() { return getPlaceholderGenericSignature(this); });
+      [&ctx, this]() { return getPlaceholderGenericSignature(ctx, this); });
 }
 
 GenericEnvironment *GenericContext::getGenericEnvironment() const {
@@ -4908,14 +4918,6 @@ GenericParameterReferenceInfo ValueDecl::findExistentialSelfReferences(
                                         llvm::None);
 }
 
-InverseMarking TypeDecl::getMarking(InvertibleProtocolKind ip) const {
-  return evaluateOrDefault(
-      getASTContext().evaluator,
-      InvertibleAnnotationRequest{const_cast<TypeDecl *>(this), ip},
-      InverseMarking::forInverse(InverseMarking::Kind::None)
-  );
-}
-
 static TypeDecl::CanBeInvertible::Result
 conformanceExists(TypeDecl const *decl, InvertibleProtocolKind ip) {
   auto *proto = decl->getASTContext().getProtocol(getKnownProtocolKind(ip));
@@ -4942,23 +4944,21 @@ conformanceExists(TypeDecl const *decl, InvertibleProtocolKind ip) {
   return TypeDecl::CanBeInvertible::Always;
 }
 
-TypeDecl::CanBeInvertible::Result TypeDecl::canBeCopyable() const {
+TypeDecl::CanBeInvertible::Result NominalTypeDecl::canBeCopyable() const {
   if (!getASTContext().LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
-    auto copyable = getMarking(InvertibleProtocolKind::Copyable);
-    return !copyable.getInverse() || bool(copyable.getPositive())
-         ? CanBeInvertible::Always
-         : CanBeInvertible::Never;
+    return !hasInverseMarking(InvertibleProtocolKind::Copyable)
+               ? CanBeInvertible::Always
+               : CanBeInvertible::Never;
   }
 
   return conformanceExists(this, InvertibleProtocolKind::Copyable);
 }
 
-TypeDecl::CanBeInvertible::Result TypeDecl::canBeEscapable() const {
+TypeDecl::CanBeInvertible::Result NominalTypeDecl::canBeEscapable() const {
   if (!getASTContext().LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
-    auto escapable = getMarking(InvertibleProtocolKind::Escapable);
-    return !escapable.getInverse() || bool(escapable.getPositive())
-         ? CanBeInvertible::Always
-         : CanBeInvertible::Never;
+    return !hasInverseMarking(InvertibleProtocolKind::Escapable)
+               ? CanBeInvertible::Always
+               : CanBeInvertible::Never;
   }
 
   return conformanceExists(this, InvertibleProtocolKind::Escapable);
@@ -6617,6 +6617,206 @@ bool ProtocolDecl::inheritsFrom(const ProtocolDecl *super) const {
   });
 }
 
+static void findInheritedType(
+    InheritedTypes inherited,
+    llvm::function_ref<bool(Type, NullablePtr<TypeRepr>)> isMatch) {
+  for (size_t i = 0; i < inherited.size(); i++) {
+    auto type = inherited.getResolvedType(i, TypeResolutionStage::Structural);
+    if (!type)
+      continue;
+
+    if (isMatch(type, inherited.getTypeRepr(i)))
+      break;
+  }
+}
+
+static InverseMarking::Mark
+findInverseInInheritance(InheritedTypes inherited,
+                         InvertibleProtocolKind target) {
+  auto isInverseOfTarget = [&](Type t) {
+    if (auto pct = t->getAs<ProtocolCompositionType>())
+      return pct->getInverses().contains(target);
+    return false;
+  };
+
+  InverseMarking::Mark inverse;
+  findInheritedType(inherited,
+                    [&](Type inheritedTy, NullablePtr<TypeRepr> repr) {
+                      if (!isInverseOfTarget(inheritedTy))
+                        return false;
+
+                      inverse = InverseMarking::Mark(
+                          InverseMarking::Kind::Explicit,
+                          repr.isNull() ? SourceLoc() : repr.get()->getLoc());
+                      return true;
+                    });
+  return inverse;
+}
+
+bool NominalTypeDecl::hasMarking(InvertibleProtocolKind target) const {
+  InverseMarking::Mark mark;
+
+  std::function<bool(Type)> isTarget = [&](Type t) -> bool {
+    if (auto kp = t->getKnownProtocol()) {
+      if (auto ip = getInvertibleProtocolKind(*kp))
+        return *ip == target;
+    } else if (auto pct = t->getAs<ProtocolCompositionType>()) {
+      return llvm::any_of(pct->getMembers(), isTarget);
+    }
+
+    return false;
+  };
+
+  findInheritedType(getInherited(),
+                    [&](Type inheritedTy, NullablePtr<TypeRepr> repr) {
+                      if (!isTarget(inheritedTy))
+                        return false;
+
+                      mark = InverseMarking::Mark(
+                          InverseMarking::Kind::Explicit,
+                          repr.isNull() ? SourceLoc() : repr.get()->getLoc());
+                      return true;
+                    });
+  return mark;
+}
+
+InverseMarking::Mark
+AssociatedTypeDecl::hasInverseMarking(InvertibleProtocolKind target) const {
+  auto &ctx = getASTContext();
+
+  if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics))
+    return InverseMarking::Mark();
+
+  return findInverseInInheritance(getInherited(), target);
+}
+
+InverseMarking::Mark
+NominalTypeDecl::hasInverseMarking(InvertibleProtocolKind target) const {
+  switch (target) {
+  case InvertibleProtocolKind::Copyable:
+    // Handle the legacy '@_moveOnly' for types they can validly appear.
+    // TypeCheckAttr handles the illegal situations for us.
+    if (auto attr = getAttrs().getAttribute<MoveOnlyAttr>())
+      if (isa<StructDecl, EnumDecl, ClassDecl>(this))
+        return InverseMarking::Mark(InverseMarking::Kind::LegacyExplicit,
+                                    attr->getLocation());
+    break;
+
+  case InvertibleProtocolKind::Escapable:
+    // Handle the legacy '@_nonEscapable' attribute
+    if (auto attr = getAttrs().getAttribute<NonEscapableAttr>()) {
+      assert((isa<ClassDecl, StructDecl, EnumDecl>(this)));
+      return InverseMarking::Mark(InverseMarking::Kind::LegacyExplicit,
+                                  attr->getLocation());
+    }
+    break;
+  }
+
+  auto &ctx = getASTContext();
+
+  // Legacy support stops here.
+  if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics))
+    return InverseMarking::Mark(InverseMarking::Kind::None);
+
+  // Claim that the tuple decl has an inferred ~TARGET marking.
+  if (isa<BuiltinTupleDecl>(this))
+    return InverseMarking::Mark(InverseMarking::Kind::Inferred);
+
+  if (auto P = dyn_cast<ProtocolDecl>(this))
+    return P->hasInverseMarking(target);
+
+  // Search the inheritance clause first.
+  if (auto inverse = findInverseInInheritance(getInherited(), target))
+    return inverse;
+
+  // Check the generic parameters for an explicit ~TARGET marking
+  // which would result in an Inferred ~TARGET marking for this context.
+  auto *gpList = getParsedGenericParams();
+  if (!gpList)
+    return InverseMarking::Mark();
+
+  llvm::SmallSet<GenericTypeParamDecl *, 4> params;
+
+  // Scan the inheritance clauses of generic parameters only for an inverse.
+  for (GenericTypeParamDecl *param : gpList->getParams()) {
+    auto inverse = findInverseInInheritance(param->getInherited(), target);
+
+    // Inverse is inferred from one of the generic parameters.
+    if (inverse)
+      return inverse.with(InverseMarking::Kind::Inferred);
+
+    params.insert(param);
+  }
+
+  // Next, scan the where clause and return the result.
+  auto whereClause = getTrailingWhereClause();
+  if (!whereClause)
+    return InverseMarking::Mark();
+
+  auto requirements = whereClause->getRequirements();
+  for (unsigned i : indices(requirements)) {
+    auto requirementRepr = requirements[i];
+    if (requirementRepr.getKind() != RequirementReprKind::TypeConstraint)
+      continue;
+
+    auto *subjectRepr =
+        dyn_cast<IdentTypeRepr>(requirementRepr.getSubjectRepr());
+
+    if (!(subjectRepr && subjectRepr->isBound()))
+      continue;
+
+    auto *subjectGP =
+        dyn_cast<GenericTypeParamDecl>(subjectRepr->getBoundDecl());
+    if (!subjectGP || !params.contains(subjectGP))
+      continue;
+
+    auto *constraintRepr =
+        dyn_cast<InverseTypeRepr>(requirementRepr.getConstraintRepr());
+    if (!constraintRepr || constraintRepr->isInvalid())
+      continue;
+
+    if (constraintRepr->isInverseOf(target, getDeclContext()))
+      return InverseMarking::Mark(InverseMarking::Kind::Inferred,
+                                  constraintRepr->getLoc());
+  }
+
+  return InverseMarking::Mark();
+}
+
+InverseMarking::Mark
+ProtocolDecl::hasInverseMarking(InvertibleProtocolKind target) const {
+  auto &ctx = getASTContext();
+
+  // Legacy support stops here.
+  if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics))
+    return InverseMarking::Mark();
+
+  if (auto inverse = findInverseInInheritance(getInherited(), target))
+    return inverse;
+
+  auto *whereClause = getTrailingWhereClause();
+  if (!whereClause)
+    return InverseMarking::Mark();
+
+  for (const auto &reqRepr : whereClause->getRequirements()) {
+    if (reqRepr.isInvalid() ||
+        reqRepr.getKind() != RequirementReprKind::TypeConstraint)
+      continue;
+
+    auto *subjectRepr = dyn_cast<IdentTypeRepr>(reqRepr.getSubjectRepr());
+    auto *constraintRepr = reqRepr.getConstraintRepr();
+
+    if (!subjectRepr || !subjectRepr->getNameRef().isSimpleName(ctx.Id_Self))
+      continue;
+
+    if (constraintRepr->isInverseOf(target, getDeclContext()))
+      return InverseMarking::Mark(InverseMarking::Kind::Explicit,
+                                  constraintRepr->getLoc());
+  }
+
+  return InverseMarking::Mark();
+}
+
 bool ProtocolDecl::requiresInvertible(InvertibleProtocolKind ip) const {
   // Protocols don't inherit from themselves.
   if (auto thisIP = getInvertibleProtocolKind()) {
@@ -6644,16 +6844,12 @@ bool ProtocolDecl::requiresInvertible(InvertibleProtocolKind ip) const {
       return TypeWalker::Action::Continue;
 
     // Otherwise, check to see if there's an inverse on this protocol.
-    switch (proto->getMarking(ip).getInverse().getKind()) {
-    case InverseMarking::Kind::None:
-      return TypeWalker::Action::Stop; // No inverse, so implicitly inherited.
 
-    case InverseMarking::Kind::LegacyExplicit:
-    case InverseMarking::Kind::Explicit:
-    case InverseMarking::Kind::Inferred:
-      // The implicit requirement was suppressed on this protocol, keep looking.
+    // The implicit requirement was suppressed on this protocol, keep looking.
+    if (proto->hasInverseMarking(ip))
       return TypeWalker::Action::Continue;
-    }
+
+    return TypeWalker::Action::Stop; // No inverse, so implicitly inherited.
   });
 }
 
@@ -6726,10 +6922,46 @@ ProtocolDecl::getProtocolDependencies() const {
       llvm::None);
 }
 
+/// If we hit a request cycle, give the protocol a requirement signature where
+/// everything is Copyable and Escapable. Otherwise, we'll get spurious
+/// downstream diagnostics concerning move-only types.
+static RequirementSignature getPlaceholderRequirementSignature(
+    const ProtocolDecl *proto) {
+  auto &ctx = proto->getASTContext();
+
+  SmallVector<Requirement, 2> requirements;
+
+  if (ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
+    auto add = [&](Type type) {
+      for (auto ip : InvertibleProtocolSet::full()) {
+        auto proto = ctx.getProtocol(getKnownProtocolKind(ip));
+        requirements.emplace_back(RequirementKind::Conformance, type,
+                                  proto->getDeclaredInterfaceType());
+      }
+    };
+
+    add(proto->getSelfInterfaceType());
+
+    for (auto *assocTypeDecl : proto->getAssociatedTypeMembers())
+      add(assocTypeDecl->getDeclaredInterfaceType());
+  }
+
+  // Maintain invariants.
+  llvm::array_pod_sort(requirements.begin(), requirements.end(),
+                       [](const Requirement *lhs, const Requirement *rhs) -> int {
+                         return lhs->compare(*rhs);
+                       });
+
+  return RequirementSignature(ctx.AllocateCopy(requirements),
+                              ArrayRef<ProtocolTypeAlias>());
+}
+
 RequirementSignature ProtocolDecl::getRequirementSignature() const {
-  return evaluateOrDefault(getASTContext().evaluator,
+  return getASTContext().evaluator(
                RequirementSignatureRequest { const_cast<ProtocolDecl *>(this) },
-               RequirementSignature());
+               [this]() {
+                 return getPlaceholderRequirementSignature(this);
+               });
 }
 
 bool ProtocolDecl::isComputingRequirementSignature() const {
