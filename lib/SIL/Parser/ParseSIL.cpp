@@ -672,7 +672,7 @@ static bool parseDeclSILOptional(
     UseStackForPackMetadata_t *useStackForPackMetadata,
     bool *hasUnsafeNonEscapableResult, IsExactSelfClass_t *isExactSelfClass,
     SILFunction **dynamicallyReplacedFunction,
-    Identifier *objCReplacementFor,
+    SILFunction **usedAdHocRequirementWitness, Identifier *objCReplacementFor,
     SILFunction::Purpose *specialPurpose, Inline_t *inlineStrategy,
     OptimizationMode *optimizationMode, PerformanceConstraints *perfConstraints,
     bool *isPerformanceConstraint,
@@ -820,6 +820,26 @@ static bool parseDeclSILOptional(
         return true;
       }
       *dynamicallyReplacedFunction = Func;
+      SP.P.consumeToken(tok::string_literal);
+
+      SP.P.parseToken(tok::r_square, diag::expected_in_attribute_list);
+      continue;
+    } else if (usedAdHocRequirementWitness && SP.P.Tok.getText() == "ref_adhoc_requirement_witness") {
+      SP.P.consumeToken(tok::identifier);
+      if (SP.P.Tok.getKind() != tok::string_literal) {
+        SP.P.diagnose(SP.P.Tok, diag::expected_in_attribute_list);
+        return true;
+      }
+      // Drop the double quotes.
+      StringRef witnessFunc = SP.P.Tok.getText().drop_front().drop_back();
+      SILFunction *Func = M.lookUpFunction(witnessFunc.str());
+      if (!Func) {
+        Identifier Id = SP.P.Context.getIdentifier(witnessFunc);
+        SP.P.diagnose(SP.P.Tok, diag::sil_adhoc_requirement_witness_func_not_found,
+                      Id);
+        return true;
+      }
+      *usedAdHocRequirementWitness = Func;
       SP.P.consumeToken(tok::string_literal);
 
       SP.P.parseToken(tok::r_square, diag::expected_in_attribute_list);
@@ -3707,6 +3727,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     bool isLexical = false;
     bool hasPointerEscape = false;
     bool fromVarDecl = false;
+    bool fixed = false;
 
     StringRef AttrName;
     SourceLoc AttrLoc;
@@ -3717,6 +3738,8 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
         hasPointerEscape = true;
       else if (AttrName == "var_decl")
         fromVarDecl = true;
+      else if (AttrName == "fixed")
+        fixed = true;
       else {
         P.diagnose(InstLoc.getSourceLoc(),
                    diag::sil_invalid_attribute_for_instruction, AttrName,
@@ -3730,7 +3753,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
       return true;
 
     ResultVal = B.createBeginBorrow(InstLoc, Val, isLexical, hasPointerEscape,
-                                    fromVarDecl);
+                                    fromVarDecl, fixed);
     break;
   }
 
@@ -7059,6 +7082,7 @@ bool SILParserState::parseDeclSIL(Parser &P) {
   ValueDecl *ClangDecl = nullptr;
   EffectsKind MRK = EffectsKind::Unspecified;
   SILFunction *DynamicallyReplacedFunction = nullptr;
+  SILFunction *AdHocWitnessFunction = nullptr;
   Identifier objCReplacementFor;
   if (parseSILLinkage(FnLinkage, P) ||
       parseDeclSILOptional(
@@ -7067,7 +7091,7 @@ bool SILParserState::parseDeclSIL(Parser &P) {
           &isRuntimeAccessible, &forceEnableLexicalLifetimes,
           &useStackForPackMetadata, &hasUnsafeNonEscapableResult,
           &isExactSelfClass, &DynamicallyReplacedFunction,
-          &objCReplacementFor, &specialPurpose,
+          &AdHocWitnessFunction, &objCReplacementFor, &specialPurpose,
           &inlineStrategy, &optimizationMode, &perfConstr,
           &isPerformanceConstraint, &markedAsUsed,
           &section, nullptr, &isWeakImported, &needStackProtection,
@@ -7113,6 +7137,8 @@ bool SILParserState::parseDeclSIL(Parser &P) {
     FunctionState.F->setIsExactSelfClass(isExactSelfClass);
     FunctionState.F->setDynamicallyReplacedFunction(
         DynamicallyReplacedFunction);
+    FunctionState.F->setReferencedAdHocRequirementWitnessFunction(
+        AdHocWitnessFunction);
     if (!objCReplacementFor.empty())
       FunctionState.F->setObjCReplacement(objCReplacementFor);
     FunctionState.F->setSpecialPurpose(specialPurpose);
@@ -7322,7 +7348,7 @@ bool SILParserState::parseSILGlobal(Parser &P) {
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr,
-                           nullptr, nullptr, nullptr, nullptr, &isLet,
+                           nullptr, nullptr, nullptr, nullptr, nullptr, &isLet,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, State, M) ||
       P.parseToken(tok::at_sign, diag::expected_sil_value_name) ||
@@ -7376,7 +7402,7 @@ bool SILParserState::parseSILProperty(Parser &P) {
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           nullptr, nullptr, SP, M))
+                           nullptr, nullptr, nullptr, SP, M))
     return true;
   
   ValueDecl *VD;
@@ -7446,7 +7472,7 @@ bool SILParserState::parseSILVTable(Parser &P) {
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           nullptr, nullptr, VTableState, M))
+                           nullptr, nullptr, nullptr, VTableState, M))
     return true;
 
 
@@ -7569,7 +7595,7 @@ bool SILParserState::parseSILMoveOnlyDeinit(Parser &parser) {
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           nullptr, nullptr, moveOnlyDeinitTableState, M))
+                           nullptr, nullptr, nullptr, moveOnlyDeinitTableState, M))
     return true;
 
   // Parse the class name.
@@ -8056,7 +8082,7 @@ bool SILParserState::parseSILWitnessTable(Parser &P) {
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           nullptr, nullptr, WitnessState, M))
+                           nullptr, nullptr, nullptr, WitnessState, M))
     return true;
 
   // Parse the protocol conformance.
