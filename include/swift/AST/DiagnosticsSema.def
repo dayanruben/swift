@@ -5640,6 +5640,9 @@ ERROR(sendable_raw_storage,none,
 
 WARNING(unchecked_conformance_not_special,none,
       "@unchecked conformance to %0 has no meaning", (Type))
+WARNING(restate_unchecked_sendable,none,
+        "class %0 must restate inherited '@unchecked Sendable' conformance",
+        (DeclName))
 ERROR(unchecked_not_inheritance_clause,none,
       "'unchecked' attribute only applies in inheritance clauses", ())
 ERROR(unchecked_not_existential,none,
@@ -7849,6 +7852,8 @@ ERROR(lifetime_dependence_cannot_infer_implicit_init, none,
       "cannot infer lifetime dependence on implicit initializer of ~Escapable"
       " type, define an initializer with explicit lifetime dependence"
       " specifiers", ())
+ERROR(lifetime_dependence_cannot_be_applied_to_tuple_elt, none,
+      "lifetime dependence specifiers cannot be applied to tuple elements", ())
 
 //===----------------------------------------------------------------------===//
 //                             MARK: Transferring
