@@ -138,7 +138,7 @@ ParseSILModuleRequest::evaluate(Evaluator &evaluator,
 //===----------------------------------------------------------------------===//
 
 bool SILParser::parseSILIdentifier(Identifier &Result, SourceLoc &Loc,
-                                   const Diagnostic &D) {
+                                   DiagRef D) {
   switch (P.Tok.getKind()) {
   case tok::identifier:
   case tok::dollarident:
@@ -188,7 +188,8 @@ bool SILParser::parseVerbatim(StringRef name) {
 SILParser::~SILParser() {
   for (auto &Entry : ForwardRefLocalValues) {
     if (ValueBase *dummyVal = LocalValues[Entry.first()]) {
-      dummyVal->replaceAllUsesWith(SILUndef::get(dummyVal->getType(), SILMod));
+      dummyVal->replaceAllUsesWith(
+          SILUndef::get(dummyVal->getFunction(), dummyVal->getType()));
       ::delete cast<PlaceholderValue>(dummyVal);
     }
   }
@@ -351,7 +352,7 @@ bool SILParser::parseGlobalName(Identifier &Name) {
 SILValue SILParser::getLocalValue(UnresolvedValueName Name, SILType Type,
                                   SILLocation Loc, SILBuilder &B) {
   if (Name.isUndef())
-    return SILUndef::get(Type, B.getFunction());
+    return SILUndef::get(B.getFunction(), Type);
 
   // Check to see if this is already defined.
   ValueBase *&Entry = LocalValues[Name.Name];
@@ -365,7 +366,7 @@ SILValue SILParser::getLocalValue(UnresolvedValueName Name, SILType Type,
       P.diagnose(Name.NameLoc, diag::sil_value_use_type_mismatch, Name.Name,
                  EntryTy.getRawASTType(), Type.getRawASTType());
       // Make sure to return something of the requested type.
-      return SILUndef::get(Type, B.getFunction());
+      return SILUndef::get(B.getFunction(), Type);
     }
 
     return SILValue(Entry);
@@ -375,7 +376,7 @@ SILValue SILParser::getLocalValue(UnresolvedValueName Name, SILType Type,
   // it until we see a real definition.
   ForwardRefLocalValues[Name.Name] = Name.NameLoc;
 
-  Entry = ::new PlaceholderValue(Type);
+  Entry = ::new PlaceholderValue(&B.getFunction(), Type);
   return Entry;
 }
 
@@ -601,7 +602,7 @@ bool SILParser::parseSILQualifier(
   }
   result = parseName(Str);
   if (!result) {
-    P.diagnose(loc, Diagnostic(diag::unrecognized_sil_qualifier));
+    P.diagnose(loc, diag::unrecognized_sil_qualifier);
     return true;
   }
   return false;
@@ -2050,7 +2051,7 @@ parseAssignOrInitAssignments(llvm::SmallVectorImpl<unsigned> &assignments,
 // Returns true on error.
 static bool parseIndexList(Parser &P, StringRef label,
                            SmallVectorImpl<unsigned> &indices,
-                           const Diagnostic &parseIndexDiag) {
+                           DiagRef parseIndexDiag) {
   SourceLoc loc;
   // Parse `[<label> <integer_literal>...]`.
   if (P.parseToken(tok::l_square, diag::sil_autodiff_expected_lsquare,
@@ -7740,7 +7741,7 @@ static CanType parseAssociatedTypePath(Parser &P, SILParser &SP,
 
   SmallString<128> name;
   name += path[0].str();
-  for (auto elt : makeArrayRef(path).slice(1)) {
+  for (auto elt : llvm::ArrayRef(path).slice(1)) {
     name += '.';
     name += elt.str();
   }
@@ -7760,7 +7761,7 @@ parseRootProtocolConformance(Parser &P, SILParser &SP, Type ConformingTy,
 
   if (P.parseSpecificIdentifier(
           ModuleKeyword, KeywordLoc,
-          Diagnostic(diag::expected_tok_in_sil_instr, ModuleKeyword)) ||
+          {diag::expected_tok_in_sil_instr, {ModuleKeyword}}) ||
       SP.parseSILIdentifier(ModuleName, Loc, diag::expected_sil_value_name))
     return ProtocolConformanceRef();
 

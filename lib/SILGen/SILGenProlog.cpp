@@ -47,28 +47,48 @@ SILValue SILGenFunction::emitSelfDeclForDestructor(VarDecl *selfDecl) {
   selfType = F.mapTypeIntoContext(selfType);
   SILValue selfValue = F.begin()->createFunctionArgument(selfType, selfDecl);
 
+  uint16_t ArgNo = 1; // Hardcoded for destructors.
+  auto dv = SILDebugVariable(selfDecl->isLet(), ArgNo);
+
   // If we have a move only type, then mark it with
   // mark_unresolved_non_copyable_value so we can't escape it.
-  if (selfType.isMoveOnly()) {
-    // For now, we do not handle move only class deinits. This is because we
-    // need to do a bit more refactoring to handle the weird way that it deals
-    // with ownership. But for simple move only deinits (like struct/enum), that
-    // are owned, lets mark them as needing to be no implicit copy checked so
-    // they cannot escape.
-    if (selfValue->getOwnershipKind() == OwnershipKind::Owned) {
-      selfValue = B.createMarkUnresolvedNonCopyableValueInst(
-          selfDecl, selfValue,
+  //
+  // For now, we do not handle move only class deinits. This is because we need
+  // to do a bit more refactoring to handle the weird way that it deals with
+  // ownership. But for simple move only deinits (like struct/enum), that are
+  // owned, lets mark them as needing to be no implicit copy checked so they
+  // cannot escape.
+  if (selfType.isMoveOnly() && !selfType.isAnyClassReferenceType()) {
+    if (getASTContext().LangOpts.hasFeature(
+            Feature::MoveOnlyPartialConsumption)) {
+      SILValue addr = B.createAllocStack(selfDecl, selfValue->getType(), dv);
+      addr = B.createMarkUnresolvedNonCopyableValueInst(
+          selfDecl, addr,
           MarkUnresolvedNonCopyableValueInst::CheckKind::
               ConsumableAndAssignable);
+      if (selfValue->getType().isObject()) {
+        B.createStore(selfDecl, selfValue, addr, StoreOwnershipQualifier::Init);
+      } else {
+        B.createCopyAddr(selfDecl, selfValue, addr, IsTake, IsInitialization);
+      }
+      // drop_deinit invalidates any user-defined struct/enum deinit
+      // before the individual members are destroyed.
+      addr = B.createDropDeinit(selfDecl, addr);
+      selfValue = addr;
+    } else {
+      if (selfValue->getOwnershipKind() == OwnershipKind::Owned) {
+        selfValue = B.createMarkUnresolvedNonCopyableValueInst(
+            selfDecl, selfValue,
+            MarkUnresolvedNonCopyableValueInst::CheckKind::
+                ConsumableAndAssignable);
+      }
     }
   }
 
   VarLocs[selfDecl] = VarLoc::get(selfValue);
   SILLocation PrologueLoc(selfDecl);
   PrologueLoc.markAsPrologue();
-  uint16_t ArgNo = 1; // Hardcoded for destructors.
-  B.createDebugValue(PrologueLoc, selfValue,
-                     SILDebugVariable(selfDecl->isLet(), ArgNo));
+  B.createDebugValue(PrologueLoc, selfValue, dv);
   return selfValue;
 }
 
@@ -614,7 +634,7 @@ public:
       // formal self parameter, but they do not pass an origFnType down,
       // so we can ignore that possibility.
       FormalParamTypes.emplace(SGF.getASTContext(), loweredParams, *origFnType,
-                               llvm::makeArrayRef(substFormalParams),
+                               llvm::ArrayRef(substFormalParams),
                                /*ignore final*/ false);
     }
 
@@ -1211,17 +1231,28 @@ static void emitCaptureArguments(SILGenFunction &SGF,
 void SILGenFunction::emitProlog(
     DeclContext *DC, CaptureInfo captureInfo, ParameterList *paramList,
     ParamDecl *selfParam, Type resultType, std::optional<Type> errorType,
-    SourceLoc throwsLoc, std::optional<AbstractionPattern> origClosureType) {
+    SourceLoc throwsLoc) {
   // Emit the capture argument variables. These are placed last because they
   // become the first curry level of the SIL function.
   assert(captureInfo.hasBeenComputed() &&
          "can't emit prolog of function with uncomputed captures");
 
+  bool hasErasedIsolation =
+    (TypeContext && TypeContext->ExpectedLoweredType->hasErasedIsolation());
+
   uint16_t ArgNo = emitBasicProlog(DC, paramList, selfParam, resultType,
                                    errorType, throwsLoc,
                                    /*ignored parameters*/
-                                     captureInfo.getCaptures().size(),
-                                   origClosureType);
+                                     (hasErasedIsolation ? 1 : 0) +
+                                     captureInfo.getCaptures().size());
+
+  // If we're emitting into a type context that expects erased isolation,
+  // add (and ignore) the isolation parameter.
+  if (hasErasedIsolation) {
+    SILType ty = SILType::getOpaqueIsolationType(getASTContext());
+    SILValue val = F.begin()->createFunctionArgument(ty);
+    (void) val;
+  }
 
   for (auto capture : captureInfo.getCaptures()) {
     if (capture.isDynamicSelfMetadata()) {
@@ -1421,11 +1452,13 @@ static void emitIndirectErrorParameter(SILGenFunction &SGF,
 uint16_t SILGenFunction::emitBasicProlog(
     DeclContext *DC, ParameterList *paramList, ParamDecl *selfParam,
     Type resultType, std::optional<Type> errorType, SourceLoc throwsLoc,
-    unsigned numIgnoredTrailingParameters,
-    std::optional<AbstractionPattern> origClosureType) {
+    unsigned numIgnoredTrailingParameters) {
   // Create the indirect result parameters.
   auto genericSig = DC->getGenericSignatureOfContext();
   resultType = resultType->getReducedType(genericSig);
+
+  std::optional<AbstractionPattern> origClosureType;
+  if (TypeContext) origClosureType = TypeContext->OrigType;
 
   AbstractionPattern origResultType = origClosureType
     ? origClosureType->getFunctionResultType()

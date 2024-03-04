@@ -1951,7 +1951,7 @@ public:
 
   /// Peek the unsatisfied requirements collected during conformance checking.
   ArrayRef<ValueDecl*> getUnsatisfiedRequirements() {
-    return llvm::makeArrayRef(UnsatisfiedReqs);
+    return llvm::ArrayRef(UnsatisfiedReqs);
   }
 
   /// Whether this member is "covered" by one of the conformances.
@@ -4853,11 +4853,11 @@ static void ensureRequirementsAreSatisfied(ASTContext &ctx,
     }
 
     // Make sure any associated type witnesses don't make reference to a
-    // parameterized existential type, or we're going to have trouble at
+    // type we can't emit metadata for, or we're going to have trouble at
     // runtime.
-    if (type->hasParameterizedExistential())
-      (void)diagnoseParameterizedProtocolAvailability(typeDecl->getLoc(),
-                                                      where.getDeclContext());
+    checkTypeMetadataAvailability(type, typeDecl->getLoc(),
+                                  where.getDeclContext());
+
     return false;
   });
 

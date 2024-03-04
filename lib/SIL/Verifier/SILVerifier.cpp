@@ -1263,6 +1263,10 @@ public:
                 "instruction isn't dominated by its bb argument operand");
       }
 
+      if (auto *undef = dyn_cast<SILUndef>(operand.get())) {
+        require(undef->getParent() == BB->getParent(), "SILUndef in wrong function");
+      }
+
       require(operand.getUser() == I,
               "instruction's operand's owner isn't the instruction");
       require(isOperandInValueUses(&operand), "operand value isn't used by operand");
@@ -1469,6 +1473,7 @@ public:
 
     // Check debug info expression
     if (const auto &DIExpr = varInfo->DIExpr) {
+      bool HasFragment = false;
       for (auto It = DIExpr.element_begin(), ItEnd = DIExpr.element_end();
            It != ItEnd;) {
         require(It->getKind() == SILDIExprElement::OperatorKind,
@@ -1483,8 +1488,10 @@ public:
                   "di-expression operand kind mismatch");
 
         if (Op == SILDIExprOperator::Fragment)
-          require(It == ItEnd, "op_fragment directive needs to be at the end "
-                               "of a di-expression");
+          HasFragment = true;
+        else
+          require(!HasFragment, "no directive allowed after op_fragment"
+                  " in a di-expression");
       }
     }
   }
@@ -6902,6 +6909,11 @@ public:
               "generic function definition must have a generic environment");
     }
 
+    // Before verifying the body of the function, validate the SILUndef map to
+    // make sure that all SILUndef in the function's map point at the function
+    // as the SILUndef's parent.
+    F->verifySILUndefMap();
+
     // Otherwise, verify the body of the function.
     verifyEntryBlock(F->getEntryBlock());
     verifyEpilogBlocks(F);
@@ -6972,6 +6984,15 @@ void SILFunction::verifyCriticalEdges() const {
   SILVerifier(*this, /*calleeCache=*/nullptr,
                      /*SingleFunction=*/true,
                      /*checkLinearLifetime=*/ false).verifyBranches(this);
+}
+
+/// Validate that all SILUndef in \p f have f as a parent.
+void SILFunction::verifySILUndefMap() const {
+  for (auto &pair : undefValues) {
+    assert(
+        pair.second->getParent() == this &&
+        "undef in f->undefValue map with different parent function than f?!");
+  }
 }
 
 /// Verify that a property descriptor follows invariants.

@@ -286,8 +286,31 @@ public:
         // We only care about macros, so skip everything else.
         if (generatedInfo->kind != GeneratedSourceInfo::ReplacedFunctionBody &&
             generatedInfo->kind != GeneratedSourceInfo::PrettyPrinted)
-          if (auto *MemBuf = SM.getLLVMSourceMgr().getMemoryBuffer(BufferID))
+          if (auto *MemBuf = SM.getLLVMSourceMgr().getMemoryBuffer(BufferID)) {
             Source = MemBuf->getBuffer();
+            // This is copying the buffer twice, but Xcode depends on this
+            // comment in the file.
+            auto origRange = generatedInfo->originalSourceRange;
+            if (origRange.isValid()) {
+              std::string s;
+              {
+                llvm::raw_string_ostream buffer(s);
+                buffer << MemBuf->getBuffer() << "\n";
+                auto originalFilename =
+                    SM.getDisplayNameForLoc(origRange.getStart(), true);
+                unsigned startLine, startColumn, endLine, endColumn;
+                std::tie(startLine, startColumn) =
+                    SM.getPresumedLineAndColumnForLoc(origRange.getStart());
+                std::tie(endLine, endColumn) =
+                    SM.getPresumedLineAndColumnForLoc(origRange.getEnd());
+                buffer << "// original-source-range: "
+                       << DebugPrefixMap.remapPath(originalFilename) << ":"
+                       << startLine << ":" << startColumn << "-" << endLine
+                       << ":" << endColumn << "\n";
+              }
+              Source = BumpAllocatedString(s);
+            }
+          }
       }
     }
     Cached.File = getOrCreateFile(
@@ -1184,11 +1207,10 @@ private:
       return OpaqueType;
     }
 
-    auto *opaqueType = createOpaqueStructWithSizedContainer(
-        Scope, Decl ? Decl->getNameStr() : "", File, Line, SizeInBits,
-        AlignInBits, Flags, MangledName, collectGenericParams(Type),
-        UnsubstitutedType);
-    return opaqueType;
+    auto *OpaqueType = createOpaqueStruct(
+        Scope, "", File, Line, SizeInBits, AlignInBits, Flags, MangledName,
+        collectGenericParams(Type), UnsubstitutedType);
+    return OpaqueType;
   }
 
   /// Create debug information for an enum with a raw type (enum E : Int {}).
@@ -1624,12 +1646,19 @@ private:
   llvm::DICompositeType *
   createOpaqueStruct(llvm::DIScope *Scope, StringRef Name, llvm::DIFile *File,
                      unsigned Line, unsigned SizeInBits, unsigned AlignInBits,
-                     llvm::DINode::DIFlags Flags, StringRef MangledName) {
-    return DBuilder.createStructType(
+                     llvm::DINode::DIFlags Flags, StringRef MangledName,
+                     llvm::DINodeArray BoundParams = {},
+                     llvm::DIType *SpecificationOf = nullptr) {
+
+    auto StructType = DBuilder.createStructType(
         Scope, Name, File, Line, SizeInBits, AlignInBits, Flags,
         /* DerivedFrom */ nullptr,
         DBuilder.getOrCreateArray(ArrayRef<llvm::Metadata *>()),
-        llvm::dwarf::DW_LANG_Swift, nullptr, MangledName);
+        llvm::dwarf::DW_LANG_Swift, nullptr, MangledName, SpecificationOf);
+
+    if (BoundParams)
+      DBuilder.replaceArrays(StructType, nullptr, BoundParams);
+    return StructType;
   }
 
   bool shouldCacheDIType(llvm::DIType *DITy, DebugTypeInfo &DbgTy) {
@@ -2012,11 +2041,9 @@ private:
         // Force the creation of the unsubstituted type, don't create it
         // directly so it goes through all the caching/verification logic.
         auto unsubstitutedDbgTy = getOrCreateType(DbgTy);
-        DBuilder.retainType(unsubstitutedDbgTy);
-        return createOpaqueStructWithSizedContainer(
-            Scope, Decl->getName().str(), L.File, FwdDeclLine, SizeInBits,
-            AlignInBits, Flags, MangledName, collectGenericParams(EnumTy),
-            unsubstitutedDbgTy);
+        return createOpaqueStruct(
+            Scope, "", L.File, FwdDeclLine, SizeInBits, AlignInBits, Flags,
+            MangledName, collectGenericParams(EnumTy), unsubstitutedDbgTy);
       }
       return createOpaqueStructWithSizedContainer(
           Scope, Decl->getName().str(), L.File, FwdDeclLine, SizeInBits,
@@ -2357,9 +2384,12 @@ IRGenDebugInfoImpl::IRGenDebugInfoImpl(const IRGenOptions &Opts,
 
   bool EnableCXXInterop =
       IGM.getSILModule().getASTContext().LangOpts.EnableCXXInterop;
+  bool EnableEmbeddedSwift =
+      IGM.getSILModule().getASTContext().LangOpts.hasFeature(Feature::Embedded);
   TheCU = DBuilder.createCompileUnit(
       Lang, MainFile, Producer, Opts.shouldOptimize(),
-      Opts.getDebugFlags(PD, EnableCXXInterop), MajorRuntimeVersion, SplitName,
+      Opts.getDebugFlags(PD, EnableCXXInterop, EnableEmbeddedSwift),
+      MajorRuntimeVersion, SplitName,
       Opts.DebugInfoLevel > IRGenDebugInfoLevel::LineTables
           ? llvm::DICompileUnit::FullDebug
           : llvm::DICompileUnit::LineTablesOnly,
@@ -2834,7 +2864,9 @@ IRGenDebugInfoImpl::emitFunction(const SILDebugScope *DS, llvm::Function *Fn,
   // Because there's no good way to cross the CU boundary to insert a nested
   // DISubprogram definition in one CU into a type defined in another CU when
   // doing LTO builds.
-  if (Rep == SILFunctionTypeRepresentation::Method) {
+  if (Rep == SILFunctionTypeRepresentation::Method ||
+      Rep == SILFunctionTypeRepresentation::ObjCMethod ||
+      Rep == SILFunctionTypeRepresentation::WitnessMethod) {
     llvm::DISubprogram::DISPFlags SPFlags = llvm::DISubprogram::toSPFlags(
         /*IsLocalToUnit=*/Fn ? Fn->hasInternalLinkage() : true,
         /*IsDefinition=*/false, /*IsOptimized=*/Opts.shouldOptimize());
@@ -2938,21 +2970,19 @@ bool IRGenDebugInfoImpl::buildDebugInfoExpression(
     llvm::DIExpression::FragmentInfo &Fragment) {
   assert(VarInfo.DIExpr && "SIL debug info expression not found");
 
-#ifndef NDEBUG
-  bool HasFragment = VarInfo.DIExpr.hasFragment();
-#endif
-
   const auto &DIExpr = VarInfo.DIExpr;
   for (const SILDIExprOperand &ExprOperand : DIExpr.operands()) {
+    llvm::DIExpression::FragmentInfo SubFragment = {0, 0};
     switch (ExprOperand.getOperator()) {
     case SILDIExprOperator::Fragment:
-      assert(HasFragment && "Fragment must be the last part of a DIExpr");
-#ifndef NDEBUG
-      // Trigger the assert above if we have more than one fragment expression.
-      HasFragment = false;
-#endif
-      if (!handleFragmentDIExpr(ExprOperand, Fragment))
+      if (!handleFragmentDIExpr(ExprOperand, SubFragment))
         return false;
+      assert(!Fragment.SizeInBits
+             || (SubFragment.OffsetInBits + SubFragment.SizeInBits
+              <= Fragment.SizeInBits)
+             && "Invalid nested fragments");
+      Fragment.OffsetInBits += SubFragment.OffsetInBits;
+      Fragment.SizeInBits = SubFragment.SizeInBits;
       break;
     case SILDIExprOperator::Dereference:
       Operands.push_back(llvm::dwarf::DW_OP_deref);

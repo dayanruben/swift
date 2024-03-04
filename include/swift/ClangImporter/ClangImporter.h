@@ -131,6 +131,7 @@ typedef llvm::PointerUnion<const clang::Decl *, const clang::MacroInfo *,
 /// from Clang ASTs over to Swift ASTs.
 class ClangImporter final : public ClangModuleLoader {
   friend class ClangModuleUnit;
+  friend class SwiftDeclSynthesizer;
 
   // Make requests in the ClangImporter zone friends so they can access `Impl`.
 #define SWIFT_REQUEST(Zone, Name, Sig, Caching, LocOptions)                    \
@@ -446,7 +447,9 @@ public:
   void verifyAllModules() override;
 
   using RemapPathCallback = llvm::function_ref<std::string(StringRef)>;
-  llvm::SmallVector<std::pair<ModuleDependencyID, ModuleDependencyInfo>, 1> bridgeClangModuleDependencies(
+  llvm::SmallVector<std::pair<ModuleDependencyID, ModuleDependencyInfo>, 1>
+  bridgeClangModuleDependencies(
+      clang::tooling::dependencies::DependencyScanningTool &clangScanningTool,
       clang::tooling::dependencies::ModuleDepsGraph &clangDependencies,
       StringRef moduleOutputPath, RemapPathCallback remapPath = nullptr);
 

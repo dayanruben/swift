@@ -2809,7 +2809,7 @@ void IRGenSILFunction::visitDifferentiableFunctionInst(
         i->getModule().Types,
         LookUpConformanceInModule(i->getModule().getSwiftModule()));
     auto *undef = SILUndef::get(
-        SILType::getPrimitiveObjectType(derivativeFnType), *i->getFunction());
+        i->getFunction(), SILType::getPrimitiveObjectType(derivativeFnType));
     return getLoweredExplosion(undef);
   };
   auto jvpExp = getDerivativeExplosion(AutoDiffDerivativeFunctionKind::JVP);
@@ -5463,9 +5463,16 @@ void IRGenSILFunction::visitDebugValueInst(DebugValueInst *i) {
       assert(isa<SILBoxType>(RealTy));
     }
 
+  VarDecl *VD = i->getDecl();
+  if (!VD) {
+    // The source location of a DebugValueInst inserted by the SIL optimizer is
+    // not necessarily the VarDecl, as it can be the source location of the
+    // update point this DebugValueInst represents.
+    VD = VarInfo->getDecl();
+  }
   // Figure out the debug variable type
-  if (VarDecl *Decl = i->getDecl()) {
-    DbgTy = DebugTypeInfo::getLocalVariable(Decl, RealTy, getTypeInfo(SILTy),
+  if (VD) {
+    DbgTy = DebugTypeInfo::getLocalVariable(VD, RealTy, getTypeInfo(SILTy),
                                             IGM, IsFragmentType);
   } else if (!SILTy.hasArchetype() && !VarInfo->Name.empty()) {
     // Handle the cases that read from a SIL file
@@ -7687,7 +7694,7 @@ void IRGenSILFunction::visitIncrementProfilerCounterInst(
   llvm::SmallVector<llvm::Value *, 2> indices;
   indices.append(2, llvm::ConstantInt::get(IGM.SizeTy, 0));
   auto *nameGEP = llvm::ConstantExpr::getGetElementPtr(
-      nameVar->getValueType(), nameVar, makeArrayRef(indices));
+      nameVar->getValueType(), nameVar, llvm::ArrayRef(indices));
 
   // Emit the call to the 'llvm.instrprof.increment' LLVM intrinsic.
   llvm::Value *args[] = {

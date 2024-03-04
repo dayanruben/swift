@@ -417,13 +417,19 @@ static bool isProjectedFromAggregate(SILValue value) {
   return visitor.isMerge;
 }
 
-static PartialApplyInst *findAsyncLetPartialApplyFromStart(BuiltinInst *bi) {
+namespace {
+using AsyncLetSourceValue =
+    llvm::PointerUnion<PartialApplyInst *, ThinToThickFunctionInst *>;
+} // namespace
+
+static std::optional<AsyncLetSourceValue>
+findAsyncLetPartialApplyFromStart(BuiltinInst *bi) {
   // If our operand is Sendable then we want to return nullptr. We only want to
   // return a value if we are not
   SILValue value = bi->getOperand(1);
   auto fType = value->getType().castTo<SILFunctionType>();
   if (fType->isSendable())
-    return nullptr;
+    return {};
 
   SILValue temp = value;
   while (true) {
@@ -436,10 +442,15 @@ static PartialApplyInst *findAsyncLetPartialApplyFromStart(BuiltinInst *bi) {
     value = temp;
   }
 
-  return cast<PartialApplyInst>(value);
+  // We can also get a thin_to_thick_function here if we do not capture
+  // anything. In such a case, we just do not process the partial apply get
+  if (auto *pai = dyn_cast<PartialApplyInst>(value))
+    return {{pai}};
+  return {{cast<ThinToThickFunctionInst>(value)}};
 }
 
-static PartialApplyInst *findAsyncLetPartialApplyFromGet(ApplyInst *ai) {
+static std::optional<AsyncLetSourceValue>
+findAsyncLetPartialApplyFromGet(ApplyInst *ai) {
   auto *bi = cast<BuiltinInst>(FullApplySite(ai).getArgument(0));
   assert(*bi->getBuiltinKind() ==
          BuiltinValueKind::StartAsyncLetWithLocalBuffer);
@@ -1524,7 +1535,7 @@ public:
       return;
     }
 
-    auto assignResultsRef = llvm::makeArrayRef(assignResults);
+    auto assignResultsRef = llvm::ArrayRef(assignResults);
     SILValue front = assignResultsRef.front();
     assignResultsRef = assignResultsRef.drop_front();
 
@@ -1552,11 +1563,18 @@ public:
   }
 
   void translateAsyncLetGet(ApplyInst *ai) {
-    auto *pai = findAsyncLetPartialApplyFromGet(ai);
+    auto source = findAsyncLetPartialApplyFromGet(ai);
+    assert(source.has_value());
+
+    // If we didn't find a partial_apply, then we must have had a
+    // thin_to_thick_function meaning we did not capture anything.
+    if (source->is<ThinToThickFunctionInst *>())
+      return;
 
     // We should always be able to derive a partial_apply since we pattern
     // matched against the actual function call to swift_asyncLet_get in our
     // caller.
+    auto *pai = source->get<PartialApplyInst *>();
     assert(pai && "AsyncLet Get should always have a derivable partial_apply");
 
     ApplySite applySite(pai);
@@ -1675,18 +1693,19 @@ public:
     }
 
     SILMultiAssignOptions options;
-    for (auto arg : pai->getOperandValues()) {
-      if (auto value = tryToTrackValue(arg)) {
+    for (auto &op : pai->getAllOperands()) {
+      if (auto value = tryToTrackValue(op.get())) {
         if (value->isActorDerived()) {
           options |= SILMultiAssignFlags::PropagatesActorSelf;
         }
       } else {
-        // NOTE: One may think that only sendable things can enter
-        // here... but we treat things like function_ref/class_method which
-        // are non-Sendable as sendable for our purposes.
-        if (arg->getType().isActor()) {
+        // We only treat Sendable values as propagating actor self if the
+        // partial apply has operand as an sil_isolated parameter.
+        ApplySite applySite(pai);
+        if (applySite.isArgumentOperand(op) &&
+            ApplySite(pai).getArgumentParameterInfo(op).hasOption(
+                SILParameterInfo::Isolated))
           options |= SILMultiAssignFlags::PropagatesActorSelf;
-        }
       }
     }
 
@@ -1968,16 +1987,6 @@ public:
     SILValue srcValue = src->get();
 
     if (auto nonSendableDest = tryToTrackValue(destValue)) {
-      // Before we do anything check if we have an assignment into an
-      // alloc_stack for a consuming transferring parameter... in such a case,
-      // we need to handle this specially.
-      if (nonSendableDest->isTransferringParameter()) {
-        if (auto nonSendableSrc = tryToTrackValue(srcValue)) {
-          return translateSILAssignmentToTransferringParameter(
-              *nonSendableDest, dest, *nonSendableSrc, src);
-        }
-      }
-
       // In the following situations, we can perform an assign:
       //
       // 1. A store to unaliased storage.
@@ -2216,7 +2225,7 @@ void PartitionOpBuilder::print(llvm::raw_ostream &os) const {
   currentInst->getLoc().getSourceLoc().printLineAndColumn(
       llvm::dbgs(), currentInst->getFunction()->getASTContext().SourceMgr);
 
-  auto ops = llvm::makeArrayRef(currentInstPartitionOps);
+  auto ops = llvm::ArrayRef(currentInstPartitionOps);
 
   // First op on its own line.
   llvm::dbgs() << "\n ├─────╼ ";
@@ -2964,6 +2973,11 @@ void BlockPartitionState::print(llvm::raw_ostream &os) const {
 static bool canComputeRegionsForFunction(SILFunction *fn) {
   if (!fn->getASTContext().LangOpts.hasFeature(Feature::RegionBasedIsolation))
     return false;
+
+  assert(fn->getASTContext().LangOpts.StrictConcurrencyLevel ==
+             StrictConcurrency::Complete &&
+         "Need strict concurrency to be enabled for RegionBasedIsolation to be "
+         "enabled as well");
 
   // If this function does not correspond to a syntactic declContext and it
   // doesn't have a parent module, don't check it since we cannot check if a

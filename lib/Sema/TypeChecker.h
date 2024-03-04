@@ -136,6 +136,10 @@ enum class TypeCheckExprFlags {
 
   /// Don't expand macros.
   DisableMacroExpansions = 0x08,
+
+  /// If set, typeCheckExpression will avoid invalidating the AST if
+  /// type-checking fails. Do not add new uses of this.
+  AvoidInvalidatingAST = 0x10,
 };
 
 using TypeCheckExprOptions = OptionSet<TypeCheckExprFlags>;
@@ -1402,10 +1406,6 @@ bool isOverrideBasedOnType(const ValueDecl *decl, Type declTy,
 /// protocol. If \p type is not null, check specifically whether \p decl
 /// could fulfill a protocol requirement for it.
 bool isMemberOperator(FuncDecl *decl, Type type);
-
-/// Given an interface type and possibly a generic environment,
-/// is the type ever noncopyable?
-bool isInterfaceTypeNoncopyable(Type interfaceTy, GenericEnvironment *env);
 
 /// Returns `true` iff `AdditiveArithmetic` derived conformances are enabled.
 bool isAdditiveArithmeticConformanceDerivationEnabled(SourceFile &SF);

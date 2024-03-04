@@ -2232,7 +2232,7 @@ namespace {
       // TODO: build a scalar tuple if possible.
       auto temporary = SGF.emitFormalAccessTemporary(
           loc, SGF.getTypeLowering(getTypeOfRValue()));
-      auto yieldsAsArray = llvm::makeArrayRef(yields);
+      auto yieldsAsArray = llvm::ArrayRef(yields);
       copyBorrowedYieldsIntoTemporary(SGF, loc, yieldsAsArray,
                                       getOrigFormalType(), getSubstFormalType(),
                                       temporary.get());
@@ -3509,13 +3509,26 @@ RValue SILGenFunction::emitRValueForNonMemberVarDecl(SILLocation loc,
     SILValue accessAddr = UnenforcedFormalAccess::enter(*this, loc, destAddr,
                                                         SILAccessKind::Read);
 
+    auto isEffectivelyMarkUnresolvedInst = [](auto *inst) -> bool {
+      if (!inst)
+        return false;
+      if (isa<MarkUnresolvedNonCopyableValueInst>(inst))
+        return true;
+      auto *ddi = dyn_cast<DropDeinitInst>(inst);
+      if (!ddi)
+        return false;
+      return isa<MarkUnresolvedNonCopyableValueInst>(ddi->getOperand());
+    };
+
     if (accessAddr->getType().isMoveOnly() &&
-        !isa<MarkUnresolvedNonCopyableValueInst>(accessAddr)) {
+        !isEffectivelyMarkUnresolvedInst(
+            accessAddr->getDefiningInstruction())) {
+      auto kind =
+          MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign;
       // When loading an rvalue, we should never need to modify the place
       // we're loading from.
-      accessAddr = B.createMarkUnresolvedNonCopyableValueInst(
-          loc, accessAddr,
-          MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
+      accessAddr =
+          B.createMarkUnresolvedNonCopyableValueInst(loc, accessAddr, kind);
     }
 
     auto propagateRValuePastAccess = [&](RValue &&rvalue) {
@@ -3707,7 +3720,7 @@ LValue SILGenLValue::visitPackElementExpr(PackElementExpr *e,
   SGF.SGM.diagnose(refExpr, diag::not_implemented,
                    "emission of 'each' for this kind of expression");
   auto loweredTy = SGF.getLoweredType(substFormalType).getAddressType();
-  auto fakeAddr = ManagedValue::forLValue(SILUndef::get(loweredTy, SGF.F));
+  auto fakeAddr = ManagedValue::forLValue(SILUndef::get(SGF.F, loweredTy));
   return LValue::forAddress(
       accessKind, fakeAddr, /*access enforcement*/ std::nullopt,
       AbstractionPattern(substFormalType), substFormalType);
@@ -3734,12 +3747,6 @@ static bool shouldEmitSelfAsRValue(AccessorDecl *fn, CanType selfType,
     return false;
   case SelfAccessKind::Borrowing:
   case SelfAccessKind::NonMutating:
-    // If the accessor is a coroutine, we may want to access the projected
-    // value through a borrow of the base. But if it's a regular get/set then
-    // there isn't any real benefit to doing so.
-    if (!fn->isCoroutine()) {
-      return true;
-    }
     // Normally we'll copy the base to minimize accesses. But if the base
     // is noncopyable, or we're accessing it in a `borrow` expression, then
     // we want to keep the access nested on the original base.

@@ -88,15 +88,6 @@ static Type containsParameterizedProtocolType(Type inheritedTy) {
   return Type();
 }
 
-bool swift::isInterfaceTypeNoncopyable(Type type, GenericEnvironment *env) {
-  assert(!type->hasTypeParameter() || env && "must have a generic environment");
-
-  if (env)
-    type = env->mapTypeIntoContext(type);
-
-  return type->isNoncopyable();
-}
-
 /// Check the inheritance clause of a type declaration or extension thereof.
 ///
 /// This routine performs detailed checking of the inheritance clause of the
@@ -1034,7 +1025,7 @@ static bool checkExpressionMacroDefaultValueRestrictions(ParamDecl *param) {
       &ctx.Diags, SF->getExportedSourceFile(),
       initExpr->getLoc().getOpaquePointerValue());
 #else
-  ctx.Diags.diagnose(initExpr->getLoc(), diag::macro_unsupported));
+  ctx.Diags.diagnose(initExpr->getLoc(), diag::macro_unsupported);
   return false;
 #endif
 }
@@ -1898,7 +1889,7 @@ swift::softenIfAccessNote(const Decl *D, const DeclAttribute *attr,
     return std::move(diag);
 
   SmallString<32> attrString;
-  auto attrText = prettyPrintAttrs(VD, makeArrayRef(attr), attrString);
+  auto attrText = prettyPrintAttrs(VD, llvm::ArrayRef(attr), attrString);
 
   ASTContext &ctx = D->getASTContext();
   auto behavior = ctx.LangOpts.getAccessNoteFailureLimit();
@@ -2753,8 +2744,7 @@ public:
       // accessors since this means that we cannot call mutating methods without
       // copying. We do not want to support types that one cannot define a
       // modify operation via a get/set or a modify.
-      if (isInterfaceTypeNoncopyable(var->getInterfaceType(),
-                                     DC->getGenericEnvironmentOfContext())) {
+      if (var->getTypeInContext()->isNoncopyable()) {
         if (auto *read = var->getAccessor(AccessorKind::Read)) {
           if (!read->isImplicit()) {
             if (auto *set = var->getAccessor(AccessorKind::Set)) {
@@ -2847,8 +2837,7 @@ public:
 
     // Reject noncopyable typed subscripts with read/set accessors since we
     // cannot define modify operations upon them without copying the read.
-    if (isInterfaceTypeNoncopyable(SD->getElementInterfaceType(),
-                                   SD->getGenericEnvironment())) {
+    if (SD->mapTypeIntoContext(SD->getElementInterfaceType())->isNoncopyable()) {
       if (auto *read = SD->getAccessor(AccessorKind::Read)) {
         if (!read->isImplicit()) {
           if (auto *set = SD->getAccessor(AccessorKind::Set)) {

@@ -3186,6 +3186,20 @@ namespace {
               /*setThrows*/ !explicitlyThrowing,
               /*isDistributedThunk=*/true);
         }
+
+        // In compiler versions <=5.10, the compiler did not diagnose cases
+        // where a non-isolated distributed actor value was passed to a VarDecl
+        // with a function type type that has an isolated distributed actor
+        // parameter, e.g. `(isolated DA) -> Void`. Stage in the error as a
+        // warning until Swift 6.
+        if (var->getTypeInContext()->getAs<FunctionType>()) {
+          ctx.Diags.diagnose(declLoc,
+                             diag::distributed_actor_isolated_non_self_reference,
+                             decl)
+            .warnUntilSwiftVersion(6);
+          noteIsolatedActorMember(decl, context);
+          return std::nullopt;
+        }
       }
 
       // FIXME: Subscript?
@@ -3508,8 +3522,11 @@ namespace {
         diagnoseApplyArgSendability(apply, getDeclContext());
       }
 
-      // Check for sendability of the result type.
-      if (diagnoseNonSendableTypes(
+      // Check for sendability of the result type if we do not have a
+      // transferring result.
+      if ((!ctx.LangOpts.hasFeature(Feature::TransferringArgsAndResults) ||
+           !fnType->hasTransferringResult()) &&
+          diagnoseNonSendableTypes(
              fnType->getResult(), getDeclContext(),
              /*inDerivedConformance*/Type(),
              apply->getLoc(),
@@ -5827,7 +5844,7 @@ ProtocolConformance *swift::deriveImplicitSendableConformance(
     if (attrMakingUnavailable) {
       // Conformance availability is currently tied to the declaring extension.
       // FIXME: This is a hack--we should give conformances real availability.
-      auto inherits = ctx.AllocateCopy(makeArrayRef(
+      auto inherits = ctx.AllocateCopy(llvm::ArrayRef(
           InheritedEntry(TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()),
                          /*isUnchecked*/ true, /*isRetroactive=*/false,
                          /*isPreconcurrency=*/false)));

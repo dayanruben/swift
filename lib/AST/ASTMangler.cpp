@@ -922,8 +922,6 @@ void ASTMangler::appendSymbolKind(SymbolKind SKind) {
     case SymbolKind::DistributedThunk: return appendOperator("TE");
     case SymbolKind::DistributedAccessor: return appendOperator("TF");
     case SymbolKind::AccessibleFunctionRecord: return appendOperator("HF");
-    case SymbolKind::AccessibleProtocolRequirementFunctionRecord:
-    return appendOperator("HpF");
     case SymbolKind::BackDeploymentThunk: return appendOperator("Twb");
     case SymbolKind::BackDeploymentFallback: return appendOperator("TwB");
     case SymbolKind::HasSymbolQuery: return appendOperator("TwS");
@@ -3699,6 +3697,12 @@ static unsigned conformanceRequirementIndex(
     if (req.getKind() != RequirementKind::Conformance)
       continue;
 
+    // This is an ABI compatibility hack for noncopyable generics.
+    // We should have really been skipping marker protocols here all along,
+    // but it's too late now, so skip Copyable and Escapable specifically.
+    if (req.getProtocolDecl()->getInvertibleProtocolKind())
+      continue;
+
     if (req.getFirstType()->isEqual(entry.first) &&
         req.getProtocolDecl() == entry.second)
       return result;
@@ -3706,7 +3710,8 @@ static unsigned conformanceRequirementIndex(
     ++result;
   }
 
-  llvm_unreachable("Conformance access path step is missing from requirements");
+  llvm::errs() <<"Conformance access path step is missing from requirements";
+  abort();
 }
 
 void ASTMangler::appendDependentProtocolConformance(
@@ -3904,11 +3909,13 @@ ASTMangler::mangleOpaqueTypeDescriptorRecord(const OpaqueTypeDecl *decl) {
   return finalize();
 }
 
-std::string ASTMangler::mangleDistributedThunk(const AbstractFunctionDecl *thunk) {
+void ASTMangler::appendDistributedThunk(
+    const AbstractFunctionDecl *thunk, bool asReference) {
   // Marker protocols cannot be checked at runtime, so there is no point
   // in recording them for distributed thunks.
   llvm::SaveAndRestore<bool> savedAllowMarkerProtocols(AllowMarkerProtocols,
                                                        false);
+  // TODO: add a flag to skip class/struct information from parameter types
 
   // Since computed property SILDeclRef's refer to the "originator"
   // of the thunk, we need to mangle distributed thunks of accessors
@@ -3931,8 +3938,52 @@ std::string ASTMangler::mangleDistributedThunk(const AbstractFunctionDecl *thunk
     thunk = storage->getDistributedThunk();
     assert(thunk);
   }
+  assert(isa<AbstractFunctionDecl>(thunk) &&
+         "distributed thunk to mangle must be function decl");
+  assert(thunk->getContextKind() == DeclContextKind::AbstractFunctionDecl);
 
-  return mangleEntity(thunk, SymbolKind::DistributedThunk);
+  auto inProtocolExtensionMangleAsReference =
+      [&thunk, asReference]() -> ProtocolDecl * {
+    if (!asReference) {
+      return nullptr;
+    }
+
+    if (auto extension = dyn_cast<ExtensionDecl>(thunk->getDeclContext())) {
+      return dyn_cast_or_null<ProtocolDecl>(extension->getExtendedNominal());
+    }
+    return nullptr;
+  };
+
+  if (auto type = inProtocolExtensionMangleAsReference()) {
+    appendContext(type->getDeclContext(), thunk->getAlternateModuleName());
+    auto baseName = type->getBaseName();
+    appendIdentifier(Twine("$", baseName.getIdentifier().str()).str());
+    appendOperator("C"); // necessary for roundtrip, though we don't use it
+  } else {
+    appendContextOf(thunk);
+  }
+
+  appendIdentifier(thunk->getBaseName().getIdentifier().str());
+  appendDeclType(thunk, FunctionMangling);
+  appendOperator("F");
+  appendSymbolKind(SymbolKind::DistributedThunk);
+}
+
+std::string ASTMangler::mangleDistributedThunkRef(const AbstractFunctionDecl *thunk) {
+  beginMangling();
+  appendDistributedThunk(thunk, /*asReference=*/true);
+  return finalize();
+}
+std::string ASTMangler::mangleDistributedThunkRecord(const AbstractFunctionDecl *thunk) {
+  beginMangling();
+  appendDistributedThunk(thunk, /*asReference=*/true);
+  appendSymbolKind(SymbolKind::AccessibleFunctionRecord);
+  return finalize();
+}
+std::string ASTMangler::mangleDistributedThunk(const AbstractFunctionDecl *thunk) {
+  beginMangling();
+  appendDistributedThunk(thunk, /*asReference=*/false);
+  return finalize();
 }
 
 void ASTMangler::appendMacroExpansionContext(

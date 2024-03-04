@@ -418,6 +418,14 @@ BridgedValue::Ownership BridgedValue::getOwnership() const {
   return castOwnership(getSILValue()->getOwnershipKind());
 }
 
+BridgedFunction BridgedValue::SILUndef_getParentFunction() const {
+  return {llvm::cast<swift::SILUndef>(getSILValue())->getParent()};
+}
+
+BridgedFunction BridgedValue::PlaceholderValue_getParentFunction() const {
+  return {llvm::cast<swift::PlaceholderValue>(getSILValue())->getParent()};
+}
+
 //===----------------------------------------------------------------------===//
 //                                BridgedOperand
 //===----------------------------------------------------------------------===//
@@ -1134,8 +1142,8 @@ void BridgedInstruction::MarkDependenceInst_resolveToNonEscaping() const {
   getAs<swift::MarkDependenceInst>()->resolveToNonEscaping();
 }
 
-BridgedInstruction::AccessKind BridgedInstruction::BeginAccessInst_getAccessKind() const {
-  return (AccessKind)getAs<swift::BeginAccessInst>()->getAccessKind();
+SwiftInt BridgedInstruction::BeginAccessInst_getAccessKind() const {
+  return (SwiftInt)getAs<swift::BeginAccessInst>()->getAccessKind();
 }
 
 bool BridgedInstruction::BeginAccessInst_isStatic() const {

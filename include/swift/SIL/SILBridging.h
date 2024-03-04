@@ -414,6 +414,8 @@ struct BridgedValue {
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE OptionalBridgedOperand getFirstUse() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedType getType() const;
   BRIDGED_INLINE Ownership getOwnership() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedFunction SILUndef_getParentFunction() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedFunction PlaceholderValue_getParentFunction() const;
 
   bool findPointerEscape() const;
 };
@@ -811,13 +813,6 @@ struct BridgedInstruction {
     bool hasValue;
   };
 
-  enum class AccessKind {
-    Init,
-    Read,
-    Modify,
-    Deinit
-  };
-
   enum class MarkDependenceKind {
     Unresolved, Escaping, NonEscaping
   };
@@ -887,7 +882,7 @@ struct BridgedInstruction {
   BRIDGED_INLINE SwiftInt AssignInst_getAssignOwnership() const;
   BRIDGED_INLINE MarkDependenceKind MarkDependenceInst_dependenceKind() const;
   BRIDGED_INLINE void MarkDependenceInst_resolveToNonEscaping() const;
-  BRIDGED_INLINE AccessKind BeginAccessInst_getAccessKind() const;
+  BRIDGED_INLINE SwiftInt BeginAccessInst_getAccessKind() const;
   BRIDGED_INLINE bool BeginAccessInst_isStatic() const;
   BRIDGED_INLINE bool CopyAddrInst_isTakeOfSrc() const;
   BRIDGED_INLINE bool CopyAddrInst_isInitializationOfDest() const;

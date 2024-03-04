@@ -122,14 +122,16 @@ static clang::CodeGenerator *createClangCodeGenerator(ASTContext &Context,
     CGO.DebugCompilationDir = Opts.DebugCompilationDir;
     CGO.DwarfVersion = Opts.DWARFVersion;
     CGO.DwarfDebugFlags =
-        Opts.getDebugFlags(PD, Context.LangOpts.EnableCXXInterop);
+        Opts.getDebugFlags(PD, Context.LangOpts.EnableCXXInterop,
+                           Context.LangOpts.hasFeature(Feature::Embedded));
     break;
   case IRGenDebugInfoFormat::CodeView:
     CGO.EmitCodeView = true;
     CGO.DebugCompilationDir = Opts.DebugCompilationDir;
     // This actually contains the debug flags for codeview.
     CGO.DwarfDebugFlags =
-        Opts.getDebugFlags(PD, Context.LangOpts.EnableCXXInterop);
+        Opts.getDebugFlags(PD, Context.LangOpts.EnableCXXInterop,
+                           Context.LangOpts.hasFeature(Feature::Embedded));
     break;
   }
   if (!Opts.TrapFuncName.empty()) {
@@ -652,12 +654,6 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
       createStructType(*this, "swift.accessible_function",
                        {RelativeAddressTy, RelativeAddressTy, RelativeAddressTy,
                         RelativeAddressTy, Int32Ty});
-  AccessibleProtocolRequirementFunctionRecordTy =
-      createStructType(*this, "swift.distributed_accessible_function",
-                       {RelativeAddressTy, RelativeAddressTy, RelativeAddressTy,
-                        RelativeAddressTy, Int32Ty,
-                        // Extra fields, after AccessibleFunctionRecordTy fields
-                        RelativeAddressTy, RelativeAddressTy});
 
   AsyncFunctionPointerTy = createStructType(*this, "swift.async_func_pointer",
                                             {RelativeAddressTy, Int32Ty}, true);
@@ -960,7 +956,7 @@ namespace RuntimeConstants {
   }
 
   RuntimeAvailability ParameterizedExistentialAvailability(ASTContext &Context) {
-    auto featureAvailability = Context.getParameterizedExistentialRuntimeAvailability();
+    auto featureAvailability = Context.getParameterizedExistentialAvailability();
     if (!isDeploymentAvailabilityContainedIn(Context, featureAvailability)) {
       return RuntimeAvailability::ConditionallyAvailable;
     }

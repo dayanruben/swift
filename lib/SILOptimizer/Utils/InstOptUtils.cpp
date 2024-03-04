@@ -127,12 +127,17 @@ swift::createDecrementBefore(SILValue ptr, SILInstruction *insertPt) {
 
 /// Returns true if OSSA scope ending instructions end_borrow/destroy_value can
 /// be deleted trivially
-static bool canTriviallyDeleteOSSAEndScopeInst(SILInstruction *i) {
+bool swift::canTriviallyDeleteOSSAEndScopeInst(SILInstruction *i) {
   if (!isa<EndBorrowInst>(i) && !isa<DestroyValueInst>(i))
     return false;
   if (isa<StoreBorrowInst>(i->getOperand(0)))
     return false;
-  return i->getOperand(0)->getOwnershipKind() == OwnershipKind::None;
+
+  auto opValue = i->getOperand(0);
+  // We can delete destroy_value with operands of none ownership unless
+  // they are move-only values, which can have custom deinit
+  return opValue->getOwnershipKind() == OwnershipKind::None &&
+         !opValue->getType().isMoveOnly();
 }
 
 /// Perform a fast local check to see if the instruction is dead.
@@ -1854,12 +1859,6 @@ void swift::salvageDebugInfo(SILInstruction *I) {
       auto VarInfo = DbgInst->getVarInfo();
       if (!VarInfo)
         continue;
-      if (VarInfo->DIExpr.hasFragment())
-        // Since we can't merge two different op_fragment
-        // now, we're simply bailing out if there is an
-        // existing op_fragment in DIExpression.
-        // TODO: Try to merge two op_fragment expressions here.
-        continue;
       for (VarDecl *FD : FieldDecls) {
         SILDebugVariable NewVarInfo = *VarInfo;
         auto FieldVal = STI->getFieldValue(FD);
@@ -1933,10 +1932,7 @@ void swift::createDebugFragments(SILValue oldValue, Projection proj,
     if (!debugVal)
       continue;
 
-    // Can't create a fragment of a fragment.
     auto varInfo = debugVal->getVarInfo();
-    if (!varInfo || varInfo->DIExpr.hasFragment())
-      continue;
 
     SILType baseType = oldValue->getType();
 

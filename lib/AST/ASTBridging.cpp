@@ -429,6 +429,18 @@ BridgedAlignmentAttr_createParsed(BridgedASTContext cContext,
       cValue, cAtLoc.unbridged(), cRange.unbridged(), /*Implicit=*/false);
 }
 
+BridgedAllowFeatureSuppressionAttr
+BridgedAllowFeatureSuppressionAttr_createParsed(BridgedASTContext cContext,
+                                                BridgedSourceLoc cAtLoc,
+                                                BridgedSourceRange cRange,
+                                                BridgedArrayRef cFeatures) {
+  SmallVector<Identifier> features;
+  for (auto elem : cFeatures.unbridged<BridgedIdentifier>())
+    features.push_back(elem.unbridged());
+  return AllowFeatureSuppressionAttr::create(cContext.unbridged(),
+      cAtLoc.unbridged(), cRange.unbridged(), /*implicit*/ false, features);
+}
+
 BridgedCDeclAttr BridgedCDeclAttr_createParsed(BridgedASTContext cContext,
                                                BridgedSourceLoc cAtLoc,
                                                BridgedSourceRange cRange,
@@ -2455,7 +2467,7 @@ BridgedGenericTypeParamDecl BridgedGenericTypeParamDecl_createParsed(
   if (auto *inheritedType = bridgedInheritedType.unbridged()) {
     auto entry = InheritedEntry(inheritedType);
     ASTContext &context = cContext.unbridged();
-    decl->setInherited(context.AllocateCopy(llvm::makeArrayRef(entry)));
+    decl->setInherited(context.AllocateCopy(llvm::ArrayRef(entry)));
   }
 
   return decl;
