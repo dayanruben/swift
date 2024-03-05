@@ -1083,7 +1083,7 @@ bool Decl::hasUnderscoredNaming() const {
   }
 
   if (!VD->getBaseName().isSpecial() &&
-      VD->getBaseIdentifier().str().startswith("_")) {
+      VD->getBaseIdentifier().hasUnderscoredNaming()) {
     return true;
   }
 
@@ -4214,9 +4214,13 @@ bool ValueDecl::hasOpenAccess(const DeclContext *useDC) const {
 }
 
 bool ValueDecl::bypassResilienceInPackage(ModuleDecl *accessingModule) const {
+  // Client needs to opt in to bypass resilience checks at the use site.
+  // Client and the loaded module both need to be in the same package.
+  // The loaded module needs to be built from source and opt in to allow
+  // non-resilient access.
   return getASTContext().LangOpts.EnableBypassResilienceInPackage &&
          getModuleContext()->inSamePackage(accessingModule) &&
-         !getModuleContext()->isBuiltFromInterface();
+         getModuleContext()->allowNonResilientAccess();
 }
 
 /// Given the formal access level for using \p VD, compute the scope where
