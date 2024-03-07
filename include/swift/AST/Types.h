@@ -3433,7 +3433,14 @@ public:
   Type getGlobalActor() const;
   Type getThrownError() const;
 
-  LifetimeDependenceInfo getLifetimeDependenceInfo() const;
+  const LifetimeDependenceInfo *getLifetimeDependenceInfoOrNull() const;
+
+  LifetimeDependenceInfo getLifetimeDependenceInfo() const {
+    if (auto *depInfo = getLifetimeDependenceInfoOrNull()) {
+      return *depInfo;
+    }
+    return LifetimeDependenceInfo();
+  }
 
   FunctionTypeIsolation getIsolation() const {
     if (hasExtInfo())
@@ -3765,14 +3772,22 @@ public:
     return getTrailingObjects<Type>()[hasGlobalActor()];
   }
 
-  LifetimeDependenceInfo getLifetimeDependenceInfo() const {
+  inline LifetimeDependenceInfo getLifetimeDependenceInfo() const {
+    if (auto *depInfo = getLifetimeDependenceInfoOrNull()) {
+      return *depInfo;
+    }
+    return LifetimeDependenceInfo();
+  }
+
+  /// Returns nullptr for an empty dependence list.
+  const LifetimeDependenceInfo *getLifetimeDependenceInfoOrNull() const {
     if (!hasLifetimeDependenceInfo()) {
-      return LifetimeDependenceInfo();
+      return nullptr;
     }
     auto *info = getTrailingObjects<LifetimeDependenceInfo>();
     assert(!info->empty() && "If the LifetimeDependenceInfo was empty, we "
                              "shouldn't have stored it.");
-    return *info;
+    return info;
   }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
@@ -3914,14 +3929,22 @@ public:
     return getTrailingObjects<Type>()[hasGlobalActor()];
   }
 
-  LifetimeDependenceInfo getLifetimeDependenceInfo() const {
+  inline LifetimeDependenceInfo getLifetimeDependenceInfo() const {
+    if (auto *depInfo = getLifetimeDependenceInfoOrNull()) {
+      return *depInfo;
+    }
+    return LifetimeDependenceInfo();
+  }
+
+  /// Returns nullptr for an empty dependence list.
+  const LifetimeDependenceInfo *getLifetimeDependenceInfoOrNull() const {
     if (!hasLifetimeDependenceInfo()) {
-      return LifetimeDependenceInfo();
+      return nullptr;
     }
     auto *info = getTrailingObjects<LifetimeDependenceInfo>();
     assert(!info->empty() && "If the LifetimeDependenceInfo was empty, we "
                              "shouldn't have stored it.");
-    return *info;
+    return info;
   }
 
   /// Retrieve the generic signature of this function type.
@@ -6007,6 +6030,7 @@ public:
   }
 
   InvertibleProtocolSet getInverses() const { return Inverses; }
+  bool hasInverse() const { return !Inverses.empty(); }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, getMembers(), getInverses(), hasExplicitAnyObject());

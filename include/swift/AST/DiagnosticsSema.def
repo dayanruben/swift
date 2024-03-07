@@ -4465,6 +4465,13 @@ ERROR(cannot_force_unwrap_nil_literal,none,
 ERROR(could_not_infer_placeholder,none,
       "could not infer type for placeholder", ())
 
+ERROR(could_not_infer_pack_element,none,
+      "could not infer pack element #%0 from context", (unsigned))
+
+NOTE(note_in_opening_pack_element,none,
+      "in inferring pack element #%0 of '%1'", (unsigned,StringRef))
+
+      
 ERROR(type_of_expression_is_ambiguous,none,
       "type of expression is ambiguous without a type annotation", ())
 
@@ -7623,10 +7630,6 @@ NOTE(add_inverse,none,
 NOTE(note_inverse_preventing_conformance,none,
      "%0 has '~%1' constraint preventing implicit '%1' conformance",
      (Type, StringRef))
-NOTE(note_inverse_preventing_conformance_implicit,none,
-     "%kind0 has '~%1' constraint on a generic parameter, "
-     "making its '%1' conformance conditional",
-     (const ValueDecl *, StringRef))
 NOTE(note_inverse_preventing_conformance_explicit,none,
      "%kind0 has '~%1' constraint preventing '%1' conformance",
      (const ValueDecl *, StringRef))
@@ -7650,6 +7653,10 @@ ERROR(non_bitwise_copyable_type_nonescapable,none,
       "nonescapable type cannot conform to 'BitwiseCopyable'", ())
 ERROR(non_bitwise_copyable_type_cxx_nontrivial,none,
       "non-trivial C++ type cannot conform to 'BitwiseCopyable'", ())
+ERROR(non_bitwise_copyable_c_type_nontrivial,none,
+      "type with unrepresentable fields cannot derive conformance to 'BitwiseCopyable'", ())
+NOTE(note_non_bitwise_copyable_c_type_add_attr,none,
+     "annotate the type __attribute__((__swift_attr__(\"_BitwiseCopyable\")))",())
 ERROR(non_bitwise_copyable_type_member,none,
       "%select{stored property %2|associated value %2}1 of "
       "'BitwiseCopyable'-conforming %kind3 has non-bitwise-copyable type %0",

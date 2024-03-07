@@ -74,7 +74,7 @@ struct SerializedModuleBaseName {
                               llvm::vfs::FileSystem &fs) const;
 
   /// Returns the .package.swiftinterface path if its package-name also applies to
-  /// the the importing module. Returns an empty optional otherwise.
+  /// the importing module. Returns an empty optional otherwise.
   std::optional<std::string>
   getPackageInterfacePathIfInSamePackage(llvm::vfs::FileSystem &fs,
                                          ASTContext &ctx) const;
@@ -173,7 +173,7 @@ protected:
 
   struct BinaryModuleImports {
     llvm::StringSet<> moduleImports;
-    llvm::StringSet<> headerImports;
+    std::string headerImport;
   };
 
   static llvm::ErrorOr<BinaryModuleImports>

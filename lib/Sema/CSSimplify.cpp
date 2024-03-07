@@ -12086,7 +12086,7 @@ ConstraintSystem::simplifyBridgingConstraint(Type type1,
     return SolutionKind::Solved;
   }
 
-  // In a previous version of Swift, we could accidently drop the coercion
+  // In a previous version of Swift, we could accidentally drop the coercion
   // constraint in certain cases. In most cases this led to either miscompiles
   // or crashes later down the pipeline, but for coercions between collections
   // we generated somewhat reasonable code that performed a force cast. To
@@ -15108,6 +15108,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::SpecifyContextualTypeForNil:
   case FixKind::AllowRefToInvalidDecl:
   case FixKind::SpecifyBaseTypeForOptionalUnresolvedMember:
+  case FixKind::SpecifyPackElementType:
   case FixKind::AllowCheckedCastCoercibleOptionalType:
   case FixKind::AllowNoopCheckedCast:
   case FixKind::AllowNoopExistentialToCFTypeCheckedCast:

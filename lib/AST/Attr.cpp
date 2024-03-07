@@ -2215,7 +2215,6 @@ OriginallyDefinedInAttr::isActivePlatform(const ASTContext &ctx) const {
   Result.Version = MovedVersion;
   Result.ModuleName = OriginalModuleName;
   if (isPlatformActive(Platform, ctx.LangOpts, /*TargetVariant*/false)) {
-    Result.IsSimulator = ctx.LangOpts.Target.isSimulatorEnvironment();
     return Result;
   }
 
@@ -2224,7 +2223,7 @@ OriginallyDefinedInAttr::isActivePlatform(const ASTContext &ctx) const {
   // libraries.
   if (ctx.LangOpts.TargetVariant.has_value() &&
       isPlatformActive(Platform, ctx.LangOpts, /*TargetVariant*/true)) {
-    Result.IsSimulator = ctx.LangOpts.TargetVariant->isSimulatorEnvironment();
+    Result.ForTargetVariant = true;
     return Result;
   }
   return std::nullopt;
@@ -2771,16 +2770,18 @@ CustomAttr *CustomAttr::create(ASTContext &ctx, SourceLoc atLoc, TypeExpr *type,
       CustomAttr(atLoc, range, type, initContext, argList, implicit);
 }
 
-std::pair<IdentTypeRepr *, DeclRefTypeRepr *>
+std::pair<UnqualifiedIdentTypeRepr *, DeclRefTypeRepr *>
 CustomAttr::destructureMacroRef() {
   TypeRepr *typeRepr = getTypeRepr();
   if (!typeRepr)
     return {nullptr, nullptr};
-  if (auto *identType = dyn_cast<IdentTypeRepr>(typeRepr))
-    return {nullptr, identType};
-  if (auto *memType = dyn_cast<MemberTypeRepr>(typeRepr)) {
-    if (auto *base = dyn_cast<SimpleIdentTypeRepr>(memType->getBase())) {
-      return {base, memType};
+  if (auto *unqualIdentType = dyn_cast<UnqualifiedIdentTypeRepr>(typeRepr))
+    return {nullptr, unqualIdentType};
+  if (auto *qualIdentType = dyn_cast<QualifiedIdentTypeRepr>(typeRepr)) {
+    if (auto *base =
+            dyn_cast<UnqualifiedIdentTypeRepr>(qualIdentType->getBase())) {
+      if (!base->hasGenericArgList())
+        return {base, qualIdentType};
     }
   }
   return {nullptr, nullptr};

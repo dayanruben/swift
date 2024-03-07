@@ -66,7 +66,7 @@ class ModuleDecl;
 class PatternBindingInitializer;
 class TrailingWhereClause;
 class TypeExpr;
-class IdentTypeRepr;
+class UnqualifiedIdentTypeRepr;
 
 class alignas(1 << AttrAlignInBits) AttributeBase
     : public ASTAllocated<AttributeBase> {
@@ -1771,7 +1771,8 @@ public:
   ///
   /// For an identifier type repr, return a pair of `nullptr` and the
   /// identifier.
-  std::pair<IdentTypeRepr *, DeclRefTypeRepr *> destructureMacroRef();
+  std::pair<UnqualifiedIdentTypeRepr *, DeclRefTypeRepr *>
+  destructureMacroRef();
 
   /// Whether the attribute has any arguments.
   bool hasArgs() const { return argList != nullptr; }
@@ -1862,8 +1863,8 @@ public:
   struct ActiveVersion {
     StringRef ModuleName;
     PlatformKind Platform;
-    bool IsSimulator;
     llvm::VersionTuple Version;
+    bool ForTargetVariant = false;
   };
 
   /// Returns non-optional if this attribute is active given the current platform.

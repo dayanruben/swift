@@ -1763,32 +1763,32 @@ bool ExtensionDecl::isConstrainedExtension() const {
   return !typeSig->isEqual(extSig);
 }
 
-bool ExtensionDecl::isEquivalentToExtendedContext() const {
+bool ExtensionDecl::isInSameDefiningModule() const {
   auto decl = getExtendedNominal();
-  bool extendDeclFromSameModule = false;
   auto extensionAlterName = getAlternateModuleName();
   auto typeAlterName = decl->getAlternateModuleName();
 
   if (!extensionAlterName.empty()) {
     if (!typeAlterName.empty()) {
       // Case I: type and extension are both moved from somewhere else
-      extendDeclFromSameModule = typeAlterName == extensionAlterName;
+      return typeAlterName == extensionAlterName;
     } else {
       // Case II: extension alone was moved from somewhere else
-      extendDeclFromSameModule = extensionAlterName ==
-        decl->getParentModule()->getNameStr();
+      return extensionAlterName == decl->getParentModule()->getNameStr();
     }
   } else {
     if (!typeAlterName.empty()) {
       // Case III: extended type alone was moved from somewhere else
-      extendDeclFromSameModule = typeAlterName == getParentModule()->getNameStr();
+      return typeAlterName == getParentModule()->getNameStr();
     } else {
       // Case IV: neither of type and extension was moved from somewhere else
-      extendDeclFromSameModule = getParentModule() == decl->getParentModule();
+      return getParentModule() == decl->getParentModule();
     }
   }
+}
 
-  return extendDeclFromSameModule
+bool ExtensionDecl::isEquivalentToExtendedContext() const {
+  return isInSameDefiningModule()
     && !isConstrainedExtension()
     && !getDeclaredInterfaceType()->isExistentialType();
 }
@@ -2294,9 +2294,9 @@ static bool isDefaultInitializable(const TypeRepr *typeRepr, ASTContext &ctx) {
       return true;
     }
 
-    if (auto *identRepr = dyn_cast<GenericIdentTypeRepr>(typeRepr)) {
-      if (identRepr->getNameRef().getBaseIdentifier() == ctx.Id_Optional &&
-          identRepr->getNumGenericArgs() == 1)
+    if (auto *unqualIdentRepr = dyn_cast<UnqualifiedIdentTypeRepr>(typeRepr)) {
+      if (unqualIdentRepr->getNumGenericArgs() == 1 &&
+          unqualIdentRepr->getNameRef().getBaseIdentifier() == ctx.Id_Optional)
         return true;
     }
   }
@@ -6694,9 +6694,9 @@ NominalTypeDecl::hasInverseMarking(InvertibleProtocolKind target) const {
   if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics))
     return InverseMarking::Mark(InverseMarking::Kind::None);
 
-  // Claim that the tuple decl has an inferred ~TARGET marking.
+  // Claim that the tuple decl has an explicit ~TARGET marking.
   if (isa<BuiltinTupleDecl>(this))
-    return InverseMarking::Mark(InverseMarking::Kind::Inferred);
+    return InverseMarking::Mark(InverseMarking::Kind::Explicit);
 
   if (auto P = dyn_cast<ProtocolDecl>(this))
     return P->hasInverseMarking(target);
@@ -6704,57 +6704,6 @@ NominalTypeDecl::hasInverseMarking(InvertibleProtocolKind target) const {
   // Search the inheritance clause first.
   if (auto inverse = findInverseInInheritance(getInherited(), target))
     return inverse;
-
-  // Check the generic parameters for an explicit ~TARGET marking
-  // which would result in an Inferred ~TARGET marking for this context.
-  auto *gpList = getParsedGenericParams();
-  if (!gpList)
-    return InverseMarking::Mark();
-
-  llvm::SmallSet<GenericTypeParamDecl *, 4> params;
-
-  // Scan the inheritance clauses of generic parameters only for an inverse.
-  for (GenericTypeParamDecl *param : gpList->getParams()) {
-    auto inverse = findInverseInInheritance(param->getInherited(), target);
-
-    // Inverse is inferred from one of the generic parameters.
-    if (inverse)
-      return inverse.with(InverseMarking::Kind::Inferred);
-
-    params.insert(param);
-  }
-
-  // Next, scan the where clause and return the result.
-  auto whereClause = getTrailingWhereClause();
-  if (!whereClause)
-    return InverseMarking::Mark();
-
-  auto requirements = whereClause->getRequirements();
-  for (unsigned i : indices(requirements)) {
-    auto requirementRepr = requirements[i];
-    if (requirementRepr.getKind() != RequirementReprKind::TypeConstraint)
-      continue;
-
-    auto *subjectRepr =
-        dyn_cast<IdentTypeRepr>(requirementRepr.getSubjectRepr());
-
-    if (!(subjectRepr && subjectRepr->isBound()))
-      continue;
-
-    auto *subjectGP =
-        dyn_cast<GenericTypeParamDecl>(subjectRepr->getBoundDecl());
-    if (!subjectGP || !params.contains(subjectGP))
-      continue;
-
-    auto *constraintRepr =
-        dyn_cast<InverseTypeRepr>(requirementRepr.getConstraintRepr());
-    if (!constraintRepr || constraintRepr->isInvalid())
-      continue;
-
-    if (constraintRepr->isInverseOf(target, getDeclContext()))
-      return InverseMarking::Mark(InverseMarking::Kind::Inferred,
-                                  constraintRepr->getLoc());
-  }
 
   return InverseMarking::Mark();
 }
@@ -6779,7 +6728,8 @@ ProtocolDecl::hasInverseMarking(InvertibleProtocolKind target) const {
         reqRepr.getKind() != RequirementReprKind::TypeConstraint)
       continue;
 
-    auto *subjectRepr = dyn_cast<IdentTypeRepr>(reqRepr.getSubjectRepr());
+    auto *subjectRepr =
+        dyn_cast<UnqualifiedIdentTypeRepr>(reqRepr.getSubjectRepr());
     auto *constraintRepr = reqRepr.getConstraintRepr();
 
     if (!subjectRepr || !subjectRepr->getNameRef().isSimpleName(ctx.Id_Self))
@@ -9517,7 +9467,7 @@ BraceStmt *AbstractFunctionDecl::getBody(bool canSynthesize) const {
 
   // Don't allow getBody() to trigger parsing of an unparsed body containing the
   // IDE inspection location.
-  // FIXME: We should be properly constructing the range of the the body as a
+  // FIXME: We should be properly constructing the range of the body as a
   // CharSourceRange but we can't because we don't have access to the lexer
   // here. Using the end location of the SourceRange works good enough here
   // because the last token is a '}' and the IDE inspection point is not inside
