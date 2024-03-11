@@ -62,7 +62,7 @@
 using namespace swift;
 using namespace swift::Mangle;
 
-static bool inversesAllowed(const Decl *decl) {
+bool ASTMangler::inversesAllowed(const Decl *decl) {
   if (!decl)
     return true;
 
@@ -73,7 +73,7 @@ static bool inversesAllowed(const Decl *decl) {
   return !decl->getAttrs().hasAttribute<PreInverseGenericsAttr>();
 }
 
-static bool inversesAllowedIn(const DeclContext *ctx) {
+bool ASTMangler::inversesAllowedIn(const DeclContext *ctx) {
   assert(ctx);
   return inversesAllowed(ctx->getInnermostDeclarationDeclContext());
 }
@@ -242,6 +242,9 @@ std::string ASTMangler::mangleConstructorVTableThunk(
 }
 
 std::string ASTMangler::mangleWitnessTable(const RootProtocolConformance *C) {
+  llvm::SaveAndRestore X(AllowInverses,
+                         inversesAllowedIn(C->getDeclContext()));
+
   beginMangling();
   if (isa<NormalProtocolConformance>(C)) {
     appendProtocolConformance(C);
@@ -449,9 +452,6 @@ std::string ASTMangler::mangleReabstractionThunkHelper(
   Mod = Module;
   assert(ThunkType->getPatternSubstitutions().empty() && "not implemented");
   GenericSignature GenSig = ThunkType->getInvocationGenericSignature();
-
-  // Reabstraction thunks never reference inverse conformances.
-  llvm::SaveAndRestore X(AllowInverses, false);
 
   beginMangling();
   appendType(FromType, GenSig);
@@ -1468,6 +1468,13 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
 
     case TypeKind::ProtocolComposition: {
       auto *PCT = cast<ProtocolCompositionType>(tybase);
+
+      if (!AllowMarkerProtocols) {
+        auto strippedTy = PCT->withoutMarkerProtocols();
+        if (!strippedTy->isEqual(PCT))
+          return appendType(strippedTy, sig, forDecl);
+      }
+
       if (PCT->hasParameterizedExistential()
           || (PCT->hasInverse() && AllowInverses))
         return appendConstrainedExistential(PCT, sig, forDecl);

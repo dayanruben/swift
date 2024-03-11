@@ -708,6 +708,16 @@ func multipleCapture2(_ k: Klass) -> () {
     print("foo bar")
 }
 
+func consumeString() {
+  var s = "asdf" // expected-warning{{}}
+  _ = consume s
+}
+
+func consumeArray() {
+  var x:[Int] = [] // expected-warning{{}}
+  _ = consume x
+}
+
 //////////////////////
 // Reinit in pieces //
 //////////////////////

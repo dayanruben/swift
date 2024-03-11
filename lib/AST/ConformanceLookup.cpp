@@ -26,10 +26,10 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/Builtins.h"
+#include "swift/AST/DistributedDecl.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/GenericEnvironment.h"
-#include "swift/AST/InverseMarking.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/PackConformance.h"
@@ -70,10 +70,46 @@ ModuleDecl::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
 
   assert(type->isExistentialType());
 
+  auto getConstraintType = [&type]() {
+    if (auto *existentialTy = type->getAs<ExistentialType>())
+      return existentialTy->getConstraintType();
+    return type;
+  };
+
+  auto lookupSuperclassConformance = [&](ExistentialLayout &layout) {
+    if (auto superclass = layout.explicitSuperclass) {
+      if (auto result =
+              lookupConformance(superclass, protocol, /*allowMissing=*/false)) {
+        if (protocol->isSpecificProtocol(KnownProtocolKind::Sendable) &&
+            result.hasUnavailableConformance())
+          return ProtocolConformanceRef::forInvalid();
+        return result;
+      }
+    }
+    return ProtocolConformanceRef::forInvalid();
+  };
+
   // If the existential type cannot be represented or the protocol does not
   // conform to itself, there's no point in looking further.
-  if (!protocol->existentialConformsToSelf())
+  if (!protocol->existentialConformsToSelf()) {
+    // If type is a protocol composition with marker protocols
+    // check whether superclass conforms, and if it does form
+    // an inherited conformance. This means that types like:
+    // `KeyPath<String, Int> & Sendable` don't have to be "opened"
+    // to satisfy conformance to i.e. `Equatable`.
+    if (getConstraintType()->is<ProtocolCompositionType>()) {
+      auto layout = type->getExistentialLayout();
+      if (llvm::all_of(layout.getProtocols(),
+                       [](const auto *P) { return P->isMarkerProtocol(); })) {
+        if (auto conformance = lookupSuperclassConformance(layout)) {
+          return ProtocolConformanceRef(
+              ctx.getInheritedConformance(type, conformance.getConcrete()));
+        }
+      }
+    }
+
     return ProtocolConformanceRef::forInvalid();
+  }
 
   if (protocol->isSpecificProtocol(KnownProtocolKind::Copyable)
       && !ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
@@ -89,10 +125,7 @@ ModuleDecl::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
   // existential to an archetype parameter, so for now we restrict this to
   // @objc protocols and marker protocols.
   if (!layout.isObjC() && !protocol->isMarkerProtocol()) {
-    auto constraint = type;
-    if (auto existential = constraint->getAs<ExistentialType>())
-      constraint = existential->getConstraintType();
-
+    auto constraint = getConstraintType();
     // There's a specific exception for protocols with self-conforming
     // witness tables, but the existential has to be *exactly* that type.
     // TODO: synthesize witness tables on-demand for protocol compositions
@@ -107,16 +140,8 @@ ModuleDecl::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
 
   // If the existential is class-constrained, the class might conform
   // concretely.
-  if (auto superclass = layout.explicitSuperclass) {
-    if (auto result = lookupConformance(
-            superclass, protocol, /*allowMissing=*/false)) {
-      if (protocol->isSpecificProtocol(KnownProtocolKind::Sendable) &&
-          result.hasUnavailableConformance())
-        result = ProtocolConformanceRef::forInvalid();
-
-      return result;
-    }
-  }
+  if (auto conformance = lookupSuperclassConformance(layout))
+    return conformance;
 
   // Otherwise, the existential might conform abstractly.
   for (auto protoDecl : layout.getProtocols()) {
@@ -403,39 +428,6 @@ static ProtocolConformanceRef getBuiltinMetaTypeTypeConformance(
   return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);
 }
 
-static ProtocolConformanceRef
-getBuiltinInvertibleProtocolConformance(NominalTypeDecl *nominal,
-                                        Type type,
-                                        ProtocolDecl *protocol) {
-  assert(isa<ClassDecl>(nominal));
-  ASTContext &ctx = protocol->getASTContext();
-
-  auto ip = protocol->getInvertibleProtocolKind();
-  switch (*ip) {
-  case InvertibleProtocolKind::Copyable:
-    // If move-only classes is enabled, we'll check the markings.
-    if (ctx.LangOpts.hasFeature(Feature::MoveOnlyClasses)) {
-      switch (nominal->hasInverseMarking(*ip).getKind()) {
-      case InverseMarking::Kind::LegacyExplicit:
-      case InverseMarking::Kind::Explicit:
-        // An inverse ~Copyable prevents conformance.
-        return ProtocolConformanceRef::forInvalid();
-
-      case InverseMarking::Kind::None:
-        break;
-      }
-    }
-    break;
-  case InvertibleProtocolKind::Escapable:
-    // Always conforms.
-    break;
-  }
-
-  return ProtocolConformanceRef(
-      ctx.getBuiltinConformance(type, protocol,
-                                BuiltinConformanceKind::Synthesized));
-}
-
 /// Synthesize a builtin type conformance to the given protocol, if
 /// appropriate.
 static ProtocolConformanceRef
@@ -625,13 +617,6 @@ LookupConformanceInModuleRequest::evaluate(
   if (!nominal || isa<ProtocolDecl>(nominal))
     return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);
 
-  // We specially avoid recording conformances to invertible protocols in a
-  // class's conformance table. This prevents an evaluator cycle.
-  if (ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)
-      && isa<ClassDecl>(nominal)
-      && protocol->getInvertibleProtocolKind())
-        return getBuiltinInvertibleProtocolConformance(nominal, type, protocol);
-
   // Expand conformances added by extension macros.
   //
   // FIXME: This expansion should only be done if the
@@ -643,8 +628,12 @@ LookupConformanceInModuleRequest::evaluate(
       ExpandExtensionMacros{nominal},
       { });
 
-  // Find the (unspecialized) conformance.
+  // Find the root conformance in the nominal type declaration's
+  // conformance lookup table.
   SmallVector<ProtocolConformance *, 2> conformances;
+
+  // If the conformance lookup table produced nothing, we try to derive the
+  // conformance for a few special protocol kinds.
   if (!nominal->lookupConformance(protocol, conformances)) {
     if (protocol->isSpecificProtocol(KnownProtocolKind::Sendable)) {
       // Try to infer Sendable conformance.
@@ -659,7 +648,8 @@ LookupConformanceInModuleRequest::evaluate(
       }
     } else if (protocol->isSpecificProtocol(KnownProtocolKind::Encodable) ||
                protocol->isSpecificProtocol(KnownProtocolKind::Decodable)) {
-      if (nominal->isDistributedActor()) {
+      // if (nominal->isDistributedActor()) {
+      if (canSynthesizeDistributedActorCodableConformance(nominal)) {
         auto protoKind =
             protocol->isSpecificProtocol(KnownProtocolKind::Encodable)
                 ? KnownProtocolKind::Encodable
@@ -677,31 +667,17 @@ LookupConformanceInModuleRequest::evaluate(
       } else {
         return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);
       }
-    } else if (protocol->isSpecificProtocol(KnownProtocolKind::Copyable)
-               || protocol->isSpecificProtocol(KnownProtocolKind::Escapable)) {
-      const auto kp = protocol->getKnownProtocolKind().value();
-
-      if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)
-          && kp == KnownProtocolKind::Copyable) {
+    } else if (protocol->isSpecificProtocol(KnownProtocolKind::Copyable)) {
+      if (!ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
         // Return an abstract conformance to maintain legacy compatability.
         // We only need to do this until we are properly dealing with or
         // omitting Copyable conformances in modules/interfaces.
 
         if (nominal->canBeCopyable())
           return ProtocolConformanceRef(protocol);
-        else
-          return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);
       }
 
-      // Try to infer the conformance.
-      ImplicitKnownProtocolConformanceRequest cvRequest{nominal, kp};
-      if (auto conformance = evaluateOrDefault(
-          ctx.evaluator, cvRequest, nullptr)) {
-        conformances.clear();
-        conformances.push_back(conformance);
-      } else {
-        return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);
-      }
+      return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);
     } else if (protocol->isSpecificProtocol(
                    KnownProtocolKind::BitwiseCopyable)) {
       // Try to infer BitwiseCopyable conformance.
@@ -720,6 +696,8 @@ LookupConformanceInModuleRequest::evaluate(
     }
   }
 
+  // We should have at least one conformance by now, or we would have returned
+  // above.
   assert(!conformances.empty());
 
   // If we have multiple conformances, first try to filter out any that are
@@ -768,27 +746,32 @@ LookupConformanceInModuleRequest::evaluate(
     return ProtocolConformanceRef(conformance);
   }
 
-  // If the type is specialized, find the conformance for the generic type.
+  // We now have a root conformance for the nominal's declared interface type.
+  // If our type is specialized, apply a substitution map to the root
+  // conformance.
   if (type->isSpecialized()) {
-    // Figure out the type that's explicitly conforming to this protocol.
-    Type explicitConformanceType = conformance->getType();
-    DeclContext *explicitConformanceDC = conformance->getDeclContext();
+    if (!conformance->getType()->isEqual(type)) {
+      // We use a builtin conformance for unconditional Copyable and Escapable
+      // conformances. Avoid building a substitution map and just return the
+      // correct builtin conformance for the specialized type.
+      if (auto *builtinConf = dyn_cast<BuiltinProtocolConformance>(conformance)) {
+        return ProtocolConformanceRef(
+            ctx.getBuiltinConformance(type, protocol,
+                                      builtinConf->getBuiltinConformanceKind()));
+      }
 
-    // If the explicit conformance is associated with a type that is different
-    // from the type we're checking, retrieve generic conformance.
-    if (!explicitConformanceType->isEqual(type)) {
-      // Gather the substitutions we need to map the generic conformance to
-      // the specialized conformance.
-      auto subMap = type->getContextSubstitutionMap(mod, explicitConformanceDC);
-
-      // Create the specialized conformance entry.
-      auto result = ctx.getSpecializedConformance(type,
-        cast<RootProtocolConformance>(conformance), subMap);
-      return ProtocolConformanceRef(result);
+      // Otherwise, we have a normal conformance, so we're going to build a
+      // specialized conformance from the context substitution map of the
+      // specialized type.
+      auto *normalConf = cast<NormalProtocolConformance>(conformance);
+      auto *conformanceDC = normalConf->getDeclContext();
+      auto subMap = type->getContextSubstitutionMap(mod, conformanceDC);
+      return ProtocolConformanceRef(
+          ctx.getSpecializedConformance(type, normalConf, subMap));
     }
   }
 
-  // Record and return the simple conformance.
+  // Return the root conformance.
   return ProtocolConformanceRef(conformance);
 }
 

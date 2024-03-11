@@ -726,6 +726,11 @@ namespace {
     }
 
     template <class G>
+    void addConformanceRequirement(const G &generator, KnownProtocolKind kp) {
+      addConformanceRequirement(generator, Context.getProtocol(kp));
+    }
+
+    template <class G>
     void addConformanceRequirement(const G &generator, ProtocolDecl *proto) {
       assert(proto && "missing protocol");
       Requirement req(RequirementKind::Conformance,
@@ -1194,14 +1199,23 @@ static ValueDecl *getNativeObjectCast(ASTContext &Context, Identifier Id,
   }
 
   BuiltinFunctionBuilder builder(Context);
+
+  auto genParam = makeGenericParam();
+
+  // Add safety, unless requested.
+  if (BV != BuiltinValueKind::UnsafeCastToNativeObject) {
+    builder.addConformanceRequirement(genParam, KnownProtocolKind::Copyable);
+    builder.addConformanceRequirement(genParam, KnownProtocolKind::Escapable);
+  }
+
   if (BV == BuiltinValueKind::CastToNativeObject ||
       BV == BuiltinValueKind::UnsafeCastToNativeObject ||
       BV == BuiltinValueKind::BridgeToRawPointer) {
-    builder.addParameter(makeGenericParam(), ownership);
+    builder.addParameter(genParam, ownership);
     builder.setResult(makeConcrete(builtinTy));
   } else {
     builder.addParameter(makeConcrete(builtinTy), ownership);
-    builder.setResult(makeGenericParam());
+    builder.setResult(genParam);
   }
   return builder.build(Id);
 }
@@ -1303,7 +1317,9 @@ static ValueDecl *getZeroInitializerOperation(ASTContext &Context,
                                              Identifier Id) {
   // <T> () -> T
   BuiltinFunctionBuilder builder(Context);
-  builder.setResult(makeGenericParam());
+  auto genParam = makeGenericParam();
+  builder.addConformanceRequirement(genParam, KnownProtocolKind::Escapable);
+  builder.setResult(genParam);
   return builder.build(Id);
 }
 
@@ -1510,6 +1526,32 @@ Type swift::getAsyncTaskAndContextType(ASTContext &ctx) {
   return TupleType::get(resultTupleElements, ctx);
 }
 
+static ValueDecl *getCreateTask(ASTContext &ctx, Identifier id) {
+  return getBuiltinFunction(
+      ctx, id, _thin, _generics(_unrestricted, _conformsToDefaults(0)),
+      _parameters(
+        _label("flags", _swiftInt),
+        _label("taskGroup", _defaulted(_optional(_rawPointer), _nil)),
+        //_label("initialExecutor", _defaulted(_optional(_executor), _nil)),
+        _label("initialTaskExecutor", _defaulted(_optional(_executor), _nil)),
+        _label("operation", _function(_async(_throws(_sendable(_thick))),
+                                      _typeparam(0), _parameters()))),
+      _tuple(_nativeObject, _rawPointer));
+}
+
+static ValueDecl *getCreateDiscardingTask(ASTContext &ctx, Identifier id) {
+  return getBuiltinFunction(
+      ctx, id, _thin,
+      _parameters(
+        _label("flags", _swiftInt),
+        _label("taskGroup", _defaulted(_optional(_rawPointer), _nil)),
+        //_label("initialExecutor", _defaulted(_optional(_executor), _nil)),
+        _label("initialTaskExecutor", _defaulted(_optional(_executor), _nil)),
+        _label("operation", _function(_async(_throws(_sendable(_thick))),
+                                      _void, _parameters()))),
+      _tuple(_nativeObject, _rawPointer));
+}
+
 static ValueDecl *getCreateAsyncTask(ASTContext &ctx, Identifier id,
                                      bool inGroup, bool withTaskExecutor,
                                      bool isDiscarding) {
@@ -1522,7 +1564,8 @@ static ValueDecl *getCreateAsyncTask(ASTContext &ctx, Identifier id,
   if (withTaskExecutor) {
     builder.addParameter(makeConcrete(ctx.TheExecutorType)); // executor
   }
-  auto extInfo = ASTExtInfoBuilder().withAsync().withThrows().build();
+  auto extInfo = ASTExtInfoBuilder().withAsync().withThrows()
+                                    .withConcurrent(true).build();
   Type operationResultType;
   if (isDiscarding) {
     operationResultType = TupleType::getEmpty(ctx); // ()
@@ -3013,6 +3056,12 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
 
   case BuiltinValueKind::CancelAsyncTask:
     return getCancelAsyncTask(Context, Id);
+
+  case BuiltinValueKind::CreateTask:
+    return getCreateTask(Context, Id);
+
+  case BuiltinValueKind::CreateDiscardingTask:
+    return getCreateDiscardingTask(Context, Id);
 
   case BuiltinValueKind::CreateAsyncTask:
     return getCreateAsyncTask(Context, Id, /*inGroup=*/false,

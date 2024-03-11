@@ -22,6 +22,7 @@
 #include "swift/SIL/AbstractionPattern.h"
 #include "swift/SIL/SILFunctionConventions.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SIL/Test.h"
 #include "swift/SIL/TypeLowering.h"
 #include <tuple>
 
@@ -1051,7 +1052,7 @@ SILType::getSingletonAggregateFieldType(SILModule &M,
   return SILType();
 }
 
-bool SILType::isEscapable() const {
+bool SILType::isEscapable(const SILFunction &function) const {
   CanType ty = getASTType();
 
   // For storage with reference ownership, check the referent.
@@ -1065,7 +1066,8 @@ bool SILType::isEscapable() const {
   if (auto boxTy = getAs<SILBoxType>()) {
     auto fields = boxTy->getLayout()->getFields();
     assert(fields.size() == 1);
-    ty = fields[0].getLoweredType();
+    ty = ::getSILBoxFieldLoweredType(function.getTypeExpansionContext(), boxTy,
+                                     function.getModule().Types, 0);
   }
 
   // TODO: Support ~Escapable in parameter packs.
@@ -1287,3 +1289,21 @@ SILType SILType::removingMoveOnlyWrapperToBoxedType(const SILFunction *fn) {
 bool SILType::isSendable(SILFunction *fn) const {
   return getASTType()->isSendableType();
 }
+
+namespace swift::test {
+// Arguments:
+// - SILValue: value
+// Dumps:
+// - message
+static FunctionTest IsSILTrivial("is-sil-trivial", [](auto &function,
+                                                      auto &arguments,
+                                                      auto &test) {
+  SILValue value = arguments.takeValue();
+  llvm::outs() << value;
+  if (value->getType().isTrivial(value->getFunction())) {
+    llvm::outs() << " is trivial\n";
+  } else {
+    llvm::outs() << " is not trivial\n";
+  }
+});
+} // end namespace swift::test

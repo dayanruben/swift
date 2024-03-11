@@ -420,12 +420,88 @@ static void diagSyntacticUseRestrictions(const Expr *E, const DeclContext *DC,
     }
 
     void checkConsumeExpr(ConsumeExpr *consumeExpr) {
+      auto partialConsumptionEnabled =
+          Ctx.LangOpts.hasFeature(Feature::MoveOnlyPartialConsumption);
       auto *subExpr = consumeExpr->getSubExpr();
-      if (auto *li = dyn_cast<LoadExpr>(subExpr))
-        subExpr = li->getSubExpr();
-      if (!isa<DeclRefExpr>(subExpr)) {
+      bool noncopyable =
+          subExpr->getType()->getCanonicalType()->isNoncopyable();
+
+      bool partial = false;
+      Expr *current = subExpr;
+      while (current) {
+        if (auto *dre = dyn_cast<DeclRefExpr>(current)) {
+          if (partial & !noncopyable) {
+            Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                               diag::consume_expression_partial_copyable);
+            return;
+          }
+          // The chain of member_ref_exprs and load_exprs terminates at a
+          // declref_expr.  This is legal.
+          return;
+        }
+        // Look through loads.
+        if (auto *le = dyn_cast<LoadExpr>(current)) {
+          current = le->getSubExpr();
+          continue;
+        }
+        auto *mre = dyn_cast<MemberRefExpr>(current);
+        if (mre && partialConsumptionEnabled) {
+          auto *vd = dyn_cast<VarDecl>(mre->getMember().getDecl());
+          if (!vd) {
+            Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                               diag::consume_expression_non_storage);
+            return;
+          }
+          partial = true;
+          AccessStrategy strategy = vd->getAccessStrategy(
+              mre->getAccessSemantics(), AccessKind::Read,
+              DC->getParentModule(), ResilienceExpansion::Minimal);
+          if (strategy.getKind() != AccessStrategy::Storage) {
+            if (noncopyable) {
+              Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                                 diag::consume_expression_non_storage);
+              Ctx.Diags.diagnose(
+                  mre->getLoc(),
+                  diag::note_consume_expression_non_storage_property);
+            } else {
+              Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                                 diag::consume_expression_partial_copyable);
+            }
+            return;
+          }
+          current = mre->getBase();
+          continue;
+        }
+        auto *ce = dyn_cast<CallExpr>(current);
+        if (ce && partialConsumptionEnabled) {
+          if (noncopyable) {
+            Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                               diag::consume_expression_non_storage);
+            Ctx.Diags.diagnose(ce->getLoc(),
+                               diag::note_consume_expression_non_storage_call);
+          } else {
+            Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                               diag::consume_expression_partial_copyable);
+          }
+          return;
+        }
+        auto *se = dyn_cast<SubscriptExpr>(current);
+        if (se && partialConsumptionEnabled) {
+          if (noncopyable) {
+            Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                               diag::consume_expression_non_storage);
+            Ctx.Diags.diagnose(
+                se->getLoc(),
+                diag::note_consume_expression_non_storage_subscript);
+          } else {
+            Ctx.Diags.diagnose(consumeExpr->getLoc(),
+                               diag::consume_expression_partial_copyable);
+          }
+          return;
+        }
         Ctx.Diags.diagnose(consumeExpr->getLoc(),
                            diag::consume_expression_not_passed_lvalue);
+        return;
       }
     }
 

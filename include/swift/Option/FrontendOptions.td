@@ -657,14 +657,6 @@ def disable_experimental_string_processing :
   Flag<["-"], "disable-experimental-string-processing">,
   HelpText<"Disable experimental string processing">;
 
-def enable_experimental_associated_type_inference :
-  Flag<["-"], "enable-experimental-associated-type-inference">,
-  HelpText<"Enable experimental associated type inference improvements">;
-
-def disable_experimental_associated_type_inference :
-  Flag<["-"], "disable-experimental-associated-type-inference">,
-  HelpText<"Disable experimental associated type inference improvements">;
-
 def enable_experimental_lifetime_dependence_inference :
   Flag<["-"], "enable-experimental-lifetime-dependence-inference">,
   HelpText<"Enable experimental lifetime dependence inference">;
@@ -1239,6 +1231,13 @@ def enable_import_ptrauth_field_function_pointers :
 def disable_import_ptrauth_field_function_pointers :
   Flag<["-"], "disable-import-ptrauth-field-function-pointers">,
   HelpText<"Disable import of custom ptrauth qualified field function pointers">;
+
+def enable_lifetime_dependence_diagnostics :
+  Flag<["-"], "enable-lifetime-dependence-diagnostics">,
+  HelpText<"Enable lifetime dependence diagnostics for Nonescapable types.">;
+def disable_lifetime_dependence_diagnostics :
+  Flag<["-"], "disable-lifetime-dependence-diagnostics">,
+  HelpText<"Disable lifetime dependence diagnostics for Nonescapable types.">;
 
 def enable_collocate_metadata_functions :
   Flag<["-"], "enable-collocate-metadata-functions">,

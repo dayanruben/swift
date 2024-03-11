@@ -274,8 +274,8 @@ bool BridgedType::isMoveOnly() const {
   return unbridged().isMoveOnly();
 }
 
-bool BridgedType::isEscapable() const {
-  return unbridged().isEscapable();
+bool BridgedType::isEscapable(BridgedFunction f) const {
+  return unbridged().isEscapable(*f.getFunction());
 }
 
 bool BridgedType::isOrContainsObjectiveCClass() const {
@@ -1461,9 +1461,12 @@ BridgedInstruction BridgedBuilder::createIntegerLiteral(BridgedType type, SwiftI
 
 BridgedInstruction BridgedBuilder::createAllocStack(BridgedType type,
                                     bool hasDynamicLifetime, bool isLexical, bool wasMoved) const {
-  return {unbridged().createAllocStack(regularLoc(), type.unbridged(),
-                                       std::nullopt, hasDynamicLifetime,
-                                       isLexical, wasMoved)};
+  return {unbridged().createAllocStack(
+      regularLoc(), type.unbridged(), std::nullopt,
+      swift::HasDynamicLifetime_t(hasDynamicLifetime),
+      swift::IsLexical_t(isLexical),
+      // TODO: Add this as an argument.
+      swift::IsNotFromVarDecl, swift::UsesMoveableValueDebugInfo_t(wasMoved))};
 }
 
 BridgedInstruction BridgedBuilder::createAllocVector(BridgedValue capacity, BridgedType type) const {

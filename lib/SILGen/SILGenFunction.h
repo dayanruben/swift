@@ -1332,10 +1332,12 @@ public:
   ///
   /// \p isLexical if set to true, this is a temporary that we are using for a
   /// local let that we need to mark with the lexical flag.
-  SILValue emitTemporaryAllocation(SILLocation loc, SILType ty,
-                                   bool hasDynamicLifetime = false,
-                                   bool isLexical = false,
-                                   bool generateDebugInfo = true);
+  SILValue emitTemporaryAllocation(
+      SILLocation loc, SILType ty,
+      HasDynamicLifetime_t hasDynamicLifetime = DoesNotHaveDynamicLifetime,
+      IsLexical_t isLexical = IsNotLexical,
+      IsFromVarDecl_t isFromVarDecl = IsNotFromVarDecl,
+      bool generateDebugInfo = true);
 
   /// Emits a temporary allocation for a pack that will be deallocated
   /// automatically at the end of the current scope.  Returns the address
@@ -1804,6 +1806,10 @@ public:
   ManagedValue emitReadAsyncLetBinding(SILLocation loc, VarDecl *var);
   
   ManagedValue emitCancelAsyncTask(SILLocation loc, SILValue task);
+
+  ManagedValue emitCreateAsyncMainTask(SILLocation loc, SubstitutionMap subs,
+                                       ManagedValue flags,
+                                       ManagedValue mainFunctionRef);
 
   bool maybeEmitMaterializeForSetThunk(ProtocolConformanceRef conformance,
                                        SILLinkage linkage,

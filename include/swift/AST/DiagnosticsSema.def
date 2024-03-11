@@ -5501,9 +5501,6 @@ ERROR(distributed_actor_remote_func_implemented_manually,none,
 ERROR(nonisolated_distributed_actor_storage,none,
       "'nonisolated' can not be applied to distributed actor stored properties",
       ())
-ERROR(nonisolated_storage_value_type,none,
-      "'nonisolated' is redundant on %0's stored properties",
-      (DescriptiveDeclKind))
 ERROR(distributed_actor_func_nonisolated, none,
       "cannot declare method %0 as both 'nonisolated' and 'distributed'",
       (DeclName))
@@ -5541,8 +5538,12 @@ NOTE(shared_mutable_state_decl_note,none,
      "isolate %0 to a global actor, or convert it to a 'let' constant and "
      "conform it to 'Sendable'", (const ValueDecl *))
 ERROR(shared_immutable_state_decl,none,
-      "%kind0 is not concurrency-safe because it is not either conforming to "
-      "'Sendable' or isolated to a global actor", (const ValueDecl *))
+      "%kind0 is not concurrency-safe because non-'Sendable' type %1 may have "
+      "shared mutable state",
+      (const ValueDecl *, Type))
+NOTE(shared_immutable_state_decl_note,none,
+     "isolate %0 to a global actor, or conform %1 to 'Sendable'",
+     (const ValueDecl *, Type))
 ERROR(actor_isolated_witness,none,
      "%select{|distributed }0%1 %kind2 cannot be used to satisfy %3 protocol "
      "requirement",
@@ -5776,9 +5777,6 @@ ERROR(global_actor_on_actor_class,none,
       "actor %0 cannot have a global actor", (Identifier))
 ERROR(global_actor_on_local_variable,none,
       "local variable %0 cannot have a global actor", (DeclName))
-ERROR(global_actor_on_storage_of_value_type,none,
-      "stored property %0 within struct cannot have a global actor",
-      (DeclName))
 ERROR(unsafe_global_actor,none,
       "'(unsafe)' global actors are deprecated; "
       "use '@preconcurrency' instead",
@@ -7649,8 +7647,6 @@ NOTE(note_non_bitwise_copyable_type_indirect_enum_element,none,
      "indirect case is here", ())
 ERROR(non_bitwise_copyable_type_noncopyable,none,
       "noncopyable type cannot conform to 'BitwiseCopyable'", ())
-ERROR(non_bitwise_copyable_type_nonescapable,none,
-      "nonescapable type cannot conform to 'BitwiseCopyable'", ())
 ERROR(non_bitwise_copyable_type_cxx_nontrivial,none,
       "non-trivial C++ type cannot conform to 'BitwiseCopyable'", ())
 ERROR(non_bitwise_copyable_c_type_nontrivial,none,
@@ -7737,6 +7733,16 @@ ERROR(moveOnly_not_allowed_here,none,
       "'@_moveOnly' attribute is only valid on structs or enums", ())
 ERROR(consume_expression_not_passed_lvalue,none,
       "'consume' can only be applied to a local binding ('let', 'var', or parameter)", ())
+ERROR(consume_expression_partial_copyable,none,
+      "'consume' can only be used to partially consume storage of a noncopyable type", ())
+ERROR(consume_expression_non_storage,none,
+      "'consume' can only be used to partially consume storage", ())
+NOTE(note_consume_expression_non_storage_call,none,
+      "non-storage produced by this call", ())
+NOTE(note_consume_expression_non_storage_subscript,none,
+      "non-storage produced by this subscript", ())
+NOTE(note_consume_expression_non_storage_property,none,
+      "non-storage produced by this computed property", ())
 ERROR(borrow_expression_not_passed_lvalue,none,
       "'borrow' can only be applied to a local binding ('let', 'var', or parameter)", ())
 ERROR(copy_expression_not_passed_lvalue,none,

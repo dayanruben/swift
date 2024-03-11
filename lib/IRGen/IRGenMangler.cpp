@@ -197,6 +197,9 @@ IRGenMangler::mangleTypeForFlatUniqueTypeRef(CanGenericSignature sig,
 
 std::string IRGenMangler::mangleProtocolConformanceDescriptor(
                                  const RootProtocolConformance *conformance) {
+  llvm::SaveAndRestore X(AllowInverses,
+                         inversesAllowedIn(conformance->getDeclContext()));
+
   beginMangling();
   if (isa<NormalProtocolConformance>(conformance)) {
     appendProtocolConformance(conformance);
@@ -496,9 +499,8 @@ IRGenMangler::appendExtendedExistentialTypeShape(CanGenericSignature genSig,
                                                  CanType shapeType) {
   // Append the generalization signature.
   if (genSig) {
-    // Generalization signature never references inverses.
+    // Generalization signature never reference inverses.
     llvm::SaveAndRestore X(AllowInverses, false);
-
     appendGenericSignature(genSig);
   }
 

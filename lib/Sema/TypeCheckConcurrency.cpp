@@ -421,18 +421,6 @@ GlobalActorAttributeRequest::evaluate(
             .highlight(globalActorAttr->getRangeWithAt());
         return std::nullopt;
       }
-
-      // ... and not if it's the instance storage of a struct
-      if (isStoredInstancePropertyOfStruct(var)) {
-        var->diagnose(diag::global_actor_on_storage_of_value_type,
-                      var->getName())
-            .highlight(globalActorAttr->getRangeWithAt())
-            .warnUntilSwiftVersion(6);
-
-        // In Swift 6, once the diag above is an error, it is disallowed.
-        if (var->getASTContext().isSwiftVersionAtLeast(6))
-          return std::nullopt;
-      }
     }
   } else if (isa<ExtensionDecl>(decl)) {
     // Extensions are okay.
@@ -4908,9 +4896,13 @@ ActorIsolation ActorIsolationRequest::evaluate(
           diagVar = originalVar;
         }
         if (var->isLet()) {
-          if (!var->getInterfaceType()->isSendableType()) {
-            diagVar->diagnose(diag::shared_immutable_state_decl, diagVar)
+          auto type = var->getInterfaceType();
+          if (!type->isSendableType()) {
+            diagVar->diagnose(diag::shared_immutable_state_decl,
+                              diagVar, type)
                 .warnUntilSwiftVersion(6);
+            diagVar->diagnose(diag::shared_immutable_state_decl_note,
+                              diagVar, type);
           }
         } else {
           diagVar->diagnose(diag::shared_mutable_state_decl, diagVar)

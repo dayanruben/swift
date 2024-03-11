@@ -1455,9 +1455,20 @@ swift::lookupValueWitnesses(DeclContext *DC, ValueDecl *req, bool *ignoringNames
     DC->lookupQualified(nominal, reqName, nominal->getLoc(),
                         options, lookupResults);
     for (auto *decl : lookupResults) {
+      // a distributed thunk is the witness
       if (!isa<ProtocolDecl>(decl->getDeclContext())) {
-        witnesses.push_back(decl);
-        addedAny = true;
+        auto func = dyn_cast<AbstractFunctionDecl>(req);
+        if (func && func->isDistributedThunk()) {
+          if (auto candidate = dyn_cast<AbstractFunctionDecl>(decl)) {
+            if (auto thunk = candidate->getDistributedThunk()) {
+              witnesses.push_back(thunk);
+              addedAny = true;
+            }
+          }
+        } else {
+          witnesses.push_back(decl);
+          addedAny = true;
+        }
       }
     };
 
@@ -1468,8 +1479,9 @@ swift::lookupValueWitnesses(DeclContext *DC, ValueDecl *req, bool *ignoringNames
       DC->lookupQualified(nominal, reqBaseName, nominal->getLoc(),
                           options, lookupResults);
       for (auto *decl : lookupResults) {
-        if (!isa<ProtocolDecl>(decl->getDeclContext()))
+        if (!isa<ProtocolDecl>(decl->getDeclContext())) {
           witnesses.push_back(decl);
+        }
       }
 
       *ignoringNames = true;
@@ -4391,11 +4403,12 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
     return ResolveWitnessResult::ExplicitFailed;
   }
 
+  if (!shouldRecordMissingWitness(Proto, Conformance, requirement))
+    return ResolveWitnessResult::Missing;
 
   if (!numViable) {
     // Save the missing requirement for later diagnosis.
-    if (shouldRecordMissingWitness(Proto, Conformance, requirement))
-      getASTContext().addDelayedMissingWitness(Conformance, {requirement, matches});
+    getASTContext().addDelayedMissingWitness(Conformance, {requirement, matches});
     return ResolveWitnessResult::Missing;
   }
 
@@ -6106,10 +6119,10 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
       tryDiagnoseExecutorConformance(Context, nominal, proto);
     } else if (NoncopyableGenerics
         && proto->isSpecificProtocol(KnownProtocolKind::Copyable)) {
-      checkCopyableConformance(conformance);
+      checkCopyableConformance(dc, conformance);
     } else if (NoncopyableGenerics
         && proto->isSpecificProtocol(KnownProtocolKind::Escapable)) {
-      checkEscapableConformance(conformance);
+      checkEscapableConformance(dc, conformance);
     } else if (Context.LangOpts.hasFeature(Feature::BitwiseCopyable) &&
                proto->isSpecificProtocol(KnownProtocolKind::BitwiseCopyable)) {
       checkBitwiseCopyableConformance(

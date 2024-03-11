@@ -360,9 +360,11 @@ How swift-C++ bridging code is compiled:
 ]=] DEFAULT)
 
 option(SWIFT_USE_SYMLINKS "Use symlinks instead of copying binaries" ${CMAKE_HOST_UNIX})
-set(SWIFT_COPY_OR_SYMLINK "copy")
+set(SWIFT_COPY_OR_SYMLINK "copy_if_different")
+set(SWIFT_COPY_OR_SYMLINK_DIR "copy_directory")
 if(SWIFT_USE_SYMLINKS)
   set(SWIFT_COPY_OR_SYMLINK "create_symlink")
+  set(SWIFT_COPY_OR_SYMLINK_DIR "create_symlink")
 endif()
 
 # The following only works with the Ninja generator in CMake >= 3.0.
@@ -486,6 +488,14 @@ set(SWIFT_ANDROID_NDK_PATH "" CACHE STRING
   "Path to the directory that contains the Android NDK tools that are executable on the build machine")
 set(SWIFT_ANDROID_DEPLOY_DEVICE_PATH "" CACHE STRING
   "Path on an Android device where build products will be pushed. These are used when running the test suite against the device")
+
+#
+# User-configurable WebAssembly specific options.
+#
+
+option(SWIFT_ENABLE_WASI_THREADS
+  "Build the Standard Library with WASI threads support"
+  FALSE)
 
 #
 # User-configurable Darwin-specific options.
@@ -655,6 +665,10 @@ option(SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED
 
 option(SWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS
   "Enable experimental NoncopyableGenerics"
+  FALSE)
+
+option(SWIFT_ENABLE_EXPERIMENTAL_NONESCAPABLE_TYPES
+  "Enable experimental NonescapableTypes"
   FALSE)
 
 option(SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING
@@ -1253,6 +1267,7 @@ if(SWIFT_BUILD_STDLIB OR SWIFT_BUILD_SDK_OVERLAY)
   message(STATUS "Concurrency Support:                ${SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY}")
   message(STATUS "Distributed Support:                ${SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED}")
   message(STATUS "NoncopyableGenerics Support:        ${SWIFT_ENABLE_EXPERIMENTAL_NONCOPYABLE_GENERICS}")
+  message(STATUS "NonEscapableTypes Support:          ${SWIFT_ENABLE_EXPERIMENTAL_NONESCAPABLE_TYPES}")
   message(STATUS "String Processing Support:          ${SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING}")
   message(STATUS "Backtracing Support:                ${SWIFT_ENABLE_BACKTRACING}")
   message(STATUS "Unicode Support:                    ${SWIFT_STDLIB_ENABLE_UNICODE_DATA}")
