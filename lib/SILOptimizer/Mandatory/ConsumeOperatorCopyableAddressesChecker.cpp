@@ -2465,7 +2465,9 @@ class ConsumeOperatorCopyableAddressesCheckerPass
     for (auto *arg : fn->front().getSILFunctionArguments()) {
       if (arg->getType().isAddress() &&
           (arg->hasConvention(SILArgumentConvention::Indirect_In) ||
-           arg->hasConvention(SILArgumentConvention::Indirect_Inout)))
+           arg->hasConvention(SILArgumentConvention::Indirect_In_Guaranteed) ||
+           arg->hasConvention(SILArgumentConvention::Indirect_Inout) ||
+           arg->hasConvention(SILArgumentConvention::Indirect_InoutAliasable)))
         addressesToCheck.insert(arg);
     }
 

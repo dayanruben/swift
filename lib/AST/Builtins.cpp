@@ -1531,8 +1531,8 @@ static ValueDecl *getCreateTask(ASTContext &ctx, Identifier id) {
       ctx, id, _thin, _generics(_unrestricted, _conformsToDefaults(0)),
       _parameters(
         _label("flags", _swiftInt),
+        _label("initialSerialExecutor", _defaulted(_optional(_executor), _nil)),
         _label("taskGroup", _defaulted(_optional(_rawPointer), _nil)),
-        //_label("initialExecutor", _defaulted(_optional(_executor), _nil)),
         _label("initialTaskExecutor", _defaulted(_optional(_executor), _nil)),
         _label("operation", _function(_async(_throws(_sendable(_thick))),
                                       _typeparam(0), _parameters()))),
@@ -1544,8 +1544,8 @@ static ValueDecl *getCreateDiscardingTask(ASTContext &ctx, Identifier id) {
       ctx, id, _thin,
       _parameters(
         _label("flags", _swiftInt),
+        _label("initialSerialExecutor", _defaulted(_optional(_executor), _nil)),
         _label("taskGroup", _defaulted(_optional(_rawPointer), _nil)),
-        //_label("initialExecutor", _defaulted(_optional(_executor), _nil)),
         _label("initialTaskExecutor", _defaulted(_optional(_executor), _nil)),
         _label("operation", _function(_async(_throws(_sendable(_thick))),
                                       _void, _parameters()))),
@@ -1565,7 +1565,7 @@ static ValueDecl *getCreateAsyncTask(ASTContext &ctx, Identifier id,
     builder.addParameter(makeConcrete(ctx.TheExecutorType)); // executor
   }
   auto extInfo = ASTExtInfoBuilder().withAsync().withThrows()
-                                    .withConcurrent(true).build();
+                                    .withSendable(true).build();
   Type operationResultType;
   if (isDiscarding) {
     operationResultType = TupleType::getEmpty(ctx); // ()
@@ -1639,8 +1639,23 @@ static ValueDecl *getStartAsyncLet(ASTContext &ctx, Identifier id) {
   // TaskOptionRecord*
   builder.addParameter(makeConcrete(OptionalType::get(ctx.TheRawPointerType)));
 
-  // operation async function pointer: () async throws -> T
-  auto extInfo = ASTExtInfoBuilder().withAsync().withThrows().withNoEscape().build();
+  // If transferring results are enabled, make async let return a transferring
+  // value.
+  //
+  // NOTE: If our actual returned function does not return something that is
+  // transferring, we will emit an error in Sema. In the case of SILGen, we just
+  // in such a case want to thunk and not emit an error. So in such a case, we
+  // always make this builtin take a transferring result.
+  bool hasTransferringResult =
+      ctx.LangOpts.hasFeature(Feature::TransferringArgsAndResults);
+
+  // operation async function pointer: () async throws -> transferring T
+  auto extInfo = ASTExtInfoBuilder()
+                     .withAsync()
+                     .withThrows()
+                     .withNoEscape()
+                     .withTransferringResult(hasTransferringResult)
+                     .build();
   builder.addParameter(
       makeConcrete(FunctionType::get({ }, genericParam, extInfo)));
 

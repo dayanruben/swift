@@ -2553,7 +2553,7 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
 
       maybeAddParameterIsolation(infoBuilder, argTy);
       infoBuilder = infoBuilder.withAsync(AFD->hasAsync());
-      infoBuilder = infoBuilder.withConcurrent(AFD->isSendable());
+      infoBuilder = infoBuilder.withSendable(AFD->isSendable());
       // 'throws' only applies to the innermost function.
       infoBuilder = infoBuilder.withThrows(AFD->hasThrows(), thrownTy);
       // Defer bodies must not escape.
@@ -2870,9 +2870,7 @@ static ArrayRef<Decl *> evaluateMembersRequest(
     }
 
     if (isDerivable) {
-      evaluateOrDefault(ctx.evaluator,
-                        ResolveValueWitnessesRequest{normal},
-                        evaluator::SideEffect());
+      normal->resolveValueWitnesses();
     }
   }
 

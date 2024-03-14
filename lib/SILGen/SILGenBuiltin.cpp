@@ -1576,6 +1576,14 @@ static ManagedValue emitCreateAsyncTask(SILGenFunction &SGF, SILLocation loc,
 
   ManagedValue flags = nextArg().getAsSingleValue(SGF);
 
+  ManagedValue initialExecutor = [&] {
+    if (options & CreateTaskOptions::OptionalEverything) {
+      return nextArg().getAsSingleValue(SGF);
+    } else {
+      return emitOptionalNone(ctx.TheExecutorType);
+    }
+  }();
+
   ManagedValue taskGroup = [&] {
     if (options & CreateTaskOptions::OptionalEverything) {
       return nextArg().getAsSingleValue(SGF);
@@ -1612,7 +1620,7 @@ static ManagedValue emitCreateAsyncTask(SILGenFunction &SGF, SILLocation loc,
         ASTExtInfoBuilder()
             .withAsync()
             .withThrows()
-            .withConcurrent(true)
+            .withSendable(true)
             .withRepresentation(GenericFunctionType::Representation::Swift)
             .build();
 
@@ -1638,6 +1646,7 @@ static ManagedValue emitCreateAsyncTask(SILGenFunction &SGF, SILLocation loc,
 
   SILValue builtinArgs[] = {
     flags.getUnmanagedValue(),
+    initialExecutor.getUnmanagedValue(),
     taskGroup.getUnmanagedValue(),
     taskExecutor.getUnmanagedValue(),
     functionValue.forward(SGF)
@@ -1724,7 +1733,7 @@ SILGenFunction::emitCreateAsyncMainTask(SILLocation loc, SubstitutionMap subs,
   CanType flagsType = ctx.getIntType()->getCanonicalType();
   CanType functionType =
     FunctionType::get({}, ctx.TheEmptyTupleType,
-                      ASTExtInfo().withAsync().withThrows().withConcurrent(true))
+                      ASTExtInfo().withAsync().withThrows().withSendable(true))
       ->getCanonicalType();
 
   using Param = FunctionType::Param;

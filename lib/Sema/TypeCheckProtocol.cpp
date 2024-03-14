@@ -2418,8 +2418,16 @@ checkIndividualConformance(NormalProtocolConformance *conformance) {
       implyingConf = implyingConf->getImplyingConformance();
     }
 
+    // If the conditional requirements all have the form `T : Copyable`, then
+    // we accept the implied conformance with the same conditional requirements.
     auto implyingCondReqs = implyingConf->getConditionalRequirements();
-    if (!implyingCondReqs.empty()) {
+    bool allCondReqsInvertible = llvm::all_of(implyingCondReqs,
+        [&](Requirement req) {
+          return (req.getKind() == RequirementKind::Conformance &&
+                  req.getProtocolDecl()->getInvertibleProtocolKind());
+        });
+
+    if (!allCondReqsInvertible) {
       // FIXME:
       // We shouldn't suggest including witnesses for the conformance, because
       // those suggestions will go in the current DeclContext, but really they
@@ -2464,9 +2472,7 @@ checkIndividualConformance(NormalProtocolConformance *conformance) {
   ensureRequirementsAreSatisfied(Context, conformance);
 
   // Check non-type requirements.
-  evaluateOrDefault(Context.evaluator,
-                    ResolveValueWitnessesRequest{conformance},
-                    evaluator::SideEffect());
+  conformance->resolveValueWitnesses();
 }
 
 /// Add the next associated type deduction to the string representation
@@ -6110,10 +6116,10 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
       tryDiagnoseExecutorConformance(Context, nominal, proto);
     } else if (NoncopyableGenerics
         && proto->isSpecificProtocol(KnownProtocolKind::Copyable)) {
-      checkCopyableConformance(dc, conformance);
+      checkCopyableConformance(dc, ProtocolConformanceRef(conformance));
     } else if (NoncopyableGenerics
         && proto->isSpecificProtocol(KnownProtocolKind::Escapable)) {
-      checkEscapableConformance(dc, conformance);
+      checkEscapableConformance(dc, ProtocolConformanceRef(conformance));
     } else if (Context.LangOpts.hasFeature(Feature::BitwiseCopyable) &&
                proto->isSpecificProtocol(KnownProtocolKind::BitwiseCopyable)) {
       checkBitwiseCopyableConformance(

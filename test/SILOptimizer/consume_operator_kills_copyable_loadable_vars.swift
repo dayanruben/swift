@@ -314,12 +314,11 @@ extension KlassWrapper {
         print("123")
     }
 
-    // We do not support moving within a defer right now.
     mutating func deferTestFail1() {
         let _ = (consume self)
         defer {
             self = KlassWrapper(k: Klass())
-            let _ = (consume self) // expected-error {{'consume' applied to value that the compiler does not support}}
+            let _ = (consume self)
         }
         print("123")
     }
@@ -721,6 +720,12 @@ func consumeArray() {
 func consumeInitdArray() {
   let x:[Int] ; x = []
   _ = consume x
+}
+
+func isNegative(_ c: consuming Int) -> Bool { return c < 0 }
+func consumeInt() {
+    var g = 0 // expected-warning{{variable 'g' was never mutated; consider changing to 'let' constant}}
+    isNegative(consume g) // expected-warning{{result of call to 'isNegative' is unused}}
 }
 
 //////////////////////

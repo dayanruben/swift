@@ -2446,8 +2446,10 @@ void IRGenModule::emitSILFunction(SILFunction *f) {
       f->getLoweredFunctionType()->isPolymorphic())
     return;
 
-  // Do not emit bodies of public_external functions.
-  if (hasPublicVisibility(f->getLinkage()) && f->isAvailableExternally())
+  // Do not emit bodies of public_external or package_external functions.
+  if (hasPublicOrPackageVisibility(f->getLinkage(),
+                                   f->getASTContext().SILOpts.EnableSerializePackage) &&
+      f->isAvailableExternally())
     return;
 
   PrettyStackTraceSILFunction stackTrace("emitting IR", f);
@@ -3568,13 +3570,14 @@ static void emitBuiltinStackDealloc(IRGenSILFunction &IGF,
 static void emitBuiltinCreateAsyncTask(IRGenSILFunction &IGF,
                                        swift::BuiltinInst *i) {
   auto flags = IGF.getLoweredSingletonExplosion(i->getOperand(0));
-  auto taskGroup = IGF.getLoweredOptionalExplosion(i->getOperand(1));
-  auto taskExecutor = IGF.getLoweredOptionalExplosion(i->getOperand(2));
-  Explosion taskFunction = IGF.getLoweredExplosion(i->getOperand(3));
+  auto serialExecutor = IGF.getLoweredOptionalExplosion(i->getOperand(1));
+  auto taskGroup = IGF.getLoweredOptionalExplosion(i->getOperand(2));
+  auto taskExecutor = IGF.getLoweredOptionalExplosion(i->getOperand(3));
+  Explosion taskFunction = IGF.getLoweredExplosion(i->getOperand(4));
 
   auto taskAndContext =
-    emitTaskCreate(IGF, flags, taskGroup, taskExecutor, taskFunction,
-                   i->getSubstitutions());
+    emitTaskCreate(IGF, flags, serialExecutor, taskGroup, taskExecutor,
+                   taskFunction, i->getSubstitutions());
   Explosion out;
   out.add(taskAndContext.first);
   out.add(taskAndContext.second);

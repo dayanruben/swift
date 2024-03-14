@@ -2133,7 +2133,13 @@ namespace {
         DiagnosticList errors = list.getSecond();
         ActorIsolation isolation = key.second;
 
-        auto behavior = DiagnosticBehavior::Error;
+        auto behavior = DiagnosticBehavior::Warning;
+        // Upgrade behavior if @preconcurrency not detected
+        if (llvm::any_of(errors, [&](IsolationError error) {
+          return !error.preconcurrency;
+        })) {
+          behavior = DiagnosticBehavior::Error;
+        }
 
         // Add Fix-it for missing @SomeActor annotation
         if (isolation.isGlobalActor()) {
@@ -2141,15 +2147,15 @@ namespace {
                   const_cast<DeclContext *>(getDeclContext()),
                   isolation.getGlobalActor(), behavior) &&
               errors.size() > 1) {
-            behavior= DiagnosticBehavior::Note;
+            behavior = DiagnosticBehavior::Note;
           }
         }
 
         for (IsolationError error : errors) {
           // Diagnose actor_isolated_non_self_reference as note
-          // if fix-it provided in missingGlobalActorOnContext
+          // if there are multiple of these diagnostics
           ctx.Diags.diagnose(error.loc, error.diag)
-              .limitBehaviorUntilSwiftVersion(behavior, 6);
+            .limitBehaviorUntilSwiftVersion(behavior, 6);
         }
       }
 
@@ -2158,7 +2164,14 @@ namespace {
         DiagnosticList errors = list.getSecond();
         ActorIsolation isolation = key.first;
 
-        auto behavior = DiagnosticBehavior::Error;
+        auto behavior = DiagnosticBehavior::Warning;
+        // Upgrade behavior if @preconcurrency not detected
+        if (llvm::any_of(errors, [&](IsolationError error) {
+          return !error.preconcurrency;
+        })) {
+          behavior = DiagnosticBehavior::Error;
+        }
+
 
         // Add Fix-it for missing @SomeActor annotation
         if (isolation.isGlobalActor()) {
@@ -2166,15 +2179,16 @@ namespace {
                   const_cast<DeclContext *>(getDeclContext()),
                   isolation.getGlobalActor(), behavior) &&
               errors.size() > 1) {
-            behavior= DiagnosticBehavior::Note;
+            behavior = DiagnosticBehavior::Note;
           }
         }
 
         for (IsolationError error : errors) {
           // Diagnose actor_isolated_call as note if
-          // fix-it provided in missingGlobalActorOnContext
+          // if there are multiple actor-isolated function calls
+          // from outside the actor
           ctx.Diags.diagnose(error.loc, error.diag)
-              .limitBehaviorUntilSwiftVersion(behavior, 6);
+            .limitBehaviorUntilSwiftVersion(behavior, 6);
         }
       }
 
@@ -2484,8 +2498,10 @@ namespace {
           auto *patternBindingDecl = getTopPatternBindingDecl();
           if (patternBindingDecl && patternBindingDecl->isAsyncLet()) {
             // Defer diagnosing checking of non-Sendable types that are passed
-            // into async let to SIL level region based isolation.
-            if (!ctx.LangOpts.hasFeature(Feature::RegionBasedIsolation)) {
+            // into async let to SIL level region based isolation if we have
+            // transferring and region based isolation enabled.
+            if (!ctx.LangOpts.hasFeature(Feature::RegionBasedIsolation) ||
+                !ctx.LangOpts.hasFeature(Feature::TransferringArgsAndResults)) {
               diagnoseNonSendableTypes(
                   type, getDeclContext(),
                   /*inDerivedConformance*/Type(), capture.getLoc(),
@@ -3437,8 +3453,12 @@ namespace {
 
           IsolationError mismatch([calleeDecl, apply, unsatisfiedIsolation, getContextIsolation]() {
             if (calleeDecl) {
+              auto preconcurrency = getContextIsolation().preconcurrency() || 
+                getActorIsolation(calleeDecl).preconcurrency();
+
               return IsolationError(
                              apply->getLoc(),
+                             preconcurrency,
                              Diagnostic(diag::actor_isolated_call_decl,
                                         *unsatisfiedIsolation,
                                         calleeDecl,
@@ -3446,6 +3466,7 @@ namespace {
             } else {
               return IsolationError(
                              apply->getLoc(),
+                             getContextIsolation().preconcurrency(),
                              Diagnostic(diag::actor_isolated_call,
                                         *unsatisfiedIsolation,
                                         getContextIsolation()));
@@ -3464,7 +3485,8 @@ namespace {
         } else {
           if (calleeDecl) {
             auto preconcurrency = getContextIsolation().preconcurrency() ||
-                getActorIsolation(calleeDecl).preconcurrency();
+              getActorIsolation(calleeDecl).preconcurrency();
+
             ctx.Diags.diagnose(
                                apply->getLoc(), diag::actor_isolated_call_decl,
                                *unsatisfiedIsolation,
@@ -3519,15 +3541,36 @@ namespace {
       // Check for sendability of the result type if we do not have a
       // transferring result.
       if ((!ctx.LangOpts.hasFeature(Feature::TransferringArgsAndResults) ||
-           !fnType->hasTransferringResult()) &&
-          diagnoseNonSendableTypes(
-             fnType->getResult(), getDeclContext(),
-             /*inDerivedConformance*/Type(),
-             apply->getLoc(),
-             diag::non_sendable_call_result_type,
-             apply->isImplicitlyAsync().has_value(),
-             *unsatisfiedIsolation))
-        return true;
+           !fnType->hasTransferringResult())) {
+        // See if we are a autoclosure that has a direct callee that has the
+        // same non-transferred type value returned. If so, do not emit an
+        // error... we are going to emit an error on the call expr and do not
+        // want to emit the error twice.
+        auto willDoubleError = [&]() -> bool {
+          auto *autoclosure = dyn_cast<AutoClosureExpr>(apply->getFn());
+          if (!autoclosure)
+            return false;
+          auto *await =
+              dyn_cast<AwaitExpr>(autoclosure->getSingleExpressionBody());
+          if (!await)
+            return false;
+          auto *subCallExpr = dyn_cast<CallExpr>(await->getSubExpr());
+          if (!subCallExpr)
+            return false;
+          return subCallExpr->getType().getPointer() ==
+                 fnType->getResult().getPointer();
+        };
+
+        if (!willDoubleError() &&
+            diagnoseNonSendableTypes(fnType->getResult(), getDeclContext(),
+                                     /*inDerivedConformance*/ Type(),
+                                     apply->getLoc(),
+                                     diag::non_sendable_call_result_type,
+                                     apply->isImplicitlyAsync().has_value(),
+                                     *unsatisfiedIsolation)) {
+          return true;
+        }
+      }
 
       return false;
     }
@@ -3967,6 +4010,7 @@ namespace {
 
         if (ctx.LangOpts.hasFeature(Feature::GroupActorErrors)) {
           IsolationError mismatch = IsolationError(loc,
+              preconcurrencyContext,
               Diagnostic(diag::actor_isolated_non_self_reference,
                   decl, useKind, refKind + 1, refGlobalActor,
                   result.isolation));
@@ -5988,7 +6032,7 @@ static Type applyUnsafeConcurrencyToParameterType(
                   type->getASTContext().getMainActorType());
 
   return fnType->withExtInfo(fnType->getExtInfo()
-                               .withConcurrent(sendable)
+                               .withSendable(sendable)
                                .withIsolation(isolation));
 }
 

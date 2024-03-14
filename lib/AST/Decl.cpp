@@ -3377,7 +3377,7 @@ mapSignatureExtInfo(AnyFunctionType::ExtInfo info,
     return AnyFunctionType::ExtInfo();
   return AnyFunctionType::ExtInfoBuilder()
       .withRepresentation(info.getRepresentation())
-      .withConcurrent(info.isSendable())
+      .withSendable(info.isSendable())
       .withAsync(info.isAsync())
       .withThrows(info.isThrowing(), info.getThrownError())
       .withClangFunctionType(info.getClangTypeInfo().getType())
@@ -7818,6 +7818,17 @@ bool VarDecl::isOrdinaryStoredProperty() const {
   // the assert into a full-fledged part of the condition if needed.
   assert(!isAsyncLet());
   return hasStorage() && !hasObservers();
+}
+
+VarDecl *VarDecl::createImplicitStringInterpolationVar(DeclContext *DC) {
+  // Make the variable which will contain our temporary value.
+  ASTContext &C = DC->getASTContext();
+  auto var =
+      new (C) VarDecl(/*IsStatic=*/false, VarDecl::Introducer::Var,
+                      /*NameLoc=*/SourceLoc(), C.Id_dollarInterpolation, DC);
+  var->setImplicit(true);
+  var->setUserAccessible(false);
+  return var;
 }
 
 void ParamDecl::setSpecifier(Specifier specifier) {

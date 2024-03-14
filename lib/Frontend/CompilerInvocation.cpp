@@ -2341,6 +2341,18 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   } else if (Args.hasArg(OPT_EnbaleCMOEverything)) {
     Opts.CMOMode = CrossModuleOptimizationMode::Everything;
   }
+
+  if (Args.hasArg(OPT_ExperimentalPackageCMO)) {
+    if (!FEOpts.AllowNonResilientAccess) {
+      Diags.diagnose(SourceLoc(), diag::ignoring_option_requires_option,
+                     "-experimental-package-cmo",
+                     "-experimental-allow-non-resilient-access");
+    } else {
+      Opts.EnableSerializePackage = true;
+      Opts.CMOMode = CrossModuleOptimizationMode::Default;
+    }
+  }
+
   Opts.EnableStackProtection =
       Args.hasFlag(OPT_enable_stack_protector, OPT_disable_stack_protector,
                    Opts.EnableStackProtection);
@@ -2472,23 +2484,43 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
 }
 
 void CompilerInvocation::buildDebugFlags(std::string &Output,
-                                         const ArrayRef<const char*> &Args,
+                                         const ArgList &Args,
                                          StringRef SDKPath,
                                          StringRef ResourceDir) {
+  ArgStringList ReducedArgs;
+  for (auto *A : Args) {
+    // Do not encode cache invariant options, even for non-caching build.
+    // Those options do not affect compilation task thus do not need to be
+    // tracked.
+    if (A->getOption().hasFlag(options::CacheInvariant))
+      continue;
+
+    A->render(Args, ReducedArgs);
+
+    // If the argument is file list, the path itself is irrelevant.
+    if (A->getOption().hasFlag(options::ArgumentIsFileList)) {
+      assert(A->getValues().size() == 1 &&
+             A->getOption().getRenderStyle() == Option::RenderSeparateStyle &&
+             "filelist options all have one argument and are all Separate<>");
+      ReducedArgs.pop_back();
+      ReducedArgs.push_back("<filelist>");
+    }
+  }
+
   // This isn't guaranteed to be the same temp directory as what the driver
   // uses, but it's highly likely.
   llvm::SmallString<128> TDir;
   llvm::sys::path::system_temp_directory(true, TDir);
 
   llvm::raw_string_ostream OS(Output);
-  interleave(Args,
+  interleave(ReducedArgs,
              [&](const char *Argument) { PrintArg(OS, Argument, TDir.str()); },
              [&] { OS << " "; });
 
   // Inject the SDK path and resource dir if they are nonempty and missing.
   bool haveSDKPath = SDKPath.empty();
   bool haveResourceDir = ResourceDir.empty();
-  for (auto A : Args) {
+  for (auto A : ReducedArgs) {
     StringRef Arg(A);
     // FIXME: this should distinguish between key and value.
     if (!haveSDKPath && Arg.equals("-sdk"))
@@ -2525,6 +2557,8 @@ static bool ParseTBDGenArgs(TBDGenOptions &Opts, ArgList &Args,
 
   Opts.VirtualFunctionElimination = Args.hasArg(OPT_enable_llvm_vfe);
   Opts.WitnessMethodElimination = Args.hasArg(OPT_enable_llvm_wme);
+  Opts.FragileResilientProtocols =
+    Args.hasArg(OPT_enable_fragile_resilient_protocol_witnesses);
 
   if (const Arg *A = Args.getLastArg(OPT_tbd_compatibility_version)) {
     Opts.CompatibilityVersion = A->getValue();
@@ -2565,14 +2599,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
              "unknown -g<kind> option");
   }
   if (Opts.DebugInfoLevel >= IRGenDebugInfoLevel::LineTables) {
-    if (Args.hasArg(options::OPT_debug_info_store_invocation)) {
-      ArgStringList RenderedArgs;
-      for (auto A : Args)
-        A->render(Args, RenderedArgs);
+    if (Args.hasArg(options::OPT_debug_info_store_invocation))
       CompilerInvocation::buildDebugFlags(Opts.DebugFlags,
-                                          RenderedArgs, SDKPath,
+                                          Args, SDKPath,
                                           ResourceDir);
-    }
 
     if (const Arg *A = Args.getLastArg(OPT_file_compilation_dir))
       Opts.DebugCompilationDir = A->getValue();
@@ -3046,6 +3076,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Args.hasFlag(OPT_enable_relative_protocol_witness_tables,
                  OPT_disable_relative_protocol_witness_tables,
                  Opts.UseRelativeProtocolWitnessTables);
+  Opts.UseFragileResilientProtocolWitnesses =
+    Args.hasFlag(OPT_enable_fragile_resilient_protocol_witnesses,
+                 OPT_disable_fragile_resilient_protocol_witnesses,
+                 Opts.UseFragileResilientProtocolWitnesses);
   Opts.EnableLargeLoadableTypesReg2Mem =
       Args.hasFlag(OPT_enable_large_loadable_types_reg2mem,
                    OPT_disable_large_loadable_types_reg2mem,

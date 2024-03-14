@@ -1998,6 +1998,8 @@ lowerCaptureContextParameters(TypeConverter &TC, SILDeclRef function,
         convention = ParameterConvention::Direct_Guaranteed;
       }
       SILParameterInfo param(loweredTy.getASTType(), convention, options);
+      if (function.isAsyncLetClosure)
+        param = param.addingOption(SILParameterInfo::Transferring);
       inputs.push_back(param);
       break;
     }
@@ -2013,6 +2015,8 @@ lowerCaptureContextParameters(TypeConverter &TC, SILDeclRef function,
           /*mutable*/ true);
       auto convention = ParameterConvention::Direct_Guaranteed;
       auto param = SILParameterInfo(boxTy, convention, options);
+      if (function.isAsyncLetClosure)
+        param = param.addingOption(SILParameterInfo::Transferring);
       inputs.push_back(param);
       break;
     }
@@ -2028,6 +2032,8 @@ lowerCaptureContextParameters(TypeConverter &TC, SILDeclRef function,
           /*mutable*/ false);
       auto convention = ParameterConvention::Direct_Guaranteed;
       auto param = SILParameterInfo(boxTy, convention, options);
+      if (function.isAsyncLetClosure)
+        param = param.addingOption(SILParameterInfo::Transferring);
       inputs.push_back(param);
       break;
     }
@@ -2037,6 +2043,8 @@ lowerCaptureContextParameters(TypeConverter &TC, SILDeclRef function,
       auto param = SILParameterInfo(
           ty.getASTType(), ParameterConvention::Indirect_InoutAliasable,
           options);
+      if (function.isAsyncLetClosure)
+        param = param.addingOption(SILParameterInfo::Transferring);
       inputs.push_back(param);
       break;
     }
@@ -2047,6 +2055,8 @@ lowerCaptureContextParameters(TypeConverter &TC, SILDeclRef function,
       auto param = SILParameterInfo(ty.getASTType(),
                                     ParameterConvention::Indirect_In_Guaranteed,
                                     options);
+      if (function.isAsyncLetClosure)
+        param = param.addingOption(SILParameterInfo::Transferring);
       inputs.push_back(param);
       break;
     }
@@ -2407,7 +2417,7 @@ static CanSILFunctionType getSILFunctionType(
   }
   auto silExtInfo = extInfoBuilder.withClangFunctionType(clangType)
                         .withIsPseudogeneric(pseudogeneric)
-                        .withConcurrent(isSendable)
+                        .withSendable(isSendable)
                         .withAsync(isAsync)
                         .withUnimplementable(unimplementable)
                         .withLifetimeDependenceInfo(
@@ -2493,7 +2503,7 @@ static CanSILFunctionType getSILFunctionTypeForInitAccessor(
   auto silExtInfo =
       SILExtInfoBuilder()
           .withRepresentation(SILFunctionTypeRepresentation::Thin)
-          .withConcurrent(substAccessorType->getExtInfo().isSendable())
+          .withSendable(substAccessorType->getExtInfo().isSendable())
           .build();
 
   return SILFunctionType::get(
