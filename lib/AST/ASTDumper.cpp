@@ -2699,6 +2699,13 @@ public:
     printFoot();
   }
 
+  void visitExtractFunctionIsolationExpr(ExtractFunctionIsolationExpr *E,
+                                         StringRef label) {
+    printCommon(E, "extract_function_isolation", label);
+    printRec(E->getFunctionExpr());
+    printFoot();
+  }
+
   void visitInOutExpr(InOutExpr *E, StringRef label) {
     printCommon(E, "inout_expr", label);
     printRec(E->getSubExpr());
@@ -2787,8 +2794,11 @@ public:
 
     switch (auto isolation = E->getActorIsolation()) {
     case ActorIsolation::Unspecified:
-    case ActorIsolation::Nonisolated:
     case ActorIsolation::NonisolatedUnsafe:
+      break;
+
+    case ActorIsolation::Nonisolated:
+      printFlag(true, "nonisolated", CapturesColor);
       break;
 
     case ActorIsolation::Erased:
