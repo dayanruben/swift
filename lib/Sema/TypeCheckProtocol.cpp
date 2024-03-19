@@ -1026,7 +1026,6 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
 
   // Initialized by the setup operation.
   std::optional<ConstraintSystem> cs;
-  ConstraintLocator *locator = nullptr;
   ConstraintLocator *reqLocator = nullptr;
   ConstraintLocator *witnessLocator = nullptr;
   Type witnessType, openWitnessType;
@@ -1115,8 +1114,8 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
       selfTy = syntheticEnv->mapTypeIntoContext(selfTy);
 
     // Open up the type of the requirement.
-    reqLocator = cs->getConstraintLocator(
-        static_cast<Expr *>(nullptr), LocatorPathElt::ProtocolRequirement(req));
+    reqLocator =
+        cs->getConstraintLocator(req, ConstraintLocator::ProtocolRequirement);
     OpenedTypeMap reqReplacements;
     reqType = cs->getTypeOfMemberReference(selfTy, req, dc,
                                            /*isDynamicResult=*/false,
@@ -1151,10 +1150,8 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
 
     // Open up the witness type.
     witnessType = witness->getInterfaceType();
-    // FIXME: witness as a base locator?
-    locator = cs->getConstraintLocator({});
-    witnessLocator = cs->getConstraintLocator({},
-                                              LocatorPathElt::Witness(witness));
+    witnessLocator =
+        cs->getConstraintLocator(req, LocatorPathElt::Witness(witness));
     if (witness->getDeclContext()->isTypeContext()) {
       openWitnessType = cs->getTypeOfMemberReference(
           selfTy, witness, dc, /*isDynamicResult=*/false,
@@ -1174,44 +1171,8 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
   // Match a type in the requirement to a type in the witness.
   auto matchTypes = [&](Type reqType,
                         Type witnessType) -> std::optional<RequirementMatch> {
-    // `swift_attr` attributes in the type context were ignored before,
-    // which means that we need to maintain status quo to avoid breaking
-    // witness matching by stripping everything concurrency related from
-    // inner types.
-    auto shouldStripConcurrency = [&]() {
-      if (!req->isObjC())
-        return false;
-
-      auto &ctx = dc->getASTContext();
-      return !(ctx.isSwiftVersionAtLeast(6) ||
-               ctx.LangOpts.StrictConcurrencyLevel ==
-                   StrictConcurrency::Complete);
-    };
-
-    if (shouldStripConcurrency()) {
-      if (reqType->is<FunctionType>()) {
-        auto *fnTy = reqType->castTo<FunctionType>();
-        SmallVector<AnyFunctionType::Param, 4> params;
-        llvm::transform(fnTy->getParams(), std::back_inserter(params),
-                        [&](const AnyFunctionType::Param &param) {
-                          return param.withType(
-                              param.getPlainType()->stripConcurrency(
-                                  /*recursive=*/true,
-                                  /*dropGlobalActor=*/true));
-                        });
-
-        auto resultTy =
-            fnTy->getResult()->stripConcurrency(/*recursive=*/true,
-                                                /*dropGlobalActor=*/true);
-
-        reqType = FunctionType::get(params, resultTy, fnTy->getExtInfo());
-      } else {
-        reqType = reqType->stripConcurrency(/*recursive=*/true,
-                                            /*dropGlobalActor=*/true);
-      }
-    }
-
-    cs->addConstraint(ConstraintKind::Bind, reqType, witnessType, locator);
+    cs->addConstraint(ConstraintKind::Bind, reqType, witnessType,
+                      witnessLocator);
     // FIXME: Check whether this has already failed.
     return std::nullopt;
   };
@@ -1235,14 +1196,31 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
           return *result;
       }
     }
-    bool requiresNonSendable = false;
-    if (!solution || solution->Fixes.size()) {
-      /// If the *only* problems are that `@Sendable` attributes are missing,
-      /// allow the match in some circumstances.
-      requiresNonSendable = solution
-        && llvm::all_of(solution->Fixes, [](constraints::ConstraintFix *fix) {
-          return fix->getKind() == constraints::FixKind::AddSendableAttribute;
-        });
+
+    bool requiresNonSendable = [&]() {
+      if (!solution)
+        return false;
+
+      // If the *only* problems are that `@Sendable` attributes are missing,
+      // allow the match in some circumstances.
+      if (!solution->Fixes.empty()) {
+        return llvm::all_of(solution->Fixes,
+                            [](constraints::ConstraintFix *fix) {
+                              return fix->getKind() ==
+                                     constraints::FixKind::AddSendableAttribute;
+                            });
+      }
+
+      // If there are no other issues, let's check whether this are
+      // missing Sendable conformances when matching ObjC requirements.
+      // This is not an error until Swift 6 because `swift_attr` wasn't
+      // allowed in type contexts initially.
+      return req->isObjC() &&
+             solution->getFixedScore()
+                     .Data[SK_MissingSynthesizableConformance] > 0;
+    }();
+
+    if (!solution || !solution->Fixes.empty()) {
       if (!requiresNonSendable)
         return RequirementMatch(witness, MatchKind::TypeConflict,
                                 witnessType);
@@ -2208,7 +2186,8 @@ static bool hasAdditionalSemanticChecks(ProtocolDecl *proto) {
 /// runtime for an arbitrary type.
 static bool hasRuntimeConformanceInfo(ProtocolDecl *proto) {
   return !proto->isMarkerProtocol()
-      || proto->isSpecificProtocol(KnownProtocolKind::Copyable);
+      || proto->isSpecificProtocol(KnownProtocolKind::Copyable)
+      || proto->isSpecificProtocol(KnownProtocolKind::Escapable);
 }
 
 static void ensureRequirementsAreSatisfied(ASTContext &ctx,
@@ -6029,8 +6008,6 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
 
   // The conformance checker bundle that checks all conformances in the context.
   auto &Context = dc->getASTContext();
-  const bool NoncopyableGenerics =
-      Context.LangOpts.hasFeature(Feature::NoncopyableGenerics);
   MultiConformanceChecker groupChecker(Context);
 
   ProtocolConformance *SendableConformance = nullptr;
@@ -6057,74 +6034,98 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
     }
 
     auto proto = conformance->getProtocol();
-    if (proto->isSpecificProtocol(
-        KnownProtocolKind::StringInterpolationProtocol)) {
-      if (auto typeDecl = dc->getSelfNominalTypeDecl()) {
-        diagnoseMissingAppendInterpolationMethod(typeDecl);
+    
+    if (auto kp = proto->getKnownProtocolKind()) {
+      switch (*kp) {
+      case KnownProtocolKind::StringInterpolationProtocol: {
+        if (auto typeDecl = dc->getSelfNominalTypeDecl()) {
+          diagnoseMissingAppendInterpolationMethod(typeDecl);
+        }
+        break;
       }
-    } else if (proto->isSpecificProtocol(KnownProtocolKind::Sendable)) {
-      SendableConformance = conformance;
+      case KnownProtocolKind::Sendable: {
+        SendableConformance = conformance;
 
-      if (auto normal = conformance->getRootNormalConformance()) {
-        if (isImpliedByConformancePredatingConcurrency(normal))
-          sendableConformancePreconcurrency = true;
+        if (auto normal = conformance->getRootNormalConformance()) {
+          if (isImpliedByConformancePredatingConcurrency(normal))
+            sendableConformancePreconcurrency = true;
+        }
+        break;
       }
-    } else if (proto->isSpecificProtocol(KnownProtocolKind::DistributedActor)) {
-      if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
-        if (!classDecl->isDistributedActor()) {
-          if (classDecl->isActor()) {
-            dc->getSelfNominalTypeDecl()
-                ->diagnose(diag::actor_cannot_inherit_distributed_actor_protocol,
-                           dc->getSelfNominalTypeDecl()->getName())
-                .fixItInsert(classDecl->getStartLoc(), "distributed ");
-          } else {
-            dc->getSelfNominalTypeDecl()
-                ->diagnose(diag::distributed_actor_protocol_illegal_inheritance,
-                           dc->getSelfNominalTypeDecl()->getName())
-                .fixItReplace(nominal->getStartLoc(), "distributed actor");
+      case KnownProtocolKind::DistributedActor: {
+        if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
+          if (!classDecl->isDistributedActor()) {
+            if (classDecl->isActor()) {
+              dc->getSelfNominalTypeDecl()
+                  ->diagnose(diag::actor_cannot_inherit_distributed_actor_protocol,
+                             dc->getSelfNominalTypeDecl()->getName())
+                  .fixItInsert(classDecl->getStartLoc(), "distributed ");
+            } else {
+              dc->getSelfNominalTypeDecl()
+                  ->diagnose(diag::distributed_actor_protocol_illegal_inheritance,
+                             dc->getSelfNominalTypeDecl()->getName())
+                  .fixItReplace(nominal->getStartLoc(), "distributed actor");
+            }
           }
         }
+        break;
       }
-    } else if (proto->isSpecificProtocol(
-        KnownProtocolKind::DistributedActorSystem)) {
-      checkDistributedActorSystem(nominal);
-    } else if (proto->isSpecificProtocol(KnownProtocolKind::Actor)) {
-      if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
-        if (!classDecl->isExplicitActor()) {
-          dc->getSelfNominalTypeDecl()
-              ->diagnose(diag::actor_protocol_illegal_inheritance,
-                         dc->getSelfNominalTypeDecl()->getName(),
-                         proto->getName())
-              .fixItReplace(nominal->getStartLoc(), "actor");
+      case KnownProtocolKind::DistributedActorSystem: {
+        checkDistributedActorSystem(nominal);
+        break;
+      }
+      case KnownProtocolKind::Actor: {
+        if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
+          if (!classDecl->isExplicitActor()) {
+            dc->getSelfNominalTypeDecl()
+                ->diagnose(diag::actor_protocol_illegal_inheritance,
+                           dc->getSelfNominalTypeDecl()->getName(),
+                           proto->getName())
+                .fixItReplace(nominal->getStartLoc(), "actor");
+          }
         }
+        break;
       }
-    } else if (proto->isSpecificProtocol(KnownProtocolKind::AnyActor)) {
-      if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
-        if (!classDecl->isExplicitActor() &&
-            !classDecl->isExplicitDistributedActor()) {
-          dc->getSelfNominalTypeDecl()
-              ->diagnose(diag::actor_protocol_illegal_inheritance,
-                         dc->getSelfNominalTypeDecl()->getName(),
-                         proto->getName())
-              .fixItReplace(nominal->getStartLoc(), "actor");
+      case KnownProtocolKind::AnyActor: {
+        if (auto classDecl = dyn_cast<ClassDecl>(nominal)) {
+          if (!classDecl->isExplicitActor() &&
+              !classDecl->isExplicitDistributedActor()) {
+            dc->getSelfNominalTypeDecl()
+                ->diagnose(diag::actor_protocol_illegal_inheritance,
+                           dc->getSelfNominalTypeDecl()->getName(),
+                           proto->getName())
+                .fixItReplace(nominal->getStartLoc(), "actor");
+          }
         }
+        break;
       }
-    } else if (proto->isSpecificProtocol(
-                   KnownProtocolKind::UnsafeSendable)) {
-      hasDeprecatedUnsafeSendable = true;
-    } else if (proto->isSpecificProtocol(KnownProtocolKind::Executor)) {
-      tryDiagnoseExecutorConformance(Context, nominal, proto);
-    } else if (NoncopyableGenerics
-        && proto->isSpecificProtocol(KnownProtocolKind::Copyable)) {
-      checkCopyableConformance(dc, ProtocolConformanceRef(conformance));
-    } else if (NoncopyableGenerics
-        && proto->isSpecificProtocol(KnownProtocolKind::Escapable)) {
-      checkEscapableConformance(dc, ProtocolConformanceRef(conformance));
-    } else if (Context.LangOpts.hasFeature(Feature::BitwiseCopyable) &&
-               proto->isSpecificProtocol(KnownProtocolKind::BitwiseCopyable)) {
-      checkBitwiseCopyableConformance(
-          conformance, /*isImplicit=*/conformance->getSourceKind() ==
-                           ConformanceEntryKind::Synthesized);
+      case KnownProtocolKind::UnsafeSendable: {
+        hasDeprecatedUnsafeSendable = true;
+        break;
+      }
+      case KnownProtocolKind::Executor: {
+        tryDiagnoseExecutorConformance(Context, nominal, proto);
+        break;
+      }
+      case KnownProtocolKind::Copyable: {
+        checkCopyableConformance(dc, ProtocolConformanceRef(conformance));
+        break;
+      }
+      case KnownProtocolKind::Escapable: {
+        checkEscapableConformance(dc, ProtocolConformanceRef(conformance));
+        break;
+      }
+      case KnownProtocolKind::BitwiseCopyable: {
+        if (Context.LangOpts.hasFeature(Feature::BitwiseCopyable)) {
+          checkBitwiseCopyableConformance(
+              conformance, /*isImplicit=*/conformance->getSourceKind() ==
+                               ConformanceEntryKind::Synthesized);
+        }
+        break;
+      }
+      default:
+        break;
+      }
     }
   }
 

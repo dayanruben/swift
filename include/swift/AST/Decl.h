@@ -32,7 +32,6 @@
 #include "swift/AST/IfConfigClause.h"
 #include "swift/AST/Import.h"
 #include "swift/AST/Initializer.h"
-#include "swift/AST/InverseMarking.h"
 #include "swift/AST/LayoutConstraint.h"
 #include "swift/AST/LifetimeAnnotation.h"
 #include "swift/AST/ReferenceCounting.h"
@@ -96,7 +95,6 @@ namespace swift {
   class NamedPattern;
   class EnumCaseDecl;
   class EnumElementDecl;
-  struct InverseMarking;
   class ParameterList;
   class ParameterTypeFlags;
   class Pattern;
@@ -4391,10 +4389,6 @@ public:
   /// If you need a more precise answer, ask this Decl's corresponding
   /// Type if it `isEscapable` instead of using this.
   CanBeInvertible::Result canBeEscapable() const;
-
-  /// Determine whether this type has ~<target>` stated on
-  /// itself, one of its inherited types or `Self` requirements.
-  InverseMarking::Mark hasInverseMarking(InvertibleProtocolKind target) const;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) {

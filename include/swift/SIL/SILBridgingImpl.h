@@ -258,6 +258,10 @@ bool BridgedType::isNoEscapeFunction() const {
   return unbridged().isNoEscapeFunction();
 }
 
+bool BridgedType::containsNoEscapeFunction() const {
+  return unbridged().containsNoEscapeFunction();
+}
+
 bool BridgedType::isAsyncFunction() const {
   return unbridged().isAsyncFunction();
 }
@@ -1243,6 +1247,27 @@ BridgedBasicBlock BridgedInstruction::CheckedCastBranch_getSuccessBlock() const 
 BridgedBasicBlock BridgedInstruction::CheckedCastBranch_getFailureBlock() const {
   return {getAs<swift::CheckedCastBranchInst>()->getFailureBB()};
 }
+
+BridgedBasicBlock BridgedInstruction::CheckedCastAddrBranch_getSuccessBlock() const {
+  return {getAs<swift::CheckedCastAddrBranchInst>()->getSuccessBB()};
+}
+
+BridgedBasicBlock BridgedInstruction::CheckedCastAddrBranch_getFailureBlock() const {
+  return {getAs<swift::CheckedCastAddrBranchInst>()->getFailureBB()};
+}
+
+BridgedInstruction::CastConsumptionKind BridgedInstruction::CheckedCastAddrBranch_getConsumptionKind() const {
+  static_assert((int)BridgedInstruction::CastConsumptionKind::TakeAlways ==
+                (int)swift::CastConsumptionKind::TakeAlways);
+  static_assert((int)BridgedInstruction::CastConsumptionKind::TakeOnSuccess ==
+                (int)swift::CastConsumptionKind::TakeOnSuccess);
+  static_assert((int)BridgedInstruction::CastConsumptionKind::CopyOnSuccess ==
+                (int)swift::CastConsumptionKind::CopyOnSuccess);
+
+  return static_cast<BridgedInstruction::CastConsumptionKind>(
+           getAs<swift::CheckedCastAddrBranchInst>()->getConsumptionKind());
+}
+
 
 BridgedSubstitutionMap BridgedInstruction::ApplySite_getSubstitutionMap() const {
   auto as = swift::ApplySite(unbridged());

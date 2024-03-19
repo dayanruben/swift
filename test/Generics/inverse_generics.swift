@@ -470,11 +470,9 @@ struct UnethicalPointer<Pointee: ~Copyable> {}
 extension UnethicalPointer: Arbitrary {}
 extension UnethicalPointer: AnotherOne where Pointee: Copyable {}
 
-struct StillIllegal1<Pointee: ~Escapable> {}
-extension StillIllegal1: Arbitrary {}
-// expected-error@-1 {{conditional conformance to non-marker protocol 'Arbitrary' cannot depend on conformance of 'Pointee' to marker protocol 'Escapable'}}
-extension StillIllegal1: AnotherOne where Pointee: Escapable {}
-// expected-error@-1 {{conditional conformance to non-marker protocol 'AnotherOne' cannot depend on conformance of 'Pointee' to marker protocol 'Escapable'}}
+struct AlsoLegal1<Pointee: ~Escapable> {}
+extension AlsoLegal1: Arbitrary {}
+extension AlsoLegal1: AnotherOne where Pointee: Escapable {}
 
 struct SillIllegal2<Pointee> {}
 extension SillIllegal2: Arbitrary where Pointee: Sendable {}
@@ -484,3 +482,19 @@ struct SSS: ~Copyable, PPP {}
 protocol PPP: ~Copyable {}
 let global__old__: any PPP = SSS() // expected-error {{value of type 'SSS' does not conform to specified type 'Copyable'}}
 let global__new__: any PPP & ~Copyable = SSS()
+
+struct Example<T> {}
+
+struct TestResolution1 { // expected-note {{consider adding '~Copyable' to struct 'TestResolution1'}}
+  var maybeNC: NC? = nil // expected-error {{stored property 'maybeNC' of 'Copyable'-conforming struct 'TestResolution1' has non-Copyable type 'NC?'}}
+}
+
+struct TestResolution2 { // expected-note {{consider adding '~Copyable' to struct 'TestResolution2'}}
+  var maybeIOUNC: NC! = nil // expected-error {{stored property 'maybeIOUNC' of 'Copyable'-conforming struct 'TestResolution2' has non-Copyable type 'NC?'}}
+}
+
+struct TestResolution3 {
+  var arrayNC: [NC] = [] // expected-error {{type 'NC' does not conform to protocol 'Copyable'}}
+  var dictNC: [String: NC] = [:] // expected-error {{type 'NC' does not conform to protocol 'Copyable'}}
+  var exampleNC: Example<NC> = Example() // expected-error {{type 'NC' does not conform to protocol 'Copyable'}}
+}

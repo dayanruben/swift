@@ -3986,23 +3986,6 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
     return getTypeMatchAmbiguous();
   }
 
-  if (!getASTContext().LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
-    // move-only types (and their metatypes) cannot match with existential types.
-    if (type1->getMetatypeInstanceType()->isNoncopyable()) {
-      // tailor error message
-      if (shouldAttemptFixes()) {
-        auto *fix = MustBeCopyable::create(*this,
-                                           type1,
-                                           NoncopyableMatchFailure::forExistentialCast(
-                                               type2),
-                                           getConstraintLocator(locator));
-        if (!recordFix(fix))
-          return getTypeMatchSuccess();
-      }
-      return getTypeMatchFailure(locator);
-    }
-  }
-
   // FIXME: Feels like a hack.
   if (type1->is<InOutType>())
     return getTypeMatchFailure(locator);
@@ -5601,6 +5584,35 @@ bool ConstraintSystem::repairFailures(
     }
 
     return false;
+  }
+
+  if (auto *VD = getAsDecl<ValueDecl>(anchor)) {
+    // Matching a witness to a ObjC protocol requirement.
+    if (VD->isObjC() && VD->isProtocolRequirement() &&
+        path[0].is<LocatorPathElt::Witness>() && 
+        // Note that the condition below is very important,
+        // we need to wait until the very last moment to strip
+        // the concurrency annotations from the inner most type.
+        conversionsOrFixes.empty()) {
+      // Allow requirements to introduce `swift_attr` annotations
+      // (note that `swift_attr` in type contexts weren't supported
+      // before) and for witnesses to adopt them gradually by matching
+      // with a warning in non-strict concurrency mode.
+      if (!(Context.isSwiftVersionAtLeast(6) ||
+            Context.LangOpts.StrictConcurrencyLevel ==
+                StrictConcurrency::Complete)) {
+        auto strippedLHS = lhs->stripConcurrency(/*resursive=*/true,
+                                                 /*dropGlobalActor=*/true);
+        auto strippedRHS = rhs->stripConcurrency(/*resursive=*/true,
+                                                 /*dropGlobalActor=*/true);
+        auto result = matchTypes(strippedLHS, strippedRHS, matchKind,
+                                 flags | TMF_ApplyingFix, locator);
+        if (!result.isFailure()) {
+          increaseScore(SK_MissingSynthesizableConformance, locator);
+          return true;
+        }
+      }
+    }
   }
 
   auto elt = path.back();
@@ -8498,26 +8510,6 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
     return SolutionKind::Solved;
   }
 
-  // FIXME: This is already handled by tuple conformance lookup path and
-  // should be removed once non-copyable generics are enabled by default.
-  if (!getASTContext().LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
-    // Copyable is checked structurally, so for better performance, split apart
-    // this constraint into individual Copyable constraints on each tuple
-    // element.
-    if (auto *tupleType = type->getAs<TupleType>()) {
-      if (protocol->isSpecificProtocol(KnownProtocolKind::Copyable)) {
-        for (unsigned i = 0, e = tupleType->getNumElements(); i < e; ++i) {
-          addConstraint(
-              ConstraintKind::ConformsTo, tupleType->getElementType(i),
-              protocol->getDeclaredInterfaceType(),
-              locator.withPathElement(LocatorPathElt::TupleElement(i)));
-        }
-
-        return SolutionKind::Solved;
-      }
-    }
-  }
-
   auto *loc = getConstraintLocator(locator);
 
   /// Record the given conformance as the result, adding any conditional
@@ -8597,7 +8589,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
         auto synthesizeConformance = [&]() {
           ProtocolConformanceRef synthesized(protocol);
           auto witnessLoc = getConstraintLocator(
-              /*anchor=*/{}, LocatorPathElt::Witness(witness));
+              locator.getAnchor(), LocatorPathElt::Witness(witness));
           SynthesizedConformances.insert({witnessLoc, synthesized});
           return recordConformance(synthesized);
         };
@@ -9766,9 +9758,9 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
 
   // Dynamically isolated function types have a magic '.isolation'
   // member that extracts the isolation value.
-  if (auto *fn = dyn_cast<FunctionType>(instanceTy)) {
+  if (auto *fn = instanceTy->getAs<FunctionType>()) {
     if (fn->getIsolation().isErased() &&
-        memberName.getBaseIdentifier().str() == "isolation") {
+        memberName.isSimpleName(Context.Id_isolation)) {
       result.ViableCandidates.push_back(
         OverloadChoice(baseTy, OverloadChoiceKind::ExtractFunctionIsolation));
     }
@@ -10770,8 +10762,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
   // reason to perform a lookup because it wouldn't return any results.
   if (shouldAttemptFixes()) {
     auto markMemberTypeAsPotentialHole = [&](Type memberTy) {
-      if (auto *typeVar = memberTy->getAs<TypeVariableType>())
-        recordPotentialHole(typeVar);
+      recordAnyTypeVarAsPotentialHole(simplifyType(memberTy));
     };
 
     // If this is an unresolved member ref e.g. `.foo` and its contextual base

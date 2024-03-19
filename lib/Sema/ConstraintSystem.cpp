@@ -2033,23 +2033,6 @@ TypeVariableType *ConstraintSystem::openGenericParameter(
   assert(result.second);
   (void)result;
 
-  if (Context.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
-    return typeVar;
-  }
-
-  // Add a constraint that generic parameters conform to Copyable.
-  // This lookup only can fail if the stdlib (i.e. the Swift module) has not
-  // been loaded because you've passed `-parse-stdlib` and are not building the
-  // stdlib itself (which would have `-module-name Swift` too).
-  if (!outerDC->getParentModule()->isBuiltinModule()) {
-    if (auto *copyable = getASTContext().getProtocol(KnownProtocolKind::Copyable)) {
-      addConstraint(
-          ConstraintKind::ConformsTo, typeVar,
-          copyable->getDeclaredInterfaceType(),
-          locator.withPathElement(LocatorPathElt::GenericParameter(parameter)));
-    }
-  }
-  
   return typeVar;
 }
 
@@ -8001,6 +7984,16 @@ void constraints::dumpAnchor(ASTNode anchor, SourceManager *SM,
     if (SM) {
       out << '@';
       pattern->getLoc().print(out, *SM);
+    }
+  } else if (auto *decl = anchor.dyn_cast<Decl *>()) {
+    if (auto *VD = dyn_cast<ValueDecl>(decl)) {
+      VD->dumpRef(out);
+    } else {
+      out << "<<" << Decl::getKindName(decl->getKind()) << ">>";
+      if (SM) {
+        out << "@";
+        decl->getLoc().print(out, *SM);
+      }
     }
   }
   // TODO(diagnostics): Implement the rest of the cases.

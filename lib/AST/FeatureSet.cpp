@@ -468,6 +468,8 @@ static bool usesFeatureLayoutPrespecialization(Decl *decl) {
 }
 
 UNINTERESTING_FEATURE(AccessLevelOnImport)
+UNINTERESTING_FEATURE(AllowNonResilientAccessInPackage)
+UNINTERESTING_FEATURE(ClientBypassResilientAccessInPackage)
 UNINTERESTING_FEATURE(LayoutStringValueWitnesses)
 UNINTERESTING_FEATURE(LayoutStringValueWitnessesInstantiation)
 UNINTERESTING_FEATURE(DifferentiableProgramming)
@@ -475,6 +477,7 @@ UNINTERESTING_FEATURE(ForwardModeDifferentiation)
 UNINTERESTING_FEATURE(AdditiveArithmeticDerivedConformances)
 UNINTERESTING_FEATURE(SendableCompletionHandlers)
 UNINTERESTING_FEATURE(OpaqueTypeErasure)
+UNINTERESTING_FEATURE(PackageCMO)
 UNINTERESTING_FEATURE(ParserRoundTrip)
 UNINTERESTING_FEATURE(ParserValidation)
 UNINTERESTING_FEATURE(ParserDiagnostics)
@@ -514,6 +517,16 @@ static bool usesFeatureNoncopyableGenerics(Decl *decl) {
         return true;
     }
 
+    if (auto proto = dyn_cast<ProtocolDecl>(decl)) {
+      auto reqSig = proto->getRequirementSignature();
+
+      SmallVector<Requirement, 2> reqs;
+      SmallVector<InverseRequirement, 2> inverses;
+      reqSig.getRequirementsWithInverses(proto, reqs, inverses);
+      if (!inverses.empty())
+        return true;
+    }
+
     if (isa<AbstractFunctionDecl>(valueDecl) ||
         isa<AbstractStorageDecl>(valueDecl)) {
       if (valueDecl->getInterfaceType().findIf([&](Type type) -> bool {
@@ -538,6 +551,13 @@ static bool usesFeatureNoncopyableGenerics(Decl *decl) {
   SmallVector<InverseRequirement, 2> inverseReqs;
 
   if (auto *proto = dyn_cast<ProtocolDecl>(decl)) {
+
+    // We have baked-in support for Sendable not needing to state inverses
+    // in its inheritance clause within interface files. So, it technically is
+    // not using the feature with respect to the concerns of an interface file.
+    if (proto->isSpecificProtocol(KnownProtocolKind::Sendable))
+      return false;
+
     proto->getRequirementSignature().getRequirementsWithInverses(
         proto, reqs, inverseReqs);
   } else if (auto *genCtx = decl->getAsGenericContext()) {

@@ -281,12 +281,10 @@ bool TypeBase::allowsOwnership(const GenericSignatureImpl *sig) {
 static void expandDefaults(SmallVectorImpl<ProtocolDecl *> &protocols,
                            InvertibleProtocolSet inverses,
                            ASTContext &ctx) {
-  if (ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
-    for (auto ip : InvertibleProtocolSet::full()) {
-      if (!inverses.contains(ip)) {
-        auto *proto = ctx.getProtocol(getKnownProtocolKind(ip));
-        protocols.push_back(proto);
-      }
+  for (auto ip : InvertibleProtocolSet::full()) {
+    if (!inverses.contains(ip)) {
+      auto *proto = ctx.getProtocol(getKnownProtocolKind(ip));
+      protocols.push_back(proto);
     }
   }
 
@@ -995,6 +993,9 @@ Type TypeBase::stripConcurrency(bool recurse, bool dropGlobalActor) {
     if (newConstraintType.getPointer() ==
             existentialType->getConstraintType().getPointer())
       return Type(this);
+
+    if (newConstraintType->getClassOrBoundGenericClass())
+      return newConstraintType;
 
     return ExistentialType::get(newConstraintType);
   }
