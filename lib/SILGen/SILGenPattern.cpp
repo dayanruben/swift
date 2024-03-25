@@ -2705,7 +2705,10 @@ void PatternMatchEmission::emitDestructiveCaseBlocks() {
                                                           mv.forward(SGF),
                                                           enumCase);
         if (payload->getType().isLoadable(SGF.F)) {
-          payload = SGF.B.createLoad(loc, payload, LoadOwnershipQualifier::Take);
+          payload = SGF.B.createLoad(loc, payload,
+                                     payload->getType().isTrivial(SGF.F)
+                                         ? LoadOwnershipQualifier::Trivial
+                                         : LoadOwnershipQualifier::Take);
         }
         visit(subPattern,
               SGF.emitManagedRValueWithCleanup(payload));
@@ -2867,7 +2870,12 @@ void PatternMatchEmission::emitAddressOnlyAllocations() {
       if (!ty.isAddressOnly(SGF.F))
         continue;
       assert(!Temporaries[vd]);
-      Temporaries[vd] = SGF.emitTemporaryAllocation(vd, ty);
+      // Don't generate debug info for the temporary, as another debug_value
+      // will be created in the body, with the same scope and a different type
+      // Not sure if this is the best way to avoid that?
+      Temporaries[vd] = SGF.emitTemporaryAllocation(
+        vd, ty, DoesNotHaveDynamicLifetime, IsNotLexical, IsNotFromVarDecl,
+        /* generateDebugInfo = */ false);
     }
   }
 

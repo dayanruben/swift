@@ -270,6 +270,12 @@ ModularizationError::diagnose(const ModuleFile *MF,
                        declIsType, foundModule,
                        foundModule->getModuleSourceFilename());
 
+  if (mismatchingTypes.has_value()) {
+    ctx.Diags.diagnose(loc,
+                       diag::modularization_issue_type_mismatch,
+                       mismatchingTypes->first, mismatchingTypes->second);
+  }
+
   // A Swift language version mismatch could lead to a different set of rules
   // from APINotes files being applied when building the module vs when reading
   // from it.
@@ -2147,6 +2153,7 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
 
     auto errorKind = ModularizationError::Kind::DeclNotFound;
     ModuleDecl *foundIn = nullptr;
+    std::optional<std::pair<Type, Type>> mismatchingTypes;
     bool isType = false;
 
     if (recordID == XREF_TYPE_PATH_PIECE ||
@@ -2190,7 +2197,10 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
                                       values);
         }
 
-        bool hadAMatchBeforeFiltering = !values.empty();
+        std::optional<ValueDecl*> matchBeforeFiltering = std::nullopt;
+        if (!values.empty()) {
+          matchBeforeFiltering = values[0];
+        }
         filterValues(filterTy, nullptr, nullptr, isType, inProtocolExt,
                      importedFromClang, isStatic, std::nullopt, values);
 
@@ -2202,13 +2212,21 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
           errorKind = ModularizationError::Kind::DeclMoved;
           foundIn = otherModule;
           break;
-        } else if (hadAMatchBeforeFiltering) {
+        } else if (matchBeforeFiltering.has_value()) {
           // Found a match that was filtered out. This may be from the same
           // expected module if there's a type difference. This can be caused
           // by the use of different Swift language versions between a library
           // with serialized SIL and a client.
           errorKind = ModularizationError::Kind::DeclKindChanged;
           foundIn = otherModule;
+
+          if (filterTy) {
+            auto expectedTy = filterTy->getCanonicalType();
+            auto foundTy = (*matchBeforeFiltering)->getInterfaceType();
+            if (expectedTy && foundTy && !expectedTy->isEqual(foundTy))
+              mismatchingTypes = std::make_pair(expectedTy, foundTy);
+          }
+
           break;
         }
       }
@@ -2221,7 +2239,8 @@ ModuleFile::resolveCrossReference(ModuleID MID, uint32_t pathLen) {
                                                        baseModule,
                                                        this,
                                                        foundIn,
-                                                       pathTrace);
+                                                       pathTrace,
+                                                       mismatchingTypes);
 
     // If we want to workaround broken modularization, we can keep going if
     // we found a matching top-level decl in a different module. This is
@@ -4461,14 +4480,14 @@ public:
     IdentifierID nameID;
     DeclContextID contextID;
     bool isImplicit, isClassBounded, isObjC, hasSelfOrAssocTypeRequirements;
-    TypeID superclassID;
+    DeclID superclassDeclID;
     uint8_t rawAccessLevel;
     ArrayRef<uint64_t> dependencyIDs;
 
     decls_block::ProtocolLayout::readRecord(scratch, nameID, contextID,
                                             isImplicit, isClassBounded, isObjC,
                                             hasSelfOrAssocTypeRequirements,
-                                            superclassID,
+                                            superclassDeclID,
                                             rawAccessLevel,
                                             dependencyIDs);
 
@@ -4493,8 +4512,10 @@ public:
         /*TrailingWhere=*/nullptr);
     declOrOffset = proto;
 
-    proto->setSuperclass(MF.getType(superclassID));
+    auto *superclassDecl = dyn_cast_or_null<ClassDecl>(MF.getDecl(superclassDeclID));
 
+    ctx.evaluator.cacheOutput(SuperclassDeclRequest{proto},
+                              std::move(superclassDecl));
     ctx.evaluator.cacheOutput(ProtocolRequiresClassRequest{proto},
                               std::move(isClassBounded));
     ctx.evaluator.cacheOutput(HasSelfOrAssociatedTypeRequirementsRequest{proto},
@@ -8802,7 +8823,7 @@ bool ModuleFile::maybeReadLifetimeDependenceSpecifier(
                                        lifetimeDependenceData);
 
   unsigned startIndex = 0;
-  auto pushData = [&](LifetimeDependenceKind kind) {
+  auto pushData = [&](ParsedLifetimeDependenceKind kind) {
     for (unsigned i = 0; i < numDeclParams + 1; i++) {
       if (lifetimeDependenceData[startIndex + i]) {
         specifierList.push_back(
@@ -8814,10 +8835,10 @@ bool ModuleFile::maybeReadLifetimeDependenceSpecifier(
   };
 
   if (hasInheritLifetimeParamIndices) {
-    pushData(LifetimeDependenceKind::Consume);
+    pushData(ParsedLifetimeDependenceKind::Inherit);
   }
   if (hasScopeLifetimeParamIndices) {
-    pushData(LifetimeDependenceKind::Borrow);
+    pushData(ParsedLifetimeDependenceKind::Scope);
   }
   return true;
 }

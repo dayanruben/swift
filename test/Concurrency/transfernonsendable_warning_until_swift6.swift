@@ -21,8 +21,8 @@ func transferValue<T>(_ t: transferring T) {}
 func testIsolationError() async {
   let x = NonSendableType()
   await transferToMain(x) // expected-error {{transferring 'x' may cause a race}}
-  // expected-note @-1 {{'x' is transferred from nonisolated caller to main actor-isolated callee. Later uses in caller could race with potential uses in callee}}
-  useValue(x) // expected-note {{access here could race}}
+  // expected-note @-1 {{transferring disconnected 'x' to main actor-isolated callee could cause races in between callee main actor-isolated and local nonisolated uses}}
+  useValue(x) // expected-note {{use here could race}}
 }
 
 func testTransferArgumentError(_ x: NonSendableType) async {
@@ -49,9 +49,10 @@ func testAssigningParameterIntoTransferringParameter(_ x: transferring NonSendab
 func testIsolationCrossingDueToCapture() async {
   let x = NonSendableType()
   let _ = { @MainActor in
-    print(x) // expected-error {{main actor-isolated closure captures value of non-Sendable type 'NonSendableType' from nonisolated context; later accesses to value could race}}
+    print(x) // expected-error {{transferring 'x' may cause a race}}
+    // expected-note @-1 {{disconnected 'x' is captured by main actor-isolated closure. main actor-isolated uses in closure may race against later nonisolated uses}}
   }
-  useValue(x) // expected-note {{access here could race}}
+  useValue(x) // expected-note {{use here could race}}
 }
 
 func testIsolationCrossingDueToCaptureParameter(_ x: NonSendableType) async {

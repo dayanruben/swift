@@ -3,7 +3,6 @@
 // RUN:   -verify \
 // RUN:   -sil-verify-all \
 // RUN:   -module-name test \
-// RUN:   -disable-experimental-parser-round-trip \
 // RUN:   -enable-experimental-feature NonescapableTypes
 
 // REQUIRES: asserts
@@ -30,7 +29,7 @@ struct NC : ~Copyable {
     self.p = p
     self.i = i
   }
-  borrowing func getBV() -> _borrow(self) BV {
+  borrowing func getBV() -> dependsOn(self) BV {
     BV(p, i)
   }
 }
@@ -45,7 +44,7 @@ struct NE {
     self.p = p
     self.i = i
   }
-  borrowing func getBV() -> _borrow(self) BV {
+  borrowing func getBV() -> dependsOn(scoped self) BV {
     BV(p, i)
   }
 }

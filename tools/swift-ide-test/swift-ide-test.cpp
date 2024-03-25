@@ -699,12 +699,6 @@ SkipDocumentationComments("skip-print-doc-comments",
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool>
-PrintRegularComments("print-regular-comments",
-    llvm::cl::desc("Print regular comments from clang module headers"),
-    llvm::cl::cat(Category),
-    llvm::cl::init(false));
-
-static llvm::cl::opt<bool>
 PrintOriginalSourceText("print-original-source",
     llvm::cl::desc("print the original source text for applicable declarations"),
     llvm::cl::cat(Category),
@@ -3405,6 +3399,9 @@ public:
       case AccessorKind::Get:
         OS << "<getter for ";
         break;
+      case AccessorKind::DistributedGet:
+        OS << "<_distributed_getter for ";
+        break;
       case AccessorKind::Set:
         OS << "<setter for ";
         break;
@@ -3752,7 +3749,11 @@ static int doPrintTypeInterface(const CompilerInvocation &InitInvok,
     llvm::errs() << "Cannot find sema token at the given location.\n";
     return 1;
   }
-  if (SemaT->getType().isNull()) {
+  Type Ty = SemaT->getSolutionSpecificInterfaceType();
+  if (Ty.isNull()) {
+    Ty = SemaT->getValueD()->getInterfaceType();
+  }
+  if (Ty.isNull()) {
     llvm::errs() << "Cannot get type of the sema token.\n";
     return 1;
   }
@@ -3760,8 +3761,8 @@ static int doPrintTypeInterface(const CompilerInvocation &InitInvok,
   std::string Error;
   std::string TypeName;
   if (printTypeInterface(
-          SemaT->getValueD()->getDeclContext()->getParentModule(),
-          SemaT->getType(), Printer, TypeName, Error)) {
+          SemaT->getValueD()->getDeclContext()->getParentModule(), Ty, Printer,
+          TypeName, Error)) {
     llvm::errs() << Error;
     return 1;
   }
@@ -4599,7 +4600,6 @@ int main(int argc, char *argv[]) {
     PrintOpts.PrintAccess = options::PrintAccess;
     PrintOpts.AccessFilter = options::AccessFilter;
     PrintOpts.PrintDocumentationComments = !options::SkipDocumentationComments;
-    PrintOpts.PrintRegularClangComments = options::PrintRegularComments;
     PrintOpts.SkipPrivateStdlibDecls = options::SkipPrivateStdlibDecls;
     PrintOpts.SkipUnsafeCXXMethods = options::SkipUnsafeCXXMethods;
     PrintOpts.SkipUnavailable = options::SkipUnavailable;

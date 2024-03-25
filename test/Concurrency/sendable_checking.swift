@@ -278,11 +278,11 @@ func testNonSendableBaseArg() async {
   await t.update()
   // expected-targeted-and-complete-warning @-1 {{passing argument of non-sendable type 'NonSendable' into main actor-isolated context may introduce data races}}
   // expected-tns-warning @-2 {{transferring 't' may cause a race}}
-  // expected-tns-note @-3 {{'t' is transferred from nonisolated caller to main actor-isolated callee. Later uses in caller could race with potential uses in callee}}
+  // expected-tns-note @-3 {{transferring disconnected 't' to main actor-isolated callee could cause races in between callee main actor-isolated and local nonisolated uses}}
 
   _ = await t.x
   // expected-warning @-1 {{non-sendable type 'NonSendable' passed in implicitly asynchronous call to main actor-isolated property 'x' cannot cross actor boundary}}
-  // expected-tns-note@-2 {{access here could race}}
+  // expected-tns-note@-2 {{use here could race}}
 }
 
 @available(SwiftStdlib 5.1, *)

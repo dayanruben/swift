@@ -82,6 +82,10 @@ static StringRef getCodeForAccessorKind(AccessorKind kind) {
   switch (kind) {
   case AccessorKind::Get:
     return "g";
+  case AccessorKind::DistributedGet:
+    // TODO(distributed): probably does not matter since we mangle distributed
+    //  thunk getters as the name of the Storage?
+    return "g";
   case AccessorKind::Set:
     return "s";
   case AccessorKind::WillSet:
@@ -3259,20 +3263,14 @@ void ASTMangler::appendParameterTypeListElement(
 
 void ASTMangler::appendLifetimeDependenceKind(LifetimeDependenceKind kind,
                                               bool isSelfDependence) {
-  // If we converge on dependsOn(borrowed: paramName)/dependsOn(paramName)
-  // syntax, this can be a single case value check.
-  if (kind == LifetimeDependenceKind::Borrow ||
-      kind == LifetimeDependenceKind::Mutate) {
+  if (kind == LifetimeDependenceKind::Scope) {
     if (isSelfDependence) {
       appendOperator("YLs");
     } else {
       appendOperator("Yls");
     }
   } else {
-    // If we converge on dependsOn(borrowed: paramName)/dependsOn(paramName)
-    // syntax, this can be a single case value check.
-    assert(kind == LifetimeDependenceKind::Copy ||
-           kind == LifetimeDependenceKind::Consume);
+    assert(kind == LifetimeDependenceKind::Inherit);
     if (isSelfDependence) {
       appendOperator("YLi");
     } else {
@@ -4283,7 +4281,17 @@ void ASTMangler::appendDistributedThunk(
     appendContextOf(thunk, base);
   }
 
-  appendIdentifier(thunk->getBaseName().getIdentifier().str());
+  if (auto accessor = dyn_cast<AccessorDecl>(thunk)) {
+    assert(accessor->getAccessorKind() == AccessorKind::DistributedGet &&
+           "Only accessors marked as _distributed_get are expected to be "
+           "mangled as thunks");
+    // A distributed getter is mangled as the name of its storage (i.e. "the
+    // var")
+    appendIdentifier(accessor->getStorage()->getBaseIdentifier().str());
+  } else {
+    appendIdentifier(thunk->getBaseIdentifier().str());
+  }
+
   appendDeclType(thunk, base, FunctionMangling);
   appendOperator("F");
   appendSymbolKind(SymbolKind::DistributedThunk);

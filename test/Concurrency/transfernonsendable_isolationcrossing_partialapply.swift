@@ -65,10 +65,11 @@ actor ProtectsNonSendable {
 
     // This is not safe since we use l later.
     self.assumeIsolated { isolatedSelf in
-      isolatedSelf.ns = l // expected-warning {{actor-isolated closure captures value of non-Sendable type 'NonSendableKlass' from nonisolated context; later accesses to value could race}}
+      isolatedSelf.ns = l // expected-warning {{transferring 'l' may cause a race}}
+      // expected-note @-1 {{disconnected 'l' is captured by actor-isolated closure. actor-isolated uses in closure may race against later nonisolated uses}}
     }
 
-    useValue(l) // expected-note {{access here could race}}
+    useValue(l) // expected-note {{use here could race}}
   }
 }
 
@@ -82,9 +83,10 @@ func normalFunc_testLocal_1() {
 func normalFunc_testLocal_2() {
   let x = NonSendableKlass()
   let _ = { @MainActor in
-    useValue(x) // expected-warning {{main actor-isolated closure captures value of non-Sendable type 'NonSendableKlass' from nonisolated context; later accesses to value could race}}
+    useValue(x) // expected-warning {{transferring 'x' may cause a race}}
+    // expected-note @-1 {{disconnected 'x' is captured by main actor-isolated closure. main actor-isolated uses in closure may race against later nonisolated uses}}
   }
-  useValue(x) // expected-note {{access here could race}}
+  useValue(x) // expected-note {{use here could race}}
 }
 
 // We error here since we are performing a double transfer.
@@ -94,8 +96,8 @@ func normalFunc_testLocal_2() {
 func transferBeforeCaptureErrors() async {
   let x = NonSendableKlass()
   await transferToCustom(x) // expected-warning {{transferring 'x' may cause a race}}
-  // expected-note @-1 {{'x' is transferred from nonisolated caller to global actor 'CustomActor'-isolated callee. Later uses in caller could race with potential uses in callee}}
-  let _ = { @MainActor in // expected-note {{access here could race}}
+  // expected-note @-1 {{transferring disconnected 'x' to global actor 'CustomActor'-isolated callee could cause races in between callee global actor 'CustomActor'-isolated and local nonisolated uses}}
+  let _ = { @MainActor in // expected-note {{use here could race}}
     useValue(x)
   }
 }
