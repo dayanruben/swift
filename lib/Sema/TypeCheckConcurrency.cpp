@@ -503,9 +503,26 @@ static bool varIsSafeAcrossActors(const ModuleDecl *fromModule,
                                   VarDecl *var,
                                   const ActorIsolation &varIsolation,
                                   ActorReferenceResult::Options &options) {
-  // must be immutable
-  if (!var->isLet())
+
+  bool accessWithinModule =
+      (fromModule == var->getDeclContext()->getParentModule());
+
+  if (!var->isLet()) {
+    ASTContext &ctx = var->getASTContext();
+    if (ctx.LangOpts.hasFeature(Feature::GlobalActorIsolatedTypesUsability)) {
+      // A mutable storage of a value type accessed from within the module is
+      // okay.
+      if (dyn_cast_or_null<StructDecl>(var->getDeclContext()->getAsDecl()) &&
+          !var->isStatic() && 
+          var->hasStorage() &&
+          var->getTypeInContext()->isSendableType() &&
+          accessWithinModule) {
+        return true;
+      }
+    }
+    // Otherwise, must be immutable.
     return false;
+  }
 
   switch (varIsolation) {
   case ActorIsolation::Nonisolated:
@@ -537,9 +554,6 @@ static bool varIsSafeAcrossActors(const ModuleDecl *fromModule,
       if (nominalParent->isDistributedActor())
         return false;
     }
-
-    bool accessWithinModule =
-        (fromModule == var->getDeclContext()->getParentModule());
 
     // If the type is not 'Sendable', it's unsafe
     if (!var->getTypeInContext()->isSendableType()) {
@@ -6058,6 +6072,7 @@ swift::isDispatchQueueOperationName(StringRef name) {
       .Case("sync", DispatchQueueOperation::Normal)
       .Case("async", DispatchQueueOperation::Sendable)
       .Case("asyncAndWait", DispatchQueueOperation::Normal)
+      .Case("asyncUnsafe", DispatchQueueOperation::Normal)
       .Case("asyncAfter", DispatchQueueOperation::Sendable)
       .Case("concurrentPerform", DispatchQueueOperation::Sendable)
       .Default(std::nullopt);
@@ -6155,8 +6170,7 @@ static AnyFunctionType *applyUnsafeConcurrencyToFunctionType(
     // @MainActor occurs in concurrency contexts or those where we have an
     // application.
     bool addSendable = knownUnsafeParams && inConcurrencyContext;
-    bool addMainActor =
-        (isMainDispatchQueue && knownUnsafeParams) &&
+    bool addMainActor = isMainDispatchQueue &&
         (inConcurrencyContext || numApplies >= 1);
     Type newParamType = param.getPlainType();
     if (addSendable || addMainActor) {
