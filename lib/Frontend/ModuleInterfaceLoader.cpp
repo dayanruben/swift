@@ -1847,8 +1847,8 @@ InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
   }
 
   // Pass down -explicit-swift-module-map-file
-  StringRef explicitSwiftModuleMap = searchPathOpts.ExplicitSwiftModuleMap;
-  genericSubInvocation.getSearchPathOptions().ExplicitSwiftModuleMap =
+  StringRef explicitSwiftModuleMap = searchPathOpts.ExplicitSwiftModuleMapPath;
+  genericSubInvocation.getSearchPathOptions().ExplicitSwiftModuleMapPath =
     explicitSwiftModuleMap.str();
 
   // Pass down VFSOverlay flags (do not need to inherit the options because
@@ -2066,6 +2066,12 @@ InterfaceSubContextDelegateImpl::runInSubCompilerInstance(StringRef moduleName,
   bool StrictImplicitModuleContext =
       subInvocation.getFrontendOptions().StrictImplicitModuleContext;
 
+  // It isn't appropriate to restrict use of experimental features in another
+  // module since it may have been built with a different compiler that allowed
+  // the use of the feature.
+  subInvocation.getLangOptions().RestrictNonProductionExperimentalFeatures =
+      false;
+
   // Save the target triple from the original context.
   llvm::Triple originalTargetTriple(subInvocation.getLangOptions().Target);
 
@@ -2192,6 +2198,7 @@ struct ExplicitSwiftModuleLoader::Implementation {
     for (auto &entry : ExplicitClangModuleMap) {
       const auto &moduleMapPath = entry.getValue().moduleMapPath;
       if (!moduleMapPath.empty() &&
+          entry.getValue().isBridgingHeaderDependency &&
           moduleMapsSeen.find(moduleMapPath) == moduleMapsSeen.end()) {
         moduleMapsSeen.insert(moduleMapPath);
         extraClangArgs.push_back(

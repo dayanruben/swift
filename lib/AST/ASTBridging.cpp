@@ -433,12 +433,14 @@ BridgedAllowFeatureSuppressionAttr
 BridgedAllowFeatureSuppressionAttr_createParsed(BridgedASTContext cContext,
                                                 BridgedSourceLoc cAtLoc,
                                                 BridgedSourceRange cRange,
+                                                bool inverted,
                                                 BridgedArrayRef cFeatures) {
   SmallVector<Identifier> features;
   for (auto elem : cFeatures.unbridged<BridgedIdentifier>())
     features.push_back(elem.unbridged());
-  return AllowFeatureSuppressionAttr::create(cContext.unbridged(),
-      cAtLoc.unbridged(), cRange.unbridged(), /*implicit*/ false, features);
+  return AllowFeatureSuppressionAttr::create(
+      cContext.unbridged(), cAtLoc.unbridged(), cRange.unbridged(),
+      /*implicit*/ false, inverted, features);
 }
 
 BridgedCDeclAttr BridgedCDeclAttr_createParsed(BridgedASTContext cContext,
@@ -660,9 +662,10 @@ BridgedObjCAttr BridgedObjCAttr_createParsedSelector(
 
 BridgedObjCImplementationAttr BridgedObjCImplementationAttr_createParsed(
     BridgedASTContext cContext, BridgedSourceLoc cAtLoc,
-    BridgedSourceRange cRange, BridgedIdentifier cName) {
+    BridgedSourceRange cRange, BridgedIdentifier cName, bool isEarlyAdopter) {
   return new (cContext.unbridged()) ObjCImplementationAttr(
-      cName.unbridged(), cAtLoc.unbridged(), cRange.unbridged());
+      cName.unbridged(), cAtLoc.unbridged(), cRange.unbridged(),
+      isEarlyAdopter);
 }
 
 BridgedObjCRuntimeNameAttr BridgedObjCRuntimeNameAttr_createParsed(

@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -disable-availability-checking -enable-experimental-feature NonescapableTypes -enable-experimental-feature NoncopyableGenerics
+// RUN: %target-typecheck-verify-swift -disable-availability-checking -enable-experimental-feature NonescapableTypes -enable-experimental-feature NoncopyableGenerics -enable-experimental-feature BitwiseCopyable
 // REQUIRES: asserts
 
 struct Container {
@@ -55,6 +55,14 @@ struct BufferView : ~Escapable {
 
   consuming func consume() -> dependsOn(scoped self) BufferView { // expected-error{{invalid use of scoped lifetime dependence with consuming ownership}}
     return BufferView(self.ptr)
+  }
+
+  func get() -> dependsOn(self) Self { // expected-note{{'get()' previously declared here}}
+    return self
+  }
+
+  func get() -> dependsOn(scoped self) Self { // expected-error{{invalid redeclaration of 'get()'}}
+    return self
   }
 }
 
@@ -201,4 +209,26 @@ public struct GenericBufferView<Element> : ~Escapable {
     self.baseAddress = baseAddress
     self.count = count
   } 
+}
+
+func derive(_ x: BufferView) -> dependsOn(x) BufferView { // expected-note{{'derive' previously declared here}}
+  return BufferView(x.ptr)
+}
+
+func derive(_ x: BufferView) -> dependsOn(scoped x) BufferView { // expected-error{{invalid redeclaration of 'derive'}}
+  return BufferView(x.ptr)
+}
+
+struct RawBufferView {
+  let ptr: UnsafeRawBufferPointer
+  @_unsafeNonescapableResult
+  init(_ ptr: UnsafeRawBufferPointer) {
+    self.ptr = ptr
+  }
+}
+
+extension RawBufferView {
+  mutating func zeroBufferView() throws -> BufferView { // expected-error{{cannot infer lifetime dependence on a self which is BitwiseCopyable & Escapable}}
+    return BufferView(ptr)
+  }
 }

@@ -582,6 +582,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                           DiagnosticEngine &Diags,
                           const FrontendOptions &FrontendOpts) {
   using namespace options;
+  bool buildingFromInterface =
+      FrontendOptions::doesActionBuildModuleFromInterface(
+          FrontendOpts.RequestedAction);
   bool HadError = false;
 
   if (auto A = Args.getLastArg(OPT_swift_version)) {
@@ -791,10 +794,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                                OPT_disable_testable_attr_requires_testable_module)) {
     Opts.EnableTestableAttrRequiresTestableModule
       = A->getOption().matches(OPT_enable_testable_attr_requires_testable_module);
-  } else if (FrontendOpts.RequestedAction ==
-             FrontendOptions::ActionType::TypecheckModuleFromInterface ||
-	     FrontendOpts.RequestedAction ==
-             FrontendOptions::ActionType::CompileModuleFromInterface) {
+  } else if (buildingFromInterface) {
     Opts.EnableObjCAttrRequiresFoundation = false;
   }
 
@@ -872,17 +872,20 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     // If this is a known experimental feature, allow it in +Asserts
     // (non-release) builds for testing purposes.
     if (auto feature = getExperimentalFeature(value)) {
-#ifdef NDEBUG
-      if (!isFeatureAvailableInProduction(*feature)) {
+      if (Opts.RestrictNonProductionExperimentalFeatures &&
+          !isFeatureAvailableInProduction(*feature)) {
         Diags.diagnose(SourceLoc(), diag::experimental_not_supported_in_production,
                        A->getValue());
         HadError = true;
       } else {
         Opts.enableFeature(*feature);
       }
-#else
-      Opts.enableFeature(*feature);
-#endif
+
+      if (*feature == Feature::NoncopyableGenerics2)
+        Opts.enableFeature(Feature::NoncopyableGenerics);
+
+      if (*feature == Feature::IsolatedAny2)
+        Opts.enableFeature(Feature::IsolatedAny);
     }
 
     // Hack: In order to support using availability macros in SPM packages, we
@@ -1142,10 +1145,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     }
     // If built from interface, non-resilient access should not be allowed.
     if (Opts.AllowNonResilientAccess &&
-        (FrontendOpts.RequestedAction ==
-             FrontendOptions::ActionType::CompileModuleFromInterface ||
-         FrontendOpts.RequestedAction ==
-             FrontendOptions::ActionType::TypecheckModuleFromInterface)) {
+        FrontendOptions::doesActionBuildModuleFromInterface(
+            FrontendOpts.RequestedAction)) {
       Diags.diagnose(
           SourceLoc(), diag::warn_ignore_option_overriden_by,
           "-experimental-allow-non-resilient-access",
@@ -1981,7 +1982,7 @@ static bool ParseSearchPathArgs(SearchPathOptions &Opts,
       Args.hasArg(OPT_disable_modules_validate_system_headers);
 
   if (const Arg *A = Args.getLastArg(OPT_explicit_swift_module_map))
-    Opts.ExplicitSwiftModuleMap = A->getValue();
+    Opts.ExplicitSwiftModuleMapPath = A->getValue();
   for (auto A : Args.getAllArgValues(options::OPT_swift_module_file)) {
     if (validateSwiftModuleFileArgumentAndAdd(A, Diags,
                                               Opts.ExplicitSwiftModuleInputs))
@@ -2180,6 +2181,10 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   if (FEOpts.RequestedAction == FrontendOptions::ActionType::EmitModuleOnly ||
       FEOpts.RequestedAction == FrontendOptions::ActionType::CompileModuleFromInterface)
     Opts.StopOptimizationAfterSerialization = true;
+
+  if (Args.getLastArg(OPT_emit_empty_object_file)) {
+    Opts.StopOptimizationAfterSerialization = true;
+  }
 
   // Propagate the typechecker's understanding of
   // -experimental-skip-*-function-bodies to SIL.

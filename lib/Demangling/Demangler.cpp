@@ -1560,6 +1560,7 @@ NodePointer Demangler::popFunctionType(Node::Kind kind, bool hasClangType) {
     ClangType = demangleClangType();
   }
   addChild(FuncType, ClangType);
+  addChild(FuncType, popNode(Node::Kind::SelfLifetimeDependence));
   addChild(FuncType, popNode(Node::Kind::GlobalActorFunctionType));
   addChild(FuncType, popNode(Node::Kind::IsolatedAnyFunctionType));
   addChild(FuncType, popNode(Node::Kind::TransferringResultFunctionType));
@@ -1570,7 +1571,6 @@ NodePointer Demangler::popFunctionType(Node::Kind kind, bool hasClangType) {
   }));
   addChild(FuncType, popNode(Node::Kind::ConcurrentFunctionType));
   addChild(FuncType, popNode(Node::Kind::AsyncAnnotation));
-  addChild(FuncType, popNode(Node::Kind::SelfLifetimeDependence));
 
   FuncType = addChild(FuncType, popFunctionParams(Node::Kind::ArgumentTuple));
   FuncType = addChild(FuncType, popFunctionParams(Node::Kind::ReturnType));
@@ -1603,6 +1603,9 @@ NodePointer Demangler::popFunctionParamLabels(NodePointer Type) {
     return nullptr;
 
   unsigned FirstChildIdx = 0;
+  if (FuncType->getChild(FirstChildIdx)->getKind() ==
+      Node::Kind::SelfLifetimeDependence)
+    ++FirstChildIdx;
   if (FuncType->getChild(FirstChildIdx)->getKind()
         == Node::Kind::GlobalActorFunctionType)
     ++FirstChildIdx;
@@ -1628,9 +1631,6 @@ NodePointer Demangler::popFunctionParamLabels(NodePointer Type) {
     ++FirstChildIdx;
   if (FuncType->getChild(FirstChildIdx)->getKind() ==
       Node::Kind::ParamLifetimeDependence)
-    ++FirstChildIdx;
-  if (FuncType->getChild(FirstChildIdx)->getKind() ==
-      Node::Kind::SelfLifetimeDependence)
     ++FirstChildIdx;
   auto ParameterType = FuncType->getChild(FirstChildIdx);
 
@@ -3134,9 +3134,9 @@ NodePointer Demangler::demangleLifetimeDependenceKind(bool isSelfDependence) {
     return createNode(Node::Kind::SelfLifetimeDependence,
                       (Node::IndexType)kind);
   }
-  auto node = createNode(Node::Kind::ParamLifetimeDependence);
-  node->addChild(createNode(Node::Kind::Index, unsigned(kind)), *this);
-  node->addChild(popTypeAndGetChild(), *this);
+  auto node = createWithChildren(Node::Kind::ParamLifetimeDependence,
+                                 createNode(Node::Kind::Index, unsigned(kind)),
+                                 popTypeAndGetChild());
   return createType(node);
 }
 
@@ -4093,7 +4093,7 @@ NodePointer Demangler::demangleGenericRequirement() {
   enum { Generic, Assoc, CompoundAssoc, Substitution } TypeKind;
   enum { Protocol, BaseClass, SameType, SameShape, Layout, PackMarker, Inverse } ConstraintKind;
 
-  std::optional<char> invertibleKind; // INVERTIBLE-KIND
+  NodePointer inverseKind = nullptr;
   switch (nextChar()) {
     case 'v': ConstraintKind = PackMarker; TypeKind = Generic; break;
     case 'c': ConstraintKind = BaseClass; TypeKind = Assoc; break;
@@ -4112,8 +4112,20 @@ NodePointer Demangler::demangleGenericRequirement() {
     case 'P': ConstraintKind = Protocol; TypeKind = CompoundAssoc; break;
     case 'Q': ConstraintKind = Protocol; TypeKind = Substitution; break;
     case 'h': ConstraintKind = SameShape; TypeKind = Generic; break;
-    case 'i': ConstraintKind = Inverse; TypeKind = Generic;
-              invertibleKind = nextChar(); break;
+    case 'i': 
+      ConstraintKind = Inverse;
+      TypeKind = Generic;
+      inverseKind = demangleIndexAsNode();
+      if (!inverseKind)
+        return nullptr;
+      break;
+    case 'I': 
+      ConstraintKind = Inverse;
+      TypeKind = Substitution;
+      inverseKind = demangleIndexAsNode();
+      if (!inverseKind)
+        return nullptr;
+      break;
     default:  ConstraintKind = Protocol; TypeKind = Generic; pushBack(); break;
   }
 
@@ -4144,17 +4156,10 @@ NodePointer Demangler::demangleGenericRequirement() {
     return createWithChildren(
         Node::Kind::DependentGenericConformanceRequirement, ConstrTy,
         popProtocol());
-  case Inverse: {
-    char const* name = nullptr;
-    switch (*invertibleKind) {
-    case 'c': name = "Copyable"; break;
-    case 'e': name = "Escapable"; break;
-    default: return nullptr;
-    }
+  case Inverse:
     return createWithChildren(
-        Node::Kind::DependentGenericInverseConformanceRequirement, ConstrTy,
-        createSwiftType(Node::Kind::Protocol, name));
-  }
+        Node::Kind::DependentGenericInverseConformanceRequirement,
+        ConstrTy, inverseKind);
   case BaseClass:
     return createWithChildren(
         Node::Kind::DependentGenericConformanceRequirement, ConstrTy,

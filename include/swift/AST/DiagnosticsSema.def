@@ -1739,6 +1739,9 @@ ERROR(swift_native_objc_runtime_base_not_on_root_class,none,
       "@_swift_native_objc_runtime_base_not_on_root_class can only be applied "
       "to root classes", ())
 
+WARNING(objc_implementation_early_spelling_deprecated,none,
+        "'@_objcImplementation' is deprecated; use '@implementation' instead",
+        ())
 ERROR(attr_objc_implementation_must_be_unconditional,none,
       "only unconditional extensions can implement an Objective-C '@interface'",
       ())
@@ -1917,8 +1920,7 @@ NOTE(objc_implementation_one_matched_requirement,none,
      (ValueDecl *, ObjCSelector, bool, StringRef))
 
 WARNING(wrap_objc_implementation_will_become_error,none,
-        "%0; this will become an error before '@_objcImplementation' is "
-        "stabilized",
+        "%0; this will become an error after adopting '@implementation'",
         (DiagnosticInfo *))
 
 ERROR(cdecl_not_at_top_level,none,
@@ -2687,6 +2689,12 @@ ERROR(type_does_not_conform_anyobject_decl_owner,none,
 ERROR(type_does_not_conform_in_opaque_return,none,
       "return type of %kind0 requires that %1 %select{conform to %2|be a class type}3",
       (const ValueDecl *, Type, Type, bool))
+ERROR(type_is_not_equal_in_opaque_return,none,
+      "return type of %kind0 requires the types %1 and %2 be equivalent",
+      (const ValueDecl *, Type, Type))
+ERROR(types_not_inherited_in_opaque_return,none,
+      "return type of %kind0 requires that %1 inherit from %2",
+      (const ValueDecl *, Type, Type))
 ERROR(types_not_equal_decl,none,
       "%kind0 requires the types %1 and %2 be equivalent",
       (const ValueDecl *, Type, Type))
@@ -4663,7 +4671,7 @@ ERROR(value_of_module_type,none,
       "expected module member name after module name", ())
 
 ERROR(value_of_metatype_type,none,
-      "expected member name or constructor call after type name%select{|; this "
+      "expected member name or initializer call after type name%select{|; this "
       "will be an error in Swift 6}0", (bool))
 
 NOTE(add_parens_to_type,none,
@@ -6510,9 +6518,9 @@ ERROR(dynamic_replacement_replaced_not_objc_dynamic, none,
 ERROR(dynamic_replacement_replacement_not_objc_dynamic, none,
       "%0 is marked @objc dynamic", (DeclName))
 ERROR(dynamic_replacement_replaced_constructor_is_convenience, none,
-      "replaced constructor %0 is marked as convenience", (DeclNameRef))
+      "replaced initializer %0 is marked as convenience", (DeclNameRef))
 ERROR(dynamic_replacement_replaced_constructor_is_not_convenience, none,
-      "replaced constructor %0 is not marked as convenience", (DeclNameRef))
+      "replaced initializer %0 is not marked as convenience", (DeclNameRef))
 
 //------------------------------------------------------------------------------
 // MARK: @_typeEraser()
@@ -7870,37 +7878,35 @@ ERROR(lifetime_dependence_only_on_function_method_init_result, none,
        "functions, methods, initializers", ())
 ERROR(lifetime_dependence_invalid_return_type, none,
       "lifetime dependence can only be specified on ~Escapable results", ())
- ERROR(lifetime_dependence_cannot_infer_ambiguous_candidate, none,
-      "cannot infer lifetime dependence, multiple ~Escapable or ~Copyable "
-      "parameters with ownership modifiers, specify explicit lifetime "
-       "dependence", ())
-ERROR(lifetime_dependence_cannot_infer_no_candidates, none,
-       "cannot infer lifetime dependence, no parameters with ownership "
-       "modifiers present", ())
-ERROR(lifetime_dependence_ctor_non_self_or_nil_return, none,
-      "expected nil or self as return values in an initializer with "
-       "lifetime dependent specifiers", ())
-ERROR(lifetime_dependence_on_bitwise_copyable, none,
-      "invalid lifetime dependence on bitwise copyable type", ())
-ERROR(lifetime_dependence_cannot_infer_implicit_init, none,
-      "cannot infer lifetime dependence on implicit initializer of ~Escapable"
-      " type, define an initializer with explicit lifetime dependence"
-      " specifiers", ())
-ERROR(lifetime_dependence_cannot_be_applied_to_tuple_elt, none,
-      "lifetime dependence specifiers cannot be applied to tuple elements", ())
+ERROR(lifetime_dependence_cannot_infer_ambiguous_candidate, none,
+      "cannot infer lifetime dependence %0, multiple parameters qualifiy as a candidate", (StringRef))
+ ERROR(lifetime_dependence_cannot_infer_no_candidates, none,
+       "cannot infer lifetime dependence %0, no parameters found that are "
+       "~Escapable or Escapable with a borrowing ownership", (StringRef))
+ ERROR(lifetime_dependence_ctor_non_self_or_nil_return, none,
+       "expected nil or self as return values in an initializer with "
+       "lifetime dependent specifiers",
+       ())
+ ERROR(lifetime_dependence_on_bitwise_copyable, none,
+       "invalid lifetime dependence on bitwise copyable type", ())
+ ERROR(lifetime_dependence_cannot_be_applied_to_tuple_elt, none,
+       "lifetime dependence specifiers cannot be applied to tuple elements", ())
+ ERROR(lifetime_dependence_method_escapable_bitwisecopyable_self, none,
+       "cannot infer lifetime dependence on a self which is BitwiseCopyable & "
+       "Escapable",
+       ())
 
-//===----------------------------------------------------------------------===//
-//                             MARK: Transferring
-//===----------------------------------------------------------------------===//
+ //===----------------------------------------------------------------------===//
+ //                             MARK: Transferring
+ //===----------------------------------------------------------------------===//
 
-ERROR(transferring_unsupported_param_specifier, none,
-      "'%0' cannot be applied to a 'transferring' parameter", (StringRef))
+ ERROR(transferring_unsupported_param_specifier, none,
+       "'%0' cannot be applied to a 'transferring' parameter", (StringRef))
 
-ERROR(transferring_only_on_parameters_and_results, none,
-      "'transferring' may only be used on parameters and results", ())
-ERROR(transferring_cannot_be_applied_to_tuple_elt, none,
-      "'transferring' cannot be applied to tuple elements", ())
-
+ ERROR(transferring_only_on_parameters_and_results, none,
+       "'transferring' may only be used on parameters and results", ())
+ ERROR(transferring_cannot_be_applied_to_tuple_elt, none,
+       "'transferring' cannot be applied to tuple elements", ())
 
 #define UNDEFINE_DIAGNOSTIC_MACROS
 #include "DefineDiagnosticMacros.h"

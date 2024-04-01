@@ -1326,7 +1326,7 @@ static GenericSignature getPlaceholderGenericSignature(
       auto type = genericParam->getDeclaredInterfaceType();
       genericParams.push_back(type->castTo<GenericTypeParamType>());
 
-      for (auto ip : InvertibleProtocolSet::full()) {
+      for (auto ip : InvertibleProtocolSet::allKnown()) {
         auto proto = ctx.getProtocol(getKnownProtocolKind(ip));
         requirements.emplace_back(RequirementKind::Conformance, type,
                                   proto->getDeclaredInterfaceType());
@@ -1761,6 +1761,54 @@ bool ExtensionDecl::isConstrainedExtension() const {
   // If the generic signature differs from that of the nominal type, it's a
   // constrained extension.
   return !typeSig->isEqual(extSig);
+}
+
+bool ExtensionDecl::isWrittenWithConstraints() const {
+  auto nominal = getExtendedNominal();
+  if (!nominal)
+    return false;
+
+  // If there's no generic signature, then it's written without constraints.
+  CanGenericSignature extSig = getGenericSignature().getCanonicalSignature();
+  if (!extSig)
+    return false;
+
+  CanGenericSignature typeSig =
+      nominal->getGenericSignature().getCanonicalSignature();
+
+  // Get the requirements and inverses for both the extension and type.
+  SmallVector<Requirement, 2> extReqs;
+  SmallVector<InverseRequirement, 2> extInverseReqs;
+  extSig->getRequirementsWithInverses(extReqs, extInverseReqs);
+
+  SmallVector<Requirement, 2> typeReqs;
+  SmallVector<InverseRequirement, 2> typeInverseReqs;
+  typeSig->getRequirementsWithInverses(typeReqs, typeInverseReqs);
+
+  // If the (non-inverse) requirements are different between the extension and
+  // the original type, it's written with constraints. Note that
+  // the extension can only add requirements, so we need only check the size
+  // (not the specific requirements).
+  if (extReqs.size() > typeReqs.size()) {
+    return true;
+  }
+
+  assert(extReqs.size() == typeReqs.size());
+
+  // If the type has no inverse requirements, there are no extra constraints
+  // to write.
+  if (typeInverseReqs.empty()) {
+    return false;
+  }
+
+  // If the extension has no inverse requirements, then there are no constraints
+  // that need to be written down.
+  if (extInverseReqs.empty()) {
+    return false;
+  }
+
+  // We have inverses that need to be written out.
+  return true;
 }
 
 bool ExtensionDecl::isInSameDefiningModule() const {
@@ -4920,22 +4968,22 @@ GenericParameterReferenceInfo ValueDecl::findExistentialSelfReferences(
                                         std::nullopt);
 }
 
-static TypeDecl::CanBeInvertible::Result
-conformanceExists(TypeDecl const *decl, InvertibleProtocolKind ip) {
-  auto *proto = decl->getASTContext().getProtocol(getKnownProtocolKind(ip));
+TypeDecl::CanBeInvertible::Result
+NominalTypeDecl::canConformTo(InvertibleProtocolKind ip) const {
+  auto *proto = getASTContext().getProtocol(getKnownProtocolKind(ip));
   assert(proto && "missing Copyable/Escapable from stdlib!");
 
   // Handle protocols specially, without building a GenericSignature.
-  if (auto *protoDecl = dyn_cast<ProtocolDecl>(decl)) {
+  if (auto *protoDecl = dyn_cast<ProtocolDecl>(this)) {
     return protoDecl->inheritsFrom(proto)
          ? TypeDecl::CanBeInvertible::Always
          : TypeDecl::CanBeInvertible::Never;
   }
 
-  Type selfTy = decl->getDeclaredInterfaceType();
+  Type selfTy = getDeclaredInterfaceType();
   assert(selfTy);
 
-  auto conformance = decl->getModuleContext()->lookupConformance(selfTy, proto,
+  auto conformance = getModuleContext()->lookupConformance(selfTy, proto,
       /*allowMissing=*/false);
 
   if (conformance.isInvalid())
@@ -4948,11 +4996,11 @@ conformanceExists(TypeDecl const *decl, InvertibleProtocolKind ip) {
 }
 
 TypeDecl::CanBeInvertible::Result NominalTypeDecl::canBeCopyable() const {
-  return conformanceExists(this, InvertibleProtocolKind::Copyable);
+  return canConformTo(InvertibleProtocolKind::Copyable);
 }
 
 TypeDecl::CanBeInvertible::Result NominalTypeDecl::canBeEscapable() const {
-  return conformanceExists(this, InvertibleProtocolKind::Escapable);
+  return canConformTo(InvertibleProtocolKind::Escapable);
 }
 
 Type TypeDecl::getDeclaredInterfaceType() const {

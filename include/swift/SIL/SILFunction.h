@@ -347,6 +347,9 @@ private:
   /// block indices.
   unsigned BlockListChangeIdx = 0;
 
+  /// The isolation of this function.
+  ActorIsolation actorIsolation = ActorIsolation::forUnspecified();
+
   /// The function's bare attribute. Bare means that the function is SIL-only
   /// and does not require debug info.
   unsigned Bare : 1;
@@ -1366,6 +1369,12 @@ public:
 
     return false;
   }
+
+  void setActorIsolation(ActorIsolation newActorIsolation) {
+    actorIsolation = newActorIsolation;
+  }
+
+  ActorIsolation getActorIsolation() const { return actorIsolation; }
 
   //===--------------------------------------------------------------------===//
   // Block List Access

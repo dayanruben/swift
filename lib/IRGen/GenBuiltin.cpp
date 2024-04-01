@@ -1137,6 +1137,17 @@ void irgen::emitBuiltinCall(IRGenFunction &IGF, const BuiltinInfo &Builtin,
     ptr = IGF.Builder.CreateBitCast(ptr,
                               valueTy.second.getStorageType()->getPointerTo());
     Address array = valueTy.second.getAddressForPointer(ptr);
+
+    // If the count is statically known to be a constant 1, then just call the
+    // type's destroy instead of the array variant.
+    if (auto ci = dyn_cast<llvm::ConstantInt>(count)) {
+      if (ci->isOne()) {
+        bool isOutlined = false;
+        valueTy.second.destroy(IGF, array, valueTy.first, isOutlined);
+        return;
+      }
+    }
+
     valueTy.second.destroyArray(IGF, array, count, valueTy.first);
     return;
   }
@@ -1474,6 +1485,16 @@ void irgen::emitBuiltinCall(IRGenFunction &IGF, const BuiltinInfo &Builtin,
 
     emitDestructiveInjectEnumTagCall(IGF, inputTy, tag,
                                      inputTi.getAddressForPointer(input));
+    return;
+  }
+
+  // LLVM must not see the address generated here as 'invariant' or immutable
+  // ever. A raw layout's address defies all formal access, so immutable looking
+  // uses may actually mutate the underlying value!
+  if (Builtin.ID == BuiltinValueKind::AddressOfRawLayout) {
+    auto addr = args.claimNext();
+    auto value = IGF.Builder.CreateBitCast(addr, IGF.IGM.Int8PtrTy);
+    out.add(value);
     return;
   }
 

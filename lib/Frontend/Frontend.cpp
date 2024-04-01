@@ -276,10 +276,8 @@ void CompilerInstance::recordPrimaryInputBuffer(unsigned BufID) {
 }
 
 bool CompilerInstance::setUpASTContextIfNeeded() {
-  if ((Invocation.getFrontendOptions().RequestedAction ==
-          FrontendOptions::ActionType::CompileModuleFromInterface ||
-      Invocation.getFrontendOptions().RequestedAction ==
-          FrontendOptions::ActionType::TypecheckModuleFromInterface) &&
+  if (FrontendOptions::doesActionBuildModuleFromInterface(
+          Invocation.getFrontendOptions().RequestedAction) &&
       !Invocation.getFrontendOptions().ExplicitInterfaceBuild) {
     // Compiling a module interface from source uses its own CompilerInstance
     // with options read from the input file. Don't bother setting up an
@@ -747,18 +745,18 @@ bool CompilerInstance::setUpModuleLoaders() {
   bool ExplicitModuleBuild =
       Invocation.getFrontendOptions().DisableImplicitModules;
   if (ExplicitModuleBuild ||
-      !Invocation.getSearchPathOptions().ExplicitSwiftModuleMap.empty() ||
+      !Invocation.getSearchPathOptions().ExplicitSwiftModuleMapPath.empty() ||
       !Invocation.getSearchPathOptions().ExplicitSwiftModuleInputs.empty()) {
     if (Invocation.getCASOptions().EnableCaching)
       ESML = ExplicitCASModuleLoader::create(
           *Context, getObjectStore(), getActionCache(), getDependencyTracker(),
-          MLM, Invocation.getSearchPathOptions().ExplicitSwiftModuleMap,
+          MLM, Invocation.getSearchPathOptions().ExplicitSwiftModuleMapPath,
           Invocation.getSearchPathOptions().ExplicitSwiftModuleInputs,
           IgnoreSourceInfoFile);
     else
       ESML = ExplicitSwiftModuleLoader::create(
           *Context, getDependencyTracker(), MLM,
-          Invocation.getSearchPathOptions().ExplicitSwiftModuleMap,
+          Invocation.getSearchPathOptions().ExplicitSwiftModuleMapPath,
           Invocation.getSearchPathOptions().ExplicitSwiftModuleInputs,
           IgnoreSourceInfoFile);
   }

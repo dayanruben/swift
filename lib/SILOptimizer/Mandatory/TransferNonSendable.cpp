@@ -1021,11 +1021,19 @@ public:
         .highlight(getOperand()->getUser()->getLoc().getSourceRange());
   }
 
-  void emitFunctionArgumentClosure(SourceLoc loc, Type type,
-                                   ApplyIsolationCrossing crossing) {
-    diagnoseError(loc, diag::regionbasedisolation_arg_transferred,
-                  "task-isolated", type, crossing.getCalleeIsolation())
-        .highlight(getOperand()->getUser()->getLoc().getSourceRange());
+  void emitNamedFunctionArgumentClosure(SILLocation loc, Identifier name,
+                                        ApplyIsolationCrossing crossing) {
+    emitNamedOnlyError(loc, name);
+    SmallString<64> descriptiveKindStr;
+    {
+      llvm::raw_svector_ostream os(descriptiveKindStr);
+      getIsolationRegionInfo().printForDiagnostics(os);
+    }
+    diagnoseNote(loc,
+                 diag::regionbasedisolation_named_isolated_closure_yields_race,
+                 descriptiveKindStr, name, crossing.getCalleeIsolation(),
+                 crossing.getCallerIsolation())
+        .highlight(loc.getSourceRange());
   }
 
   void emitFunctionArgumentApplyStronglyTransferred(SILLocation loc,
@@ -1144,13 +1152,18 @@ public:
   bool run();
 
 private:
-  bool initForIsolatedPartialApply(Operand *op, AbstractClosureExpr *ace);
+  /// \p actualCallerIsolation is used to override the caller isolation we use
+  /// when emitting the error if the closure would have the incorrect one.
+  bool initForIsolatedPartialApply(
+      Operand *op, AbstractClosureExpr *ace,
+      std::optional<ActorIsolation> actualCallerIsolation = {});
 };
 
 } // namespace
 
 bool TransferNonTransferrableDiagnosticInferrer::initForIsolatedPartialApply(
-    Operand *op, AbstractClosureExpr *ace) {
+    Operand *op, AbstractClosureExpr *ace,
+    std::optional<ActorIsolation> actualCallerIsolation) {
   SmallVector<std::tuple<CapturedValue, unsigned, ApplyIsolationCrossing>, 8>
       foundCapturedIsolationCrossing;
   ace->getIsolationCrossing(foundCapturedIsolationCrossing);
@@ -1160,9 +1173,16 @@ bool TransferNonTransferrableDiagnosticInferrer::initForIsolatedPartialApply(
   unsigned opIndex = ApplySite(op->getUser()).getAppliedArgIndex(*op);
   for (auto &p : foundCapturedIsolationCrossing) {
     if (std::get<1>(p) == opIndex) {
-      Type type = std::get<0>(p).getDecl()->getInterfaceType();
-      diagnosticEmitter.emitFunctionArgumentClosure(std::get<0>(p).getLoc(),
-                                                    type, std::get<2>(p));
+      auto loc = RegularLocation(std::get<0>(p).getLoc());
+      auto crossing = std::get<2>(p);
+      auto declIsolation = crossing.getCallerIsolation();
+      auto closureIsolation = crossing.getCalleeIsolation();
+      if (!bool(declIsolation) && actualCallerIsolation) {
+        declIsolation = *actualCallerIsolation;
+      }
+      diagnosticEmitter.emitNamedFunctionArgumentClosure(
+          loc, std::get<0>(p).getDecl()->getBaseIdentifier(),
+          ApplyIsolationCrossing(declIsolation, closureIsolation));
       return true;
     }
   }
@@ -1211,6 +1231,15 @@ bool TransferNonTransferrableDiagnosticInferrer::run() {
       return false;
     }
     assert(isolation && "Expected non-null");
+
+    // Then if we are calling a closure expr. If so, we should use the loc of
+    // the closure.
+    if (auto *closureExpr =
+            dyn_cast<AbstractClosureExpr>(sourceApply->getFn())) {
+      initForIsolatedPartialApply(op, closureExpr,
+                                  isolation->getCallerIsolation());
+      return true;
+    }
 
     // See if we can infer a name from the value.
     SmallString<64> resultingName;

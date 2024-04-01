@@ -130,6 +130,12 @@ void swift::simple_display(llvm::raw_ostream &out,
   out << getProtocolName(getKnownProtocolKind(value));
 }
 
+// Metadata stores a 16-bit field for invertible protocols. Trigger a build
+// error when we assign the 15th bit so we can think about what to do.
+#define INVERTIBLE_PROTOCOL(Name, Bit) \
+  static_assert(Bit < 15);
+#include "swift/ABI/InvertibleProtocols.def"
+
 namespace {
 enum class SearchPathKind : uint8_t {
   Import = 1 << 0,
@@ -4524,29 +4530,29 @@ SILFunctionType::SILFunctionType(
       !ext.getLifetimeDependenceInfo().empty();
   Bits.SILFunctionType.CoroutineKind = unsigned(coroutineKind);
   NumParameters = params.size();
-  if (coroutineKind == SILCoroutineKind::None) {
-    assert(yields.empty());
-    NumAnyResults = normalResults.size();
-    NumAnyIndirectFormalResults = 0;
-    NumPackResults = 0;
-    for (auto &resultInfo : normalResults) {
-      if (resultInfo.isFormalIndirect())
-        NumAnyIndirectFormalResults++;
-      if (resultInfo.isPack())
-        NumPackResults++;
-    }
-    memcpy(getMutableResults().data(), normalResults.data(),
-           normalResults.size() * sizeof(SILResultInfo));
-  } else {
-    assert(normalResults.empty());
-    NumAnyResults = yields.size();
-    NumAnyIndirectFormalResults = 0;
+  assert((coroutineKind == SILCoroutineKind::None && yields.empty()) ||
+         coroutineKind != SILCoroutineKind::None);
+
+  NumAnyResults = normalResults.size();
+  NumAnyIndirectFormalResults = 0;
+  NumPackResults = 0;
+  for (auto &resultInfo : normalResults) {
+    if (resultInfo.isFormalIndirect())
+      NumAnyIndirectFormalResults++;
+    if (resultInfo.isPack())
+      NumPackResults++;
+  }
+  memcpy(getMutableResults().data(), normalResults.data(),
+         normalResults.size() * sizeof(SILResultInfo));
+  if (coroutineKind != SILCoroutineKind::None) {
+    NumAnyYieldResults = yields.size();
+    NumAnyIndirectFormalYieldResults = 0;
     NumPackResults = 0;
     for (auto &yieldInfo : yields) {
       if (yieldInfo.isFormalIndirect())
-        NumAnyIndirectFormalResults++;
+        NumAnyIndirectFormalYieldResults++;
       if (yieldInfo.isPack())
-        NumPackResults++;
+        NumPackYieldResults++;
     }
     memcpy(getMutableYields().data(), yields.data(),
            yields.size() * sizeof(SILYieldInfo));
@@ -4718,7 +4724,6 @@ CanSILFunctionType SILFunctionType::get(
     std::optional<SILResultInfo> errorResult, SubstitutionMap patternSubs,
     SubstitutionMap invocationSubs, const ASTContext &ctx,
     ProtocolConformanceRef witnessMethodConformance) {
-  assert(coroutineKind == SILCoroutineKind::None || normalResults.empty());
   assert(coroutineKind != SILCoroutineKind::None || yields.empty());
   assert(!ext.isPseudogeneric() || genericSig ||
          coroutineKind != SILCoroutineKind::None);

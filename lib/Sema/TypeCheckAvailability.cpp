@@ -65,6 +65,8 @@ ExportContext::ExportContext(
 bool swift::isExported(const ValueDecl *VD) {
   if (VD->getAttrs().hasAttribute<ImplementationOnlyAttr>())
     return false;
+  if (VD->isObjCMemberImplementation())
+    return false;
 
   // Is this part of the module's API or ABI?
   AccessScope accessScope =
@@ -680,6 +682,11 @@ private:
   /// some exceptions.
   bool shouldConstrainSignatureToDeploymentTarget(Decl *D) {
     if (isCurrentTRCContainedByDeploymentTarget())
+      return false;
+
+    // A declaration inside of a local context always inherits the availability
+    // of the parent.
+    if (D->getDeclContext()->isLocalContext())
       return false;
 
     // As a convenience, SPI decls and explicitly unavailable decls are
