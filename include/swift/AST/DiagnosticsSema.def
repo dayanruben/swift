@@ -5696,6 +5696,8 @@ ERROR(incorrect_optional_any,none,
 ERROR(existential_requires_any,none,
       "use of %select{protocol |}2%0 as a type must be written %1",
       (Type, Type, bool))
+ERROR(inverse_requires_any,none,
+      "constraint that suppresses conformance requires 'any'", ())
 
 ERROR(nonisolated_let,none,
       "'nonisolated' is meaningless on 'let' declarations because "
@@ -7741,8 +7743,6 @@ ERROR(noncopyable_enums_do_not_support_indirect,none,
       "noncopyable enum %0 cannot be marked indirect or have indirect cases yet", (Identifier))
 ERROR(noncopyable_cast,none,
       "noncopyable types cannot be conditionally cast", ())
-ERROR(noncopyable_failable_init,none,
-      "noncopyable types cannot have failable initializers yet", ())
 ERROR(noncopyable_objc_enum, none,
       "noncopyable enums cannot be marked '@objc'", ())
 ERROR(moveOnly_not_allowed_here,none,
