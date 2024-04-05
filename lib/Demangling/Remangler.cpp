@@ -1917,6 +1917,12 @@ ManglingError Remangler::mangleImplPatternSubstitutions(Node *node,
   return MANGLING_ERROR(ManglingError::UnsupportedNodeKind, node);
 }
 
+ManglingError Remangler::mangleImplCoroutineKind(Node *node,
+                                                 unsigned depth) {
+  // handled inline
+  return MANGLING_ERROR(ManglingError::UnsupportedNodeKind, node);
+}
+
 ManglingError Remangler::mangleImplFunctionType(Node *node, unsigned depth) {
   const char *PseudoGeneric = "";
   Node *GenSig = nullptr;
@@ -2015,10 +2021,21 @@ ManglingError Remangler::mangleImplFunctionType(Node *node, unsigned depth) {
         RETURN_IF_ERROR(mangleImplFunctionConvention(Child, depth + 1));
         break;
       }
+      case Node::Kind::ImplCoroutineKind: {
+        char CoroAttr = llvm::StringSwitch<char>(Child->getText())
+                        .Case("yield_once", 'A')
+                        .Case("yield_many", 'G')
+                        .Default(0);
+
+        if (!CoroAttr) {
+          return MANGLING_ERROR(ManglingError::InvalidImplCoroutineKind,
+                                Child);
+        }
+        Buffer << CoroAttr;
+        break;
+      }
       case Node::Kind::ImplFunctionAttribute: {
         char FuncAttr = llvm::StringSwitch<char>(Child->getText())
-                        .Case("@yield_once", 'A')
-                        .Case("@yield_many", 'G')
                         .Case("@Sendable", 'h')
                         .Case("@async", 'H')
                         .Default(0);
@@ -2614,6 +2631,14 @@ ManglingError Remangler::mangleConcreteProtocolConformance(Node *node,
   return ManglingError::Success;
 }
 
+ManglingError Remangler::manglePackProtocolConformance(Node *node,
+                                                       unsigned depth) {
+  RETURN_IF_ERROR(
+      mangleAnyProtocolConformanceList(node->getChild(0), depth + 1));
+  Buffer << "HX";
+  return ManglingError::Success;
+}
+
 ManglingError
 Remangler::mangleDependentProtocolConformanceRoot(Node *node, unsigned depth) {
   RETURN_IF_ERROR(mangleType(node->getChild(0), depth + 1));
@@ -2663,6 +2688,8 @@ ManglingError Remangler::mangleAnyProtocolConformance(Node *node,
   switch (node->getKind()) {
   case Node::Kind::ConcreteProtocolConformance:
     return mangleConcreteProtocolConformance(node, depth + 1);
+  case Node::Kind::PackProtocolConformance:
+    return manglePackProtocolConformance(node, depth + 1);
   case Node::Kind::DependentProtocolConformanceRoot:
     return mangleDependentProtocolConformanceRoot(node, depth + 1);
   case Node::Kind::DependentProtocolConformanceInherited:

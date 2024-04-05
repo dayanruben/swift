@@ -3634,9 +3634,7 @@ public:
     return getExtInfo().isNoEscape();
   }
 
-  bool isSendable() const {
-    return getExtInfo().isSendable();
-  }
+  bool isSendable() const;
 
   bool isAsync() const { return getExtInfo().isAsync(); }
 
@@ -5174,8 +5172,11 @@ public:
   /// Returns the number of function potential semantic results:
   ///  * Usual results
   ///  * Inout parameters
+  ///  * yields
   unsigned getNumAutoDiffSemanticResults() const {
-    return getNumResults() + getNumAutoDiffSemanticResultsParameters();
+    return getNumResults() +
+           getNumAutoDiffSemanticResultsParameters() +
+           getNumYields();
   }
 
   /// Get the generic signature that the component types are specified

@@ -505,6 +505,7 @@ static bool usesFeatureRawLayout(Decl *decl) {
 }
 
 UNINTERESTING_FEATURE(Embedded)
+UNINTERESTING_FEATURE(SuppressedAssociatedTypes)
 
 static bool usesFeatureNoncopyableGenerics(Decl *decl) {
   if (decl->getAttrs().hasAttribute<PreInverseGenericsAttr>())
@@ -682,6 +683,7 @@ static bool usesFeatureIsolatedAny(Decl *decl) {
   });
 }
 
+UNINTERESTING_FEATURE(ExtensionImportVisibility)
 UNINTERESTING_FEATURE(IsolatedAny2)
 
 static bool usesFeatureGlobalActorIsolatedTypesUsability(Decl *decl) {
