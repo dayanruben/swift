@@ -173,11 +173,13 @@ enum class DescriptiveDeclKind : uint8_t {
   Struct,
   Class,
   Actor,
+  DistributedActor,
   Protocol,
   GenericEnum,
   GenericStruct,
   GenericClass,
   GenericActor,
+  GenericDistributedActor,
   GenericType,
   Subscript,
   StaticSubscript,
@@ -1305,6 +1307,11 @@ public:
   /// checked by \c AvailableAttr::isUnavailable.
   std::optional<std::pair<const AvailableAttr *, const Decl *>>
   getSemanticUnavailableAttr(bool ignoreAppExtensions = false) const;
+
+  /// Returns true if code associated with this declaration should be considerd
+  /// unreachable at runtime because the declaration is unavailable in all
+  /// execution contexts in which the code may run.
+  bool isUnreachableAtRuntime() const;
 
   /// Returns true if this declaration should be considered available during
   /// SIL/IR lowering. A declaration would not be available during lowering if,
@@ -7294,6 +7301,7 @@ public:
 
   /// Add the given derivative function configuration.
   void addDerivativeFunctionConfiguration(const AutoDiffConfig &config);
+  std::optional<LifetimeDependenceInfo> getLifetimeDependenceInfo() const;
 
 protected:
   // If a function has a body at all, we have either a parsed body AST node or
