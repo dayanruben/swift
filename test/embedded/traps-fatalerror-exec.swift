@@ -19,7 +19,8 @@
 // REQUIRES: swift_in_compiler
 // REQUIRES: executable_test
 // REQUIRES: optimized_stdlib
-// REQUIRES: OS=macosx
+// REQUIRES: OS=macosx || OS=linux-gnu
+// REQUIRES: swift_test_mode_optimize_none
 
 func test() {
      fatalError("task failed successfully")
