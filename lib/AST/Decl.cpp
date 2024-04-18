@@ -567,6 +567,15 @@ std::optional<llvm::VersionTuple>
 Decl::getBackDeployedBeforeOSVersion(ASTContext &Ctx) const {
   if (auto *attr = getAttrs().getBackDeployed(Ctx)) {
     auto version = attr->Version;
+    StringRef ignoredPlatformString;
+    AvailabilityInference::updateBeforePlatformForFallback(
+        attr, getASTContext(), ignoredPlatformString, version);
+
+    // If the remap for fallback resulted in 1.0, then the
+    // backdeployment prior to that is not meaningful.
+    if (version == clang::VersionTuple(1, 0, 0, 0))
+      return std::nullopt;
+
     return version;
   }
 
@@ -1669,7 +1678,8 @@ Type InheritedTypes::getResolvedType(unsigned i,
                         ? Decl.get<const ExtensionDecl *>()->getASTContext()
                         : Decl.get<const TypeDecl *>()->getASTContext();
   return evaluateOrDefault(ctx.evaluator, InheritedTypeRequest{Decl, i, stage},
-                           Type());
+                           InheritedTypeResult::forDefault())
+      .getInheritedTypeOrNull(getASTContext());
 }
 
 ExtensionDecl::ExtensionDecl(SourceLoc extensionLoc,
@@ -3856,7 +3866,7 @@ ValueDecl::getSatisfiedProtocolRequirements(bool Sorted) const {
 }
 
 std::optional<AttributedImport<ImportedModule>>
-ValueDecl::findImport(const DeclContext *fromDC) {
+ValueDecl::findImport(const DeclContext *fromDC) const {
   // If the type is from the current module, there's no import.
   auto module = getModuleContext();
   if (module == fromDC->getParentModule())
@@ -5363,6 +5373,13 @@ bool NominalTypeDecl::isAnyActor() const {
 bool NominalTypeDecl::isMainActor() const {
   return getName().is("MainActor") &&
          getParentModule()->getName() == getASTContext().Id_Concurrency;
+}
+
+bool NominalTypeDecl::suppressesConformance(KnownProtocolKind kp) const {
+  auto mutableThis = const_cast<NominalTypeDecl *>(this);
+  return evaluateOrDefault(getASTContext().evaluator,
+                           SuppressesConformanceRequest{mutableThis, kp},
+                           false);
 }
 
 GenericTypeDecl::GenericTypeDecl(DeclKind K, DeclContext *DC,

@@ -1683,14 +1683,11 @@ void PrintAST::printGenericSignature(GenericSignature genericSig,
 static void eraseInvertibleProtocolConformances(
     SmallVectorImpl<Requirement> &requirements) {
   llvm::erase_if(requirements, [&](Requirement req) {
-      if (req.getKind() == RequirementKind::Conformance) {
-        if (auto protoType = req.getSecondType()->getAs<ProtocolType>()) {
-          auto proto = protoType->getDecl();
-          return proto->getInvertibleProtocolKind().has_value();
-        }
-      }
+      if (req.getKind() != RequirementKind::Conformance)
+        return false;
 
-      return false;
+      return req.getProtocolDecl()
+          ->getInvertibleProtocolKind().has_value();
     });
 }
 
@@ -2796,6 +2793,8 @@ void PrintAST::printInherited(const Decl *decl) {
         Printer << "@retroactive ";
       if (inherited.isPreconcurrency())
         Printer << "@preconcurrency ";
+      if (inherited.isSuppressed())
+        Printer << "~";
     });
   }, [&]() {
     Printer << ", ";
@@ -3136,6 +3135,17 @@ static void suppressingFeatureNoncopyableGenerics(
   options.ExcludeAttrList.push_back(DeclAttrKind::PreInverseGenerics);
   llvm::SaveAndRestore<bool> scope(
       options.SuppressNoncopyableGenerics, true);
+  action();
+  options.ExcludeAttrList.resize(originalExcludeAttrCount);
+}
+
+static void
+suppressingFeatureConformanceSuppression(PrintOptions &options,
+                                         llvm::function_ref<void()> action) {
+  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
+  options.ExcludeAttrList.push_back(DeclAttrKind::PreInverseGenerics);
+  llvm::SaveAndRestore<bool> scope(options.SuppressConformanceSuppression,
+                                   true);
   action();
   options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
@@ -7853,6 +7863,10 @@ swift::getInheritedForPrinting(
           if (protoTy->getDecl()->isSpecificProtocol(KnownProtocolKind::Copyable))
             continue;
       }
+    }
+    if (options.SuppressConformanceSuppression &&
+        inherited.getEntry(i).isSuppressed()) {
+      continue;
     }
 
     Results.push_back(inherited.getEntry(i));

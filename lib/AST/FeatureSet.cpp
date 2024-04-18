@@ -645,33 +645,47 @@ static bool usesFeatureTransferringArgsAndResults(Decl *decl) {
   return false;
 }
 
-static bool usesFeatureDynamicActorIsolation(Decl *decl) {
-  auto usesPreconcurrencyConformance = [&](const InheritedTypes &inherited) {
-    return llvm::any_of(
-        inherited.getEntries(),
-        [](const InheritedEntry &entry) { return entry.isPreconcurrency(); });
-  };
-
-  if (auto *T = dyn_cast<TypeDecl>(decl))
-    return usesPreconcurrencyConformance(T->getInherited());
-
-  if (auto *E = dyn_cast<ExtensionDecl>(decl)) {
-    // If type has `@preconcurrency` conformance(s) all of its
-    // extensions have to be guarded by the flag too.
-    if (auto *T = dyn_cast<TypeDecl>(E->getExtendedNominal())) {
-      if (usesPreconcurrencyConformance(T->getInherited()))
-        return true;
-    }
-
-    return usesPreconcurrencyConformance(E->getInherited());
-  }
-
-  return false;
-}
+UNINTERESTING_FEATURE(DynamicActorIsolation)
 
 UNINTERESTING_FEATURE(BorrowingSwitch)
 
 UNINTERESTING_FEATURE(ClosureIsolation)
+
+static bool usesFeatureConformanceSuppression(Decl *decl) {
+  auto *nominal = dyn_cast<NominalTypeDecl>(decl);
+  if (!nominal)
+    return false;
+
+  auto inherited = InheritedTypes(nominal);
+  for (auto index : indices(inherited.getEntries())) {
+    // Ensure that InheritedTypeRequest has set the isSuppressed bit if
+    // appropriate.
+    auto resolvedTy = inherited.getResolvedType(index);
+    (void)resolvedTy;
+
+    auto entry = inherited.getEntry(index);
+
+    if (!entry.isSuppressed())
+      continue;
+
+    auto ty = entry.getType();
+
+    if (!ty)
+      continue;
+
+    auto kp = ty->getKnownProtocol();
+    if (!kp)
+      continue;
+
+    auto rpk = getRepressibleProtocolKind(*kp);
+    if (!rpk)
+      continue;
+
+    return true;
+  }
+
+  return false;
+}
 
 static bool usesFeatureIsolatedAny(Decl *decl) {
   return usesTypeMatching(decl, [](Type type) {
@@ -682,7 +696,7 @@ static bool usesFeatureIsolatedAny(Decl *decl) {
   });
 }
 
-UNINTERESTING_FEATURE(ExtensionImportVisibility)
+UNINTERESTING_FEATURE(MemberImportVisibility)
 UNINTERESTING_FEATURE(IsolatedAny2)
 
 static bool usesFeatureGlobalActorIsolatedTypesUsability(Decl *decl) {

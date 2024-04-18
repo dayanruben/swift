@@ -2259,6 +2259,48 @@ void NominalTypeDecl::recordObjCMethod(AbstractFunctionDecl *method,
   vec.push_back(method);
 }
 
+static bool missingExplicitImportForMemberDecl(const DeclContext *dc,
+                                               ValueDecl *decl) {
+  // Only require explicit imports for members when MemberImportVisibility is
+  // enabled.
+  if (!dc->getASTContext().LangOpts.hasFeature(Feature::MemberImportVisibility))
+    return false;
+
+  // If the decl is in the same module, no import is required.
+  auto declModule = decl->getDeclContext()->getParentModule();
+  if (declModule == dc->getParentModule())
+    return false;
+
+  // Source files are not expected to contain an import for the clang header
+  // module.
+  if (auto *loader = dc->getASTContext().getClangModuleLoader()) {
+    if (declModule == loader->getImportedHeaderModule())
+      return false;
+  }
+
+  // Only require an import in the context of user authored source file.
+  auto sf = dc->getParentSourceFile();
+  if (!sf)
+    return false;
+
+  switch (sf->Kind) {
+  case SourceFileKind::SIL:
+  case SourceFileKind::Interface:
+  case SourceFileKind::MacroExpansion:
+  case SourceFileKind::DefaultArgument:
+    return false;
+  case SourceFileKind::Library:
+  case SourceFileKind::Main:
+    break;
+  }
+
+  // If we've found an import, we're done.
+  if (decl->findImport(dc))
+    return false;
+
+  return true;
+}
+
 /// Determine whether the given declaration is an acceptable lookup
 /// result when searching from the given DeclContext.
 static bool isAcceptableLookupResult(const DeclContext *dc,
@@ -2291,10 +2333,7 @@ static bool isAcceptableLookupResult(const DeclContext *dc,
 
     // Check that there is some import in the originating context that
     // makes this decl visible.
-    if (decl->getDeclContext()->getParentModule() != dc->getParentModule() &&
-        dc->getASTContext().LangOpts.hasFeature(
-            Feature::ExtensionImportVisibility) &&
-        !decl->findImport(dc))
+    if (missingExplicitImportForMemberDecl(dc, decl))
       return false;
   }
 
@@ -3173,7 +3212,7 @@ DirectlyReferencedTypeDecls InheritedDeclsReferencedRequest::evaluate(
     unsigned index) const {
 
   // Prefer syntactic information when we have it.
-  const TypeLoc &typeLoc = InheritedTypes(decl).getEntry(index);
+  const InheritedEntry &typeLoc = InheritedTypes(decl).getEntry(index);
   if (auto typeRepr = typeLoc.getTypeRepr()) {
     // Figure out the context in which name lookup will occur.
     DeclContext *dc;
@@ -3822,6 +3861,7 @@ void swift::getDirectlyInheritedNominalTypeDecls(
   SourceLoc uncheckedLoc;
   SourceLoc preconcurrencyLoc;
   auto inheritedTypes = InheritedTypes(decl);
+  bool isSuppressed = inheritedTypes.getEntry(i).isSuppressed();
   if (TypeRepr *typeRepr = inheritedTypes.getTypeRepr(i)) {
     loc = typeRepr->getLoc();
     uncheckedLoc = typeRepr->findAttrLoc(TypeAttrKind::Unchecked);
@@ -3830,7 +3870,8 @@ void swift::getDirectlyInheritedNominalTypeDecls(
 
   // Form the result.
   for (auto nominal : nominalTypes) {
-    result.push_back({nominal, loc, uncheckedLoc, preconcurrencyLoc});
+    result.push_back(
+        {nominal, loc, uncheckedLoc, preconcurrencyLoc, isSuppressed});
   }
 }
 
@@ -3860,9 +3901,9 @@ swift::getDirectlyInheritedNominalTypeDecls(
   for (auto attr :
        protoDecl->getAttrs().getAttributes<SynthesizedProtocolAttr>()) {
     auto loc = attr->getLocation();
-    result.push_back({attr->getProtocol(), loc,
-                      attr->isUnchecked() ? loc : SourceLoc(),
-                      /*preconcurrencyLoc=*/SourceLoc()});
+    result.push_back(
+        {attr->getProtocol(), loc, attr->isUnchecked() ? loc : SourceLoc(),
+         /*preconcurrencyLoc=*/SourceLoc(), /*isSuppressed=*/false});
   }
 
   // Else we have access to this information on the where clause.
@@ -3873,7 +3914,8 @@ swift::getDirectlyInheritedNominalTypeDecls(
   // FIXME: Refactor SelfBoundsFromWhereClauseRequest to dig out
   // the source location.
   for (auto inheritedNominal : selfBounds.decls)
-    result.emplace_back(inheritedNominal, SourceLoc(), SourceLoc(), SourceLoc());
+    result.emplace_back(inheritedNominal, SourceLoc(), SourceLoc(), SourceLoc(),
+                        /*isSuppressed=*/false);
 
   return result;
 }
