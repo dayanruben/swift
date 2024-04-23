@@ -3685,6 +3685,10 @@ ERROR(inconsistent_implicit_access_level_on_import,none,
       "ambiguous implicit access level for import of %0; it is imported as "
       "'%select{private|fileprivate|internal|package|public|%error}1' elsewhere",
       (Identifier, AccessLevel))
+NOTE(inconsistent_implicit_access_level_on_import_silence,none,
+      "silence these warnings by adopting the upcoming feature "
+      "'InternalImportsByDefault'",
+      ())
 NOTE(inconsistent_implicit_access_level_on_import_here,none,
      "imported "
      "'%select{private|fileprivate|internal|package|public|%error}0' here",
@@ -7704,7 +7708,7 @@ NOTE(add_explicit_protocol_for_conformance,none,
      "consider making %kind0 explicitly conform to the '%1' protocol",
      (const ValueDecl *, StringRef))
 ERROR(escapable_requires_feature_flag,none,
-      "type '~Escapable' requires -enable-experimental-feature NonescapableTypes",
+      "type 'Escapable' requires -enable-experimental-feature NonescapableTypes",
       ())
 ERROR(non_bitwise_copyable_type_class,none,
       "class cannot conform to 'BitwiseCopyable'", ())
