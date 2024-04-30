@@ -532,6 +532,12 @@ set(SWIFT_DARWIN_STDLIB_INSTALL_NAME_DIR "/usr/lib/swift" CACHE STRING
 set(SWIFT_DARWIN_STDLIB_PRIVATE_INSTALL_NAME_DIR "@rpath" CACHE STRING
     "The directory of the install_name for the private standard library dylibs")
 
+option(SWIFT_ALLOW_LINKING_SWIFT_CONTENT_IN_DARWIN_TOOLCHAIN
+  "Adds search paths for libraries in the toolchain
+   when building Swift programs.
+   This is needed to support Apple internal configurations."
+  FALSE)
+
 set(SWIFT_DARWIN_DEPLOYMENT_VERSION_OSX "10.13" CACHE STRING
     "Minimum deployment target version for OS X")
 
@@ -730,6 +736,18 @@ option(SWIFT_ENABLE_BACKTRACING
 set(SWIFT_DARWIN_DEPLOYMENT_VERSION_MACCATALYST "14.5" CACHE STRING
   "Minimum deployment target version for macCatalyst")
 
+# A tempoarary hack: force enabling HOSTTOOLS mode on Windows.
+# Right now, SwiftCompilerSources cannot be enabled for lldb because on Windows
+# swift and lldb are built in a unified build and there is a missing dependency
+# on swiftrt.
+# Swift and lldb are configured with the same cmake invocation and therefore
+# enabling bootstrapping for swift and disabling it for lldb only works by
+# hardcoding the bootstrapping mode in the cmake file.
+# https://github.com/apple/swift/issues/73322
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  set(BOOTSTRAPPING_MODE "HOSTTOOLS")
+endif()
+
 #
 # End of user-configurable options.
 #
@@ -898,6 +916,10 @@ if("${SWIFT_NATIVE_SWIFT_TOOLS_PATH}" STREQUAL "")
   # This is the normal case. We are not cross-compiling.
   set(SWIFT_NATIVE_SWIFT_TOOLS_PATH "${SWIFT_RUNTIME_OUTPUT_INTDIR}")
   set(SWIFT_EXEC_FOR_SWIFT_MODULES "${CMAKE_Swift_COMPILER}")
+  if(NOT SWIFT_EXEC_FOR_SWIFT_MODULES)
+    message(WARNING "BOOSTRAPPING set to OFF because no Swift compiler is defined")
+    set(BOOTSTRAPPING_MODE "OFF")
+  endif()
 elseif(BOOTSTRAPPING_MODE MATCHES "BOOTSTRAPPING.*")
   # If cross-compiling, we don't have to bootstrap. We can just use the previously
   # built native swiftc to build the swift compiler modules.

@@ -3310,16 +3310,20 @@ static void emitApplyArgument(IRGenSILFunction &IGF,
     bool canForwardLoadToIndirect = false;
     auto *load = dyn_cast<LoadInst>(arg);
     [&]() {
-      if (apply && load && apply->getParent() == load->getParent()) {
-        for (auto it = std::next(load->getIterator()), e = apply->getIterator();
-             it != e; ++it) {
-          if (isa<LoadInst>(&(*it))) {
-            continue;
-          }
-          return;
+      if (!apply || !load || apply->getParent() != load->getParent())
+        return;
+      // We cannot forward projections as the code that does the optimization
+      // does not know about them.
+      if (!isa<AllocStackInst>(load->getOperand()))
+        return;
+      for (auto it = std::next(load->getIterator()), e = apply->getIterator();
+           it != e; ++it) {
+        if (isa<LoadInst>(&(*it))) {
+          continue;
         }
-        canForwardLoadToIndirect = true;
+        return;
       }
+      canForwardLoadToIndirect = true;
     }();
     IGF.getLoweredExplosion(arg, out);
     if (canForwardLoadToIndirect) {
@@ -5613,11 +5617,10 @@ void IRGenSILFunction::visitDebugValueInst(DebugValueInst *i) {
 
   auto VarInfo = i->getVarInfo();
   assert(VarInfo && "debug_value without debug info");
-  if (isa<SILUndef>(SILVal)) {
+  if (isa<SILUndef>(SILVal) && VarInfo->Name == "$error") {
     // We cannot track the location of inlined error arguments because it has no
     // representation in SIL.
-    if (!IsAddrVal &&
-        !i->getDebugScope()->InlinedCallSite && VarInfo->Name == "$error") {
+    if (!IsAddrVal && !i->getDebugScope()->InlinedCallSite) {
       auto funcTy = CurSILFn->getLoweredFunctionType();
       emitErrorResultVar(funcTy, funcTy->getErrorResult(), i);
     }
