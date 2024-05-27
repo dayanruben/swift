@@ -2590,6 +2590,17 @@ BeginCOWMutationInst::create(SILDebugLocation loc, SILValue operand,
 
 UncheckedRefCastInst *
 UncheckedRefCastInst::create(SILDebugLocation DebugLoc, SILValue Operand,
+                             SILType Ty, SILModule &Mod,
+                             ValueOwnershipKind forwardingOwnershipKind) {
+  assert(Operand->getType().getCategory() == SILValueCategory::Object);
+  unsigned size = totalSizeToAlloc<swift::Operand>(1);
+  void *Buffer = Mod.allocateInst(size, alignof(UncheckedRefCastInst));
+  return ::new (Buffer) UncheckedRefCastInst(
+      DebugLoc, Operand, {}, Ty, forwardingOwnershipKind);
+}
+
+UncheckedRefCastInst *
+UncheckedRefCastInst::create(SILDebugLocation DebugLoc, SILValue Operand,
                              SILType Ty, SILFunction &F,
                              ValueOwnershipKind forwardingOwnershipKind) {
   assert(Operand->getType().getCategory() == SILValueCategory::Object);
@@ -2701,6 +2712,15 @@ MetatypeInst *MetatypeInst::create(SILDebugLocation Loc, SILType Ty,
   auto Size = totalSizeToAlloc<swift::Operand>(TypeDependentOperands.size());
   auto Buffer = Mod.allocateInst(Size, alignof(MetatypeInst));
   return ::new (Buffer) MetatypeInst(Loc, Ty, TypeDependentOperands);
+}
+
+UpcastInst *UpcastInst::create(SILDebugLocation DebugLoc, SILValue Operand,
+                               SILType Ty, SILModule &Mod,
+                               ValueOwnershipKind forwardingOwnershipKind) {
+  unsigned size = totalSizeToAlloc<swift::Operand>(1);
+  void *Buffer = Mod.allocateInst(size, alignof(UpcastInst));
+  return ::new (Buffer) UpcastInst(DebugLoc, Operand, {}, Ty,
+                                   forwardingOwnershipKind);
 }
 
 UpcastInst *UpcastInst::create(SILDebugLocation DebugLoc, SILValue Operand,

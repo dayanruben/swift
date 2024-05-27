@@ -532,8 +532,8 @@ protected:
     /// analysis.
     HasTopLevelLocalContextCaptures : 1,
 
-    /// Set to true if this FuncDecl has a transferring result.
-    HasTransferringResult : 1
+    /// Set to true if this FuncDecl has a 'sending' result.
+    HasSendingResult : 1
   );
 
   SWIFT_INLINE_BITFIELD(AccessorDecl, FuncDecl, 4 + 1 + 1,
@@ -1024,6 +1024,10 @@ public:
 
   /// Returns the source range of the declaration including its attributes.
   SourceRange getSourceRangeIncludingAttrs() const;
+
+  /// Retrieve the location at which we should insert a new attribute or
+  /// modifier.
+  SourceLoc getAttributeInsertionLoc(bool forModifier) const;
 
   using ImportAccessLevel = std::optional<AttributedImport<ImportedModule>>;
 
@@ -1911,11 +1915,6 @@ public:
   /// extension X where T: Q, T: ~Copyable { }
   /// \endcode
   bool isWrittenWithConstraints() const;
-
-  /// Returns the name of the category specified by the \c \@_objcImplementation
-  /// attribute, or \c None if the name is invalid or
-  /// \c isObjCImplementation() is false.
-  std::optional<Identifier> getCategoryNameForObjCImplementation() const;
 
   /// If this extension represents an imported Objective-C category, returns the
   /// category's name. Otherwise returns the empty identifier.
@@ -3177,10 +3176,6 @@ public:
   /// can't be "static" or are in a context where "static" doesn't make sense.
   bool isStatic() const;
 
-  /// Retrieve the location at which we should insert a new attribute or
-  /// modifier.
-  SourceLoc getAttributeInsertionLoc(bool forModifier) const;
-
   static bool classof(const Decl *D) {
     return D->getKind() >= DeclKind::First_ValueDecl &&
            D->getKind() <= DeclKind::Last_ValueDecl;
@@ -4151,6 +4146,13 @@ public:
   /// is built resiliently.
   bool isResilient() const;
 
+  /// True if the decl is resilient AND also its defining module does
+  /// _not_ allow non-resilient access; the module can allow such access
+  /// if package optimization is enabled so its client modules within the
+  /// same package can have a direct access to this decl even if it's
+  /// resilient.
+  bool isStrictlyResilient() const;
+
   /// Returns whether this decl is accessed non/resiliently at the _use_ site
   /// in \p accessingModule, depending on \p expansion.
   ///
@@ -4203,6 +4205,12 @@ public:
 
   /// Retrieve the set of extensions of this type.
   ExtensionRange getExtensions();
+
+  /// Retrieve the extension most recently added to this type. Helpful to
+  /// determine if an extension has been added.
+  ExtensionDecl *getLastExtension() const {
+    return LastExtension;
+  }
 
   /// Special-behaviour flags passed to lookupDirect()
   enum class LookupDirectFlags {
@@ -5069,6 +5077,11 @@ public:
   llvm::TinyPtrVector<Decl *>
   getImportedObjCCategory(Identifier name) const;
 
+  /// Return a map of category names to extensions with that category name,
+  /// whether imported or otherwise. 
+  llvm::DenseMap<Identifier, llvm::TinyPtrVector<ExtensionDecl *>>
+  getObjCCategoryNameMap();
+
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::Class;
@@ -5760,9 +5773,8 @@ public:
   /// Determine whether references to this storage declaration may appear
   /// on the left-hand side of an assignment, as the operand of a
   /// `&` or 'inout' operator, or as a component in a writable key path.
-  bool isSettable(const DeclContext *useDC,
-                  const DeclRefExpr *base = nullptr) const {
-    switch (mutability(useDC, base)) {
+  bool isSettable(const DeclContext *useDC) const {
+    switch (mutability(useDC)) {
       case StorageMutability::Immutable:
         return false;
       case StorageMutability::Mutable:
@@ -5773,8 +5785,9 @@ public:
 
   /// Determine the mutability of this storage declaration when
   /// accessed from a given declaration context.
-  StorageMutability mutability(const DeclContext *useDC,
-                               const DeclRefExpr *base = nullptr) const;
+  StorageMutability mutability(
+      const DeclContext *useDC,
+      std::optional<const DeclRefExpr *> base = std::nullopt) const;
 
   /// Determine the mutability of this storage declaration when
   /// accessed from a given declaration context in Swift.
@@ -5784,7 +5797,7 @@ public:
   /// writes in Swift.
   StorageMutability mutabilityInSwift(
       const DeclContext *useDC,
-      const DeclRefExpr *base = nullptr) const;
+      std::optional<const DeclRefExpr *> base = std::nullopt) const;
 
   /// Determine whether references to this storage declaration in Swift may
   /// appear on the left-hand side of an assignment, as the operand of a
@@ -5793,9 +5806,8 @@ public:
   /// This method is equivalent to \c isSettable with the exception of
   /// 'optional' storage requirements, which lack support for direct writes
   /// in Swift.
-  bool isSettableInSwift(const DeclContext *useDC,
-                         const DeclRefExpr *base = nullptr) const {
-    switch (mutabilityInSwift(useDC, base)) {
+  bool isSettableInSwift(const DeclContext *useDC) const {
+    switch (mutabilityInSwift(useDC)) {
       case StorageMutability::Immutable:
         return false;
       case StorageMutability::Mutable:
@@ -6015,6 +6027,13 @@ public:
   /// property from the given module?
   bool isResilient(ModuleDecl *M, ResilienceExpansion expansion) const;
 
+  /// True if the decl is resilient AND also its defining module does
+  /// _not_ allow non-resilient access; the module can allow such access
+  /// if package optimization is enabled so its client modules within the
+  /// same package can have a direct access to this decl even if it's
+  /// resilient.
+  bool isStrictlyResilient() const;
+
   /// True if the storage can be referenced by a keypath directly.
   /// Otherwise, its override must be referenced.
   bool isValidKeyPathComponent() const;
@@ -6117,8 +6136,9 @@ public:
 
   /// Determine the mutability of this variable declaration when
   /// accessed from a given declaration context.
-  StorageMutability mutability(const DeclContext *useDC,
-                               const DeclRefExpr *base = nullptr) const;
+  StorageMutability mutability(
+      const DeclContext *useDC,
+      std::optional<const DeclRefExpr *> base = std::nullopt) const;
 
   /// Return the parent pattern binding that may provide an initializer for this
   /// VarDecl.  This returns null if there is none associated with the VarDecl.
@@ -6639,8 +6659,8 @@ class ParamDecl : public VarDecl {
     /// Whether or not this paramater is '_resultDependsOn'
     IsResultDependsOn = 1 << 3,
 
-    /// Whether or not this parameter is 'transferring'.
-    IsTransferring = 1 << 4,
+    /// Whether or not this parameter is 'sending'.
+    IsSending = 1 << 4,
   };
 
   /// The type repr and 3 bits used for flags.
@@ -6918,16 +6938,14 @@ public:
       removeFlag(Flag::IsIsolated);
   }
 
-  /// Whether or not this parameter is marked with 'transferring'.
-  bool isTransferring() const {
-    return getOptions().contains(Flag::IsTransferring);
-  }
+  /// Whether or not this parameter is marked with 'sending'.
+  bool isSending() const { return getOptions().contains(Flag::IsSending); }
 
-  void setTransferring(bool value = true) {
+  void setSending(bool value = true) {
     if (value)
-      addFlag(Flag::IsTransferring);
+      addFlag(Flag::IsSending);
     else
-      removeFlag(Flag::IsTransferring);
+      removeFlag(Flag::IsSending);
   }
 
   /// Whether or not this parameter is marked with '_const'.
@@ -7966,7 +7984,7 @@ protected:
     Bits.FuncDecl.IsStaticComputed = false;
     Bits.FuncDecl.IsStatic = false;
     Bits.FuncDecl.HasTopLevelLocalContextCaptures = false;
-    Bits.FuncDecl.HasTransferringResult = false;
+    Bits.FuncDecl.HasSendingResult = false;
   }
 
   void setResultInterfaceType(Type type);
@@ -8119,14 +8137,12 @@ public:
     Bits.FuncDecl.ForcedStaticDispatch = flag;
   }
 
-  /// Returns true if this FuncDecl has a transferring result... returns false
+  /// Returns true if this FuncDecl has a sending result... returns false
   /// otherwise.
-  bool hasTransferringResult() const {
-    return Bits.FuncDecl.HasTransferringResult;
-  }
+  bool hasSendingResult() const { return Bits.FuncDecl.HasSendingResult; }
 
-  void setTransferringResult(bool newValue = true) {
-    Bits.FuncDecl.HasTransferringResult = newValue;
+  void setSendingResult(bool newValue = true) {
+    Bits.FuncDecl.HasSendingResult = newValue;
   }
 
   static bool classof(const Decl *D) {

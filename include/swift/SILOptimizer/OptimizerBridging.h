@@ -265,6 +265,7 @@ struct BridgedPassContext {
   SwiftInt getStaticSize(BridgedType type) const;
   SwiftInt getStaticAlignment(BridgedType type) const;
   SwiftInt getStaticStride(BridgedType type) const;
+  bool canMakeStaticObjectReadOnly(BridgedType type) const;
 
   // Sets
 
@@ -336,6 +337,9 @@ struct BridgedPassContext {
   BRIDGED_INLINE bool continueWithNextSubpassRun(OptionalBridgedInstruction inst) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedPassContext initializeNestedPassContext(BridgedFunction newFunction) const;
   BRIDGED_INLINE void deinitializedNestedPassContext() const;
+  BRIDGED_INLINE void
+  addFunctionToPassManagerWorklist(BridgedFunction newFunction,
+                                   BridgedFunction oldFunction) const;
 
   // SSAUpdater
 
