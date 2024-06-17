@@ -708,8 +708,13 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
     SwiftTaskOptionRecordTy, // Base option record
     SwiftExecutorTy,         // Executor
   });
-  SwiftInitialTaskExecutorPreferenceTaskOptionRecordTy =
+  SwiftInitialTaskExecutorUnownedPreferenceTaskOptionRecordTy =
       createStructType(*this, "swift.task_executor_task_option", {
+    SwiftTaskOptionRecordTy, // Base option record
+    SwiftExecutorTy,         // Executor
+  });
+  SwiftInitialTaskExecutorOwnedPreferenceTaskOptionRecordTy =
+      createStructType(*this, "swift.task_executor_owned_task_option", {
     SwiftTaskOptionRecordTy, // Base option record
     SwiftExecutorTy,         // Executor
   });
@@ -1963,11 +1968,13 @@ bool IRGenModule::finalize() {
   }
   emitLazyPrivateDefinitions();
 
-  // Finalize clang IR-generation.
-  finalizeClangCodeGen();
-
+  // Finalize Swift debug info before running Clang codegen, because it may
+  // delete the llvm module.
   if (DebugInfo)
     DebugInfo->finalize();
+
+  // Finalize clang IR-generation.
+  finalizeClangCodeGen();
 
   // If that failed, report failure up and skip the final clean-up.
   if (!ClangCodeGen->GetModule())

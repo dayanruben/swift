@@ -3393,6 +3393,10 @@ TypeResolver::resolveAttributedType(TypeRepr *repr, TypeResolutionOptions option
           diagnoseInvalid(repr, repr->getLoc(),
                           diag::escaping_optional_type_argument)
               .fixItRemove(attrRange);
+        } else if (options.is(TypeResolverContext::InoutFunctionInput)) {
+          diagnoseInvalid(repr, repr->getLoc(),
+                          diag::escaping_inout_parameter)
+              .fixItRemove(attrRange);
         } else {
           diagnoseInvalid(repr, loc, diag::escaping_non_function_parameter)
               .fixItRemove(attrRange);
@@ -4960,7 +4964,8 @@ TypeResolver::resolveSendingTypeRepr(SendingTypeRepr *repr,
     return ErrorType::get(getASTContext());
   }
 
-  if (!options.is(TypeResolverContext::FunctionResult) &&
+  if (!options.is(TypeResolverContext::ClosureExpr) &&
+      !options.is(TypeResolverContext::FunctionResult) &&
       (!options.is(TypeResolverContext::FunctionInput) ||
        options.hasBase(TypeResolverContext::EnumElementDecl))) {
     diagnoseInvalid(repr, repr->getSpecifierLoc(),

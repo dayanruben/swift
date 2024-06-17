@@ -836,11 +836,11 @@ function Build-CMakeProject {
     }
 
     if ($Platform -eq "Android") {
-      $vsWherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-      $vsInstallPath = & $vsWherePath -latest -property installationPath
-      if (Test-Path "${vsInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin") {
-        $env:Path = "${vsInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;${vsInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;${env:Path}"
-        TryAdd-KeyValue $Defines CMAKE_MAKE_PROGRAM "${vsInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+      $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+      $VSInstallPath = & $vswhere -nologo -latest -products * -property installationPath
+      if (Test-Path "${VSInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin") {
+        $env:Path = "${VSInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;${VSInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;${env:Path}"
+        TryAdd-KeyValue $Defines CMAKE_MAKE_PROGRAM "${VSInstallPath}\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
       } else {
         throw "Missing CMake and Ninja in the visual studio installation that are needed to build Android"
       }
@@ -1629,6 +1629,7 @@ function Build-Dispatch([Platform]$Platform, $Arch, [switch]$Test = $false) {
 
 function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
   $DispatchBinaryCache = Get-TargetProjectBinaryCache $Arch Dispatch
+  $SwiftSyntaxDir = Get-HostProjectCMakeModules Compilers
   $FoundationBinaryCache = Get-TargetProjectBinaryCache $Arch Foundation
   $ShortArch = $Arch.LLVMName
 
@@ -1655,7 +1656,7 @@ function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
       -InstallTo $InstallPath `
       -Arch $Arch `
       -Platform $Platform `
-      -UseBuiltCompilers ASM,C,Swift `
+      -UseBuiltCompilers ASM,C,CXX,Swift `
       -BuildTargets $Targets `
       -Defines (@{
         FOUNDATION_BUILD_TOOLS = if ($Platform -eq "Windows") { "YES" } else { "NO" };
@@ -1695,6 +1696,10 @@ function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
         };
         ZLIB_INCLUDE_DIR = "$LibraryRoot\zlib-1.3.1\usr\include";
         dispatch_DIR = "$DispatchBinaryCache\cmake\modules";
+        SwiftSyntax_DIR = "$SwiftSyntaxDir";
+        _SwiftFoundation_SourceDIR = "$SourceCache\swift-foundation";
+        _SwiftFoundationICU_SourceDIR = "$SourceCache\swift-foundation-icu";
+        _SwiftCollections_SourceDIR = "$SourceCache\swift-collections"
       } + $TestingDefines)
   }
 }
@@ -1772,6 +1777,7 @@ function Install-Platform([Platform]$Platform, $Arch) {
       Copy-File "$PlatformLibSrc\$($Arch.LLVMName)\*.lib" "$PlatformLibDst\$($Arch.LLVMName)\"
     }
     Android {
+      Copy-File "$PlatformLibSrc\*.a" "$PlatformLibDst\$($Arch.LLVMName)\"
       Copy-File "$PlatformLibSrc\*.so" "$PlatformLibDst\$($Arch.LLVMName)\"
     }
   }

@@ -3842,8 +3842,11 @@ CanType ASTMangler::getDeclTypeForMangling(
   parentGenericSig = GenericSignature();
 
   auto &C = decl->getASTContext();
-  if (decl->isInvalid()) {
-    if (isa<AbstractFunctionDecl>(decl)) {
+
+  auto ty = decl->getInterfaceType()->getReferenceStorageReferent();
+  if (ty->hasError()) {
+    if (isa<AbstractFunctionDecl>(decl) || isa<EnumElementDecl>(decl) ||
+        isa<SubscriptDecl>(decl)) {
       // FIXME: Verify ExtInfo state is correct, not working by accident.
       CanFunctionType::ExtInfo info;
       return CanFunctionType::get({AnyFunctionType::Param(C.TheErrorType)},
@@ -3851,8 +3854,6 @@ CanType ASTMangler::getDeclTypeForMangling(
     }
     return C.TheErrorType;
   }
-
-  Type ty = decl->getInterfaceType()->getReferenceStorageReferent();
 
   // If this declaration predates concurrency, adjust its type to not
   // contain type features that were not available pre-concurrency. This
@@ -4440,10 +4441,21 @@ void ASTMangler::appendMacroExpansionContext(
   ASTContext &ctx = origDC->getASTContext();
   SourceManager &sourceMgr = ctx.SourceMgr;
 
+  auto appendMacroExpansionLoc = [&]() {
+    appendIdentifier(origDC->getParentModule()->getName().str());
+
+    auto *SF = origDC->getParentSourceFile();
+    appendIdentifier(llvm::sys::path::filename(SF->getFilename()));
+
+    auto lineColumn = sourceMgr.getLineAndColumnInBuffer(loc);
+    appendOperator("fMX", Index(lineColumn.first), Index(lineColumn.second));
+  };
+
   auto bufferID = sourceMgr.findBufferContainingLoc(loc);
   auto generatedSourceInfo = sourceMgr.getGeneratedSourceInfo(bufferID);
-  if (!generatedSourceInfo)
-    return appendContext(origDC, nullBase, StringRef());
+  if (!generatedSourceInfo) {
+    return appendMacroExpansionLoc();
+  }
 
   SourceLoc outerExpansionLoc;
   DeclContext *outerExpansionDC;
@@ -4462,7 +4474,7 @@ void ASTMangler::appendMacroExpansionContext(
   case GeneratedSourceInfo::PrettyPrinted:
   case GeneratedSourceInfo::ReplacedFunctionBody:
   case GeneratedSourceInfo::DefaultArgument:
-    return appendContext(origDC, nullBase, StringRef());
+    return appendMacroExpansionLoc();
   }
   
   switch (generatedSourceInfo->kind) {
@@ -4519,7 +4531,7 @@ void ASTMangler::appendMacroExpansionContext(
   // If we hit the point where the structure is represented as a DeclContext,
   // we're done.
   if (origDC->isChildContextOf(outerExpansionDC))
-    return appendContext(origDC, nullBase, StringRef());
+    return appendMacroExpansionLoc();
 
   // Append our own context and discriminator.
   appendMacroExpansionContext(outerExpansionLoc, origDC);

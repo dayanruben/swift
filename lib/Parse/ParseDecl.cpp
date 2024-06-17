@@ -2456,7 +2456,7 @@ Parser::parseDocumentationAttribute(SourceLoc atLoc, SourceLoc loc) {
   StringRef finalMetadata = metadata.value_or("");
 
   return makeParserResult(
-    new (Context) DocumentationAttr(loc, range, finalMetadata,
+    new (Context) DocumentationAttr(atLoc, range, finalMetadata,
                                     visibility, false));
 }
 
@@ -5122,10 +5122,16 @@ ParserStatus Parser::parseLifetimeDependenceSpecifiers(
             Identifier paramName;
             auto paramLoc =
                 consumeIdentifier(paramName, /*diagnoseDollarPrefix=*/false);
-            specifierList.push_back(
-                LifetimeDependenceSpecifier::
-                    getNamedLifetimeDependenceSpecifier(
-                        paramLoc, lifetimeDependenceKind, paramName));
+            if (paramName.is("immortal")) {
+              specifierList.push_back(
+                  LifetimeDependenceSpecifier::
+                      getImmortalLifetimeDependenceSpecifier(paramLoc));
+            } else {
+              specifierList.push_back(
+                  LifetimeDependenceSpecifier::
+                      getNamedLifetimeDependenceSpecifier(
+                          paramLoc, lifetimeDependenceKind, paramName));
+            }
             break;
           }
           case tok::integer_literal: {

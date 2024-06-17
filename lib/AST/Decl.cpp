@@ -1809,18 +1809,25 @@ bool ExtensionDecl::isWrittenWithConstraints() const {
   typeSig->getRequirementsWithInverses(typeReqs, typeInverseReqs);
 
   // If the (non-inverse) requirements are different between the extension and
-  // the original type, it's written with constraints. Note that
-  // the extension can only add requirements, so we need only check the size
-  // (not the specific requirements).
-  if (extReqs.size() > typeReqs.size()) {
+  // the original type, it's written with constraints.
+  if (extReqs.size() != typeReqs.size()) {
     return true;
   }
 
-  assert(extReqs.size() == typeReqs.size());
+  // In case of equal number of constraints, we have to check the specific
+  // requirements. Extensions can end up with fewer requirements than the type
+  // extended, due to a same-type requirement in the extension.
+  //
+  // This mirrors the 'same' check in `ASTMangler::gatherGenericSignatureParts`
+  for (size_t i = 0; i < extReqs.size(); i++) {
+    if (extReqs[i] != typeReqs[i])
+      return true;
+  }
 
   // If the type has no inverse requirements, there are no extra constraints
   // to write.
   if (typeInverseReqs.empty()) {
+    assert(extInverseReqs.empty() && "extension retroactively added inverse?");
     return false;
   }
 
@@ -2314,7 +2321,7 @@ bool VarDecl::isLayoutExposedToClients() const {
   auto nominalAccess =
     parent->getFormalAccessScope(/*useDC=*/nullptr,
                                  /*treatUsableFromInlineAsPublic=*/true);
-  if (!nominalAccess.isPublicOrPackage()) return false;
+  if (!nominalAccess.isPublic()) return false;
 
   if (!parent->getAttrs().hasAttribute<FrozenAttr>() &&
       !parent->getAttrs().hasAttribute<FixedLayoutAttr>())
@@ -3053,9 +3060,6 @@ bool AbstractStorageDecl::isResilient(ModuleDecl *M,
     return isResilient();
   case ResilienceExpansion::Maximal:
     if (M == getModuleContext())
-      return false;
-    // Access non-resiliently if package optimization is enabled
-    if (bypassResilienceInPackage(M))
       return false;
     return isResilient();
   }
@@ -4680,10 +4684,8 @@ bool ValueDecl::isMoreVisibleThan(ValueDecl *other) const {
 
   if (scope.isPublic())
     return !otherScope.isPublic();
-  else if (scope.isPackage())
-    return !otherScope.isPublicOrPackage();
   else if (scope.isInternal())
-    return !otherScope.isPublicOrPackage() && !otherScope.isInternal();
+    return !otherScope.isPublic() && !otherScope.isInternal();
   else
     return false;
 }
