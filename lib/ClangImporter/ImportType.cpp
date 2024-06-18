@@ -1695,8 +1695,7 @@ void swift::getConcurrencyAttrs(ASTContext &SwiftContext,
   findSwiftAttributes(type, [&](const clang::SwiftAttrAttr *attr) {
     if (isMainActorAttr(attr)) {
       isMainActor = true;
-      isNonSendable = importKind == ImportTypeKind::Parameter ||
-                      importKind == ImportTypeKind::CompletionHandlerParameter;
+      isSendable = true; // MainActor implies Sendable
     } else if (attr->getAttribute() == "@Sendable")
       isSendable = true;
     else if (attr->getAttribute() == "@_nonSendable")
@@ -3513,7 +3512,7 @@ ModuleDecl *ClangImporter::Implementation::tryLoadFoundationModule() {
 bool ClangImporter::Implementation::canImportFoundationModule() {
   ImportPath::Module::Builder builder(SwiftContext.Id_Foundation);
   auto modulePath = builder.get();
-  return SwiftContext.canImportModule(modulePath);
+  return SwiftContext.canImportModule(modulePath, SourceLoc());
 }
 
 Type ClangImporter::Implementation::getNamedSwiftType(ModuleDecl *module,
