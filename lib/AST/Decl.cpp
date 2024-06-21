@@ -49,6 +49,7 @@
 #include "swift/AST/SwiftNameTranslation.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeLoc.h"
+#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/Range.h"
 #include "swift/Basic/Statistic.h"
@@ -4681,6 +4682,8 @@ bool ValueDecl::isMoreVisibleThan(ValueDecl *other) const {
 
   if (scope.isPublic())
     return !otherScope.isPublic();
+  else if (scope.isPackage())
+    return !otherScope.isPublicOrPackage();
   else if (scope.isInternal())
     return !otherScope.isPublic() && !otherScope.isInternal();
   else

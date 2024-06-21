@@ -28,6 +28,7 @@
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/TypeCheckRequests.h"
+#include "swift/Basic/Assertions.h"
 
 using namespace swift;
 
@@ -508,6 +509,10 @@ template <class Impl>
 class EffectsHandlingWalker : public ASTWalker {
   Impl &asImpl() { return *static_cast<Impl*>(this); }
 public:
+  LazyInitializerWalking getLazyInitializerWalkingBehavior() override {
+    return LazyInitializerWalking::InAccessor;
+  }
+
   /// Only look at the expansions for effects checking.
   MacroWalking getMacroWalkingBehavior() const override {
     return MacroWalking::Expansion;
@@ -939,7 +944,7 @@ public:
                                   ConditionalEffectKind conditionalKind,
                                   PotentialEffectReason reason) {
     Classification result;
-    if (!thrownError || isNeverThrownError(thrownError))
+    if (isNeverThrownError(thrownError))
       return result;
 
     assert(!thrownError->hasError());
@@ -2085,6 +2090,9 @@ public:
     /// The initializer for a global variable.
     GlobalVarInitializer,
 
+    /// The initializer for a `lazy` variable.
+    LazyVarInitializer,
+
     /// The initializer for an enum element.
     EnumElementInitializer,
 
@@ -2100,8 +2108,12 @@ public:
 
 private:
   static Context getContextForPatternBinding(PatternBindingDecl *pbd) {
+    auto *var = pbd->getSingleVar();
+
     if (!pbd->isStatic() && pbd->getDeclContext()->isTypeContext()) {
       return Context(Kind::IVarInitializer, pbd->getDeclContext());
+    } else if (var && var->getAttrs().hasAttribute<LazyAttr>()) {
+      return Context(Kind::LazyVarInitializer, pbd->getDeclContext());
     } else {
       return Context(Kind::GlobalVarInitializer, pbd->getDeclContext());
     }
@@ -2519,6 +2531,7 @@ public:
 
     case Kind::EnumElementInitializer:
     case Kind::GlobalVarInitializer:
+    case Kind::LazyVarInitializer:
     case Kind::IVarInitializer:
     case Kind::DefaultArgument:
     case Kind::PropertyWrapper:
@@ -2555,6 +2568,7 @@ public:
 
     case Kind::EnumElementInitializer:
     case Kind::GlobalVarInitializer:
+    case Kind::LazyVarInitializer:
     case Kind::IVarInitializer:
     case Kind::DefaultArgument:
     case Kind::PropertyWrapper:
@@ -2581,6 +2595,7 @@ public:
 
     case Kind::EnumElementInitializer:
     case Kind::GlobalVarInitializer:
+    case Kind::LazyVarInitializer:
     case Kind::IVarInitializer:
     case Kind::DefaultArgument:
     case Kind::PropertyWrapper:
@@ -2690,6 +2705,7 @@ public:
 
     case Kind::EnumElementInitializer:
     case Kind::GlobalVarInitializer:
+    case Kind::LazyVarInitializer:
     case Kind::IVarInitializer:
     case Kind::DefaultArgument:
     case Kind::PropertyWrapper:
