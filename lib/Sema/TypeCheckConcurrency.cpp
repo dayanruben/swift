@@ -3682,7 +3682,7 @@ namespace {
       }
 
       // Check for sendability of the result type if we do not have a
-      // transferring result.
+      // sending result.
       if ((!ctx.LangOpts.hasFeature(Feature::RegionBasedIsolation) ||
            !fnType->hasSendingResult())) {
         assert(ctx.LangOpts.hasFeature(Feature::SendingArgsAndResults) &&
@@ -6055,6 +6055,8 @@ bool swift::checkSendableConformance(
     }
   }
 
+  if (conformance->getSourceKind() == ConformanceEntryKind::Implied)
+    conformanceDC = nominal;
   return checkSendableInstanceStorage(nominal, conformanceDC, check);
 }
 

@@ -185,7 +185,14 @@ usesDefaultDefinition(AssociatedTypeDecl *requirement) const {
 bool ProtocolConformance::isRetroactive() const {
   auto extensionModule = getDeclContext()->getParentModule();
   auto protocolModule = getProtocol()->getParentModule();
-  if (extensionModule->isSameModuleLookingThroughOverlays(protocolModule)) {
+  
+  auto isSameRetroactiveContext = 
+    [](ModuleDecl *moduleA, ModuleDecl *moduleB) -> bool {
+      return moduleA->isSameModuleLookingThroughOverlays(moduleB) ||
+        moduleA->inSamePackage(moduleB);
+    };
+  
+  if (isSameRetroactiveContext(extensionModule, protocolModule)) {
     return false;
   }
 
@@ -193,8 +200,7 @@ bool ProtocolConformance::isRetroactive() const {
       ConformingType->getNominalOrBoundGenericNominal();
   if (conformingTypeDecl) {
     auto conformingTypeModule = conformingTypeDecl->getParentModule();
-    if (extensionModule->
-        isSameModuleLookingThroughOverlays(conformingTypeModule)) {
+    if (isSameRetroactiveContext(extensionModule, conformingTypeModule)) {
       return false;
     }
   }
@@ -231,6 +237,10 @@ GenericSignature ProtocolConformance::getGenericSignature() const {
   case ProtocolConformanceKind::Self:
     // If we have a normal or inherited protocol conformance, look for its
     // generic signature.
+    if (getSourceKind() == ConformanceEntryKind::Implied &&
+        getProtocol()->isSpecificProtocol(KnownProtocolKind::Sendable)) {
+      return getDeclContext()->getSelfNominalTypeDecl()->getGenericSignature();
+    }
     return getDeclContext()->getGenericSignatureOfContext();
 
   case ProtocolConformanceKind::Builtin:
@@ -406,7 +416,7 @@ ConditionalRequirementsRequest::evaluate(Evaluator &evaluator,
     return {};
   }
 
-  const auto extensionSig = ext->getGenericSignature();
+  const auto extensionSig = NPC->getGenericSignature();
 
   // The extension signature should be a superset of the type signature, meaning
   // every thing in the type signature either is included too or is implied by
