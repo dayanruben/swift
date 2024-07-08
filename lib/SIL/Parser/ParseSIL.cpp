@@ -1126,7 +1126,8 @@ bool SILParser::parseSILType(SILType &Result,
   }
 
   // Parse attributes.
-  Parser::ParsedTypeAttributeList parsedAttrs;
+  Parser::ParsedTypeAttributeList parsedAttrs(
+      Parser::ParseTypeReason::Unspecified);
   parsedAttrs.parse(P);
 
   // Global functions are implicitly @convention(thin) if not specified otherwise.
@@ -1765,11 +1766,10 @@ static bool getConformancesForSubstitution(Parser &P,
               Type subReplacement,
               SourceLoc loc,
               SmallVectorImpl<ProtocolConformanceRef> &conformances) {
-  auto M = P.SF.getParentModule();
   subReplacement = subReplacement->getReferenceStorageReferent();
 
   for (auto protoDecl : protocols) {
-    auto conformance = M->lookupConformance(subReplacement, protoDecl);
+    auto conformance = ModuleDecl::lookupConformance(subReplacement, protoDecl);
     if (conformance.isInvalid()) {
       P.diagnose(loc, diag::sil_substitution_mismatch, subReplacement,
                  protoDecl->getDeclaredInterfaceType());
@@ -1821,9 +1821,8 @@ SubstitutionMap getApplySubstitutionsFromParsed(
       },
       [&](CanType dependentType, Type replacementType,
           ProtocolDecl *proto) -> ProtocolConformanceRef {
-        auto M = SP.P.SF.getParentModule();
         replacementType = replacementType->getReferenceStorageReferent();
-        if (auto conformance = M->lookupConformance(replacementType, proto))
+        if (auto conformance = ModuleDecl::lookupConformance(replacementType, proto))
           return conformance;
 
         SP.P.diagnose(loc, diag::sil_substitution_mismatch, replacementType,
@@ -2301,8 +2300,7 @@ SILParser::parseKeyPathPatternComponent(KeyPathPatternComponent &component,
            contextFormalTy = patternSig.getGenericEnvironment()
               ->mapTypeIntoContext(formalTy);
          }
-         auto lookup = P.SF.getParentModule()->lookupConformance(
-                                                 contextFormalTy, proto);
+         auto lookup = ModuleDecl::lookupConformance(contextFormalTy, proto);
          if (lookup.isInvalid()) {
            P.diagnose(formalTyLoc,
                       diag::sil_keypath_index_not_hashable,
@@ -5449,8 +5447,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
         P.diagnose(TyLoc, diag::sil_witness_method_not_protocol);
         return true;
       }
-      auto conformance =
-          P.SF.getParentModule()->lookupConformance(LookupTy, proto);
+      auto conformance = ModuleDecl::lookupConformance(LookupTy, proto);
       if (conformance.isInvalid()) {
         P.diagnose(TyLoc, diag::sil_witness_method_type_does_not_conform);
         return true;
@@ -7845,7 +7842,7 @@ parseRootProtocolConformance(Parser &P, SILParser &SP, Type ConformingTy,
   Type lookupTy = ConformingTy;
   if (auto bound = lookupTy->getAs<BoundGenericType>())
     lookupTy = bound->getDecl()->getDeclaredType();
-  auto lookup = P.SF.getParentModule()->lookupConformance(lookupTy, proto);
+  auto lookup = ModuleDecl::lookupConformance(lookupTy, proto);
   if (lookup.isInvalid()) {
     P.diagnose(KeywordLoc, diag::sil_witness_protocol_conformance_not_found);
     return ProtocolConformanceRef();

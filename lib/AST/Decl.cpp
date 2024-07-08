@@ -5128,7 +5128,7 @@ NominalTypeDecl::canConformTo(InvertibleProtocolKind ip) const {
   Type selfTy = getDeclaredInterfaceType();
   assert(selfTy);
 
-  auto conformance = getModuleContext()->lookupConformance(selfTy, proto,
+  auto conformance = ModuleDecl::lookupConformance(selfTy, proto,
       /*allowMissing=*/false);
 
   if (conformance.isInvalid())
@@ -7409,6 +7409,8 @@ VarDecl::VarDecl(DeclKind kind, bool isStatic, VarDecl::Introducer introducer,
   Bits.VarDecl.IsLazyStorageProperty = false;
   Bits.VarDecl.IsPropertyWrapperBackingProperty = false;
   Bits.VarDecl.IsTopLevelGlobal = false;
+  Bits.VarDecl.NoAttachedPropertyWrappers = false;
+  Bits.VarDecl.NoPropertyWrapperAuxiliaryVariables = false;
 }
 
 Type VarDecl::getTypeInContext() const {
@@ -11635,9 +11637,7 @@ ActorIsolation::forActorInstanceParameter(Expr *actor,
     auto baseType =
         memberRef->getBase()->getType()->getMetatypeInstanceType();
     if (auto globalActor = ctx.getProtocol(KnownProtocolKind::GlobalActor)) {
-      auto *dc = declRef.getDecl()->getDeclContext();
-      auto *module = dc->getParentModule();
-      auto conformance = module->checkConformance(baseType, globalActor);
+      auto conformance = ModuleDecl::checkConformance(baseType, globalActor);
       if (conformance &&
           conformance.getWitnessByName(baseType, ctx.Id_shared) == declRef) {
         return ActorIsolation::forGlobalActor(baseType);
