@@ -741,6 +741,13 @@ isIsolationInferenceBoundaryClosure(const AbstractClosureExpr *closure,
     }
   }
 
+  // An autoclosure for an async let acts as a boundary. It is non-Sendable
+  // regardless of its context.
+  if (auto *autoclosure = dyn_cast<AutoClosureExpr>(closure)) {
+    if (autoclosure->getThunkKind() == AutoClosureExpr::Kind::AsyncLet)
+      return true;
+  }
+
   return isSendableClosure(closure, forActorIsolation);
 }
 
@@ -3936,6 +3943,12 @@ namespace {
                 kindOfUsage(decl, keyPath));
 
             if (result == ActorReferenceResult::SameConcurrencyDomain)
+              break;
+
+            // An isolated key-path component requires being formed in the same
+            // isolation domain. Record the required isolation here if we're
+            // computing the isolation of a stored property initializer.
+            if (refineRequiredIsolation(isolation))
               break;
 
             LLVM_FALLTHROUGH;
