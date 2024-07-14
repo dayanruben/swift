@@ -1537,8 +1537,7 @@ public:
 class ActorIsolationRequest :
     public SimpleRequest<ActorIsolationRequest,
                          ActorIsolation(ValueDecl *),
-                         RequestFlags::SeparatelyCached |
-                         RequestFlags::SplitCached> {
+                         RequestFlags::Cached> {
 public:
   using SimpleRequest::SimpleRequest;
 
@@ -1548,10 +1547,8 @@ private:
   ActorIsolation evaluate(Evaluator &evaluator, ValueDecl *value) const;
 
 public:
-  // Separate.
+  // Caching
   bool isCached() const { return true; }
-  std::optional<ActorIsolation> getCachedResult() const;
-  void cacheResult(ActorIsolation value) const;
 };
 
 /// Determine whether the given function should have an isolated 'self'.
@@ -5001,25 +4998,27 @@ public:
 };
 
 class LifetimeDependenceInfoRequest
-    : public SimpleRequest<LifetimeDependenceInfoRequest,
-                           std::optional<LifetimeDependenceInfo>(
-                               AbstractFunctionDecl *),
-                           RequestFlags::SeparatelyCached |
-                           RequestFlags::SplitCached> {
+    : public SimpleRequest<
+          LifetimeDependenceInfoRequest,
+          std::optional<llvm::ArrayRef<LifetimeDependenceInfo>>(
+              AbstractFunctionDecl *),
+          RequestFlags::SeparatelyCached | RequestFlags::SplitCached> {
 public:
   using SimpleRequest::SimpleRequest;
 
 private:
   friend SimpleRequest;
 
-  std::optional<LifetimeDependenceInfo>
+  std::optional<llvm::ArrayRef<LifetimeDependenceInfo>>
   evaluate(Evaluator &evaluator, AbstractFunctionDecl *AFD) const;
 
 public:
   // Separate caching.
   bool isCached() const { return true; }
-  std::optional<std::optional<LifetimeDependenceInfo>> getCachedResult() const;
-  void cacheResult(std::optional<LifetimeDependenceInfo> value) const;
+  std::optional<std::optional<llvm::ArrayRef<LifetimeDependenceInfo>>>
+  getCachedResult() const;
+  void cacheResult(
+      std::optional<llvm::ArrayRef<LifetimeDependenceInfo>> value) const;
 };
 
 class CaptureInfoRequest :

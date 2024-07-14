@@ -2014,28 +2014,6 @@ GlobalActorAttributeRequest::cacheResult(std::optional<CustomAttrNominalPair> va
 }
 
 //----------------------------------------------------------------------------//
-// ActorIsolationRequest computation.
-//----------------------------------------------------------------------------//
-
-std::optional<ActorIsolation> ActorIsolationRequest::getCachedResult() const {
-  auto *decl = std::get<0>(getStorage());
-  if (decl->LazySemanticInfo.noActorIsolation)
-    return ActorIsolation::forUnspecified();
-
-  return decl->getASTContext().evaluator.getCachedNonEmptyOutput(*this);
-}
-
-void ActorIsolationRequest::cacheResult(ActorIsolation value) const {
-  auto *decl = std::get<0>(getStorage());
-  if (value.isUnspecified()) {
-    decl->LazySemanticInfo.noActorIsolation = 1;
-    return;
-  }
-
-  decl->getASTContext().evaluator.cacheNonEmptyOutput(*this, std::move(value));
-}
-
-//----------------------------------------------------------------------------//
 // ResolveMacroRequest computation.
 //----------------------------------------------------------------------------//
 
@@ -2540,7 +2518,7 @@ void ExpandBodyMacroRequest::noteCycleStep(DiagnosticEngine &diags) const {
 // LifetimeDependenceInfoRequest computation.
 //----------------------------------------------------------------------------//
 
-std::optional<std::optional<LifetimeDependenceInfo>>
+std::optional<std::optional<llvm::ArrayRef<LifetimeDependenceInfo>>>
 LifetimeDependenceInfoRequest::getCachedResult() const {
   auto *func = std::get<0>(getStorage());
 
@@ -2551,7 +2529,7 @@ LifetimeDependenceInfoRequest::getCachedResult() const {
 }
 
 void LifetimeDependenceInfoRequest::cacheResult(
-    std::optional<LifetimeDependenceInfo> result) const {
+    std::optional<llvm::ArrayRef<LifetimeDependenceInfo>> result) const {
   auto *func = std::get<0>(getStorage());
   
   if (!result) {

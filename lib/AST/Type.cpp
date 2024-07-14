@@ -3043,8 +3043,7 @@ getForeignRepresentable(Type type, ForeignLanguage language,
       auto specialized = type->getASTContext()
         .getSpecializedConformance(type,
              cast<NormalProtocolConformance>(result.getConformance()),
-             boundGenericType->getContextSubstitutionMap(
-                                                 boundGenericType->getDecl()));
+             boundGenericType->getContextSubstitutionMap());
       result = ForeignRepresentationInfo::forBridged(specialized);
     }
   }
@@ -3306,6 +3305,37 @@ static bool matches(CanType t1, CanType t2, TypeMatchOptions matchMode,
                  opaque2->getSubstitutions().getCanonical() &&
                opaque1->getInterfaceType()->getCanonicalType()->matches(
                    opaque2->getInterfaceType()->getCanonicalType(), matchMode);
+
+  if (matchMode.contains(TypeMatchFlags::IgnoreSendability)) {
+    // Support `any Sendable` -> `Any` matching inside generic types
+    // e.g. collections and optionals (i.e. `[String: (any Sendable)?]`).
+    if (auto *generic1 = t1->getAs<BoundGenericType>()) {
+      if (auto *generic2 = t2->getAs<BoundGenericType>()) {
+        if (generic1->getDecl() == generic2->getDecl()) {
+          auto genericArgs1 = generic1->getGenericArgs();
+          auto genericArgs2 = generic2->getGenericArgs();
+
+          if (genericArgs1.size() == genericArgs2.size() &&
+              llvm::all_of(llvm::zip_equal(genericArgs1, genericArgs2),
+                           [&](const auto &elt) -> bool {
+                             return matches(
+                                 std::get<0>(elt)->getCanonicalType(),
+                                 std::get<1>(elt)->getCanonicalType(),
+                                 matchMode, ParameterPosition::NotParameter,
+                                 OptionalUnwrapping::None);
+                           }))
+            return true;
+        }
+      }
+    }
+
+    // Attempting to match `any Sendable` by `Any` is allowed in this mode.
+    if (t1->isAny()) {
+      auto *PD = dyn_cast_or_null<ProtocolDecl>(t2->getAnyNominal());
+      if (PD && PD->isSpecificProtocol(KnownProtocolKind::Sendable))
+        return true;
+    }
+  }
 
   return false;
 }
@@ -3915,17 +3945,38 @@ Type AnyFunctionType::getGlobalActor() const {
   }
 }
 
-const LifetimeDependenceInfo *
-AnyFunctionType::getLifetimeDependenceInfoOrNull() const {
+llvm::ArrayRef<LifetimeDependenceInfo>
+AnyFunctionType::getLifetimeDependencies() const {
   switch (getKind()) {
   case TypeKind::Function:
-    return cast<FunctionType>(this)->getLifetimeDependenceInfoOrNull();
+    return cast<FunctionType>(this)->getLifetimeDependencies();
   case TypeKind::GenericFunction:
-    return cast<GenericFunctionType>(this)->getLifetimeDependenceInfoOrNull();
+    return cast<GenericFunctionType>(this)->getLifetimeDependencies();
 
   default:
     llvm_unreachable("Illegal type kind for AnyFunctionType.");
   }
+}
+
+std::optional<LifetimeDependenceInfo>
+AnyFunctionType::getLifetimeDependenceFor(unsigned targetIndex) const {
+  switch (getKind()) {
+  case TypeKind::Function:
+    return cast<FunctionType>(this)->getLifetimeDependenceFor(targetIndex);
+  case TypeKind::GenericFunction:
+    return cast<GenericFunctionType>(this)->getLifetimeDependenceFor(
+        targetIndex);
+
+  default:
+    llvm_unreachable("Illegal type kind for AnyFunctionType.");
+  }
+}
+
+std::optional<LifetimeDependenceInfo>
+AnyFunctionType::getLifetimeDependenceForResult(const ValueDecl *decl) const {
+  auto resultIndex =
+      decl->hasCurriedSelf() ? getNumParams() + 1 : getNumParams();
+  return getLifetimeDependenceFor(resultIndex);
 }
 
 ClangTypeInfo AnyFunctionType::getCanonicalClangTypeInfo() const {
@@ -3967,7 +4018,7 @@ AnyFunctionType::getCanonicalExtInfo(bool useClangFunctionType) const {
   return ExtInfo(bits,
                  useClangFunctionType ? getCanonicalClangTypeInfo()
                                       : ClangTypeInfo(),
-                 globalActor, thrownError, getLifetimeDependenceInfo());
+                 globalActor, thrownError, getLifetimeDependencies());
 }
 
 bool AnyFunctionType::hasNonDerivableClangType() {
@@ -3999,17 +4050,6 @@ ClangTypeInfo SILFunctionType::getClangTypeInfo() const {
   assert(!info->empty() &&
          "If the ClangTypeInfo was empty, we shouldn't have stored it.");
   return *info;
-}
-
-const LifetimeDependenceInfo *SILFunctionType::
-getLifetimeDependenceInfoOrNull() const {
-  if (!Bits.SILFunctionType.HasLifetimeDependenceInfo)
-    return nullptr;
-  auto *info = getTrailingObjects<LifetimeDependenceInfo>();
-  assert(
-      !info->empty() &&
-      "If the LifetimeDependenceInfo was empty, we shouldn't have stored it.");
-  return info;
 }
 
 bool SILFunctionType::hasNonDerivableClangType() {

@@ -3147,6 +3147,9 @@ WARNING(witness_deprecated,none,
         "protocol %1%select{|: %2}2",
         (const ValueDecl *, Identifier, StringRef))
 
+WARNING(unavailable_conformance,none,
+        "conformance of %0 to protocol %1 is already unavailable",
+        (Type, Identifier))
 ERROR(redundant_conformance,none,
       "redundant conformance of %0 to protocol %1", (Type, Identifier))
 ERROR(redundant_conformance_conditional,none,
@@ -3997,6 +4000,12 @@ ERROR(reasync_without_async_parameter,none,
 
 ERROR(inherits_executor_without_async,none,
       "non-async functions cannot inherit an executor", ())
+ERROR(isolation_in_inherits_executor,none,
+      "#isolation%select{| (introduced by a default argument)}0 cannot be used "
+      "within an '@_unsafeInheritExecutor' function", (bool))
+ERROR(unsafe_inherits_executor_deprecated,none,
+        "@_unsafeInheritExecutor attribute is deprecated; consider an "
+        "'isolated' parameter defaulted to '#isolation' instead", ())
 
 ERROR(lifetime_invalid_global_scope,none, "%0 is only valid on methods",
       (DeclAttribute))
@@ -5557,6 +5566,9 @@ ERROR(non_sendable_isolated_capture,none,
 ERROR(implicit_async_let_non_sendable_capture,none,
       "capture of %1 with non-sendable type %0 in 'async let' binding",
       (Type, DeclName))
+ERROR(self_capture_deinit_task,none,
+      "capture of 'self' in a closure that outlives deinit",
+      ())
 ERROR(implicit_non_sendable_capture,none,
       "implicit capture of %1 requires that %0 conforms to `Sendable`",
       (Type, DeclName))
@@ -7820,6 +7832,9 @@ WARNING(suppress_already_suppressed_protocol,none,
 ERROR(extension_conforms_to_invertible_and_others, none,
       "conformance to '%0' must be declared in a separate extension",
       (StringRef))
+ERROR(invertible_conformance_other_source_file,none,
+      "conformance to '%0' must occur in the same source file as %kind1",
+      (StringRef, const ValueDecl *))
 
 // -- older ones below --
 ERROR(noncopyable_parameter_requires_ownership, none,
@@ -7975,8 +7990,8 @@ ERROR(lifetime_dependence_invalid_self_ownership, none,
 ERROR(lifetime_dependence_only_on_function_method_init_result, none,
       "lifetime dependence specifiers may only be used on result of "
        "functions, methods, initializers", ())
-ERROR(lifetime_dependence_invalid_return_type, none,
-      "lifetime dependence can only be specified on ~Escapable results", ())
+ERROR(lifetime_dependence_invalid_type, none,
+      "lifetime dependence can only be specified on ~Escapable types", ())
 ERROR(lifetime_dependence_cannot_infer_ambiguous_candidate, none,
       "cannot infer lifetime dependence %0, multiple parameters qualifiy as a candidate", (StringRef))
  ERROR(lifetime_dependence_cannot_infer_no_candidates, none,
@@ -7994,6 +8009,9 @@ ERROR(lifetime_dependence_cannot_infer_ambiguous_candidate, none,
        ())
 ERROR(lifetime_dependence_immortal_conflict_name, none,
       "conflict between the parameter name and immortal keyword", ())
+ERROR(lifetime_dependence_function_type, none,
+      "lifetime dependencies on function types are not supported",
+      ())
 
 //===----------------------------------------------------------------------===//
 //                             MARK: Sending

@@ -1208,11 +1208,6 @@ static bool hasLessAccessibleSetter(const AbstractStorageDecl *ASD) {
   return ASD->getSetterFormalAccess() < ASD->getFormalAccess();
 }
 
-static bool isImplicitRethrowsProtocol(const ProtocolDecl *proto) {
-  return proto->isSpecificProtocol(KnownProtocolKind::AsyncSequence) ||
-      proto->isSpecificProtocol(KnownProtocolKind::AsyncIteratorProtocol);
-}
-
 void PrintAST::printAttributes(const Decl *D) {
   if (Options.SkipAttributes)
     return;
@@ -1222,17 +1217,6 @@ void PrintAST::printAttributes(const Decl *D) {
     (void)D->getSemanticAttrs();
 
   auto attrs = D->getAttrs();
-
-  // When printing a Swift interface, make sure that older compilers see
-  // @rethrows on the AsyncSequence and AsyncIteratorProtocol.
-  if (Options.AsyncSequenceRethrows && Options.IsForSwiftInterface) {
-    if (auto proto = dyn_cast<ProtocolDecl>(D)) {
-      if (isImplicitRethrowsProtocol(proto)) {
-        Printer << "@rethrows";
-        Printer.printNewline();
-      }
-    }
-  }
 
   // Save the current number of exclude attrs to restore once we're done.
   unsigned originalExcludeAttrCount = Options.ExcludeAttrList.size();
@@ -3043,14 +3027,6 @@ void PrintAST::printExtension(ExtensionDecl *decl) {
   }
 }
 
-static void suppressingFeatureExtensionMacroAttr(PrintOptions &options,
-                                                 llvm::function_ref<void()> action) {
-  bool originalPrintExtensionMacroAttrs = options.PrintExtensionMacroAttributes;
-  options.PrintExtensionMacroAttributes = false;
-  action();
-  options.PrintExtensionMacroAttributes = originalPrintExtensionMacroAttrs;
-}
-
 static void suppressingFeatureSpecializeAttributeWithAvailability(
                                         PrintOptions &options,
                                         llvm::function_ref<void()> action) {
@@ -3059,67 +3035,9 @@ static void suppressingFeatureSpecializeAttributeWithAvailability(
   action();
 }
 
-static void suppressingFeaturePrimaryAssociatedTypes2(PrintOptions &options,
-                                         llvm::function_ref<void()> action) {
-  bool originalPrintPrimaryAssociatedTypes = options.PrintPrimaryAssociatedTypes;
-  options.PrintPrimaryAssociatedTypes = false;
-  action();
-  options.PrintPrimaryAssociatedTypes = originalPrintPrimaryAssociatedTypes;
-}
-
-static void
-suppressingFeatureAssociatedTypeAvailability(
-    PrintOptions &options, llvm::function_ref<void()> action) {
-  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DeclAttrKind::Available);
-  action();
-  options.ExcludeAttrList.resize(originalExcludeAttrCount);
-}
-
-static void
-suppressingFeatureAsyncSequenceFailure(
-    PrintOptions &options, llvm::function_ref<void()> action) {
-  llvm::SaveAndRestore<bool> saved(options.AsyncSequenceRethrows, true);
-  action();
-}
-static void
-suppressingFeatureLexicalLifetimes(PrintOptions &options,
-                                   llvm::function_ref<void()> action) {
-  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DeclAttrKind::EagerMove);
-  options.ExcludeAttrList.push_back(DeclAttrKind::NoEagerMove);
-  options.ExcludeAttrList.push_back(DeclAttrKind::LexicalLifetimes);
-  action();
-  options.ExcludeAttrList.resize(originalExcludeAttrCount);
-}
-
-static void suppressingFeatureRetroactiveAttribute(
-  PrintOptions &options,
-  llvm::function_ref<void()> action) {
-  llvm::SaveAndRestore<PrintOptions> originalOptions(options);
-  options.ExcludeAttrList.push_back(TypeAttrKind::Retroactive);
-  action();
-}
-
-static void suppressingFeatureExtern(PrintOptions &options,
-                                     llvm::function_ref<void()> action) {
-  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DeclAttrKind::Extern);
-  action();
-  options.ExcludeAttrList.resize(originalExcludeAttrCount);
-}
-
 static void suppressingFeatureIsolatedAny(PrintOptions &options,
                                           llvm::function_ref<void()> action) {
   llvm::SaveAndRestore<bool> scope(options.SuppressIsolatedAny, true);
-  action();
-}
-
-static void suppressingFeatureOptionalIsolatedParameters(
-    PrintOptions &options,
-    llvm::function_ref<void()> action) {
-  llvm::SaveAndRestore<bool> scope(
-      options.SuppressOptionalIsolatedParams, true);
   action();
 }
 
@@ -3128,25 +3046,6 @@ suppressingFeatureSendingArgsAndResults(PrintOptions &options,
                                         llvm::function_ref<void()> action) {
   llvm::SaveAndRestore<bool> scope(options.SuppressSendingArgsAndResults, true);
   action();
-}
-
-static void suppressingFeatureAssociatedTypeImplements(PrintOptions &options,
-                                     llvm::function_ref<void()> action) {
-  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DeclAttrKind::Implements);
-  action();
-  options.ExcludeAttrList.resize(originalExcludeAttrCount);
-}
-
-static void
-suppressingFeatureConformanceSuppression(PrintOptions &options,
-                                         llvm::function_ref<void()> action) {
-  unsigned originalExcludeAttrCount = options.ExcludeAttrList.size();
-  options.ExcludeAttrList.push_back(DeclAttrKind::PreInverseGenerics);
-  llvm::SaveAndRestore<bool> scope(options.SuppressConformanceSuppression,
-                                   true);
-  action();
-  options.ExcludeAttrList.resize(originalExcludeAttrCount);
 }
 
 static void
@@ -3677,10 +3576,7 @@ void PrintAST::visitProtocolDecl(ProtocolDecl *decl) {
         Printer.printName(name);
       });
 
-    if (Options.PrintPrimaryAssociatedTypes) {
-      printPrimaryAssociatedTypes(decl);
-    }
-
+    printPrimaryAssociatedTypes(decl);
     printInheritedFromRequirementSignature(decl, decl);
 
     // The trailing where clause is a syntactic thing, which isn't serialized
@@ -3765,7 +3661,7 @@ static void printParameterFlags(ASTPrinter &printer,
       // at +1. By not printing sending, we would be changing the API
       // potentially to take the parameter at +0 instead of +1. To work around
       // this, print out consuming so that we preserve the +1 parameter.
-      printer.printKeyword("consuming", options, " ");
+      printer.printKeyword("__owned", options, " ");
     }
   }
 
@@ -4187,7 +4083,7 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
       Printer.printDeclResultTypePre(decl, ResultTyLoc);
       Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
       {
-        if (auto *typeRepr = dyn_cast_or_null<LifetimeDependentReturnTypeRepr>(
+        if (auto *typeRepr = dyn_cast_or_null<LifetimeDependentTypeRepr>(
                 decl->getResultTypeRepr())) {
           for (auto &dep : typeRepr->getLifetimeDependencies()) {
             Printer << " " << dep.getLifetimeDependenceSpecifierString() << " ";
@@ -4389,15 +4285,13 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
     // Protocol extension initializers are modeled as convenience initializers,
     // but they're not written that way in source. Check if we're actually
     // printing onto a class.
-    bool isClassContext;
-    if (CurrentType) {
-      isClassContext = CurrentType->getClassOrBoundGenericClass() != nullptr;
-    } else {
-      const DeclContext *dc = decl->getDeclContext();
-      isClassContext = dc->getSelfClassDecl() != nullptr;
-    }
-    if (isClassContext) {
-      Printer.printKeyword("convenience", Options, " ");
+    ClassDecl *classDecl = CurrentType
+                               ? CurrentType->getClassOrBoundGenericClass()
+                               : decl->getDeclContext()->getSelfClassDecl();
+    if (classDecl) {
+      // Convenience intializers are also unmarked on actors.
+      if (!classDecl->isActor())
+        Printer.printKeyword("convenience", Options, " ");
     } else {
       assert(decl->getDeclContext()->getExtendedProtocolDecl() &&
              "unexpected convenience initializer");
@@ -4425,7 +4319,7 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
       if (decl->hasLifetimeDependentReturn()) {
         Printer << " -> ";
         auto *typeRepr =
-            cast<LifetimeDependentReturnTypeRepr>(decl->getResultTypeRepr());
+            cast<LifetimeDependentTypeRepr>(decl->getResultTypeRepr());
         for (auto &dep : typeRepr->getLifetimeDependencies()) {
           Printer << dep.getLifetimeDependenceSpecifierString() << " ";
         }
@@ -6530,8 +6424,9 @@ public:
     }
   }
 
-  void visitAnyFunctionTypeParams(ArrayRef<AnyFunctionType::Param> Params,
-                                  bool printLabels) {
+  void visitAnyFunctionTypeParams(
+      ArrayRef<AnyFunctionType::Param> Params, bool printLabels,
+      ArrayRef<LifetimeDependenceInfo> lifetimeDependencies) {
     Printer << "(";
 
     for (unsigned i = 0, e = Params.size(); i != e; ++i) {
@@ -6565,6 +6460,8 @@ public:
         Printer << ": ";
       }
 
+      Printer.printLifetimeDependenceAt(lifetimeDependencies, i);
+
       auto type = Param.getPlainType();
       if (Param.isVariadic()) {
         visit(type);
@@ -6588,7 +6485,8 @@ public:
     printFunctionExtInfo(T);
 
     // If we're stripping argument labels from types, do it when printing.
-    visitAnyFunctionTypeParams(T->getParams(), /*printLabels*/false);
+    visitAnyFunctionTypeParams(T->getParams(), /*printLabels*/ false,
+                               T->getLifetimeDependencies());
 
     if (T->hasExtInfo()) {
       if (T->isAsync()) {
@@ -6614,11 +6512,7 @@ public:
       Printer.printKeyword("sending ", Options);
     }
 
-    if (T->hasLifetimeDependenceInfo()) {
-      auto lifetimeDependenceInfo = T->getExtInfo().getLifetimeDependenceInfo();
-      assert(!lifetimeDependenceInfo.empty());
-      Printer << lifetimeDependenceInfo.getString() << " ";
-    }
+    Printer.printLifetimeDependence(T->getLifetimeDependenceForResult());
 
     Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
     T->getResult().print(Printer, Options);
@@ -6652,16 +6546,17 @@ public:
                           PrintAST::defaultGenericRequirementFlags(Options));
     Printer << " ";
 
-   visitAnyFunctionTypeParams(T->getParams(), /*printLabels*/true);
+    visitAnyFunctionTypeParams(T->getParams(), /*printLabels*/ true,
+                               T->getLifetimeDependencies());
 
-   if (T->hasExtInfo()) {
-     if (T->isAsync()) {
-       Printer << " ";
-       Printer.printKeyword("async", Options);
-     }
+    if (T->hasExtInfo()) {
+      if (T->isAsync()) {
+        Printer << " ";
+        Printer.printKeyword("async", Options);
+      }
 
-     if (T->isThrowing()) {
-       Printer << " " << tok::kw_throws;
+      if (T->isThrowing()) {
+        Printer << " " << tok::kw_throws;
 
         if (auto thrownError = T->getThrownError()) {
           Printer << "(";
@@ -6673,11 +6568,8 @@ public:
 
     Printer << " -> ";
 
-    if (T->hasLifetimeDependenceInfo()) {
-      auto lifetimeDependenceInfo = T->getExtInfo().getLifetimeDependenceInfo();
-      assert(!lifetimeDependenceInfo.empty());
-      Printer << lifetimeDependenceInfo.getString() << " ";
-    }
+    Printer.printLifetimeDependenceAt(T->getLifetimeDependencies(),
+                                      T->getParams().size());
 
     Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
     T->getResult().print(Printer, Options);
@@ -6773,16 +6665,16 @@ public:
     [T, sub, &subOptions] {
       sub->Printer << "(";
       bool first = true;
+      unsigned paramIndex = 0;
       for (auto param : T->getParameters()) {
         sub->Printer.printSeparator(first, ", ");
-        param.print(sub->Printer, subOptions);
+        param.print(sub->Printer, subOptions,
+                    T->getLifetimeDependenceFor(paramIndex));
+        paramIndex++;
       }
       sub->Printer << ") -> ";
 
-      auto lifetimeDependenceInfo = T->getLifetimeDependenceInfo();
-      if (!lifetimeDependenceInfo.empty()) {
-        sub->Printer << lifetimeDependenceInfo.getString() << " ";
-      }
+      sub->Printer.printLifetimeDependence(T->getLifetimeDependenceForResult());
 
       bool parenthesizeResults = mustParenthesizeResults(T);
       if (parenthesizeResults)
@@ -6793,6 +6685,7 @@ public:
       for (auto yield : T->getYields()) {
         sub->Printer.printSeparator(first, ", ");
         sub->Printer << "@yields ";
+        // TODO: Fix lifetime dependence printing here
         yield.print(sub->Printer, subOptions);
       }
 
@@ -6812,8 +6705,6 @@ public:
         else {
           assert(false && "Should have error, error_indirect, or error_unowned");
         }
-
-
         T->getErrorResult().getInterfaceType().print(sub->Printer, subOptions);
       }
 
@@ -7363,8 +7254,10 @@ void AnyFunctionType::printParams(ArrayRef<AnyFunctionType::Param> Params,
 void AnyFunctionType::printParams(ArrayRef<AnyFunctionType::Param> Params,
                                   ASTPrinter &Printer,
                                   const PrintOptions &PO) {
-  TypePrinter(Printer, PO).visitAnyFunctionTypeParams(Params,
-                                                      /*printLabels*/true);
+  // TODO: Handle lifetime dependence printing here
+  TypePrinter(Printer, PO)
+      .visitAnyFunctionTypeParams(Params,
+                                  /*printLabels*/ true, {});
 }
 
 std::string
@@ -7518,12 +7411,16 @@ StringRef swift::getCheckedCastKindName(CheckedCastKind kind) {
   llvm_unreachable("bad checked cast name");
 }
 
-void SILParameterInfo::print(raw_ostream &OS, const PrintOptions &Opts) const {
+void SILParameterInfo::print(
+    raw_ostream &OS, const PrintOptions &Opts,
+    std::optional<LifetimeDependenceInfo> lifetimeDependence) const {
   StreamPrinter Printer(OS);
-  print(Printer, Opts);
+  print(Printer, Opts, lifetimeDependence);
 }
-void SILParameterInfo::print(ASTPrinter &Printer,
-                             const PrintOptions &Opts) const {
+
+void SILParameterInfo::print(
+    ASTPrinter &Printer, const PrintOptions &Opts,
+    std::optional<LifetimeDependenceInfo> lifetimeDependence) const {
   auto options = getOptions();
 
   if (options.contains(SILParameterInfo::NotDifferentiable)) {
@@ -7539,6 +7436,10 @@ void SILParameterInfo::print(ASTPrinter &Printer,
   if (options.contains(SILParameterInfo::Isolated)) {
     options -= SILParameterInfo::Isolated;
     Printer << "@sil_isolated ";
+  }
+
+  if (lifetimeDependence) {
+    Printer.printLifetimeDependence(*lifetimeDependence);
   }
 
   // If we did not handle a case in Options, this code was not updated
