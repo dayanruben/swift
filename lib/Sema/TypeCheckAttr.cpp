@@ -3273,7 +3273,7 @@ void AttributeChecker::visitUsableFromInlineAttr(UsableFromInlineAttr *attr) {
       VD->getFormalAccess() != AccessLevel::Package) {
     diagnoseAndRemoveAttr(attr,
                           diag::usable_from_inline_attr_with_explicit_access,
-                          VD->getName(), VD->getFormalAccess());
+                          VD, VD->getFormalAccess());
     return;
   }
 
@@ -7275,7 +7275,10 @@ void AttributeChecker::visitUnsafeInheritExecutorAttr(
   auto fn = cast<FuncDecl>(D);
   if (!fn->isAsyncContext()) {
     diagnose(attr->getLocation(), diag::inherits_executor_without_async);
-  } else {
+  } else if (fn->getBaseName().isSpecial() ||
+             !fn->getParentModule()->getName().str().equals("_Concurrency") ||
+             !fn->getBaseIdentifier().str()
+                .startswith("_unsafeInheritExecutor_")) {
     bool inConcurrencyModule = D->getDeclContext()->getParentModule()->getName()
         .str().equals("_Concurrency");
     auto diag = fn->diagnose(diag::unsafe_inherits_executor_deprecated);
