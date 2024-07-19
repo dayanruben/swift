@@ -21,6 +21,7 @@
 #include "TypeCheckType.h"
 #include "swift/Strings.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/DistributedDecl.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/ImportCache.h"
 #include "swift/AST/Initializer.h"
@@ -3967,6 +3968,20 @@ namespace {
       return nullptr;
     }
 
+    /// Check whether there are _unsafeInheritExecutor_ workarounds in the
+    /// given _Concurrency module.
+    static bool hasUnsafeInheritExecutorWorkarounds(
+        DeclContext *dc, SourceLoc loc
+      ) {
+      ASTContext &ctx = dc->getASTContext();
+      Identifier name =
+          ctx.getIdentifier("_unsafeInheritExecutor_withUnsafeContinuation");
+      NameLookupOptions lookupOptions = defaultUnqualifiedLookupOptions;
+      LookupResult lookup = TypeChecker::lookupUnqualified(
+          dc, DeclNameRef(name), loc, lookupOptions);
+      return !lookup.empty();
+    }
+
     void recordCurrentContextIsolation(
         CurrentContextIsolationExpr *isolationExpr) {
       // If an actor has already been assigned, we're done.
@@ -3987,6 +4002,12 @@ namespace {
                                        diag::isolation_in_inherits_executor,
                                        inDefaultArgument);
         diag.limitBehaviorIf(inConcurrencyModule, DiagnosticBehavior::Warning);
+
+        if (!inConcurrencyModule &&
+            !hasUnsafeInheritExecutorWorkarounds(func, func->getLoc())) {
+          diag.limitBehavior(DiagnosticBehavior::Warning);
+        }
+
         replaceUnsafeInheritExecutorWithDefaultedIsolationParam(func, diag);
       }
 
@@ -4114,10 +4135,13 @@ namespace {
           return false;
         }
 
-        if (auto param =  dyn_cast<ParamDecl>(value)){
-          if(param->isInOut()){
-              ctx.Diags.diagnose(loc, diag::concurrent_access_of_inout_param, param->getName());
-              return true;
+        if (auto param = dyn_cast<ParamDecl>(value)) {
+          if (param->isInOut()) {
+            ctx.Diags
+                .diagnose(loc, diag::concurrent_access_of_inout_param,
+                          param->getName())
+                .limitBehaviorUntilSwiftVersion(limit, 6);
+            return true;
           }
         }
 
@@ -6244,8 +6268,9 @@ bool swift::checkSendableConformance(
         return false;
     }
 
-    nominal->diagnose(diag::restate_unchecked_sendable,
-                      nominal->getName());
+    auto diag =
+        nominal->diagnose(diag::restate_unchecked_sendable, nominal->getName());
+    addSendableFixIt(nominal, diag, /*unchecked=*/true);
     return false;
   }
 
@@ -6879,6 +6904,23 @@ VarDecl *swift::getReferencedParamOrCapture(
   // corresponds to the isolation of the given code.
   if (isa<CurrentContextIsolationExpr>(expr))
     return getCurrentIsolatedVar();
+
+  // Distributed:
+  // If we're referring to a member, it may be the special 'self.asLocalActor'
+  // of an actor that is the result of #isolation of distributed actors.
+  // the result of the value should be considered equal to the "self" isolation
+  // as it only transforms the DistributedActor self to an "any Actor" self
+  // used for isolation purposes.
+  if (auto memberRef = dyn_cast<MemberRefExpr>(expr)) {
+    if (auto refDecl = expr->getReferencedDecl(/*stopAtParenExpr=*/true)) {
+      if (auto decl = dyn_cast_or_null<VarDecl>(refDecl.getDecl())) {
+        if (isDistributedActorAsLocalActorComputedProperty(decl)) {
+          return getCurrentIsolatedVar();
+        }
+      }
+    }
+  }
+
 
   return nullptr;
 }
