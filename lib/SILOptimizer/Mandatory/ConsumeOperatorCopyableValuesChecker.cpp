@@ -222,14 +222,15 @@ struct ConsumeOperatorCopyableValuesChecker {
   InstructionDeleter deleter;
   CanonicalizeOSSALifetime canonicalizer;
 
-  ConsumeOperatorCopyableValuesChecker(SILFunction *fn,
-                                       DominanceInfo *dominance,
-                                       BasicCalleeAnalysis *calleeAnalysis)
+  ConsumeOperatorCopyableValuesChecker(
+      SILFunction *fn, DominanceInfo *dominance,
+      BasicCalleeAnalysis *calleeAnalysis,
+      DeadEndBlocksAnalysis *deadEndBlocksAnalysis)
       : fn(fn), dominance(dominance),
         canonicalizer(DontPruneDebugInsts,
                       MaximizeLifetime_t(!fn->shouldOptimize()), fn,
-                      /*accessBlockAnalysis=*/nullptr, dominance,
-                      calleeAnalysis, deleter) {}
+                      /*accessBlockAnalysis=*/nullptr, deadEndBlocksAnalysis,
+                      dominance, calleeAnalysis, deleter) {}
 
   bool check();
 
@@ -498,7 +499,8 @@ bool ConsumeOperatorCopyableValuesChecker::check() {
         mvi->setAllowsDiagnostics(false);
 
         LLVM_DEBUG(llvm::dbgs() << "Move Value: " << *mvi);
-        if (livenessInfo.liveness->isWithinBoundary(mvi)) {
+        if (livenessInfo.liveness->isWithinBoundary(
+                mvi, /*deadEndBlocks=*/nullptr)) {
           LLVM_DEBUG(llvm::dbgs() << "    WithinBoundary: Yes!\n");
           emitDiagnosticForMove(lexicalValue, varName, mvi);
         } else {
@@ -588,8 +590,9 @@ class ConsumeOperatorCopyableValuesCheckerPass : public SILFunctionTransform {
     auto *dominanceAnalysis = getAnalysis<DominanceAnalysis>();
     auto *dominance = dominanceAnalysis->get(fn);
     auto *calleeAnalysis = getAnalysis<BasicCalleeAnalysis>();
-    ConsumeOperatorCopyableValuesChecker checker(getFunction(), dominance,
-                                                 calleeAnalysis);
+    auto *deadEndBlocksAnalysis = getAnalysis<DeadEndBlocksAnalysis>();
+    ConsumeOperatorCopyableValuesChecker checker(
+        getFunction(), dominance, calleeAnalysis, deadEndBlocksAnalysis);
     auto *loopAnalysis = getAnalysis<SILLoopAnalysis>();
 
     if (checker.check()) {

@@ -1490,7 +1490,7 @@ struct MoveOnlyAddressCheckerPImpl {
       DominanceInfo *domTree, PostOrderAnalysis *poa,
       DeadEndBlocksAnalysis *deba,
       borrowtodestructure::IntervalMapAllocator &allocator)
-      : fn(fn), deleter(), canonicalizer(fn, domTree, deleter),
+      : fn(fn), deleter(), canonicalizer(fn, domTree, deba, deleter),
         addressUseState(domTree), diagnosticEmitter(diagnosticEmitter),
         deba(deba), poa(poa), allocator(allocator) {
     deleter.setCallbacks(std::move(
@@ -2052,8 +2052,8 @@ struct GatherUsesVisitor : public TransitiveAddressWalker<GatherUsesVisitor> {
     liveness->initializeDef(bai);
     liveness->computeSimple();
     for (auto *consumingUse : li->getConsumingUses()) {
-      if (!liveness->areUsesWithinBoundary(
-              {consumingUse},
+      if (!liveness->isWithinBoundary(
+              consumingUse->getUser(),
               moveChecker.deba->get(consumingUse->getFunction()))) {
         diagnosticEmitter.emitAddressExclusivityHazardDiagnostic(
             markedValue, consumingUse->getUser());

@@ -1,5 +1,7 @@
 // RUN: %target-sil-opt -test-runner %s -o /dev/null 2>&1 | %FileCheck %s
 
+import Swift
+
 class C {}
 sil @getOwned : $@convention(thin) () -> @owned C
 sil @barrier : $@convention(thin) () -> ()
@@ -8,8 +10,8 @@ sil [ossa] @borrowC : $@convention(thin) (@guaranteed C) -> ()
 sil [ossa] @takeC : $@convention(thin) (@owned C) -> ()
 struct S {}
 
-@_moveOnly struct MoS {}
-@_moveOnly struct MoE {}
+struct MoS: ~Copyable {}
+struct MoE: ~Copyable {}
 
 // CHECK-LABEL: begin running test 1 of 1 on fn: canonicalize-ossa-lifetime with: true, true, true, @trace
 // CHECK-LABEL: end running test 1 of 1 on fn: canonicalize-ossa-lifetime with: true, true, true, @trace
@@ -56,12 +58,12 @@ sil [ossa] @retract_value_lifetime_into_access_scope_when_access_scopes_not_resp
 bb0(%addr : $*C):
   %instance = apply undef() : $@convention(thin) () -> @owned C
   debug_value [trace] %instance : $C
-                                                         // respect access scopes
-                                                         // VVVV
+                                                   // respect access scopes
+                                                   // VVVV
   specify_test "canonicalize-ossa-lifetime true false true @trace"
   specify_test "canonicalize-ossa-lifetime true false false @trace"
-                                                         // ^^^^^
-                                                         // respect access scopes
+                                                   // ^^^^^
+                                                   // respect access scopes
   %copy = copy_value %instance : $C
   %access = begin_access [modify] [static] %addr : $*C
   store %copy to [init] %access : $*C
