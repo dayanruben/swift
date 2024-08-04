@@ -247,6 +247,7 @@ EXPERIMENTAL_FEATURE(OldOwnershipOperatorSpellings, true)
 EXPERIMENTAL_FEATURE(MoveOnlyEnumDeinits, true)
 EXPERIMENTAL_FEATURE(MoveOnlyTuples, true)
 EXPERIMENTAL_FEATURE(MoveOnlyPartialReinitialization, true)
+EXPERIMENTAL_FEATURE(ConsumeSelfInDeinit, true)
 
 EXPERIMENTAL_FEATURE(OneWayClosureParameters, false)
 EXPERIMENTAL_FEATURE(LayoutPrespecialization, true)
@@ -392,7 +393,7 @@ EXPERIMENTAL_FEATURE(DebugDescriptionMacro, true)
 
 EXPERIMENTAL_FEATURE(ReinitializeConsumeInMultiBlockDefer, false)
 
-EXPERIMENTAL_FEATURE(SE427NoInferenceOnExtension, false)
+EXPERIMENTAL_FEATURE(SE427NoInferenceOnExtension, true)
 
 EXPERIMENTAL_FEATURE(Extern, true)
 

@@ -160,7 +160,7 @@ SwiftModuleScanner::scanInterfaceFile(Twine moduleInterfacePath,
         auto compiledCandidates =
             getCompiledCandidates(Ctx, realModuleName.str(), InPath);
         if (!compiledCandidates.empty() &&
-            !Ctx.SearchPathOpts.NoScannerModuleValidation) {
+            Ctx.SearchPathOpts.ScannerModuleValidation) {
           assert(compiledCandidates.size() == 1 &&
                  "Should only have 1 candidate module");
           auto BinaryDep = scanModuleFile(compiledCandidates[0], isFramework,
@@ -186,8 +186,7 @@ SwiftModuleScanner::scanInterfaceFile(Twine moduleInterfacePath,
           Args.push_back("-direct-clang-cc1-module-build");
           auto *importer =
               static_cast<ClangImporter *>(Ctx.getClangModuleLoader());
-          for (auto &Arg : importer->getSwiftExplicitModuleDirectCC1Args(
-                   /*isInterface=*/true)) {
+          for (auto &Arg : importer->getSwiftExplicitModuleDirectCC1Args()) {
             Args.push_back("-Xcc");
             Args.push_back(Arg);
           }

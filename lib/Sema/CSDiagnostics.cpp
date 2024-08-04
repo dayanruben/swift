@@ -9360,7 +9360,17 @@ bool InvalidMemberReferenceWithinInitAccessor::diagnoseAsError() {
 }
 
 bool ConcreteTypeSpecialization::diagnoseAsError() {
-  emitDiagnostic(diag::not_a_generic_type, ConcreteType);
+  if (isa<MacroDecl>(Decl)) {
+    emitDiagnostic(diag::not_a_generic_macro, Decl);
+  } else {
+    emitDiagnostic(diag::not_a_generic_type, ConcreteType);
+  }
+  return true;
+}
+
+bool GenericFunctionSpecialization::diagnoseAsError() {
+  emitDiagnostic(diag::cannot_explicitly_specialize_generic_function);
+  emitDiagnosticAt(Decl, diag::decl_declared_here, Decl);
   return true;
 }
 

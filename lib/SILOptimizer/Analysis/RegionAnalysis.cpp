@@ -1159,8 +1159,16 @@ struct PartitionOpBuilder {
   Element getActorIntroducingRepresentative(SILIsolationInfo actorIsolation);
 
   void addAssignFresh(SILValue value) {
+    std::array<Element, 1> values = {lookupValueID(value)};
     currentInstPartitionOps.emplace_back(
-        PartitionOp::AssignFresh(lookupValueID(value), currentInst));
+        PartitionOp::AssignFresh(values, currentInst));
+  }
+
+  void addAssignFresh(ArrayRef<SILValue> values) {
+    auto transformedCollection = makeTransformRange(
+        values, [&](SILValue value) { return lookupValueID(value); });
+    currentInstPartitionOps.emplace_back(
+        PartitionOp::AssignFresh(transformedCollection, currentInst));
   }
 
   void addAssign(SILValue destValue, Operand *srcOperand) {
@@ -1733,23 +1741,18 @@ public:
       return;
     }
 
-    auto assignResultsRef = llvm::ArrayRef(assignResults);
-    SILValue front = assignResultsRef.front();
-    assignResultsRef = assignResultsRef.drop_front();
-
+    // If we do not have any non-Sendable srcs, then all of our results get one
+    // large fresh region.
     if (assignOperands.empty()) {
-      // If no non-sendable srcs, non-sendable tgts get a fresh region.
-      builder.addAssignFresh(front);
-    } else {
-      builder.addAssign(front, assignOperands.front().first);
+      builder.addAssignFresh(assignResults);
+      return;
     }
 
-    // Assign all targets to the target region.
-    while (assignResultsRef.size()) {
-      SILValue next = assignResultsRef.front();
-      assignResultsRef = assignResultsRef.drop_front();
-
-      builder.addAssign(next, assignOperands.front().first);
+    // Otherwise, we need to assign all of the results to be in the same region
+    // as the operands. Without losing generality, we just use the first
+    // non-Sendable one.
+    for (auto result : assignResults) {
+      builder.addAssign(result, assignOperands.front().first);
     }
   }
 
@@ -2891,9 +2894,6 @@ CONSTANT_TRANSLATION(VectorInst, Asserting)
 
 #define IGNORE_IF_SENDABLE_RESULT_ASSIGN_OTHERWISE(INST)                       \
   TranslationSemantics PartitionOpTranslator::visit##INST(INST *inst) {        \
-    if (!isNonSendableType(inst->getType())) {                                 \
-      return TranslationSemantics::Ignored;                                    \
-    }                                                                          \
     return TranslationSemantics::Assign;                                       \
   }
 
@@ -2922,10 +2922,18 @@ IGNORE_IF_SENDABLE_RESULT_ASSIGN_OTHERWISE(StructExtractInst)
       return TranslationSemantics::Require;                                    \
     }                                                                          \
                                                                                \
-    if (isResultNonSendable)                                                   \
-      return TranslationSemantics::AssignFresh;                                \
-                                                                               \
-    return TranslationSemantics::Ignored;                                      \
+    /* We always use assign fresh here regardless of whether or not a */       \
+    /* type is sendable.                                              */       \
+    /*                                                                */       \
+    /* DISCUSSION: Since the typechecker is lazy, if there is a bug   */       \
+    /* that causes us to not look up enough type information it is    */       \
+    /* possible for a type to move from being Sendable to being       */       \
+    /* non-Sendable. For example, we could call isNonSendableType and */       \
+    /* get that the type is non-Sendable, but as a result of calling  */       \
+    /* that API, the type checker could get more information that the */       \
+    /* next time we call isNonSendableType, we will get that the type */       \
+    /* is non-Sendable.                                               */       \
+    return TranslationSemantics::AssignFresh;                                  \
   }
 
 LOOKTHROUGH_IF_NONSENDABLE_RESULT_AND_OPERAND(UncheckedTrivialBitCastInst)

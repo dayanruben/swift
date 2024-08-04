@@ -13950,6 +13950,8 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
 
   // Bail out if we haven't selected an overload yet.
   auto simplifiedBoundType = simplifyType(type1, flags);
+  if (simplifiedBoundType->isPlaceholder())
+    return SolutionKind::Solved;
   if (simplifiedBoundType->isTypeVariableOrMember())
     return formUnsolved();
 
@@ -13978,6 +13980,8 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
     decl = bound->getDecl();
     for (auto argType : bound->getDirectGenericArgs()) {
       auto *typeVar = argType->getAs<TypeVariableType>();
+      if (!typeVar)
+        return SolutionKind::Error;
       auto *genericParam = typeVar->getImpl().getGenericParameter();
       openedTypes.push_back({genericParam, typeVar});
     }
@@ -14042,13 +14046,15 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
     }
   }
 
-  if (!decl->getAsGenericContext())
-    return SolutionKind::Error;
-
   auto genericParams = getGenericParams(decl);
-  if (!genericParams) {
-    // FIXME: Record an error here that we're ignoring the parameters.
-    return SolutionKind::Solved;
+  if (!decl->getAsGenericContext() || !genericParams) {
+    // Allow concrete macros to have specializations with just a warning.
+    return recordFix(AllowConcreteTypeSpecialization::create(
+               *this, type1, decl, getConstraintLocator(locator),
+               isa<MacroDecl>(decl) ? FixBehavior::DowngradeToWarning
+                                    : FixBehavior::Error))
+               ? SolutionKind::Error
+               : SolutionKind::Solved;
   }
 
   // Map the generic parameters we have over to their opened types.
@@ -14081,12 +14087,14 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
     }
   }
 
-  if (openedGenericParams.empty()) {
+  // FIXME: We could support explicit function specialization.
+  if (openedGenericParams.empty() ||
+      (isa<AbstractFunctionDecl>(decl) && !hasParameterPack)) {
     if (!shouldAttemptFixes())
       return SolutionKind::Error;
 
-    return recordFix(AllowConcreteTypeSpecialization::create(
-               *this, type1, getConstraintLocator(locator)))
+    return recordFix(AllowGenericFunctionSpecialization::create(
+               *this, decl, getConstraintLocator(locator)))
                ? SolutionKind::Error
                : SolutionKind::Solved;
   }
@@ -15217,6 +15225,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::AllowAssociatedValueMismatch:
   case FixKind::GenericArgumentsMismatch:
   case FixKind::AllowConcreteTypeSpecialization:
+  case FixKind::AllowGenericFunctionSpecialization:
   case FixKind::IgnoreGenericSpecializationArityMismatch:
   case FixKind::IgnoreKeyPathSubscriptIndexMismatch:
   case FixKind::AllowMemberRefOnExistential: {

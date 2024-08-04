@@ -982,6 +982,11 @@ class SwiftDependencyScanningService {
   /// File prefix mapper.
   std::unique_ptr<llvm::TreePathPrefixMapper> Mapper;
 
+  /// The global file system cache.
+  std::optional<
+      clang::tooling::dependencies::DependencyScanningFilesystemSharedCache>
+      SharedFilesystemCache;
+
   /// A map from a String representing the target triple of a scanner invocation
   /// to the corresponding cached dependencies discovered so far when using this
   /// triple.
@@ -993,7 +998,7 @@ class SwiftDependencyScanningService {
   std::vector<std::string> AllContextHashes;
 
   /// Shared state mutual-exclusivity lock
-  llvm::sys::SmartMutex<true> ScanningServiceGlobalLock;
+  mutable llvm::sys::SmartMutex<true> ScanningServiceGlobalLock;
 
   /// Retrieve the dependencies map that corresponds to the given dependency
   /// kind.
@@ -1010,6 +1015,19 @@ public:
   SwiftDependencyScanningService &
   operator=(const SwiftDependencyScanningService &) = delete;
   virtual ~SwiftDependencyScanningService() {}
+
+  /// Query the service's filesystem cache
+  clang::tooling::dependencies::DependencyScanningFilesystemSharedCache &getSharedCache() {
+    assert(SharedFilesystemCache && "Expected a shared cache");
+    return *SharedFilesystemCache;
+  }
+
+  /// Query the service's filesystem cache
+  clang::tooling::dependencies::DependencyScanningFilesystemSharedCache &
+  getSharedFilesystemCache() {
+    assert(SharedFilesystemCache && "Expected a shared cache");
+    return *SharedFilesystemCache;
+  }
 
   bool usingCachingFS() const { return !UseClangIncludeTree && (bool)CacheFS; }
   llvm::IntrusiveRefCntPtr<llvm::cas::CachingOnDiskFileSystem>
