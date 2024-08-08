@@ -134,6 +134,7 @@ UNINTERESTING_FEATURE(StaticExclusiveOnly)
 UNINTERESTING_FEATURE(ExtractConstantsFromMembers)
 UNINTERESTING_FEATURE(FixedArrays)
 UNINTERESTING_FEATURE(GroupActorErrors)
+UNINTERESTING_FEATURE(SameElementRequirements)
 
 static bool usesFeatureSendingArgsAndResults(Decl *decl) {
   auto isFunctionTypeWithSending = [](Type type) {
@@ -223,6 +224,7 @@ UNINTERESTING_FEATURE(Sensitive)
 UNINTERESTING_FEATURE(DebugDescriptionMacro)
 UNINTERESTING_FEATURE(ReinitializeConsumeInMultiBlockDefer)
 UNINTERESTING_FEATURE(SE427NoInferenceOnExtension)
+UNINTERESTING_FEATURE(TrailingComma)
 
 // ----------------------------------------------------------------------------
 // MARK: - FeatureSet

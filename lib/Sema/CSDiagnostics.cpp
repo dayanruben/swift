@@ -3474,11 +3474,6 @@ bool ContextualFailure::tryProtocolConformanceFixIt(
     conformanceDiag.fixItInsert(nameEndLoc, ": " + protoString);
   }
 
-  // Emit fix-its to insert requirement stubs if we're in editor mode.
-  if (!getASTContext().LangOpts.DiagnosticsEditorMode) {
-    return true;
-  }
-
   {
     llvm::SmallString<128> Text;
     llvm::raw_svector_ostream SS(Text);
@@ -6188,7 +6183,7 @@ bool InaccessibleMemberFailure::diagnoseAsError() {
 
   auto loc = nameLoc.isValid() ? nameLoc.getStartLoc() : ::getLoc(anchor);
   if (IsMissingImport) {
-    diagnoseMissingImportForMember(Member, getDC(), loc);
+    maybeDiagnoseMissingImportForMember(Member, getDC(), loc);
     return true;
   }
 

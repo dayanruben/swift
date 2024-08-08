@@ -701,7 +701,8 @@ generateFullDependencyGraph(const CompilerInstance &instance,
                              .CASBridgingHeaderIncludeTreeRootID.c_str()),
             create_clone(swiftTextualDeps->moduleCacheKey.c_str()),
             createMacroDependencySet(
-                swiftTextualDeps->textualModuleDetails.macroDependencies)};
+                swiftTextualDeps->textualModuleDetails.macroDependencies),
+            create_clone(swiftTextualDeps->userModuleVersion.c_str())};
       } else if (swiftSourceDeps) {
         swiftscan_string_ref_t moduleInterfacePath = create_null();
         swiftscan_string_ref_t bridgingHeaderPath =
@@ -761,7 +762,8 @@ generateFullDependencyGraph(const CompilerInstance &instance,
             create_set(swiftBinaryDeps->headerSourceFiles),
             swiftBinaryDeps->isFramework,
             swiftBinaryDeps->isStatic,
-            create_clone(swiftBinaryDeps->moduleCacheKey.c_str())};
+            create_clone(swiftBinaryDeps->moduleCacheKey.c_str()),
+            create_clone(swiftBinaryDeps->userModuleVersion.c_str())};
       } else {
         // Clang module details
         details->kind = SWIFTSCAN_DEPENDENCY_INFO_CLANG;
