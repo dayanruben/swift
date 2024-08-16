@@ -4212,6 +4212,21 @@ bool ValueDecl::isUsableFromInline() const {
   return false;
 }
 
+bool ValueDecl::isInterfacePackageEffectivelyPublic() const {
+  // If a package decl has a @usableFromInline (or other inlinable)
+  // attribute, and is defined in a module built from interface, it
+  // can be referenced by another module that imports it even though
+  // the defining interface module does not have package-name (such
+  // as public or private interface); in such case, the decl is treated
+  // as public and access checks in sema are skipped.
+  // We might need to add another check here to ensure the interface
+  // was part of the same package before the package-name was removed.
+  return getFormalAccess() == AccessLevel::Package &&
+         isUsableFromInline() &&
+         getModuleContext()->getPackageName().empty() &&
+         getModuleContext()->isBuiltFromInterface();
+}
+
 bool ValueDecl::shouldHideFromEditor() const {
   // Hide private stdlib declarations.
   if (isPrivateStdlibDecl(/*treatNonBuiltinProtocolsAsPublic*/ false) ||
@@ -4303,6 +4318,9 @@ static AccessLevel getAdjustedFormalAccess(const ValueDecl *VD,
   // access level of the current declaration to be as open as possible.
   if (useDC && VD->getASTContext().isAccessControlDisabled())
     return getMaximallyOpenAccessFor(VD);
+
+  if (VD->isInterfacePackageEffectivelyPublic())
+    return AccessLevel::Public;
 
   if (treatUsableFromInlineAsPublic &&
       access < AccessLevel::Public &&
@@ -4486,6 +4504,8 @@ getAccessScopeForFormalAccess(const ValueDecl *VD,
   case AccessLevel::Package: {
     auto pkg = resultDC->getPackageContext(/*lookupIfNotCurrent*/ true);
     if (!pkg) {
+      if (VD->isInterfacePackageEffectivelyPublic())
+        return AccessScope::getPublic();
       // Instead of reporting and failing early, return the scope of resultDC to
       // allow continuation (should still non-zero exit later if in script mode)
       return AccessScope(resultDC);
@@ -4619,6 +4639,9 @@ static bool checkAccess(const DeclContext *useDC, const ValueDecl *VD,
     return false;
 
   if (VD->getASTContext().isAccessControlDisabled())
+    return true;
+
+  if (VD->isInterfacePackageEffectivelyPublic())
     return true;
 
   auto access = getAccessLevel();
@@ -6560,6 +6583,11 @@ bool EnumDecl::hasOnlyCasesWithoutAssociatedValues() const {
   return !hasAssociatedValues;
 }
 
+bool EnumDecl::treatAsExhaustiveForDiags(const DeclContext *useDC) const {
+  return isFormallyExhaustive(useDC) ||
+         (useDC && getModuleContext()->inSamePackage(useDC->getParentModule()));
+}
+
 bool EnumDecl::isFormallyExhaustive(const DeclContext *useDC) const {
   // Enums explicitly marked frozen are exhaustive.
   if (getAttrs().hasAttribute<FrozenAttr>())
@@ -6577,13 +6605,9 @@ bool EnumDecl::isFormallyExhaustive(const DeclContext *useDC) const {
     return true;
 
   // Non-public, non-versioned enums are always exhaustive.
-  AccessScope accessScope = getFormalAccessScope(/*useDC*/nullptr,
-                                                 /*respectVersioned*/true);
-  // Both public and package enums should behave the same unless
-  // package enum is optimized with bypassing resilience checks.
+  AccessScope accessScope = getFormalAccessScope(/*useDC*/ nullptr,
+                                                 /*respectVersioned*/ true);
   if (!accessScope.isPublicOrPackage())
-    return true;
-  if (useDC && bypassResilienceInPackage(useDC->getParentModule()))
     return true;
 
   // All other checks are use-site specific; with no further information, the
@@ -6616,11 +6640,13 @@ bool EnumDecl::isEffectivelyExhaustive(ModuleDecl *M,
   if (isObjC())
     return false;
 
-  // Otherwise, the only non-exhaustive cases are those that don't have a fixed
-  // layout.
-  assert(isFormallyExhaustive(M) == !isResilient(M,ResilienceExpansion::Maximal)
-         && "ignoring the effects of @inlinable, @testable, and @objc, "
-            "these should match up");
+  // Otherwise, the only non-exhaustive enums are those that don't have
+  // a fixed layout; however, they are treated as exhaustive if package
+  // optimization is enabled.
+  assert((isFormallyExhaustive(M) || bypassResilienceInPackage(M)) ==
+             !isResilient(M, ResilienceExpansion::Maximal) &&
+         "ignoring the effects of @inlinable, @testable, and @objc, "
+         "these should match up");
   return !isResilient(M, expansion);
 }
       
