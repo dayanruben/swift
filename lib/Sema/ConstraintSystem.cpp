@@ -772,9 +772,12 @@ ConstraintLocator *ConstraintSystem::getOpenOpaqueLocator(
 
 std::pair<Type, OpenedArchetypeType *> ConstraintSystem::openExistentialType(
     Type type, ConstraintLocator *locator) {
-  OpenedArchetypeType *opened = nullptr;
-  auto sig = DC->getGenericSignatureOfContext();
-  Type result = type->openAnyExistentialType(opened, sig);
+  Type result = OpenedArchetypeType::getAny(type);
+  Type t = result;
+  while (t->is<MetatypeType>())
+    t = t->getMetatypeInstanceType();
+  auto *opened = t->castTo<OpenedArchetypeType>();
+
   assert(OpenedExistentialTypes.count(locator) == 0);
   OpenedExistentialTypes.insert({locator, opened});
   return {result, opened};
@@ -2449,15 +2452,14 @@ Type constraints::typeEraseOpenedExistentialReference(
       /*force=*/false);
 }
 
-Type constraints::typeEraseOpenedArchetypesWithRoot(
-    Type type, const OpenedArchetypeType *root) {
-  assert(root->isRoot() && "Expected a root archetype");
+Type constraints::typeEraseOpenedArchetypesFromEnvironment(
+    Type type, GenericEnvironment *env) {
+  assert(env->getKind() == GenericEnvironment::Kind::OpenedExistential);
 
-  auto *env = root->getGenericEnvironment();
   auto sig = env->getGenericSignature();
 
   return typeEraseExistentialSelfReferences(
-      type, root->getExistentialType(), TypePosition::Covariant, sig,
+      type, env->getOpenedExistentialType(), TypePosition::Covariant, sig,
       /*containsFn=*/[](Type t) {
         return t->hasOpenedExistential();
       },
@@ -2877,8 +2879,7 @@ DeclReferenceType ConstraintSystem::getTypeOfMemberReference(
     }
   } else if (baseObjTy->isExistentialType()) {
     auto openedArchetype =
-        OpenedArchetypeType::get(baseObjTy->getCanonicalType(),
-                                 GenericSignature());
+        OpenedArchetypeType::get(baseObjTy->getCanonicalType());
     OpenedExistentialTypes.insert(
         {getConstraintLocator(locator), openedArchetype});
     baseOpenedTy = openedArchetype;

@@ -956,9 +956,12 @@ namespace {
       // If we had a return type of 'Self', erase it.
       Type resultTy;
       resultTy = cs.getType(result);
-      if (resultTy->hasOpenedExistentialWithRoot(record.Archetype)) {
-        Type erasedTy = constraints::typeEraseOpenedArchetypesWithRoot(
-            resultTy, record.Archetype);
+
+      auto *env = record.Archetype->getGenericEnvironment();
+
+      if (resultTy->hasLocalArchetypeFromEnvironment(env)) {
+        Type erasedTy = constraints::typeEraseOpenedArchetypesFromEnvironment(
+            resultTy, env);
         auto range = result->getSourceRange();
         result = coerceToType(result, erasedTy, locator);
         // FIXME: Implement missing tuple-to-tuple conversion
@@ -1668,8 +1671,8 @@ namespace {
         } else {
           // Erase opened existentials from the type of the thunk; we're
           // going to open the existential inside the thunk's body.
-          containerTy = constraints::typeEraseOpenedArchetypesWithRoot(
-              containerTy, knownOpened->second);
+          containerTy = constraints::typeEraseOpenedArchetypesFromEnvironment(
+              containerTy, knownOpened->second->getGenericEnvironment());
           selfTy = containerTy;
         }
       }
@@ -1732,8 +1735,8 @@ namespace {
           // If the base was an opened existential, erase the opened
           // existential.
           if (openedExistential) {
-            refType = constraints::typeEraseOpenedArchetypesWithRoot(
-                refType, baseTy->castTo<OpenedArchetypeType>());
+            refType = constraints::typeEraseOpenedArchetypesFromEnvironment(
+                refType, baseTy->castTo<OpenedArchetypeType>()->getGenericEnvironment());
           }
 
           return refType;
@@ -1958,8 +1961,8 @@ namespace {
               getConstraintSystem().getConstraintLocator(memberLocator));
           if (knownOpened != solution.OpenedExistentialTypes.end()) {
             curryThunkTy =
-                constraints::typeEraseOpenedArchetypesWithRoot(
-                  curryThunkTy, knownOpened->second)
+                constraints::typeEraseOpenedArchetypesFromEnvironment(
+                  curryThunkTy, knownOpened->second->getGenericEnvironment())
                     ->castTo<FunctionType>();
           }
         }
@@ -5801,8 +5804,7 @@ Expr *ExprRewriter::coerceSuperclass(Expr *expr, Type toType) {
     // Coercion from superclass-constrained existential to its
     // concrete superclass.
     auto fromArchetype =
-        OpenedArchetypeType::getAny(fromType->getCanonicalType(),
-                                    dc->getGenericSignatureOfContext());
+        OpenedArchetypeType::getAny(fromType->getCanonicalType());
 
     auto *archetypeVal = cs.cacheType(new (ctx) OpaqueValueExpr(
         expr->getSourceRange(), fromArchetype));
@@ -6206,8 +6208,7 @@ ArgumentList *ExprRewriter::coerceCallArguments(
     // implicit self capture or inheriting actor context.
     bool isImplicitSelfCapture = paramInfo.isImplicitSelfCapture(paramIdx);
     bool inheritsActorContext = paramInfo.inheritsActorContext(paramIdx);
-    bool isPassedToSendingParameter =
-        paramInfo.isPassedToSendingParameter(paramIdx);
+    bool isPassedToSendingParameter = paramInfo.isSendingParameter(paramIdx);
 
     applyContextualClosureFlags(argExpr, isImplicitSelfCapture,
                                 inheritsActorContext,
@@ -6822,8 +6823,7 @@ Expr *ExprRewriter::coerceExistential(Expr *expr, Type toType,
   // For existential-to-existential coercions, open the source existential.
   Type openedFromType;
   if (fromType->isAnyExistentialType()) {
-    openedFromType = OpenedArchetypeType::getAny(fromType->getCanonicalType(),
-                                                 dc->getGenericSignatureOfContext());
+    openedFromType = OpenedArchetypeType::getAny(fromType->getCanonicalType());
   }
 
   Type openedFromInstanceType = openedFromType;

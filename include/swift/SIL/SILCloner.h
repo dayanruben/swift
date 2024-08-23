@@ -57,6 +57,16 @@ struct SubstitutionMapWithLocalArchetypes {
 
     return ProtocolConformanceRef(proto);
   }
+
+  void dump(llvm::raw_ostream &out) const {
+    if (SubsMap)
+      SubsMap->dump(out);
+    for (auto pair : LocalArchetypeSubs) {
+      out << "---\n";
+      pair.first->dump(out);
+      pair.second->dump(out);
+    }
+  }
 };
 
 /// SILCloner - Abstract SIL visitor which knows how to clone instructions and
@@ -231,8 +241,7 @@ public:
     for (auto substConf : substSubs.getConformances()) {
       if (substConf.isInvalid()) {
         llvm::errs() << "Invalid conformance in SIL cloner:\n";
-        if (Functor.SubsMap)
-          Functor.SubsMap->dump(llvm::errs());
+        Functor.dump(llvm::errs());
         llvm::errs() << "\nsubstitution map:\n";
         Subs.dump(llvm::errs());
         llvm::errs() << "\n";
@@ -337,11 +346,10 @@ public:
   void remapRootOpenedType(CanOpenedArchetypeType archetypeTy) {
     assert(archetypeTy->isRoot());
 
-    auto sig = Builder.getFunction().getGenericSignature();
     auto origExistentialTy = archetypeTy->getExistentialType()
         ->getCanonicalType();
     auto substExistentialTy = getOpASTType(origExistentialTy);
-    auto replacementTy = OpenedArchetypeType::get(substExistentialTy, sig);
+    auto replacementTy = OpenedArchetypeType::get(substExistentialTy);
     registerLocalArchetypeRemapping(archetypeTy, replacementTy);
   }
 
@@ -364,11 +372,10 @@ public:
 #ifndef NDEBUG
     if (substConf.isInvalid()) {
       llvm::errs() << "Invalid conformance in SIL cloner:\n";
-      if (Functor.SubsMap)
-        Functor.SubsMap->dump(llvm::errs());
+      Functor.dump(llvm::errs());
       llvm::errs() << "\nconformance:\n";
       conformance.dump(llvm::errs());
-      llvm::errs() << "original type:\n";
+      llvm::errs() << "\noriginal type:\n";
       ty.dump(llvm::errs());
       abort();
     }
@@ -461,8 +468,12 @@ protected:
 
   SILType remapType(SILType Ty) {
     if (Functor.SubsMap || Ty.hasLocalArchetype()) {
+      SubstOptions options(std::nullopt);
+      if (!Functor.LocalArchetypeSubs.empty())
+        options |= SubstFlags::SubstituteLocalArchetypes;
+
       Ty = Ty.subst(Builder.getModule(), Functor, Functor,
-                    CanGenericSignature());
+                    CanGenericSignature(), options);
     }
 
     if (asImpl().shouldSubstOpaqueArchetypes()) {
@@ -481,8 +492,13 @@ protected:
   }
 
   CanType remapASTType(CanType ty) {
-    if (Functor.SubsMap || ty->hasLocalArchetype())
-      ty = ty.subst(Functor, Functor)->getCanonicalType();
+    if (Functor.SubsMap || ty->hasLocalArchetype()) {
+      SubstOptions options(std::nullopt);
+      if (!Functor.LocalArchetypeSubs.empty())
+        options |= SubstFlags::SubstituteLocalArchetypes;
+
+      ty = ty.subst(Functor, Functor, options)->getCanonicalType();
+    }
 
     if (asImpl().shouldSubstOpaqueArchetypes()) {
       auto context = getBuilder().getTypeExpansionContext();
@@ -501,9 +517,13 @@ protected:
 
   ProtocolConformanceRef remapConformance(Type Ty, ProtocolConformanceRef C) {
     if (Functor.SubsMap || Ty->hasLocalArchetype()) {
-      C = C.subst(Ty, Functor, Functor);
+      SubstOptions options(std::nullopt);
+      if (!Functor.LocalArchetypeSubs.empty())
+        options |= SubstFlags::SubstituteLocalArchetypes;
+
+      C = C.subst(Ty, Functor, Functor, options);
       if (asImpl().shouldSubstOpaqueArchetypes())
-        Ty = Ty.subst(Functor, Functor);
+        Ty = Ty.subst(Functor, Functor, options);
     }
 
     if (asImpl().shouldSubstOpaqueArchetypes()) {
@@ -521,13 +541,18 @@ protected:
 
   SubstitutionMap remapSubstitutionMap(SubstitutionMap Subs) {
     // If we have local archetypes to substitute, do so now.
-    if (Subs.hasLocalArchetypes() || Functor.SubsMap)
-      Subs = Subs.subst(Functor, Functor);
+    if (Subs.getRecursiveProperties().hasLocalArchetype() || Functor.SubsMap) {
+      SubstOptions options(std::nullopt);
+      if (!Functor.LocalArchetypeSubs.empty())
+        options |= SubstFlags::SubstituteLocalArchetypes;
+
+      Subs = Subs.subst(Functor, Functor, options);
+    }
 
     if (asImpl().shouldSubstOpaqueArchetypes()) {
       auto context = getBuilder().getTypeExpansionContext();
 
-      if (!Subs.hasOpaqueArchetypes() ||
+      if (!Subs.getRecursiveProperties().hasOpaqueArchetype() ||
           !context.shouldLookThroughOpaqueTypeArchetypes())
         return Subs;
 
@@ -2871,7 +2896,7 @@ void SILCloner<ImplClass>::visitOpenPackElementInst(
 
   // Substitute the contextual substitutions.
   auto newContextSubs =
-    getOpSubstitutionMap(origEnv->getPackElementContextSubstitutions());
+    getOpSubstitutionMap(origEnv->getOuterSubstitutions());
 
   // The opened shape class is a parameter of the original signature,
   // which is unchanged.

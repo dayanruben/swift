@@ -4162,6 +4162,29 @@ public:
   bool isCached() const { return true; }
 };
 
+struct FallthroughSourceAndDest {
+  CaseStmt *Source;
+  CaseStmt *Dest;
+};
+
+/// Lookup the source and destination of a 'fallthrough'.
+class FallthroughSourceAndDestRequest
+    : public SimpleRequest<FallthroughSourceAndDestRequest,
+                           FallthroughSourceAndDest(const FallthroughStmt *),
+                           RequestFlags::Cached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  FallthroughSourceAndDest evaluate(Evaluator &evaluator,
+                                    const FallthroughStmt *FS) const;
+
+public:
+  bool isCached() const { return true; }
+};
+
 /// Precheck a ReturnStmt, which involves some initial validation, as well as
 /// applying a conversion to a FailStmt if needed.
 class PreCheckReturnStmtRequest
@@ -5040,6 +5063,24 @@ private:
 
 public:
   bool isCached() const { return true; }
+};
+
+class IsUnsafeRequest
+    : public SimpleRequest<IsUnsafeRequest,
+                           bool(Decl *decl),
+                           RequestFlags::SeparatelyCached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  bool evaluate(Evaluator &evaluator, Decl *decl) const;
+
+public:
+  bool isCached() const { return true; }
+  std::optional<bool> getCachedResult() const;
+  void cacheResult(bool value) const;
 };
 
 #define SWIFT_TYPEID_ZONE TypeChecker

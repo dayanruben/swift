@@ -1329,10 +1329,11 @@ ERROR(single_value_stmt_branch_empty,none,
       "expected expression in branch of '%0' expression",
       (StmtKind))
 ERROR(single_value_stmt_branch_must_end_in_result,none,
-      "non-expression branch of '%0' expression may only end with a 'throw'",
-      (StmtKind))
+      "non-expression branch of '%0' expression may only end with a 'throw'"
+      "%select{| or 'fallthrough'}1",
+      (StmtKind, bool))
 ERROR(cannot_jump_in_single_value_stmt,none,
-      "cannot '%0' in '%1' when used as expression",
+      "cannot use '%0' to transfer control out of '%1' expression",
       (StmtKind, StmtKind))
 WARNING(effect_marker_on_single_value_stmt,none,
       "'%0' has no effect on '%1' expression", (StringRef, StmtKind))
@@ -3125,7 +3126,7 @@ NOTE(declared_protocol_conformance_here,none,
 
 ERROR(witness_unavailable,none,
         "unavailable %kind0 was used to satisfy a requirement of protocol %1%select{|: %2}2",
-        (const ValueDecl *, Identifier, StringRef))
+        (const ValueDecl *, const ProtocolDecl *, StringRef))
 
 WARNING(witness_deprecated,none,
         "deprecated default implementation is used to satisfy %kind0 required by "
@@ -5455,6 +5456,9 @@ ERROR(distributed_actor_isolated_non_self_reference,none,
       "distributed actor-isolated %kind0 can not be accessed from a "
       "nonisolated context",
       (const ValueDecl *))
+NOTE(note_consider_method_for_isolated_property_mutation,none,
+     "consider declaring an isolated method on %0 to perform the mutation",
+     (const NominalTypeDecl *))
 ERROR(conflicting_stored_property_isolation,none,
       "%select{default|memberwise}0 initializer for %1 cannot be both %2 and %3",
       (bool, Type, ActorIsolation, ActorIsolation))
@@ -6777,7 +6781,7 @@ WARNING(availability_enum_element_no_potential_warn,
 
 ERROR(availability_protocol_requires_version,
       none, "protocol %0 requires %1 to be available in %2 %3 and newer",
-      (Identifier, DeclName, StringRef, llvm::VersionTuple))
+      (const ProtocolDecl *, const ValueDecl *, StringRef, llvm::VersionTuple))
 
 NOTE(availability_protocol_requirement_here, none,
      "protocol requirement here", ())
@@ -7962,6 +7966,34 @@ NOTE(sending_function_result_with_sending_param_note, none,
      "risks allowing actor-isolated values to escape their "
      "isolation domain through a result of an invocation of value",
      ())
+
+//------------------------------------------------------------------------------
+// MARK: Strict Safety Diagnostics
+//------------------------------------------------------------------------------
+ERROR(unsafe_attr_disabled,none,
+      "attribute requires '-enable-experimental-feature AllowUnsafeAttribute'", ())
+WARNING(override_safe_withunsafe,none,
+      "override of safe %0 with unsafe %0", (DescriptiveDeclKind))
+WARNING(witness_unsafe,none,
+     "unsafe %0 %1 cannot satisfy safe requirement",
+      (DescriptiveDeclKind, DeclName))
+WARNING(type_witness_unsafe,none,
+      "unsafe type %0 cannot satisfy safe associated type %1",
+      (Type, DeclName))
+WARNING(unchecked_conformance_is_unsafe,none,
+      "@unchecked conformance involves unsafe code", ())
+WARNING(unowned_unsafe_is_unsafe,none,
+      "unowned(unsafe) involves unsafe code", ())
+WARNING(nonisolated_unsafe_is_unsafe,none,
+      "nonisolated(unsafe) involves unsafe code", ())
+WARNING(reference_to_unsafe_decl,none,
+      "%select{reference|call}0 to unsafe %kindbase1",
+      (bool, const ValueDecl *))
+WARNING(reference_to_unsafe_typed_decl,none,
+      "%select{reference|call}0 to %kindbase1 involves unsafe type %2",
+      (bool, const ValueDecl *, Type))
+NOTE(unsafe_decl_here,none,
+     "unsafe %kindbase0 declared here", (const ValueDecl *))
 
 #define UNDEFINE_DIAGNOSTIC_MACROS
 #include "DefineDiagnosticMacros.h"

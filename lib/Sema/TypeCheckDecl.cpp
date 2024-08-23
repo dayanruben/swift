@@ -1689,8 +1689,9 @@ SelfAccessKindRequest::evaluate(Evaluator &evaluator, FuncDecl *FD) const {
 }
 
 bool TypeChecker::isAvailabilitySafeForConformance(
-    ProtocolDecl *proto, ValueDecl *requirement, ValueDecl *witness,
-    DeclContext *dc, AvailabilityContext &requirementInfo) {
+    const ProtocolDecl *proto, const ValueDecl *requirement,
+    const ValueDecl *witness, const DeclContext *dc,
+    AvailabilityContext &requirementInfo) {
 
   // We assume conformances in
   // non-SourceFiles have already been checked for availability.
@@ -3192,4 +3193,23 @@ SourceFile::getIfConfigClausesWithin(SourceRange outer) const {
         return SM.isBeforeInBuffer(loc, range.getStartLoc());
       });
   return llvm::ArrayRef(lower, upper - lower);
+}
+
+//----------------------------------------------------------------------------//
+// IsUnsafeRequest
+//----------------------------------------------------------------------------//
+
+bool IsUnsafeRequest::evaluate(Evaluator &evaluator, Decl *decl) const {
+  // If it's marked @unsafe, it's unsafe.
+  if (decl->getAttrs().hasAttribute<UnsafeAttr>())
+    return true;
+
+  // Inference: A member of an @unsafe type is also unsafe.
+  if (auto enclosingDC = decl->getDeclContext()) {
+    if (auto enclosingNominal = enclosingDC->getSelfNominalTypeDecl())
+      if (enclosingNominal->isUnsafe())
+        return true;
+  }
+
+  return false;
 }

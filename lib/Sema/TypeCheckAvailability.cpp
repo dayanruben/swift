@@ -18,6 +18,7 @@
 #include "MiscDiagnostics.h"
 #include "TypeCheckConcurrency.h"
 #include "TypeCheckObjC.h"
+#include "TypeCheckType.h"
 #include "TypeChecker.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ClangModuleLoader.h"
@@ -363,6 +364,18 @@ static bool isInsideCompatibleUnavailableDeclaration(
 
   return (*referencedPlatform == platform ||
           inheritsAvailabilityFromPlatform(platform, *referencedPlatform));
+}
+
+const AvailableAttr *
+ExportContext::shouldDiagnoseDeclAsUnavailable(const Decl *D) const {
+  auto attr = AvailableAttr::isUnavailable(D);
+  if (!attr)
+    return nullptr;
+
+  if (isInsideCompatibleUnavailableDeclaration(D, *this, attr))
+    return nullptr;
+
+  return attr;
 }
 
 static bool shouldAllowReferenceToUnavailableInSwiftDeclaration(
@@ -1901,8 +1914,8 @@ static bool fixAvailabilityByNarrowingNearbyVersionCheck(
                                  AvailabilityContext(RunningRange))) {
 
     // Only fix situations that are "nearby" versions, meaning
-    // disagreement on a minor-or-less version for non-macOS,
-    // or disagreement on a subminor-or-less version for macOS.
+    // disagreement on a minor-or-less version (subminor-or-less version for
+    // macOS 10.x.y).
     auto RunningVers = RunningRange.getLowerEndpoint();
     auto RequiredVers = RequiredRange.getLowerEndpoint();
     auto Platform = targetPlatform(Context.LangOpts);
@@ -1910,6 +1923,7 @@ static bool fixAvailabilityByNarrowingNearbyVersionCheck(
       return false;
     if ((Platform == PlatformKind::macOS ||
          Platform == PlatformKind::macOSApplicationExtension) &&
+        RunningVers.getMajor() == 10 &&
         !(RunningVers.getMinor().has_value() &&
           RequiredVers.getMinor().has_value() &&
           RunningVers.getMinor().value() ==
@@ -1977,6 +1991,12 @@ static void fixAvailabilityByAddingVersionCheck(
     }
 
     PlatformKind Target = targetPlatform(Context.LangOpts);
+
+    // Runtime availability checks that specify app extension platforms don't
+    // work, so only suggest checks against the base platform.
+    if (auto TargetRemovingAppExtension =
+            basePlatformForExtensionPlatform(Target))
+      Target = *TargetRemovingAppExtension;
 
     Out << "if #available(" << platformString(Target)
         << " " << RequiredRange.getLowerEndpoint().getAsString()
@@ -2893,15 +2913,8 @@ public:
 static std::optional<UnavailabilityDiagnosticInfo>
 getExplicitUnavailabilityDiagnosticInfo(const Decl *decl,
                                         const ExportContext &where) {
-  auto *attr = AvailableAttr::isUnavailable(decl);
+  auto *attr = where.shouldDiagnoseDeclAsUnavailable(decl);
   if (!attr)
-    return std::nullopt;
-
-  // Calling unavailable code from within code with the same
-  // unavailability is OK -- the eventual caller can't call the
-  // enclosing code in the same situations it wouldn't be able to
-  // call this code.
-  if (isInsideCompatibleUnavailableDeclaration(decl, where, attr))
     return std::nullopt;
 
   ASTContext &ctx = decl->getASTContext();
@@ -3882,6 +3895,26 @@ bool ExprAvailabilityWalker::diagnoseDeclRefAvailability(
   if (diagnoseDeclAvailability(D, R, call, Where, Flags))
       return true;
 
+  // If the declaration itself is "safe" but we don't disallow unsafe uses,
+  // check whether it traffics in unsafe types.
+  ASTContext &ctx = D->getASTContext();
+  if (ctx.LangOpts.hasFeature(Feature::WarnUnsafe) && !D->isUnsafe()) {
+    auto type = D->getInterfaceType();
+    if (auto subs = declRef.getSubstitutions())
+      type = type.subst(subs);
+    if (type->isUnsafe()) {
+      diagnoseUnsafeType(
+          ctx, R.Start, type,
+          [&](Type specificType) {
+            ctx.Diags.diagnose(
+                R.Start, diag::reference_to_unsafe_typed_decl,
+                call != nullptr && !isa<ParamDecl>(D), D,
+                specificType);
+            D->diagnose(diag::decl_declared_here, D);
+          });
+    }
+  }
+
   if (R.isValid()) {
     if (diagnoseSubstitutionMapAvailability(R.Start, declRef.getSubstitutions(),
                                             Where)) {
@@ -3943,6 +3976,23 @@ diagnoseDeclAsyncAvailability(const ValueDecl *D, SourceRange R,
   return true;
 }
 
+/// Diagnose uses of unsafe declarations.
+static void
+diagnoseDeclUnsafe(const ValueDecl *D, SourceRange R,
+                   const Expr *call, const ExportContext &Where) {
+  ASTContext &ctx = D->getASTContext();
+  if (!ctx.LangOpts.hasFeature(Feature::WarnUnsafe))
+    return;
+
+  if (!D->isUnsafe())
+    return;
+
+  SourceLoc diagLoc = call ? call->getLoc() : R.Start;
+  ctx.Diags
+    .diagnose(diagLoc, diag::reference_to_unsafe_decl, call != nullptr, D);
+  D->diagnose(diag::decl_declared_here, D);
+}
+
 /// Diagnose uses of unavailable declarations. Returns true if a diagnostic
 /// was emitted.
 bool swift::diagnoseDeclAvailability(const ValueDecl *D, SourceRange R,
@@ -3978,6 +4028,8 @@ bool swift::diagnoseDeclAvailability(const ValueDecl *D, SourceRange R,
 
   if (diagnoseDeclAsyncAvailability(D, R, call, Where))
     return true;
+
+  diagnoseDeclUnsafe(D, R, call, Where);
 
   // Make sure not to diagnose an accessor's deprecation if we already
   // complained about the property/subscript.

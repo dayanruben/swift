@@ -2428,6 +2428,13 @@ checkIndividualConformance(NormalProtocolConformance *conformance) {
       ComplainLoc, diag::unchecked_conformance_not_special, ProtoType);
   }
 
+  // @unchecked conformances are considered unsafe in strict concurrency mode.
+  if (conformance->isUnchecked() &&
+      Context.LangOpts.hasFeature(Feature::WarnUnsafe) &&
+      Context.LangOpts.StrictConcurrencyLevel == StrictConcurrency::Complete) {
+    Context.Diags.diagnose(ComplainLoc, diag::unchecked_conformance_is_unsafe);
+  }
+
   bool allowImpliedConditionalConformance = false;
   if (Proto->isSpecificProtocol(KnownProtocolKind::Sendable)) {
     // In -swift-version 5 mode, a conditional conformance to a protocol can imply
@@ -2835,8 +2842,10 @@ diagnoseMatch(ModuleDecl *module, NormalProtocolConformance *conformance,
     // Also fix the Objective-C name, if needed.
     if (!match.Witness->canInferObjCFromRequirement(req))
       fixDeclarationObjCName(diag, match.Witness,
-                             match.Witness->getObjCRuntimeName(),
-                             req->getObjCRuntimeName());
+                             match.Witness->getObjCRuntimeName()
+                                .value_or(ObjCSelector()),
+                             req->getObjCRuntimeName()
+                                .value_or(ObjCSelector()));
     break;
   }
 
@@ -4304,8 +4313,7 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
           SourceLoc diagLoc = getLocForDiagnosingWitness(conformance, witness);
           diags.diagnose(
               diagLoc, diag::availability_protocol_requires_version,
-              conformance->getProtocol()->getName(),
-              witness->getName(),
+              conformance->getProtocol(), witness,
               prettyPlatformString(targetPlatform(ctx.LangOpts)),
               check.RequiredAvailability.getOSVersion().getLowerEndpoint());
           emitDeclaredHereIfNeeded(diags, diagLoc, witness);
@@ -4376,9 +4384,8 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
           SourceLoc diagLoc = getLocForDiagnosingWitness(conformance, witness);
           auto *attr = AvailableAttr::isUnavailable(witness);
           EncodedDiagnosticMessage EncodedMessage(attr->Message);
-          diags.diagnose(diagLoc, diag::witness_unavailable,
-                         witness, conformance->getProtocol()->getName(),
-                         EncodedMessage.Message);
+          diags.diagnose(diagLoc, diag::witness_unavailable, witness,
+                         conformance->getProtocol(), EncodedMessage.Message);
           emitDeclaredHereIfNeeded(diags, diagLoc, witness);
           diags.diagnose(requirement, diag::kind_declname_declared_here,
                          DescriptiveDeclKind::Requirement,
@@ -4777,6 +4784,63 @@ static void diagnoseInvariantSelfRequirement(
       .warnUntilSwiftVersion(6);
 }
 
+static bool diagnoseTypeWitnessAvailability(
+    NormalProtocolConformance *conformance, const TypeDecl *witness,
+    const AssociatedTypeDecl *assocType, const ExportContext &where) {
+  auto dc = conformance->getDeclContext();
+  auto &ctx = dc->getASTContext();
+  if (ctx.LangOpts.DisableAvailabilityChecking)
+    return false;
+
+  // In Swift 6 and earlier type witness availability diagnostics are warnings.
+  const unsigned warnBeforeVersion = 7;
+  bool shouldError =
+      ctx.LangOpts.EffectiveLanguageVersion.isVersionAtLeast(warnBeforeVersion);
+
+  if (auto attr = where.shouldDiagnoseDeclAsUnavailable(witness)) {
+    ctx.addDelayedConformanceDiag(
+        conformance, shouldError,
+        [witness, assocType, attr](NormalProtocolConformance *conformance) {
+          SourceLoc loc = getLocForDiagnosingWitness(conformance, witness);
+          EncodedDiagnosticMessage encodedMessage(attr->Message);
+          auto &ctx = conformance->getDeclContext()->getASTContext();
+          ctx.Diags
+              .diagnose(loc, diag::witness_unavailable, witness,
+                        conformance->getProtocol(), encodedMessage.Message)
+              .warnUntilSwiftVersion(warnBeforeVersion);
+
+          emitDeclaredHereIfNeeded(ctx.Diags, loc, witness);
+          ctx.Diags.diagnose(assocType, diag::kind_declname_declared_here,
+                             DescriptiveDeclKind::Requirement,
+                             assocType->getName());
+        });
+  }
+
+  auto requiredAvailability = AvailabilityContext::alwaysAvailable();
+  if (!TypeChecker::isAvailabilitySafeForConformance(conformance->getProtocol(),
+                                                     assocType, witness, dc,
+                                                     requiredAvailability)) {
+    auto requiredRange = requiredAvailability.getOSVersion();
+    ctx.addDelayedConformanceDiag(
+        conformance, shouldError,
+        [witness, requiredRange](NormalProtocolConformance *conformance) {
+          SourceLoc loc = getLocForDiagnosingWitness(conformance, witness);
+          auto &ctx = conformance->getDeclContext()->getASTContext();
+          ctx.Diags
+              .diagnose(loc, diag::availability_protocol_requires_version,
+                        conformance->getProtocol(), witness,
+                        prettyPlatformString(targetPlatform(ctx.LangOpts)),
+                        requiredRange.getLowerEndpoint())
+              .warnUntilSwiftVersion(warnBeforeVersion);
+
+          emitDeclaredHereIfNeeded(ctx.Diags, loc, witness);
+        });
+    return true;
+  }
+
+  return false;
+}
+
 /// Check whether the type witnesses satisfy the protocol's requirement
 /// signature. Also checks access level of type witnesses and availiability
 /// of associated conformances.
@@ -4898,6 +4962,10 @@ static void ensureRequirementsAreSatisfied(ASTContext &ctx,
                                         DiagnoseUsableFromInline(typeDecl));
       }
     }
+
+    // The type witness must be as available as the associated type.
+    if (auto witness = type->getAnyNominal())
+      diagnoseTypeWitnessAvailability(conformance, witness, assocType, where);
 
     // Make sure any associated type witnesses don't make reference to a
     // type we can't emit metadata for, or we're going to have trouble at
@@ -5023,6 +5091,15 @@ void ConformanceChecker::resolveValueWitnesses() {
               .withEnterIsolation(*enteringIsolation));
       }
 
+      // If we're disallowing unsafe code, check for an unsafe witness to a
+      // safe requirement.
+      if (C.LangOpts.hasFeature(Feature::WarnUnsafe) &&
+          witness->isUnsafe() && !requirement->isUnsafe()) {
+        witness->diagnose(diag::witness_unsafe,
+                          witness->getDescriptiveKind(),
+                          witness->getName());
+      }
+
       // Objective-C checking for @objc requirements.
       if (requirement->isObjC() &&
           requirement->getName() == witness->getName() &&
@@ -5050,8 +5127,8 @@ void ConformanceChecker::resolveValueWitnesses() {
             if (!witness->canInferObjCFromRequirement(requirement)) {
               fixDeclarationObjCName(
                   fixItDiag.value(), witness,
-                  witness->getObjCRuntimeName(),
-                  requirement->getObjCRuntimeName());
+                  witness->getObjCRuntimeName().value_or(ObjCSelector()),
+                  requirement->getObjCRuntimeName().value_or(ObjCSelector()));
             }
           } else if (isa<VarDecl>(witness)) {
             std::optional<InFlightDiagnostic> fixItDiag = C.Diags.diagnose(
@@ -5070,8 +5147,8 @@ void ConformanceChecker::resolveValueWitnesses() {
             if (!witness->canInferObjCFromRequirement(requirement)) {
               fixDeclarationObjCName(
                   fixItDiag.value(), witness,
-                  witness->getObjCRuntimeName(),
-                  requirement->getObjCRuntimeName());
+                  witness->getObjCRuntimeName().value_or(ObjCSelector()),
+                  requirement->getObjCRuntimeName().value_or(ObjCSelector()));
             }
           } else if (isa<SubscriptDecl>(witness)) {
             std::optional<InFlightDiagnostic> fixItDiag = C.Diags.diagnose(
@@ -5769,8 +5846,10 @@ static void diagnosePotentialWitness(NormalProtocolConformance *conformance,
         witness->diagnose(diag::optional_req_nonobjc_near_match_add_objc);
     if (!witness->canInferObjCFromRequirement(req))
       fixDeclarationObjCName(diag, witness,
-                             witness->getObjCRuntimeName(),
-                             req->getObjCRuntimeName());
+                             witness->getObjCRuntimeName()
+                                .value_or(ObjCSelector()),
+                             req->getObjCRuntimeName()
+                                .value_or(ObjCSelector()));
   } else {
     diagnoseMatch(conformance->getDeclContext()->getParentModule(),
                   conformance, req, match);
