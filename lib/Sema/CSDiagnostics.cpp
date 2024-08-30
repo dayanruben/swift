@@ -1649,7 +1649,7 @@ class VarDeclMultipleReferencesChecker : public ASTWalker {
     }
 
     // FIXME: We can see UnresolvedDeclRefExprs here because we have
-    // not yet run preCheckExpression() on the entire function body
+    // not yet run preCheckTarget() on the entire function body
     // yet.
     //
     // We could consider pre-checking more eagerly.
@@ -9365,8 +9365,8 @@ bool ConcreteTypeSpecialization::diagnoseAsError() {
   return true;
 }
 
-bool GenericFunctionSpecialization::diagnoseAsError() {
-  emitDiagnostic(diag::cannot_explicitly_specialize_generic_function);
+bool InvalidFunctionSpecialization::diagnoseAsError() {
+  emitDiagnostic(diag::cannot_explicitly_specialize_function, Decl);
   emitDiagnosticAt(Decl, diag::decl_declared_here, Decl);
   return true;
 }

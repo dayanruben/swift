@@ -3927,8 +3927,8 @@ ConstraintSystem::matchDeepEqualityTypes(Type type1, Type type2,
 
   if (shouldAttemptFixes()) {
     auto *baseLoc =
-      getConstraintLocator(locator, {LocatorPathElt::GenericType(bound1),
-          LocatorPathElt::GenericType(bound2)});
+      getConstraintLocator(locator, {LocatorPathElt::GenericType(type1),
+          LocatorPathElt::GenericType(type2)});
 
     auto argMatchingFlags = subflags;
     // Allow the solver to produce separate fixes while matching
@@ -6201,6 +6201,24 @@ bool ConstraintSystem::repairFailures(
       conversionsOrFixes.push_back(fix);
     }
     break;
+  }
+
+  case ConstraintLocator::ExistentialConstraintType: {
+    if (lhs->hasPlaceholder() || rhs->hasPlaceholder())
+      return true;
+
+    // If there are any restrictions/conversions left to attempt, wait.
+    if (hasAnyRestriction())
+      break;
+
+    // Drop the element introduced by DeepEquality matcher.
+    path.pop_back();
+
+    // Presence of DeepEquality conversion delayed repair but since the
+    // constraint types didn't match easier, let's retry it.
+    return repairFailures(ExistentialType::get(lhs), ExistentialType::get(rhs),
+                          matchKind, flags, conversionsOrFixes,
+                          getConstraintLocator(anchor, path));
   }
 
   case ConstraintLocator::ClosureBody:
@@ -14051,6 +14069,13 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
 
   auto genericParams = getGenericParams(decl);
   if (!decl->getAsGenericContext() || !genericParams) {
+    if (isa<AbstractFunctionDecl>(decl)) {
+      return recordFix(AllowFunctionSpecialization::create(
+                 *this, decl, getConstraintLocator(locator)))
+                 ? SolutionKind::Error
+                 : SolutionKind::Solved;
+    }
+
     // Allow concrete macros to have specializations with just a warning.
     return recordFix(AllowConcreteTypeSpecialization::create(
                *this, type1, decl, getConstraintLocator(locator),
@@ -14093,10 +14118,7 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
   // FIXME: We could support explicit function specialization.
   if (openedGenericParams.empty() ||
       (isa<AbstractFunctionDecl>(decl) && !hasParameterPack)) {
-    if (!shouldAttemptFixes())
-      return SolutionKind::Error;
-
-    return recordFix(AllowGenericFunctionSpecialization::create(
+    return recordFix(AllowFunctionSpecialization::create(
                *this, decl, getConstraintLocator(locator)))
                ? SolutionKind::Error
                : SolutionKind::Solved;
@@ -15228,7 +15250,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::AllowAssociatedValueMismatch:
   case FixKind::GenericArgumentsMismatch:
   case FixKind::AllowConcreteTypeSpecialization:
-  case FixKind::AllowGenericFunctionSpecialization:
+  case FixKind::AllowFunctionSpecialization:
   case FixKind::IgnoreGenericSpecializationArityMismatch:
   case FixKind::IgnoreKeyPathSubscriptIndexMismatch:
   case FixKind::AllowMemberRefOnExistential: {
