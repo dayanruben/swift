@@ -110,6 +110,15 @@ public:
   /// This function should generally only be used by the substitution
   /// subsystem.
   static SubstitutionMap get(GenericSignature genericSig,
+                             ArrayRef<Type> replacementTypes,
+                             InFlightSubstitution &IFS);
+
+  /// Build a substitution map from the substitutions represented by
+  /// the given in-flight substitution.
+  ///
+  /// This function should generally only be used by the substitution
+  /// subsystem.
+  static SubstitutionMap get(GenericSignature genericSig,
                              InFlightSubstitution &IFS);
 
   /// Retrieve the generic signature describing the environment in which
@@ -322,6 +331,19 @@ struct LookUpConformanceInOverrideSubs {
   ProtocolConformanceRef operator()(CanType type,
                                     Type substType,
                                     ProtocolDecl *proto) const;
+};
+
+// Substitute the outer generic parameters from a substitution map, ignoring
+/// inner generic parameters with a given depth.
+struct OuterSubstitutions {
+  SubstitutionMap subs;
+  unsigned depth;
+
+  bool isUnsubstitutedTypeParameter(Type type) const;
+  Type operator()(SubstitutableType *type) const;
+  ProtocolConformanceRef operator()(CanType dependentType,
+                                    Type conformingReplacementType,
+                                    ProtocolDecl *conformedProtocol) const;
 };
 
 } // end namespace swift

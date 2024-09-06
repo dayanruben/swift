@@ -291,61 +291,17 @@ GenericEnvironment::getMappingIfPresent(GenericParamKey key) const {
   return std::nullopt;
 }
 
-namespace {
-
-/// Substitute the outer generic parameters from a substitution map, ignoring
-/// innter generic parameters with a given depth.
-struct SubstituteOuterFromSubstitutionMap {
-  SubstitutionMap subs;
-  unsigned depth;
-
-  /// Whether this is a type parameter that should not be substituted.
-  bool isUnsubstitutedTypeParameter(Type type) const {
-    if (!type->isTypeParameter())
-      return false;
-
-    if (auto depMemTy = type->getAs<DependentMemberType>())
-      return isUnsubstitutedTypeParameter(depMemTy->getBase());
-
-    if (auto genericParam = type->getAs<GenericTypeParamType>())
-      return genericParam->getDepth() >= depth;
-
-    return false;
-  }
-
-  Type operator()(SubstitutableType *type) const {
-    if (isUnsubstitutedTypeParameter(type))
-      return Type(type);
-
-    return QuerySubstitutionMap{subs}(type);
-  }
-
-  ProtocolConformanceRef operator()(CanType dependentType,
-                                    Type conformingReplacementType,
-                                    ProtocolDecl *conformedProtocol) const {
-    if (isUnsubstitutedTypeParameter(dependentType))
-      return ProtocolConformanceRef(conformedProtocol);
-
-    return LookUpConformanceInSubstitutionMap(subs)(
-        dependentType, conformingReplacementType, conformedProtocol);
-  }
-};
-
-}
-
 Type
 GenericEnvironment::maybeApplyOuterContextSubstitutions(Type type) const {
   switch (getKind()) {
   case Kind::Primary:
-  case Kind::OpenedExistential:
     return type;
 
+  case Kind::OpenedExistential:
   case Kind::OpenedElement:
   case Kind::Opaque: {
-    auto packElements = getGenericSignature().getInnermostGenericParams();
-    auto elementDepth = packElements.front()->getDepth();
-    SubstituteOuterFromSubstitutionMap replacer{
-        getOuterSubstitutions(), elementDepth};
+    OuterSubstitutions replacer{
+        getOuterSubstitutions(), getGenericSignature()->getMaxDepth()};
     return type.subst(replacer, replacer);
   }
   }
@@ -402,25 +358,8 @@ GenericEnvironment::getOrCreateArchetypeFromInterfaceType(Type depType) {
   auto genericSig = getGenericSignature();
   auto requirements = genericSig->getLocalRequirements(depType);
 
-  /// Substitute a type for the purpose of requirements.
-  auto substForRequirements = [&](Type type) {
-    switch (getKind()) {
-    case Kind::Primary:
-    case Kind::OpenedExistential:
-      if (type->hasTypeParameter()) {
-        return mapTypeIntoContext(type, LookUpConformanceInModule());
-      } else {
-        return type;
-      }
-    case Kind::OpenedElement:
-    case Kind::Opaque:
-      return maybeApplyOuterContextSubstitutions(type);
-    }
-  };
-
-  if (requirements.concreteType) {
-    return substForRequirements(requirements.concreteType);
-  }
+  if (requirements.concreteType)
+    return mapTypeIntoContext(requirements.concreteType);
 
   assert(requirements.anchor && "No anchor or concrete type?");
 
@@ -448,7 +387,7 @@ GenericEnvironment::getOrCreateArchetypeFromInterfaceType(Type depType) {
   // Substitute into the superclass.
   Type superclass = requirements.superclass;
   if (superclass && superclass->hasTypeParameter()) {
-    superclass = substForRequirements(superclass);
+    superclass = mapTypeIntoContext(superclass);
     if (superclass->is<ErrorType>())
       superclass = Type();
   }
@@ -472,14 +411,10 @@ GenericEnvironment::getOrCreateArchetypeFromInterfaceType(Type depType) {
     break;
 
   case Kind::Opaque: {
-    assert(!rootGP->isParameterPack());
-
     // If the anchor type isn't rooted in a generic parameter that
     // represents an opaque declaration, then apply the outer substitutions.
     // It would be incorrect to build an opaque type archetype here.
-    unsigned opaqueDepth =
-        getOpaqueTypeDecl()->getOpaqueGenericParams().front()->getDepth();
-    if (rootGP->getDepth() < opaqueDepth) {
+    if (rootGP->getDepth() < genericSig->getMaxDepth()) {
       result = maybeApplyOuterContextSubstitutions(requirements.anchor);
       break;
     }
@@ -491,7 +426,10 @@ GenericEnvironment::getOrCreateArchetypeFromInterfaceType(Type depType) {
   }
 
   case Kind::OpenedExistential: {
-    assert(!rootGP->isParameterPack());
+    if (rootGP->getDepth() < genericSig->getMaxDepth()) {
+      result = maybeApplyOuterContextSubstitutions(requirements.anchor);
+      break;
+    }
 
     // FIXME: The existential layout's protocols might differ from the
     // canonicalized set of protocols determined by the generic signature.
@@ -519,10 +457,7 @@ GenericEnvironment::getOrCreateArchetypeFromInterfaceType(Type depType) {
   }
 
   case Kind::OpenedElement: {
-    auto packElements = getGenericSignature().getInnermostGenericParams();
-    auto elementDepth = packElements.front()->getDepth();
-
-    if (rootGP->getDepth() < elementDepth) {
+    if (rootGP->getDepth() < genericSig->getMaxDepth()) {
       result = maybeApplyOuterContextSubstitutions(requirements.anchor);
       break;
     }
@@ -580,9 +515,7 @@ Type GenericEnvironment::mapTypeIntoContext(
   Type result = type.subst(QueryInterfaceTypeSubstitutions(this),
                            lookupConformance,
                            SubstFlags::PreservePackExpansionLevel);
-  assert((!result->hasTypeParameter() || result->hasError() ||
-          getKind() == Kind::Opaque) &&
-         "not fully substituted");
+  ASSERT(getKind() != Kind::Primary || !result->hasTypeParameter());
   return result;
 
 }

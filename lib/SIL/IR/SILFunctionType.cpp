@@ -472,8 +472,7 @@ static CanType getAutoDiffTangentTypeForLinearMap(
   // Otherwise, the tangent type is a new generic parameter substituted for the
   // tangent type.
   auto gpIndex = substGenericParams.size();
-  auto gpType = CanGenericTypeParamType::get(/*isParameterPack*/ false,
-                                             0, gpIndex, context);
+  auto gpType = CanGenericTypeParamType::getType(0, gpIndex, context);
   substGenericParams.push_back(gpType);
   substReplacements.push_back(tanType);
   return gpType;
@@ -1967,14 +1966,11 @@ lowerCaptureContextParameters(TypeConverter &TC, SILDeclRef function,
   auto mapTypeOutOfContext = [&](Type t) -> CanType {
     LLVM_DEBUG(llvm::dbgs() << "-- capture with contextual type " << t << "\n");
 
-    t = t.subst(MapLocalArchetypesOutOfContext(origGenericSig, capturedEnvs),
-                MakeAbstractConformanceForGenericType(),
-                SubstFlags::PreservePackExpansionLevel |
-                SubstFlags::SubstitutePrimaryArchetypes |
-                SubstFlags::SubstituteLocalArchetypes);
+    auto result = mapLocalArchetypesOutOfContext(t, origGenericSig, capturedEnvs)
+        ->getCanonicalType();
 
-    LLVM_DEBUG(llvm::dbgs() << "-- maps to " << t->getCanonicalType() << "\n");
-    return t->getCanonicalType();
+    LLVM_DEBUG(llvm::dbgs() << "-- maps to " << result << "\n");
+    return result;
   };
 
   for (auto capture : loweredCaptures.getCaptures()) {
@@ -3004,26 +3000,19 @@ CanSILFunctionType swift::buildSILFunctionThunkType(
                                      interfaceSubs);
   }
 
-  MapLocalArchetypesOutOfContext mapOutOfContext(baseGenericSig, capturedEnvs);
   auto substFormalTypeIntoThunkContext =
       [&](CanType t) -> CanType {
-    return genericEnv->mapTypeIntoContext(
-        t.subst(mapOutOfContext,
-                MakeAbstractConformanceForGenericType(),
-                SubstFlags::PreservePackExpansionLevel |
-                SubstFlags::SubstitutePrimaryArchetypes |
-                SubstFlags::SubstituteLocalArchetypes))
+    return GenericEnvironment::mapTypeIntoContext(
+        genericEnv,
+        mapLocalArchetypesOutOfContext(t, baseGenericSig, capturedEnvs))
                ->getCanonicalType();
   };
   auto substLoweredTypeIntoThunkContext =
       [&](CanSILFunctionType t) -> CanSILFunctionType {
     return cast<SILFunctionType>(
-        genericEnv->mapTypeIntoContext(
-          Type(t).subst(mapOutOfContext,
-                        MakeAbstractConformanceForGenericType(),
-                        SubstFlags::PreservePackExpansionLevel |
-                        SubstFlags::SubstitutePrimaryArchetypes |
-                        SubstFlags::SubstituteLocalArchetypes))
+        GenericEnvironment::mapTypeIntoContext(
+          genericEnv,
+          mapLocalArchetypesOutOfContext(t, baseGenericSig, capturedEnvs))
               ->getCanonicalType());
   };
 

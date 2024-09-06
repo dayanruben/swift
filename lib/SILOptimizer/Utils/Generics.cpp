@@ -1420,7 +1420,8 @@ public:
       SubstitutionMap::get(
         SpecializedGenericSig,
         [&](SubstitutableType *type) -> Type {
-          return CalleeGenericEnv->mapTypeIntoContext(
+          return GenericEnvironment::mapTypeIntoContext(
+              CalleeGenericEnv,
               SpecializedGenericSig.getReducedType(type));
         },
         LookUpConformanceInModule());
@@ -1449,7 +1450,7 @@ public:
 
 GenericTypeParamType *
 FunctionSignaturePartialSpecializer::createGenericParam() {
-  auto GP = GenericTypeParamType::get(/*isParameterPack*/ false, 0, GPIdx++, Ctx);
+  auto GP = GenericTypeParamType::getType(0, GPIdx++, Ctx);
   AllGenericParams.push_back(GP);
   return GP;
 }

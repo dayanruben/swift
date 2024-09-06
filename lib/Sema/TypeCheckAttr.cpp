@@ -1681,10 +1681,11 @@ visitObjCImplementationAttr(ObjCImplementationAttr *attr) {
     // supported.
     auto deploymentAvailability = AvailabilityContext::forDeploymentTarget(Ctx);
     if (!deploymentAvailability.isContainedIn(Ctx.getSwift50Availability())) {
-      auto diag = diagnose(attr->getLocation(),
-               diag::attr_objc_implementation_raise_minimum_deployment_target,
-               prettyPlatformString(targetPlatform(Ctx.LangOpts)),
-               Ctx.getSwift50Availability().getOSVersion().getLowerEndpoint());
+      auto diag = diagnose(
+          attr->getLocation(),
+          diag::attr_objc_implementation_raise_minimum_deployment_target,
+          Ctx.getTargetPlatformStringForDiagnostics(),
+          Ctx.getSwift50Availability().getRawMinimumVersion());
       if (attr->isEarlyAdopter()) {
         diag.wrapIn(diag::wrap_objc_implementation_will_become_error);
       }
@@ -2208,12 +2209,12 @@ void AttributeChecker::visitAvailableAttr(AvailableAttr *attr) {
           diagnose(enclosingDecl->getLoc(),
                    diag::availability_implicit_decl_here,
                    D->getDescriptiveKind(),
-                   prettyPlatformString(targetPlatform(Ctx.LangOpts)),
-                   AttrRange.getOSVersion().getLowerEndpoint());
+                   Ctx.getTargetPlatformStringForDiagnostics(),
+                   AttrRange.getRawMinimumVersion());
         diagnose(enclosingDecl->getLoc(),
                  diag::availability_decl_more_than_enclosing_here,
-                 prettyPlatformString(targetPlatform(Ctx.LangOpts)),
-                 EnclosingAnnotatedRange->getOSVersion().getLowerEndpoint());
+                 Ctx.getTargetPlatformStringForDiagnostics(),
+                 EnclosingAnnotatedRange->getRawMinimumVersion());
       }
     }
   }
@@ -3836,19 +3837,29 @@ ResolveTypeEraserTypeRequest::evaluate(Evaluator &evaluator,
 }
 
 Type
-ResolveRawLayoutLikeTypeRequest::evaluate(Evaluator &evaluator,
-                                          StructDecl *sd,
-                                          RawLayoutAttr *attr) const {
-  assert(attr->LikeType);
+ResolveRawLayoutTypeRequest::evaluate(Evaluator &evaluator, StructDecl *sd,
+                                      RawLayoutAttr *attr,
+                                      bool isLikeType) const {
+  TypeRepr *typeRepr = nullptr;
+
+  if (isLikeType) {
+    assert(attr->LikeType);
+    typeRepr = attr->LikeType;
+  } else {
+    assert(attr->CountType);
+    typeRepr = attr->CountType;
+  }
 
   // If the attribute has a fixed type representation, then it was likely
   // deserialized and the type has already been computed.
-  if (auto fixedTy = dyn_cast<FixedTypeRepr>(attr->LikeType)) {
+  if (auto fixedTy = dyn_cast<FixedTypeRepr>(typeRepr)) {
     return fixedTy->getType();
   }
 
-  // Resolve the like type in the struct's context.
-  return TypeResolution::resolveContextualType(attr->LikeType, sd, std::nullopt,
+  TypeResolutionOptions options(TypeResolverContext::RawLayoutAttr);
+
+  // Resolve the type in the struct's context.
+  return TypeResolution::resolveContextualType(typeRepr, sd, options,
                                                // Unbound generics and
                                                // placeholders are not allowed
                                                // within this attribute.
@@ -7596,6 +7607,14 @@ void AttributeChecker::visitRawLayoutAttr(RawLayoutAttr *attr) {
     (void)attr->getResolvedLikeType(sd);
   } else if (attr->getArrayLikeTypeAndCount()) {
     (void)attr->getResolvedLikeType(sd);
+    auto countType = attr->getResolvedCountType(sd);
+
+    // Raw layout's count type can only either be an archetype or an integer
+    // type.
+    if (!countType->is<IntegerType>() && !countType->is<ArchetypeType>()) {
+      diagnoseAndRemoveAttr(attr, diag::attr_rawlayout_invalid_count_type);
+      return;
+    }
   } else {
     llvm_unreachable("new unhandled rawLayout attribute form?");
   }

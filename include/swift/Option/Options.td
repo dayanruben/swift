@@ -286,6 +286,13 @@ def swift_version : Separate<["-"], "swift-version">,
   HelpText<"Interpret input according to a specific Swift language version number">,
   MetaVarName<"<vers>">;
 
+def language_mode : Separate<["-"], "language-mode">,
+  Flags<[FrontendOption, ModuleInterfaceOption, SwiftSymbolGraphExtractOption,
+         SwiftAPIDigesterOption]>,
+  HelpText<"Interpret input according to a specific Swift language mode">,
+  MetaVarName<"<mode>">,
+  Alias<swift_version>;
+
 def package_description_version: Separate<["-"], "package-description-version">,
   Flags<[FrontendOption, HelpHidden, ModuleInterfaceOption]>,
   HelpText<"The version number to be applied on the input for the PackageDescription availability kind">,
@@ -728,7 +735,11 @@ def disable_bridging_pch : Flag<["-"], "disable-bridging-pch">,
 def disable_print_package_name_for_non_package_interface :
   Flag<["-"], "disable-print-package-name-for-non-package-interface">,
   Flags<[FrontendOption, NoDriverOption, HelpHidden]>,
-  HelpText<"Disable adding package name to public or private interface">;
+  HelpText<"No op; package name is only printed in package interface by default">;
+def print_package_name_in_non_package_interface :
+  Flag<["-"], "print-package-name-in-non-package-interface">,
+  Flags<[FrontendOption, NoDriverOption, HelpHidden]>,
+  HelpText<"Print package name in public or private interface">;
 
 def lto : Joined<["-"], "lto=">,
   Flags<[FrontendOption, NoInteractiveOption]>,

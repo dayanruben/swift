@@ -1590,7 +1590,7 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
       auto paramTy = cast<GenericTypeParamType>(tybase);
       // If this assertion fires, it probably means the type being mangled here
       // didn't go through getTypeForDWARFMangling().
-      assert(paramTy->getDecl() == nullptr &&
+      assert(paramTy->isCanonical() &&
              "cannot mangle non-canonical generic parameter");
       // A special mangling for the very first generic parameter. This shows up
       // frequently because it corresponds to 'Self' in protocol requirement
@@ -1664,6 +1664,20 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
 
       return;
     }
+
+    case TypeKind::Integer: {
+      auto integer = cast<IntegerType>(tybase);
+
+      appendOperator("$");
+
+      if (integer->isNegative()) {
+        appendOperator("n");
+      }
+
+      appendOperator(integer->getDigitsText());
+      return;
+    }
+
     case TypeKind::SILMoveOnlyWrapped:
       // If we hit this, we just mangle the underlying name and move on.
       llvm_unreachable("should never be mangled?");
@@ -3796,12 +3810,8 @@ void ASTMangler::appendClosureComponents(CanType Ty, unsigned discriminator,
   appendContext(parentContext, base, StringRef());
 
   auto Sig = parentContext->getGenericSignatureOfContext();
-
-  Ty = Ty.subst(MapLocalArchetypesOutOfContext(Sig, capturedEnvs),
-                MakeAbstractConformanceForGenericType(),
-                SubstFlags::PreservePackExpansionLevel |
-                SubstFlags::SubstitutePrimaryArchetypes |
-                SubstFlags::SubstituteLocalArchetypes)->getCanonicalType();
+  Ty = mapLocalArchetypesOutOfContext(Ty, Sig, capturedEnvs)
+      ->getCanonicalType();
 
   appendType(Ty, Sig);
   appendOperator(isImplicit ? "fu" : "fU", Index(discriminator));
@@ -4726,8 +4736,7 @@ static void extractExistentialInverseRequirements(
 
   // Form a parameter referring to the existential's Self.
   auto existentialSelf =
-      GenericTypeParamType::get(/*isParameterPack=*/false,
-                                /*depth=*/0, /*index=*/0, ctx);
+      GenericTypeParamType::getType(/*depth=*/0, /*index=*/0, ctx);
 
   for (auto ip : PCT->getInverses()) {
     auto *proto = ctx.getProtocol(getKnownProtocolKind(ip));

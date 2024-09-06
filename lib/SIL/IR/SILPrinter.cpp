@@ -531,7 +531,7 @@ static void printSILFunctionNameAndType(
 
       // Opaque parameter types are printed as their canonical types and not
       // the unparseable "<anonymous>".
-      if (sugaredTy->getDecl() && sugaredTy->getDecl()->isOpaqueType())
+      if (sugaredTy->getOpaqueDecl())
         continue;
 
       Identifier name = sugaredTy->getName();
@@ -2568,6 +2568,10 @@ public:
     *this << getIDAndType(RI->getOperand());
   }
 
+  void visitTypeValueInst(TypeValueInst *tvi) {
+    *this << tvi->getType() << " for " << tvi->getParamType();
+  }
+
   void visitEndLifetimeInst(EndLifetimeInst *ELI) {
     *this << getIDAndType(ELI->getOperand());
   }
@@ -3438,8 +3442,7 @@ void SILFunction::print(SILPrintContext &PrintCtx) const {
     OS << "[weak_imported] ";
   auto availability = getAvailabilityForLinkage();
   if (!availability.isAlwaysAvailable()) {
-    auto version = availability.getOSVersion().getLowerEndpoint();
-    OS << "[available " << version.getAsString() << "] ";
+    OS << "[available " << availability.getVersionString() << "] ";
   }
 
   switch (getInlineStrategy()) {
@@ -4409,9 +4412,8 @@ void SILSpecializeAttr::print(llvm::raw_ostream &OS) const {
   if (targetFunction) {
     OS << "target: \"" << targetFunction->getName() << "\", ";
   }
- if (!availability.isAlwaysAvailable()) {
-    auto version = availability.getOSVersion().getLowerEndpoint();
-    OS << "available: " << version.getAsString() << ", ";
+  if (!availability.isAlwaysAvailable()) {
+    OS << "available: " << availability.getVersionString() << ", ";
   }
   if (!requirements.empty()) {
     OS << "where ";
