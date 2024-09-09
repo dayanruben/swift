@@ -735,11 +735,7 @@ def disable_bridging_pch : Flag<["-"], "disable-bridging-pch">,
 def disable_print_package_name_for_non_package_interface :
   Flag<["-"], "disable-print-package-name-for-non-package-interface">,
   Flags<[FrontendOption, NoDriverOption, HelpHidden]>,
-  HelpText<"No op; package name is only printed in package interface by default">;
-def print_package_name_in_non_package_interface :
-  Flag<["-"], "print-package-name-in-non-package-interface">,
-  Flags<[FrontendOption, NoDriverOption, HelpHidden]>,
-  HelpText<"Print package name in public or private interface">;
+  HelpText<"Disable adding package name to public or private interface">;
 
 def lto : Joined<["-"], "lto=">,
   Flags<[FrontendOption, NoInteractiveOption]>,
@@ -790,11 +786,6 @@ def experimental_c_foreign_reference_types :
   Flags<[FrontendOption, HelpHidden, ModuleInterfaceOption]>,
   HelpText<"Enable experimental C foreign references types (with reference counting).">;
 
-def experimental_cxx_stdlib :
-  Separate<["-"], "experimental-cxx-stdlib">,
-  Flags<[HelpHidden]>,
-  HelpText<"C++ standard library to use; forwarded to Clang's -stdlib flag">;
-
 def experimental_hermetic_seal_at_link:
   Flag<["-"], "experimental-hermetic-seal-at-link">,
   Flags<[FrontendOption, HelpHidden]>,
@@ -810,14 +801,30 @@ def suppress_warnings : Flag<["-"], "suppress-warnings">,
   Flags<[FrontendOption]>,
   HelpText<"Suppress all warnings">;
 
+def warning_treating_Group : OptionGroup<"<options to control warning treating>">;
+
 def warnings_as_errors : Flag<["-"], "warnings-as-errors">,
+  Group<warning_treating_Group>,
   Flags<[FrontendOption]>,
   HelpText<"Treat warnings as errors">;
 
+def Werror : Separate<["-"], "Werror">,
+  Group<warning_treating_Group>,
+  Flags<[FrontendOption, HelpHidden]>,
+  MetaVarName<"<diagnostic_group>">,
+  HelpText<"Treat this warning group as error">;
+
 def no_warnings_as_errors : Flag<["-"], "no-warnings-as-errors">,
+  Group<warning_treating_Group>,
   Flags<[FrontendOption]>,
-  HelpText<"Don't treat warnings as errors">;
-  
+  HelpText<"Treat warnings as warnings">;
+
+def Wwarning : Separate<["-"], "Wwarning">,
+  Group<warning_treating_Group>,
+  Flags<[FrontendOption, HelpHidden]>,
+  MetaVarName<"<diagnostic_group>">,
+  HelpText<"Treat this warning group as warning">;
+
 def suppress_remarks : Flag<["-"], "suppress-remarks">,
   Flags<[FrontendOption]>,
   HelpText<"Suppress all remarks">;

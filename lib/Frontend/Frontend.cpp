@@ -238,6 +238,9 @@ SerializationOptions CompilerInvocation::computeSerializationOptions(
     serializationOpts.ExtraClangOptions.push_back("--target=" +
                                                   LangOpts.ClangTarget->str());
   }
+  if (LangOpts.EnableAppExtensionRestrictions) {
+    serializationOpts.ExtraClangOptions.push_back("-fapplication-extension");
+  }
 
   serializationOpts.PluginSearchOptions =
       getSearchPathOptions().PluginSearchOpts;
@@ -724,9 +727,8 @@ void CompilerInstance::setUpDiagnosticOptions() {
   if (Invocation.getDiagnosticOptions().SuppressRemarks) {
     Diagnostics.setSuppressRemarks(true);
   }
-  if (Invocation.getDiagnosticOptions().WarningsAsErrors) {
-    Diagnostics.setWarningsAsErrors(true);
-  }
+  Diagnostics.setWarningsAsErrorsRules(
+      Invocation.getDiagnosticOptions().WarningsAsErrorsRules);
   if (Invocation.getDiagnosticOptions().PrintDiagnosticNames) {
     Diagnostics.setPrintDiagnosticNames(true);
   }

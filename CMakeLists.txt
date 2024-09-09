@@ -244,10 +244,17 @@ option(SWIFT_BUILD_CLANG_OVERLAYS
   "Build Swift overlays for the clang builtin modules"
   TRUE)
 
+# The SDK overlay is provided by the SDK itself on Darwin platforms.
+if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_DARWIN_PLATFORMS)
+  set(SWIFT_BUILD_DYNAMIC_SDK_OVERLAY_default FALSE)
+else()
+  set(SWIFT_BUILD_DYNAMIC_SDK_OVERLAY_default TRUE)
+endif()
+
 option(SWIFT_BUILD_DYNAMIC_SDK_OVERLAY
     "Build dynamic variants of the Swift SDK overlay"
-    TRUE)
-
+    "${SWIFT_BUILD_DYNAMIC_SDK_OVERLAY_default}")
+  
 option(SWIFT_BUILD_STATIC_SDK_OVERLAY
     "Build static variants of the Swift SDK overlay"
     FALSE)
@@ -556,16 +563,16 @@ option(SWIFT_ALLOW_LINKING_SWIFT_CONTENT_IN_DARWIN_TOOLCHAIN
    This is needed to support Apple internal configurations."
   FALSE)
 
-set(SWIFT_DARWIN_DEPLOYMENT_VERSION_OSX "10.13" CACHE STRING
+set(SWIFT_DARWIN_DEPLOYMENT_VERSION_OSX "13.0" CACHE STRING
     "Minimum deployment target version for OS X")
 
-set(SWIFT_DARWIN_DEPLOYMENT_VERSION_IOS "11.0" CACHE STRING
+set(SWIFT_DARWIN_DEPLOYMENT_VERSION_IOS "16.0" CACHE STRING
     "Minimum deployment target version for iOS")
 
-set(SWIFT_DARWIN_DEPLOYMENT_VERSION_TVOS "11.0" CACHE STRING
+set(SWIFT_DARWIN_DEPLOYMENT_VERSION_TVOS "16.0" CACHE STRING
     "Minimum deployment target version for tvOS")
 
-set(SWIFT_DARWIN_DEPLOYMENT_VERSION_WATCHOS "4.0" CACHE STRING
+set(SWIFT_DARWIN_DEPLOYMENT_VERSION_WATCHOS "9.0" CACHE STRING
     "Minimum deployment target version for watchOS")
 
 set(SWIFT_DARWIN_DEPLOYMENT_VERSION_XROS "1.0" CACHE STRING

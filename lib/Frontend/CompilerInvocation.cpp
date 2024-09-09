@@ -525,6 +525,7 @@ static void ParseModuleInterfaceArgs(ModuleInterfaceOptions &Opts,
     Args.hasArg(OPT_debug_emit_invalid_swiftinterface_syntax);
   Opts.PrintMissingImports =
     !Args.hasArg(OPT_disable_print_missing_imports_in_module_interface);
+  Opts.DisablePackageNameForNonPackageInterface |= Args.hasArg(OPT_disable_print_package_name_for_non_package_interface);
 
   if (const Arg *A = Args.getLastArg(OPT_library_level)) {
     StringRef contents = A->getValue();
@@ -556,8 +557,8 @@ static bool ShouldIncludeModuleInterfaceArg(const Arg *A) {
 
 static bool IsPackageInterfaceFlag(const Arg *A, ArgList &Args) {
   return A->getOption().matches(options::OPT_package_name) &&
-         !Args.hasArg(
-             options::OPT_print_package_name_in_non_package_interface);
+         Args.hasArg(
+             options::OPT_disable_print_package_name_for_non_package_interface);
 }
 
 static bool IsPrivateInterfaceFlag(const Arg *A, ArgList &Args) {
@@ -2330,9 +2331,24 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   Opts.FixitCodeForAllDiagnostics |= Args.hasArg(OPT_fixit_all);
   Opts.SuppressWarnings |= Args.hasArg(OPT_suppress_warnings);
   Opts.SuppressRemarks |= Args.hasArg(OPT_suppress_remarks);
-  Opts.WarningsAsErrors = Args.hasFlag(options::OPT_warnings_as_errors,
-                                       options::OPT_no_warnings_as_errors,
-                                       false);
+  for (const Arg *arg : Args.filtered(OPT_warning_treating_Group)) {
+    Opts.WarningsAsErrorsRules.push_back([&] {
+      switch (arg->getOption().getID()) {
+      case OPT_warnings_as_errors:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Enable);
+      case OPT_no_warnings_as_errors:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Disable);
+      case OPT_Werror:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Enable,
+                                  arg->getValue());
+      case OPT_Wwarning:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Disable,
+                                  arg->getValue());
+      default:
+        llvm_unreachable("unhandled warning as error option");
+      }
+    }());
+  }
   Opts.PrintDiagnosticNames |= Args.hasArg(OPT_debug_diagnostic_names);
   Opts.PrintEducationalNotes |= Args.hasArg(OPT_print_educational_notes);
   if (Arg *A = Args.getLastArg(OPT_diagnostic_documentation_path)) {
@@ -2375,7 +2391,9 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
       Opts.LocalizationPath = A->getValue();
     }
   }
-  assert(!(Opts.WarningsAsErrors && Opts.SuppressWarnings) &&
+  assert(!(Opts.SuppressWarnings &&
+           WarningAsErrorRule::hasConflictsWithSuppressWarnings(
+               Opts.WarningsAsErrorsRules)) &&
          "conflicting arguments; should have been caught by driver");
 
   return false;
