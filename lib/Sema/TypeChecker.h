@@ -174,6 +174,14 @@ inline NameLookupOptions operator|(NameLookupFlags flag1,
 /// Default options for member name lookup.
 const NameLookupOptions defaultMemberLookupOptions;
 
+/// Default options for member name lookup in the constraint solver.
+/// Overloads which come from modules that have not been imported should be
+/// deprioritized by ranking and diagnosed by MiscDiagnostics, so we allow
+/// them to be found in constraint solver lookups to improve diagnostics
+/// overall.
+const NameLookupOptions defaultConstraintSolverMemberLookupOptions(
+    NameLookupFlags::IgnoreMissingImports);
+
 /// Default options for member type lookup.
 const NameLookupOptions defaultMemberTypeLookupOptions;
 
@@ -1012,13 +1020,13 @@ TypeRefinementContext *getOrBuildTypeRefinementContext(SourceFile *SF);
 /// Returns a diagnostic indicating why the declaration cannot be annotated
 /// with an @available() attribute indicating it is potentially unavailable
 /// or None if this is allowed.
-std::optional<Diag<>>
+std::optional<Diagnostic>
 diagnosticIfDeclCannotBePotentiallyUnavailable(const Decl *D);
 
 /// Returns a diagnostic indicating why the declaration cannot be annotated
 /// with an @available() attribute indicating it is unavailable or None if this
 /// is allowed.
-std::optional<Diag<>> diagnosticIfDeclCannotBeUnavailable(const Decl *D);
+std::optional<Diagnostic> diagnosticIfDeclCannotBeUnavailable(const Decl *D);
 
 /// Same as \c checkDeclarationAvailability but doesn't give a reason for
 /// unavailability.

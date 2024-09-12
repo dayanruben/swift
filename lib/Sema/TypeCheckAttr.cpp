@@ -366,6 +366,7 @@ public:
   void visitWeakLinkedAttr(WeakLinkedAttr *attr);
   void visitSILGenNameAttr(SILGenNameAttr *attr);
   void visitUnsafeAttr(UnsafeAttr *attr);
+  void visitLifetimeAttr(LifetimeAttr *attr);
 };
 
 } // end anonymous namespace
@@ -2219,7 +2220,7 @@ void AttributeChecker::visitAvailableAttr(AvailableAttr *attr) {
     }
   }
 
-  std::optional<Diag<>> MaybeNotAllowed =
+  std::optional<Diagnostic> MaybeNotAllowed =
       TypeChecker::diagnosticIfDeclCannotBePotentiallyUnavailable(D);
   if (MaybeNotAllowed.has_value()) {
     AvailabilityContext DeploymentRange
@@ -4923,13 +4924,19 @@ Type TypeChecker::checkReferenceOwnershipAttr(VarDecl *var, Type type,
   return ReferenceStorageType::get(type, ownershipKind, var->getASTContext());
 }
 
-std::optional<Diag<>>
+std::optional<Diagnostic>
 TypeChecker::diagnosticIfDeclCannotBePotentiallyUnavailable(const Decl *D) {
   auto *DC = D->getDeclContext();
 
   // A destructor is always called if declared.
   if (auto *DD = dyn_cast<DestructorDecl>(D))
-    return diag::availability_deinit_no_potential;
+    return Diagnostic(diag::availability_decl_no_potential, D);
+
+  // Observing accessors are always called implicitly.
+  if (auto *AD = dyn_cast<AccessorDecl>(D)) {
+    if (AD->isObservingAccessor())
+      return Diagnostic(diag::availability_decl_no_potential, D);
+  }
 
   if (auto *VD = dyn_cast<VarDecl>(D)) {
     if (!VD->hasStorageOrWrapsStorage())
@@ -4963,7 +4970,7 @@ TypeChecker::diagnosticIfDeclCannotBePotentiallyUnavailable(const Decl *D) {
   return std::nullopt;
 }
 
-std::optional<Diag<>>
+std::optional<Diagnostic>
 TypeChecker::diagnosticIfDeclCannotBeUnavailable(const Decl *D) {
   auto parentIsUnavailable = [](const Decl *D) -> bool {
     if (auto *parent =
@@ -4978,7 +4985,18 @@ TypeChecker::diagnosticIfDeclCannotBeUnavailable(const Decl *D) {
     if (parentIsUnavailable(D))
       return std::nullopt;
 
-    return diag::availability_deinit_no_unavailable;
+    return Diagnostic(diag::availability_decl_no_unavailable, D);
+  }
+
+  // The conformance checker does not know what to do with unavailable
+  // associated types.
+  if (auto *AT = dyn_cast<AssociatedTypeDecl>(D))
+    return Diagnostic(diag::availability_decl_no_unavailable, D);
+
+  // Observing accessors are always called implicitly.
+  if (auto *AD = dyn_cast<AccessorDecl>(D)) {
+    if (AD->isObservingAccessor())
+      return Diagnostic(diag::availability_decl_no_unavailable, D);
   }
 
   if (auto *VD = dyn_cast<VarDecl>(D)) {
@@ -7673,6 +7691,8 @@ void AttributeChecker::visitUnsafeAttr(UnsafeAttr *attr) {
 
   diagnoseAndRemoveAttr(attr, diag::unsafe_attr_disabled);
 }
+
+void AttributeChecker::visitLifetimeAttr(LifetimeAttr *attr) {}
 
 namespace {
 
