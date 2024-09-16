@@ -525,7 +525,6 @@ static void ParseModuleInterfaceArgs(ModuleInterfaceOptions &Opts,
     Args.hasArg(OPT_debug_emit_invalid_swiftinterface_syntax);
   Opts.PrintMissingImports =
     !Args.hasArg(OPT_disable_print_missing_imports_in_module_interface);
-  Opts.DisablePackageNameForNonPackageInterface |= Args.hasArg(OPT_disable_print_package_name_for_non_package_interface);
 
   if (const Arg *A = Args.getLastArg(OPT_library_level)) {
     StringRef contents = A->getValue();
@@ -557,8 +556,8 @@ static bool ShouldIncludeModuleInterfaceArg(const Arg *A) {
 
 static bool IsPackageInterfaceFlag(const Arg *A, ArgList &Args) {
   return A->getOption().matches(options::OPT_package_name) &&
-         Args.hasArg(
-             options::OPT_disable_print_package_name_for_non_package_interface);
+         !Args.hasArg(
+             options::OPT_print_package_name_in_non_package_interface);
 }
 
 static bool IsPrivateInterfaceFlag(const Arg *A, ArgList &Args) {
@@ -2690,6 +2689,9 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   Opts.EnableThrowsPrediction = Args.hasFlag(
       OPT_enable_throws_prediction, OPT_disable_throws_prediction,
       Opts.EnableThrowsPrediction);
+  Opts.EnableNoReturnCold = Args.hasFlag(
+      OPT_enable_noreturn_prediction, OPT_disable_noreturn_prediction,
+      Opts.EnableNoReturnCold);
   Opts.EnableActorDataRaceChecks |= Args.hasFlag(
       OPT_enable_actor_data_race_checks,
       OPT_disable_actor_data_race_checks, /*default=*/false);
@@ -3458,6 +3460,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
       Args.hasFlag(OPT_enable_split_cold_code,
                    OPT_disable_split_cold_code,
                    Opts.EnableHotColdSplit);
+  Opts.EmitAsyncFramePushPopMetadata =
+    Args.hasFlag(OPT_enable_async_frame_push_pop_metadata,
+                 OPT_disable_async_frame_push_pop_metadata,
+                 Opts.EmitAsyncFramePushPopMetadata);
   Opts.EnableLargeLoadableTypesReg2Mem =
       Args.hasFlag(OPT_enable_large_loadable_types_reg2mem,
                    OPT_disable_large_loadable_types_reg2mem,
@@ -3701,6 +3707,7 @@ bool CompilerInvocation::parseArgs(
     IRGenOpts.DisableLegacyTypeInfo = true;
     IRGenOpts.ReflectionMetadata = ReflectionMetadataMode::None;
     IRGenOpts.EnableReflectionNames = false;
+    FrontendOpts.DisableBuildingInterface = true;
     TypeCheckerOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.CMOMode = CrossModuleOptimizationMode::Everything;
