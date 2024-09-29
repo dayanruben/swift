@@ -2615,6 +2615,11 @@ namespace {
         Impl.diagnose(loc,
                       diag::foreign_reference_types_cannot_find_retain_release,
                       false, retainOperation.name, decl->getNameAsString());
+        if (!Impl.SwiftContext.LangOpts
+                 .DisableExperimentalClangImporterDiagnostics) {
+          Impl.diagnoseTopLevelValue(
+              DeclName(Impl.SwiftContext.getIdentifier(retainOperation.name)));
+        }
       } else if (retainOperation.kind ==
                  CustomRefCountingOperationResult::tooManyFound) {
         HeaderLoc loc(decl->getLocation());
@@ -2674,7 +2679,12 @@ namespace {
         Impl.diagnose(loc,
                       diag::foreign_reference_types_cannot_find_retain_release,
                       true, releaseOperation.name, decl->getNameAsString());
-      } else if (releaseOperation.kind ==
+        if (!Impl.SwiftContext.LangOpts
+                 .DisableExperimentalClangImporterDiagnostics) {
+          Impl.diagnoseTopLevelValue(
+              DeclName(Impl.SwiftContext.getIdentifier(releaseOperation.name)));
+        }
+      }else if (releaseOperation.kind ==
                  CustomRefCountingOperationResult::tooManyFound) {
         HeaderLoc loc(decl->getLocation());
         Impl.diagnose(loc,
@@ -8155,8 +8165,7 @@ bool swift::importer::isMutabilityAttr(const clang::SwiftAttrAttr *swiftAttr) {
          swiftAttr->getAttribute() == "nonmutating";
 }
 
-static bool importAsUnsafe(const ASTContext &context,
-                           const clang::RecordDecl *decl,
+static bool importAsUnsafe(ASTContext &context, const clang::RecordDecl *decl,
                            const Decl *MappedDecl) {
   if (!context.LangOpts.hasFeature(Feature::SafeInterop) ||
       !context.LangOpts.hasFeature(Feature::AllowUnsafeAttribute) || !decl)
@@ -8165,9 +8174,9 @@ static bool importAsUnsafe(const ASTContext &context,
   if (isa<ClassDecl>(MappedDecl))
     return false;
 
-  // TODO: Add logic to cover structural rules.
-  return !importer::hasNonEscapableAttr(decl) &&
-         !importer::hasEscapableAttr(decl);
+  return evaluateOrDefault(
+             context.evaluator, ClangTypeEscapability({decl->getTypeForDecl()}),
+             CxxEscapability::Unknown) == CxxEscapability::Unknown;
 }
 
 void
