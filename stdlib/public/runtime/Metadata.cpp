@@ -5862,9 +5862,9 @@ static const unsigned swift_ptrauth_key_associated_type =
 
 /// Given an unsigned pointer to an associated-type protocol witness,
 /// fill in the appropriate slot in the witness table we're building.
-static void initAssociatedTypeProtocolWitness(const Metadata **slot,
-                                              const Metadata *witness,
-                                              const ProtocolRequirement &reqt) {
+static void initAssociatedConformanceWitness(const Metadata **slot,
+                                             const Metadata *witness,
+                                             const ProtocolRequirement &reqt) {
   assert(reqt.Flags.getKind() ==
            ProtocolRequirementFlags::Kind::AssociatedTypeAccessFunction);
   // FIXME: this should use ptrauth_key_process_independent_data
@@ -5918,11 +5918,11 @@ static void initProtocolWitness(void **slot, void *witness,
     return;
 
   case ProtocolRequirementFlags::Kind::AssociatedTypeAccessFunction:
-    initAssociatedTypeProtocolWitness(reinterpret_cast<const Metadata **>(
+    initAssociatedConformanceWitness(reinterpret_cast<const Metadata **>(
                                         const_cast<const void**>(slot)),
-                                      reinterpret_cast<const Metadata *>(
+                                     reinterpret_cast<const Metadata *>(
                                         witness),
-                                      reqt);
+                                     reqt);
     return;
   }
   swift_unreachable("bad witness kind");
@@ -7925,7 +7925,7 @@ const HeapObject *swift_getKeyPathImpl(const void *pattern,
 
 #define OVERRIDE_KEYPATH COMPATIBILITY_OVERRIDE
 #define OVERRIDE_WITNESSTABLE COMPATIBILITY_OVERRIDE
-#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH
+#include "../CompatibilityOverride/CompatibilityOverrideIncludePath.h"
 
 // Autolink with libc++, for cases where libswiftCore is linked statically.
 #if defined(__MACH__)

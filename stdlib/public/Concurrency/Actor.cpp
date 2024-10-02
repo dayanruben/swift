@@ -43,6 +43,7 @@
 #define SWIFT_OBJC_INTEROP 1
 #endif
 #include "llvm/ADT/PointerIntPair.h"
+
 #include "TaskPrivate.h"
 #include "VoucherSupport.h"
 
@@ -2239,7 +2240,7 @@ static void swift_task_enqueueImpl(Job *job, SerialExecutorRef serialExecutorRef
   }
   SWIFT_TASK_DEBUG_LOG("enqueue job %p on serial serialExecutor %p, taskExecutor = %p", job,
                        serialExecutorRef.getIdentity(),
-                       __taskExecutorRef.getIdentity());
+                       _taskExecutorRef.getIdentity());
 #endif
 
   assert(job && "no job provided");
@@ -2310,8 +2311,7 @@ void swift::swift_executor_escalate(SerialExecutorRef executor, AsyncTask *task,
 }
 
 #define OVERRIDE_ACTOR COMPATIBILITY_OVERRIDE
-#include COMPATIBILITY_OVERRIDE_INCLUDE_PATH
-
+#include "../CompatibilityOverride/CompatibilityOverrideIncludePath.h"
 
 /*****************************************************************************/
 /***************************** DISTRIBUTED ACTOR *****************************/
