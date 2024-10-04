@@ -940,6 +940,26 @@ void SILModule::performOnceForPrespecializedImportedExtensions(
   prespecializedFunctionDeclsImported = true;
 }
 
+void SILModule::moveBefore(SILModule::iterator moveAfter, SILFunction *fn) {
+  assert(&fn->getModule() == this);
+  assert(&moveAfter->getModule() == this);
+  assert(moveAfter != end() &&
+         "We assume that moveAfter must not be end since nothing is after end");
+
+  getFunctionList().remove(fn->getIterator());
+  getFunctionList().insert(moveAfter, fn);
+}
+
+void SILModule::moveAfter(SILModule::iterator moveAfter, SILFunction *fn) {
+  assert(&fn->getModule() == this);
+  assert(&moveAfter->getModule() == this);
+  assert(moveAfter != end() &&
+         "We assume that moveAfter must not be end since nothing is after end");
+
+  getFunctionList().remove(fn->getIterator());
+  getFunctionList().insertAfter(moveAfter, fn);
+}
+
 SILProperty *
 SILProperty::create(SILModule &M, unsigned Serialized, AbstractStorageDecl *Decl,
                     std::optional<KeyPathPatternComponent> Component) {
@@ -990,4 +1010,26 @@ bool Lowering::usesObjCAllocator(ClassDecl *theClass) {
   // If the root class was implemented in Objective-C, use Objective-C's
   // allocation methods because they may have been overridden.
   return theClass->getObjectModel() == ReferenceCounting::ObjC;
+}
+
+bool Lowering::needsIsolatingDestructor(DestructorDecl *dd) {
+  auto ai = swift::getActorIsolation(dd);
+  if (!ai.isActorIsolated()) {
+    return false;
+  }
+  DestructorDecl *firstIsolated = dd;
+  while (true) {
+    DestructorDecl *next = firstIsolated->getSuperDeinit();
+    if (!next)
+      break;
+    auto ai = swift::getActorIsolation(next);
+    if (!ai.isActorIsolated())
+      break;
+    firstIsolated = next;
+  }
+
+  // If isolation was introduced in ObjC code, then we assume that ObjC code
+  // also overrides retain/release to make sure that dealloc is called on the
+  // correct executor in the first place.
+  return firstIsolated->getClangNode().isNull();
 }

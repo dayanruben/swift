@@ -336,6 +336,9 @@ Added: _$ss9TaskLocalC13withValueImpl_9operation9isolation4file4lineqd__xn_qd__y
 Added: _$ss9TaskLocalC9withValue_9operation9isolation4file4lineqd__x_qd__yYaKXEScA_pSgYiSSSutYaKlF
 Added: _$ss9TaskLocalC9withValue_9operation9isolation4file4lineqd__x_qd__yYaKXEScA_pSgYiSSSutYaKlFTu
 
+// isolated deinit
+Added: _swift_task_deinitOnExecutor
+
 Added: __swift_concurrency_debug_internal_layout_version
 
 Added: _swift_task_getMainExecutor_hook
@@ -366,3 +369,5 @@ Added: _$ss15ContinuousClockV7InstantV3nowADvpZMV
 Added: _$ss15SuspendingClockV3nowAB7InstantVvpZMV
 Added: _$ss15SuspendingClockV7InstantV3nowADvpZMV
 Added: _$ss9TaskLocalC18_enclosingInstance7wrapped7storagexs5NeverO_s24ReferenceWritableKeyPathCyAGxGAIyAgByxGGtcipZMV
+
+Added: _swift_taskGroup_initializeWithOptions

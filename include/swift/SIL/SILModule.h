@@ -644,6 +644,13 @@ public:
     return {functions.begin(), functions.end()};
   }
 
+  /// Move \p fn to be in the function list before \p moveBefore.
+  void moveBefore(SILModule::iterator moveBefore, SILFunction *fn);
+
+  /// Move \p fn to be in the function list after \p moveAfter. It is assumed
+  /// that \p moveAfter is not end.
+  void moveAfter(SILModule::iterator moveAfter, SILFunction *fn);
+
   const_iterator zombies_begin() const { return zombieFunctions.begin(); }
   const_iterator zombies_end() const { return zombieFunctions.end(); }
 
@@ -1113,6 +1120,9 @@ namespace Lowering {
 /// Determine whether the given class will be allocated/deallocated using the
 /// Objective-C runtime, i.e., +alloc and -dealloc.
 LLVM_LIBRARY_VISIBILITY bool usesObjCAllocator(ClassDecl *theClass);
+/// Determine if isolating destructor is needed.
+LLVM_LIBRARY_VISIBILITY bool needsIsolatingDestructor(DestructorDecl *dd);
+
 } // namespace Lowering
 } // namespace swift
 

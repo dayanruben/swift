@@ -378,6 +378,9 @@ void SILDeclRef::print(raw_ostream &OS) const {
   case SILDeclRef::Kind::Deallocator:
     OS << "!deallocator";
     break;
+  case SILDeclRef::Kind::IsolatedDeallocator:
+    OS << "!isolateddeallocator";
+    break;
   case SILDeclRef::Kind::IVarInitializer:
     OS << "!ivarinitializer";
     break;
@@ -2046,6 +2049,23 @@ public:
     *this << CI->getType();
     printForwardingOwnershipKind(CI, CI->getOperand());
   }
+
+  void visitThunkInst(ThunkInst *ti) {
+    switch (ti->getThunkKind()) {
+    case ThunkInst::Kind::Invalid:
+      llvm_unreachable("Cannot print invalid?!");
+      break;
+    case ThunkInst::Kind::Identity:
+      *this << "[identity] ";
+      break;
+    }
+    *this << Ctx.getID(ti->getOperand());
+    printSubstitutions(
+        ti->getSubstitutionMap(),
+        ti->getOrigCalleeType()->getInvocationGenericSignature());
+    *this << "() : " << ti->getOperand()->getType();
+  }
+
   void visitConvertEscapeToNoEscapeInst(ConvertEscapeToNoEscapeInst *CI) {
     *this << (CI->isLifetimeGuaranteed() ? "" : "[not_guaranteed] ")
           << getIDAndType(CI->getOperand()) << " to " << CI->getType();
@@ -4036,6 +4056,7 @@ void SILVTableEntry::print(llvm::raw_ostream &OS) const {
   case SILDeclRef::Kind::IVarDestroyer:
   case SILDeclRef::Kind::Destroyer:
   case SILDeclRef::Kind::Deallocator:
+  case SILDeclRef::Kind::IsolatedDeallocator:
     HasSingleImplementation = true;
   }
   // No need to emit the signature for methods that may have only

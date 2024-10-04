@@ -215,6 +215,17 @@ void swift_taskGroup_initialize(TaskGroup *group, const Metadata *T);
 SWIFT_EXPORT_FROM(swift_Concurrency) SWIFT_CC(swift)
 void swift_taskGroup_initializeWithFlags(size_t flags, TaskGroup *group, const Metadata *T);
 
+/// Initialize a `TaskGroup` in the passed `group` memory location.
+/// The caller is responsible for retaining and managing the group's lifecycle.
+///
+/// Its Swift signature is
+///
+/// \code
+/// func swift_taskGroup_initialize(flags: Int, group: Builtin.RawPointer)
+/// \endcode
+SWIFT_EXPORT_FROM(swift_Concurrency) SWIFT_CC(swift)
+void swift_taskGroup_initializeWithOptions(size_t flags, TaskGroup *group, const Metadata *T, TaskOptionRecord *options);
+
 /// Attach a child task to the parent task's task group record.
 ///
 /// This function MUST be called from the AsyncTask running the task group.
@@ -604,6 +615,11 @@ NullaryContinuationJob*
 swift_task_createNullaryContinuationJob(
     size_t priority,
     AsyncTask *continuation);
+
+SWIFT_EXPORT_FROM(swift_Concurrency)
+SWIFT_CC(swift)
+void swift_task_deinitOnExecutor(void *object, DeinitWorkFunction *work,
+                                 SerialExecutorRef newExecutor, size_t flags);
 
 /// Report error about attempting to bind a task-local value from an illegal context.
 SWIFT_EXPORT_FROM(swift_Concurrency) SWIFT_CC(swift)
