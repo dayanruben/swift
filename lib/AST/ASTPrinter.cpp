@@ -4746,7 +4746,7 @@ void PrintAST::visitBooleanLiteralExpr(BooleanLiteralExpr *expr) {
 }
 
 void PrintAST::visitRegexLiteralExpr(RegexLiteralExpr *expr) {
-  Printer << expr->getRegexText();
+  Printer << expr->getParsedRegexText();
 }
 
 void PrintAST::visitErrorExpr(ErrorExpr *expr) {
@@ -6745,6 +6745,9 @@ public:
       return;
     case SILCoroutineKind::YieldOnce:
       Printer << "@yield_once ";
+      return;
+    case SILCoroutineKind::YieldOnce2:
+      Printer << "@yield_once_2 ";
       return;
     case SILCoroutineKind::YieldMany:
       Printer << "@yield_many ";

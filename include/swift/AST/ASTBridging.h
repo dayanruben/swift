@@ -1254,6 +1254,12 @@ BridgedAwaitExpr BridgedAwaitExpr_createParsed(BridgedASTContext cContext,
                                                BridgedSourceLoc cAwaitLoc,
                                                BridgedExpr cSubExpr);
 
+SWIFT_NAME("BridgedBindOptionalExpr.createParsed(_:subExpr:questionLoc:)")
+BridgedBindOptionalExpr
+BridgedBindOptionalExpr_createParsed(BridgedASTContext cContext,
+                                     BridgedExpr cSubExpr,
+                                     BridgedSourceLoc cQuestionLoc);
+
 SWIFT_NAME("BridgedBooleanLiteralExpr.createParsed(_:value:loc:)")
 BridgedBooleanLiteralExpr
 BridgedBooleanLiteralExpr_createParsed(BridgedASTContext cContext, bool value,
@@ -1321,6 +1327,13 @@ BridgedDotSelfExpr BridgedDotSelfExpr_createParsed(BridgedASTContext cContext,
                                                    BridgedSourceLoc cDotLoc,
                                                    BridgedSourceLoc cSelfLoc);
 
+SWIFT_NAME("BridgedEditorPlaceholderExpr.createParsed(_:placeholder:loc:"
+           "placeholderType:expansionType:)")
+BridgedEditorPlaceholderExpr BridgedEditorPlaceholderExpr_createParsed(
+    BridgedASTContext cContext, BridgedIdentifier cPlaceholderId,
+    BridgedSourceLoc cLoc, BridgedNullableTypeRepr cPlaceholderTyR,
+    BridgedNullableTypeRepr cExpansionTyR);
+
 SWIFT_NAME("BridgedErrorExpr.create(_:loc:)")
 BridgedErrorExpr BridgedErrorExpr_create(BridgedASTContext cContext,
                                          BridgedSourceRange cRange);
@@ -1336,6 +1349,12 @@ BridgedForceTryExpr
 BridgedForceTryExpr_createParsed(BridgedASTContext cContext,
                                  BridgedSourceLoc cTryLoc, BridgedExpr cSubExpr,
                                  BridgedSourceLoc cExclaimLoc);
+
+SWIFT_NAME("BridgedForceValueExpr.createParsed(_:subExpr:exclaimLoc:)")
+BridgedForceValueExpr
+BridgedForceValueExpr_createParsed(BridgedASTContext cContext,
+                                   BridgedExpr cSubExpr,
+                                   BridgedSourceLoc cExclaimLoc);
 
 SWIFT_NAME(
     "BridgedForcedCheckedCastExpr.createParsed(_:asLoc:exclaimLoc:type:)")
@@ -1405,17 +1424,11 @@ BridgedPrefixUnaryExpr
 BridgedPrefixUnaryExpr_createParsed(BridgedASTContext cContext,
                                     BridgedExpr oper, BridgedExpr operand);
 
-SWIFT_NAME("BridgedRegexLiteralExpr."
-           "allocateCaptureStructureSerializationBuffer(_:size:)")
-BridgedData BridgedRegexLiteralExpr_allocateCaptureStructureSerializationBuffer(
-    BridgedASTContext cContext, SwiftInt size);
-
-SWIFT_NAME("BridgedRegexLiteralExpr.createParsed(_:loc:regexText:version:"
-           "captureStructure:)")
-BridgedRegexLiteralExpr BridgedRegexLiteralExpr_createParsed(
-    BridgedASTContext cContext, BridgedSourceLoc cLoc,
-    BridgedStringRef cRegexText, SwiftInt version,
-    BridgedData cCaptureStructure);
+SWIFT_NAME("BridgedRegexLiteralExpr.createParsed(_:loc:regexText:)")
+BridgedRegexLiteralExpr
+BridgedRegexLiteralExpr_createParsed(BridgedASTContext cContext,
+                                     BridgedSourceLoc cLoc,
+                                     BridgedStringRef cRegexText);
 
 SWIFT_NAME("BridgedSequenceExpr.createParsed(_:exprs:)")
 BridgedSequenceExpr BridgedSequenceExpr_createParsed(BridgedASTContext cContext,
