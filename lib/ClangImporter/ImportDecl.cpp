@@ -1637,7 +1637,8 @@ namespace {
 
         synthesizer.makeStructRawValued(
             structDecl, underlyingType,
-            {KnownProtocolKind::RawRepresentable, KnownProtocolKind::Equatable},
+            {KnownProtocolKind::RawRepresentable, KnownProtocolKind::Equatable,
+             KnownProtocolKind::Hashable},
             options, /*setterAccess=*/AccessLevel::Public);
 
         result = structDecl;
@@ -3857,7 +3858,7 @@ namespace {
         return;
 
       auto swiftParams = result->getParameters();
-      bool hasSelf = result->hasImplicitSelfDecl();
+      bool hasSelf = result->hasImplicitSelfDecl() && !isa<ConstructorDecl>(result);
       SmallVector<LifetimeDependenceInfo, 1> lifetimeDependencies;
       SmallBitVector inheritLifetimeParamIndicesForReturn(swiftParams->size() +
                                                           hasSelf);
