@@ -112,6 +112,7 @@ void Driver::parseDriverKind(ArrayRef<const char *> Args) {
           .Case("swift-api-digester", DriverKind::APIDigester)
           .Case("swift-cache-tool", DriverKind::CacheTool)
           .Case("swift-parse-test", DriverKind::ParseTest)
+          .Case("swift-synthesize-interface", DriverKind::SynthesizeInterface)
           .Default(std::nullopt);
 
   if (Kind.has_value())
@@ -519,6 +520,7 @@ createStatsReporter(const llvm::opt::InputArgList *ArgList,
                                                  A->getValue(),
                                                  nullptr,
                                                  nullptr,
+                                                 false,
                                                  false,
                                                  false,
                                                  false,
@@ -3121,6 +3123,7 @@ void Driver::printHelp(bool ShowHidden) const {
   case DriverKind::APIDigester:
   case DriverKind::CacheTool:
   case DriverKind::ParseTest:
+  case DriverKind::SynthesizeInterface:
     ExcludedFlagsBitmask |= options::NoBatchOption;
     break;
   }
