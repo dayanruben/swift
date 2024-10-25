@@ -45,8 +45,6 @@ private:
   AvailabilityContext(const Storage *info) : Info(info) { assert(info); };
 
 public:
-  AvailabilityContext(const AvailabilityContext &other) : Info(other.Info){};
-
   /// Retrieves the default `AvailabilityContext`, which is maximally available.
   /// The platform availability range will be set to the deployment target (or
   /// minimum inlining target when applicable).
@@ -71,14 +69,20 @@ public:
   /// Returns true if this context is deprecated on the current platform.
   bool isDeprecated() const;
 
+  /// Constrain with another `AvailabilityContext`.
+  void constrainWithContext(const AvailabilityContext &other, ASTContext &ctx);
+
+  /// Constrain with the availability attributes of `decl`.
+  void constrainWithDecl(const Decl *decl);
+
   /// Constrain the platform availability range with `platformRange`.
   void constrainWithPlatformRange(const AvailabilityRange &platformRange,
                                   ASTContext &ctx);
 
-  /// Constrain the platform availability range with both the availability
-  /// attributes of `decl` and with `platformRange`.
+  /// Constrain with the availability attributes of `decl`, intersecting the
+  /// platform range of `decl` with `platformRange`.
   void
-  constrainWithDeclAndPlatformRange(Decl *decl,
+  constrainWithDeclAndPlatformRange(const Decl *decl,
                                     const AvailabilityRange &platformRange);
 
   /// Returns true if `other` is as available or is more available.
