@@ -50,6 +50,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
+#include <optional>
 
 using namespace swift;
 
@@ -2321,7 +2322,7 @@ void AttributeChecker::visitExposeAttr(ExposeAttr *attr) {
     }
 
     // Verify that the declaration is exposable.
-    auto repr = cxx_translation::getDeclRepresentation(VD);
+    auto repr = cxx_translation::getDeclRepresentation(VD, std::nullopt);
     if (repr.isUnsupported())
       diagnose(attr->getLocation(),
                cxx_translation::diagnoseRepresenationError(*repr.error, VD));
@@ -5459,7 +5460,8 @@ static AbstractFunctionDecl *findAutoDiffOriginalFunctionDecl(
   if (!baseType && lookupContext->isTypeContext())
     baseType = lookupContext->getSelfTypeInContext();
   if (baseType) {
-    results = TypeChecker::lookupMember(lookupContext, baseType, funcName);
+    if (!baseType->hasError())
+      results = TypeChecker::lookupMember(lookupContext, baseType, funcName);
   } else {
     results = TypeChecker::lookupUnqualified(
         lookupContext, funcName, funcNameLoc.getBaseNameLoc(), lookupOptions);

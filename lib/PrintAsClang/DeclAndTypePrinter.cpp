@@ -297,8 +297,11 @@ private:
   /// Prints an encoded string, escaped properly for C.
   void printEncodedString(raw_ostream &os, StringRef str,
                           bool includeQuotes = true) {
-    // NB: We don't use raw_ostream::write_escaped() because it does hex escapes
-    // for non-ASCII chars.
+    // Per "P2361 Unevaluated string literals", we should generally print
+    // either raw Unicode characters or letter-based escape sequences for
+    // string literals in e.g. availability attributes. In particular, we
+    // must not use hex escapes. When we don't have an escape for a particular
+    // control character, we'll print its hex value in "{U+NNNN}" format.
 
     llvm::SmallString<128> Buf;
     StringRef decodedStr = Lexer::getEncodedStringSegment(str, Buf);
@@ -306,23 +309,42 @@ private:
     if (includeQuotes) os << '"';
     for (unsigned char c : decodedStr) {
       switch (c) {
+        // Note: We aren't bothering to escape single quote or question mark
+        // even though we could.
+      case '"':
+        os << '\\' << '"';
+        break;
       case '\\':
         os << '\\' << '\\';
         break;
-      case '\t':
-        os << '\\' << 't';
+      case '\a':
+        os << '\\' << 'a';
+        break;
+      case '\b':
+        os << '\\' << 'b';
+        break;
+      case '\f':
+        os << '\\' << 'f';
         break;
       case '\n':
         os << '\\' << 'n';
         break;
-      case '"':
-        os << '\\' << '"';
+      case '\r':
+        os << '\\' << 'r';
         break;
+      case '\t':
+        os << '\\' << 't';
+        break;
+      case '\v':
+        os << '\\' << 'v';
+        break;
+
       default:
         if (c < 0x20 || c == 0x7F) {
-          os << '\\' << 'x';
+          os << "{U+00";
           os << llvm::hexdigit((c >> 4) & 0xF);
           os << llvm::hexdigit((c >> 0) & 0xF);
+          os << "}";
         } else {
           os << c;
         }
@@ -2958,7 +2980,9 @@ bool DeclAndTypePrinter::shouldInclude(const ValueDecl *VD) {
   if (outputLang == OutputLanguageMode::Cxx) {
     if (!isExposedToThisModule(M, VD, exposedModules))
       return false;
-    if (!cxx_translation::isExposableToCxx(VD))
+    if (!cxx_translation::isExposableToCxx(
+            VD,
+            [this](const NominalTypeDecl *decl) { return isZeroSized(decl); }))
       return false;
     if (!isEnumExposableToCxx(VD, *this))
       return false;
@@ -2974,6 +2998,16 @@ bool DeclAndTypePrinter::shouldInclude(const ValueDecl *VD) {
     return false;
 
   return true;
+}
+
+bool DeclAndTypePrinter::isZeroSized(const NominalTypeDecl *decl) {
+  if (decl->isResilient())
+    return false;
+  auto &abiDetails = interopContext.getIrABIDetails();
+  auto sizeAndAlignment = abiDetails.getTypeSizeAlignment(decl);
+  if (sizeAndAlignment)
+    return sizeAndAlignment->size == 0;
+  return false;
 }
 
 bool DeclAndTypePrinter::isVisible(const ValueDecl *vd) const {
