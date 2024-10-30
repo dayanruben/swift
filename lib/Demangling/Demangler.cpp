@@ -2810,7 +2810,7 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
   switch (char c = nextChar()) {
     // Thunks that are from a thunk inst. We take the TT namespace.
     case 'T': {
-      switch (char c = nextChar()) {
+      switch (nextChar()) {
       case 'I':
         return createWithChild(Node::Kind::SILThunkIdentity, popNode(isEntity));
       case 'H':
@@ -4450,11 +4450,11 @@ NodePointer Demangler::demangleIntegerType() {
   switch (peekChar()) {
   case 'n':
     nextChar();
-    integer = createNode(Node::Kind::NegativeInteger, -demangleNatural());
+    integer = createNode(Node::Kind::NegativeInteger, -demangleIndex());
     break;
 
   default:
-    integer = createNode(Node::Kind::Integer, demangleNatural());
+    integer = createNode(Node::Kind::Integer, demangleIndex());
     break;
   }
 
