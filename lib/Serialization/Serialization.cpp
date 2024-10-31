@@ -3031,7 +3031,8 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
           theAttr->isUnconditionallyDeprecated(),
           theAttr->isNoAsync(),
           theAttr->isPackageDescriptionVersionSpecific(),
-          theAttr->IsSPI,
+          theAttr->isSPI(),
+          theAttr->isForEmbedded(),
           LIST_VER_TUPLE_PIECES(Introduced),
           LIST_VER_TUPLE_PIECES(Deprecated),
           LIST_VER_TUPLE_PIECES(Obsoleted),
@@ -6134,6 +6135,7 @@ void Serializer::writeAllDeclsAndTypes() {
   BCBlockRAII restoreBlock(Out, DECLS_AND_TYPES_BLOCK_ID, 9);
   using namespace decls_block;
   registerDeclTypeAbbr<BuiltinAliasTypeLayout>();
+  registerDeclTypeAbbr<BuiltinFixedArrayTypeLayout>();
   registerDeclTypeAbbr<TypeAliasTypeLayout>();
   registerDeclTypeAbbr<GenericTypeParamDeclLayout>();
   registerDeclTypeAbbr<AssociatedTypeDeclLayout>();
