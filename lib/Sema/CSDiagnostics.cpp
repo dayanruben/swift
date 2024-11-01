@@ -1433,7 +1433,7 @@ bool MissingExplicitConversionFailure::diagnoseAsError() {
     insertAfter += ")";
   }
   insertAfter += useAs ? " as " : " as! ";
-  insertAfter += toType->getWithoutParens()->getString();
+  insertAfter += toType->getString();
   if (needsParensOutside)
     insertAfter += ")";
 
@@ -3324,7 +3324,7 @@ bool ContextualFailure::tryIntegerCastFixIts(
       insertAfter += ")";
     }
     insertAfter += " as ";
-    insertAfter += toType->getWithoutParens()->getString();
+    insertAfter += toType->getString();
     if (needsParensOutside)
       insertAfter += ")";
     diagnostic.fixItInsert(exprRange.Start, insertBefore);
@@ -3430,8 +3430,7 @@ bool ContextualFailure::tryProtocolConformanceFixIt(
   auto fromType = getFromType();
   // We need to get rid of optionals and parens as it's not relevant when
   // printing the diagnostic and the fix-it.
-  auto unwrappedToType =
-      getToType()->lookThroughAllOptionalTypes()->getWithoutParens();
+  auto unwrappedToType = getToType()->lookThroughAllOptionalTypes();
 
   // If the protocol requires a class & we don't have one (maybe the context
   // is a struct), then bail out instead of offering a broken fix-it later on.
@@ -6337,25 +6336,30 @@ SourceLoc InvalidMemberRefInKeyPath::getLoc() const {
 }
 
 bool InvalidStaticMemberRefInKeyPath::diagnoseAsError() {
-  auto *KPE = getAsExpr<KeyPathExpr>(getRawAnchor());
-  auto rootTyRepr = KPE->getExplicitRootType();
-  auto isProtocol = getBaseType()->isExistentialType();
-
-  if (!getConstraintSystem().getASTContext().LangOpts.hasFeature(
-          Feature::KeyPathWithStaticMembers)) {
-    emitDiagnostic(diag::expr_keypath_static_member, getMember(),
-                   isForKeyPathDynamicMemberLookup());
-  } else {
-    if (rootTyRepr && !isProtocol) {
-      emitDiagnostic(diag::could_not_use_type_member_on_instance, getBaseType(),
-                     DeclNameRef(getMember()->getName()))
-          .fixItInsert(rootTyRepr->getEndLoc(), ".Type");
-    } else {
+  auto diagnostic =
       emitDiagnostic(diag::could_not_use_type_member_on_instance, getBaseType(),
                      DeclNameRef(getMember()->getName()));
+
+  // Suggest adding `.Type` to an explicit root if possible.
+  if (auto *keyPath = getAsExpr<KeyPathExpr>(getRawAnchor())) {
+    if (auto *explicitRoot = keyPath->getExplicitRootType()) {
+      if (explicitRoot && !getBaseType()->isExistentialType())
+        diagnostic.fixItInsert(explicitRoot->getEndLoc(), ".Type");
     }
   }
 
+  return true;
+}
+
+bool UnsupportedStaticMemberRefInKeyPath::diagnoseAsError() {
+  auto *member = getMember();
+  auto *module = member->getDeclContext()->getParentModule();
+
+  emitDiagnostic(diag::keypath_static_member_access_from_unsupported_module,
+                 BaseType->getMetatypeInstanceType(), member, module,
+                 getLocator()->isForKeyPathDynamicMemberLookup());
+  emitDiagnostic(
+      diag::keypath_static_member_access_from_unsupported_module_note, module);
   return true;
 }
 

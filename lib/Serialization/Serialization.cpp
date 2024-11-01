@@ -5526,11 +5526,6 @@ public:
                                   variableData);
   }
 
-  void visitParenType(const ParenType *parenTy) {
-    using namespace decls_block;
-    serializeSimpleWrapper<ParenTypeLayout>(parenTy->getUnderlyingType());
-  }
-
   void visitTupleType(const TupleType *tupleTy) {
     using namespace decls_block;
     unsigned abbrCode = S.DeclTypeAbbrCodes[TupleTypeLayout::Code];
@@ -5715,7 +5710,10 @@ public:
     using namespace decls_block;
 
     auto resultType = S.addTypeRef(fnTy->getResult());
-    auto clangType = S.addClangTypeRef(fnTy->getClangTypeInfo().getType());
+    auto clangType =
+      S.getASTContext().LangOpts.UseClangFunctionTypes
+      ? S.addClangTypeRef(fnTy->getClangTypeInfo().getType())
+      : ClangTypeID(0);
 
     auto isolation = encodeIsolation(fnTy->getIsolation());
 
@@ -6140,7 +6138,6 @@ void Serializer::writeAllDeclsAndTypes() {
   registerDeclTypeAbbr<GenericTypeParamDeclLayout>();
   registerDeclTypeAbbr<AssociatedTypeDeclLayout>();
   registerDeclTypeAbbr<NominalTypeLayout>();
-  registerDeclTypeAbbr<ParenTypeLayout>();
   registerDeclTypeAbbr<TupleTypeLayout>();
   registerDeclTypeAbbr<TupleTypeEltLayout>();
   registerDeclTypeAbbr<FunctionTypeLayout>();
