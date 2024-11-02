@@ -1283,6 +1283,11 @@ public:
     auto e = getLoweredExplosion(i->getOperand());
     setLoweredExplosion(i, e);
   }
+
+  void visitMergeIsolationRegionInst(MergeIsolationRegionInst *i) {
+    llvm_unreachable("Valid only when ownership is enabled");
+  }
+
   void visitReleaseValueInst(ReleaseValueInst *i);
   void visitReleaseValueAddrInst(ReleaseValueAddrInst *i);
   void visitDestroyValueInst(DestroyValueInst *i);
@@ -1937,6 +1942,11 @@ IRGenSILFunction::IRGenSILFunction(IRGenModule &IGM, SILFunction *f)
       CurFn->addFnAttr(llvm::Attribute::OptimizeForSize);
     }
     // LLVM doesn't have an attribute for -O
+  }
+
+  if (!IGM.IRGen.Opts.UseSampleProfile.empty()) {
+    // This attribute helps in LTO situations: https://reviews.llvm.org/D79959
+    CurFn->addFnAttr("use-sample-profile");
   }
 
   // Emit the thunk that calls the previous implementation if this is a dynamic
