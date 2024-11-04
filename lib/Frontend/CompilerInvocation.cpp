@@ -18,18 +18,16 @@
 #include "ArgsToFrontendOptionsConverter.h"
 #include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/Basic/Assertions.h"
-#include "swift/Basic/Assertions.h"
 #include "swift/Basic/Feature.h"
 #include "swift/Basic/Platform.h"
 #include "swift/Option/Options.h"
 #include "swift/Option/SanitizerOptions.h"
+#include "swift/Parse/Lexer.h"
 #include "swift/Parse/ParseVersion.h"
 #include "swift/SIL/SILBridging.h"
 #include "swift/Strings.h"
 #include "swift/SymbolGraphGen/SymbolGraphOptions.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/VersionTuple.h"
-#include "llvm/TargetParser/Triple.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/Option.h"
@@ -37,7 +35,9 @@
 #include "llvm/Support/LineIterator.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/VersionTuple.h"
 #include "llvm/Support/WithColor.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace swift;
 using namespace llvm::opt;
@@ -1015,13 +1015,16 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.EnableExperimentalStringProcessing = true;
   }
 
-  auto enableUpcomingFeature = [&Opts, &Diags](Feature feature) -> bool {
+  auto enableUpcomingFeature = [&Opts, &Diags](Feature feature,
+                                               bool downgradeDiag) -> bool {
     // Check if this feature was introduced already in this language version.
     if (auto firstVersion = getFeatureLanguageVersion(feature)) {
       if (Opts.isSwiftVersionAtLeast(*firstVersion)) {
-        Diags.diagnose(SourceLoc(), diag::error_upcoming_feature_on_by_default,
-                       getFeatureName(feature), *firstVersion);
-        return true;
+        Diags
+            .diagnose(SourceLoc(), diag::error_upcoming_feature_on_by_default,
+                      getFeatureName(feature), *firstVersion)
+            .limitBehaviorIf(downgradeDiag, DiagnosticBehavior::Warning);
+        return !downgradeDiag;
       }
     }
 
@@ -1062,7 +1065,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     // -enable-experimental-feature flag too since the feature may have
     // graduated from being experimental.
     if (auto feature = getUpcomingFeature(value)) {
-      if (enableUpcomingFeature(*feature))
+      if (enableUpcomingFeature(*feature, /*downgradeDiag=*/true))
         HadError = true;
     }
 
@@ -1087,7 +1090,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     if (!feature)
       continue;
 
-    if (enableUpcomingFeature(*feature))
+    if (enableUpcomingFeature(*feature, /*downgradeDiag=*/false))
       HadError = true;
   }
 
@@ -2697,6 +2700,8 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
 
   Opts.EnableARCOptimizations &= !Args.hasArg(OPT_disable_arc_opts);
   Opts.EnableOSSAModules |= Args.hasArg(OPT_enable_ossa_modules);
+  Opts.EnableRecompilationToOSSAModule |=
+      Args.hasArg(OPT_enable_recompilation_to_ossa_module);
   Opts.EnableOSSAOptimizations &= !Args.hasArg(OPT_disable_ossa_opts);
   Opts.EnableSILOpaqueValues = Args.hasFlag(
       OPT_enable_sil_opaque_values, OPT_disable_sil_opaque_values, false);
