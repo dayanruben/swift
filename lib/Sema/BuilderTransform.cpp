@@ -1260,12 +1260,8 @@ static bool walkExplicitReturnStmts(const BraceStmt *BS,
     }
 
     PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
-      if (S->isImplicit()) {
-        return Action::SkipNode(S);
-      }
-
       auto *returnStmt = dyn_cast<ReturnStmt>(S);
-      if (!returnStmt) {
+      if (!returnStmt || returnStmt->isImplicit()) {
         return Action::Continue(S);
       }
 
@@ -1322,7 +1318,7 @@ ResultBuilderOpSupport TypeChecker::checkBuilderOpSupport(
 
   auto isUnavailable = [&](Decl *D) -> bool {
     auto loc = extractNearestSourceLoc(dc);
-    return getUnmetDeclAvailabilityRequirement(D, dc, loc).has_value();
+    return getUnsatisfiedAvailabilityConstraint(D, dc, loc).has_value();
   };
 
   bool foundMatch = false;
