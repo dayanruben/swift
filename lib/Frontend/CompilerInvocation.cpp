@@ -554,9 +554,7 @@ static bool ShouldIncludeModuleInterfaceArg(const Arg *A) {
 }
 
 static bool IsPackageInterfaceFlag(const Arg *A, ArgList &Args) {
-  return A->getOption().matches(options::OPT_package_name) &&
-         !Args.hasArg(
-             options::OPT_print_package_name_in_non_package_interface);
+  return false;
 }
 
 static bool IsPrivateInterfaceFlag(const Arg *A, ArgList &Args) {
