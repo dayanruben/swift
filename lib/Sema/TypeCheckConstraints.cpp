@@ -175,6 +175,16 @@ bool TypeVariableType::Implementation::isSubscriptResultType() const {
              KeyPathExpr::Component::Kind::UnresolvedSubscript;
 }
 
+bool TypeVariableType::Implementation::isApplicationResultType() const {
+  if (!(locator && locator->getAnchor()))
+    return false;
+
+  if (!locator->isLastElement<LocatorPathElt::FunctionResult>())
+    return false;
+
+  return isExpr<ApplyExpr>(locator->getAnchor()) || isSubscriptResultType();
+}
+
 bool TypeVariableType::Implementation::isParameterPack() const {
   return locator
       && locator->isForGenericParameter()
@@ -332,7 +342,9 @@ public:
   }
 
   MacroWalking getMacroWalkingBehavior() const override {
-    return MacroWalking::Expansion;
+    // Macro expansions will be walked when they're type-checked, not as
+    // part of the surrounding code.
+    return MacroWalking::None;
   }
 
   PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {

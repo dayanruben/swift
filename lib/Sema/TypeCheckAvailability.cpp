@@ -535,8 +535,8 @@ private:
     return MacroWalking::Arguments;
   }
 
-  /// Check whether this declaration is in a source file buried within
-  /// a macro expansion of the
+  /// Check whether this declaration is within a macro expansion buffer that
+  /// will have its own type refinement context that will be lazily expanded.
   bool isDeclInMacroExpansion(Decl *decl) const override {
     // If it's not in a macro expansion relative to its context, it's not
     // considered to be in a macro expansion.
@@ -3615,7 +3615,11 @@ public:
 
     if (auto *apply = dyn_cast<ApplyExpr>(E)) {
       bool preconcurrency = false;
-      auto declRef = apply->getFn()->getReferencedDecl();
+      auto *fn = apply->getFn();
+      if (auto *selfApply = dyn_cast<SelfApplyExpr>(fn)) {
+        fn = selfApply->getFn();
+      }
+      auto declRef = fn->getReferencedDecl();
       if (auto *decl = declRef.getDecl()) {
         preconcurrency = decl->preconcurrency();
       }
