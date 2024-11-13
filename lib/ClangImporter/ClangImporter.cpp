@@ -2445,10 +2445,14 @@ ModuleDecl *ClangImporter::Implementation::finishLoadingClangModule(
     if (auto moduleRef = clangModule->getASTFile()) {
       auto *moduleFile = Instance->getASTReader()->getModuleManager().lookup(
           *moduleRef);
+      llvm::SmallString<0> pathBuf;
+      pathBuf.reserve(256);
       Instance->getASTReader()->visitInputFileInfos(
           *moduleFile, /*IncludeSystem=*/true,
           [&](const clang::serialization::InputFileInfo &IFI, bool isSystem) {
-            SwiftDependencyTracker->addDependency(IFI.Filename, isSystem);
+            auto Filename = clang::ASTReader::ResolveImportedPath(
+                pathBuf, IFI.UnresolvedImportedFilename, *moduleFile);
+            SwiftDependencyTracker->addDependency(*Filename, isSystem);
           });
     }
   }
@@ -5777,6 +5781,9 @@ makeBaseClassMemberAccessors(DeclContext *declContext,
     bodyParams = ParameterList::createEmpty(ctx);
   }
 
+  assert(baseClassVar->getFormalAccess() == AccessLevel::Public &&
+         "base class member must be public");
+
   auto getterDecl = AccessorDecl::create(
       ctx,
       /*FuncLoc=*/SourceLoc(),
@@ -7325,6 +7332,10 @@ Decl *ClangImporter::importDeclDirectly(const clang::NamedDecl *decl) {
 
 ValueDecl *ClangImporter::Implementation::importBaseMemberDecl(
     ValueDecl *decl, DeclContext *newContext) {
+  // Do not clone private C++ decls.
+  if (decl->getFormalAccess() < AccessLevel::Public)
+    return nullptr;
+
   // Make sure we don't clone the decl again for this class, as that would
   // result in multiple definitions of the same symbol.
   std::pair<ValueDecl *, DeclContext *> key = {decl, newContext};
