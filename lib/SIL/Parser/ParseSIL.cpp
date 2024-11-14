@@ -65,11 +65,6 @@ static llvm::cl::opt<bool>
 ParseIncompleteOSSA("parse-incomplete-ossa",
                     llvm::cl::desc("Parse OSSA with incomplete lifetimes"));
 
-static llvm::cl::opt<bool> DisablePopulateOwnershipFlags(
-    "disable-populate-ownership-flags",
-    llvm::cl::desc("Disable populating ownership flags"),
-    llvm::cl::init(false));
-
 //===----------------------------------------------------------------------===//
 // SILParserState implementation
 //===----------------------------------------------------------------------===//
@@ -7180,9 +7175,14 @@ bool SILParser::parseSILBasicBlock(SILBuilder &B) {
 
         // If SILOwnership is enabled and we are not assuming that we are
         // parsing unqualified SIL, look for printed value ownership kinds.
-        if (F->hasOwnership() &&
-            parseSILOwnership(OwnershipKind))
-          return true;
+        if (F->hasOwnership()) {
+          if (P.Tok.is(tok::at_sign)) {
+            if (parseSILOwnership(OwnershipKind))
+              return true;
+          } else if (foundReborrow) {
+            OwnershipKind = OwnershipKind::Guaranteed;
+          }
+        }
 
         if (parseSILType(Ty))
           return true;
@@ -7235,16 +7235,6 @@ bool SILParser::parseSILBasicBlock(SILBuilder &B) {
   } while (isStartOfSILInstruction());
 
   return false;
-}
-
-static void populateOwnershipFlags(SILFunction *func) {
-  for (auto &bb : *func) {
-    for (auto &arg : bb.getArguments()) {
-      if (computeIsReborrow(arg)) {
-        arg->setReborrow(true);
-      }
-    }
-  }
 }
 
 ///   decl-sil:   [[only in SIL mode]]
@@ -7425,13 +7415,6 @@ bool SILParserState::parseDeclSIL(Parser &P) {
           if (FunctionState.parseSILBasicBlock(B))
             return true;
         } while (P.Tok.isNot(tok::r_brace) && P.Tok.isNot(tok::eof));
-
-        // OSSA uses flags to represent "reborrow", "escaping" etc.
-        // These flags are populated here as a shortcut to rewriting all
-        // existing OSSA tests with flags.
-        if (!DisablePopulateOwnershipFlags) {
-          populateOwnershipFlags(FunctionState.F);
-        }
 
         SourceLoc RBraceLoc;
         P.parseMatchingToken(tok::r_brace, RBraceLoc, diag::expected_sil_rbrace,
