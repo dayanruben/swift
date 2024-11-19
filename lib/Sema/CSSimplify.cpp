@@ -11534,10 +11534,9 @@ static Type getOpenedResultBuilderTypeFor(ConstraintSystem &cs,
     // Find the opened type for this callee and substitute in the type
     // parameters.
     auto substitutions = cs.getOpenedTypes(calleeLocator);
-    if (!substitutions.empty()) {
-      OpenedTypeMap replacements(substitutions.begin(), substitutions.end());
-      builderType = cs.openType(builderType, replacements, locator);
-    }
+    if (!substitutions.empty())
+      builderType = cs.openType(builderType, substitutions, locator);
+
     assert(!builderType->hasTypeParameter());
   }
   return builderType;
@@ -13935,6 +13934,13 @@ ConstraintSystem::simplifyExplicitGenericArgumentsConstraint(
   } else {
     // If the overload hasn't been resolved, we can't simplify this constraint.
     auto overloadLocator = getCalleeLocator(getConstraintLocator(locator));
+
+    // If there was a problem resolving specialization expression
+    // it would be diagnosted as invalid AST node.
+    if (overloadLocator->directlyAt<ErrorExpr>()) {
+      return shouldAttemptFixes() ? SolutionKind::Error : SolutionKind::Solved;
+    }
+
     auto selectedOverload = findSelectedOverloadFor(overloadLocator);
     if (!selectedOverload)
       return formUnsolved();
