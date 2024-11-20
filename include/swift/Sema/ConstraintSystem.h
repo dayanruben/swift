@@ -555,12 +555,7 @@ public:
   /// \param trail The record of state changes.
   void mergeEquivalenceClasses(TypeVariableType *other,
                                constraints::SolverTrail *trail) {
-    // Merge the equivalence classes corresponding to these two type
-    // variables. Always merge 'up' the constraint stack, because it is simpler.
-    if (getID() > other->getImpl().getID()) {
-      other->getImpl().mergeEquivalenceClasses(getTypeVariable(), trail);
-      return;
-    }
+    ASSERT(getID() < other->getImpl().getID());
 
     auto otherRep = other->getImpl().getRepresentative(trail);
     if (trail)
@@ -1478,6 +1473,9 @@ class Solution {
 
   /// The fixed score for this solution.
   Score FixedScore;
+
+  /// The total memory used by this solution.
+  std::optional<size_t> TotalMemory;
 
 public:
   /// Create a solution for the given constraint system.
