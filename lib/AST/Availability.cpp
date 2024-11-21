@@ -65,6 +65,10 @@ AvailabilityRange AvailabilityRange::forRuntimeTarget(const ASTContext &Ctx) {
   return AvailabilityRange(VersionRange::allGTE(Ctx.LangOpts.RuntimeVersion));
 }
 
+PlatformKind AvailabilityConstraint::getPlatform() const {
+  return attr->Platform;
+}
+
 std::optional<AvailabilityRange>
 AvailabilityConstraint::getRequiredNewerAvailabilityRange(
     ASTContext &ctx) const {
@@ -87,6 +91,15 @@ bool AvailabilityConstraint::isConditionallySatisfiable() const {
   case Kind::IntroducedInNewerVersion:
     return true;
   }
+}
+
+bool AvailabilityConstraint::isActiveForRuntimeQueries(ASTContext &ctx) const {
+  if (attr->Platform == PlatformKind::none)
+    return true;
+
+  return swift::isPlatformActive(attr->Platform, ctx.LangOpts,
+                                 /*forTargetVariant=*/false,
+                                 /*forRuntimeQuery=*/true);
 }
 
 namespace {
@@ -667,15 +680,19 @@ AvailabilityRange AvailabilityInference::inferForType(Type t) {
 AvailabilityRange ASTContext::getSwiftFutureAvailability() const {
   auto target = LangOpts.Target;
 
-  if (target.isMacOSX() ) {
+  auto getFutureAvailabilityRange = []() -> AvailabilityRange {
     return AvailabilityRange(
         VersionRange::allGTE(llvm::VersionTuple(99, 99, 0)));
+  };
+
+  if (target.isMacOSX()) {
+    return getFutureAvailabilityRange();
   } else if (target.isiOS()) {
-    return AvailabilityRange(
-        VersionRange::allGTE(llvm::VersionTuple(99, 99, 0)));
+    return getFutureAvailabilityRange();
   } else if (target.isWatchOS()) {
-    return AvailabilityRange(
-        VersionRange::allGTE(llvm::VersionTuple(99, 99, 0)));
+    return getFutureAvailabilityRange();
+  } else if (target.isXROS()) {
+    return getFutureAvailabilityRange();
   } else {
     return AvailabilityRange::alwaysAvailable();
   }
