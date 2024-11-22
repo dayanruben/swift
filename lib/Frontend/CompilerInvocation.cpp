@@ -795,13 +795,9 @@ static bool ParseEnabledFeatureArgs(LangOptions &Opts, ArgList &Args,
     // diagnose and skip it.
     if (auto firstVersion = getFeatureLanguageVersion(*feature)) {
       if (Opts.isSwiftVersionAtLeast(*firstVersion)) {
-        Diags
-            .diagnose(SourceLoc(), diag::error_upcoming_feature_on_by_default,
-                      getFeatureName(*feature), *firstVersion)
-            .limitBehaviorIf(!enableUpcoming, DiagnosticBehavior::Warning);
-        if (enableUpcoming)
-          HadError = true;
-
+        Diags.diagnose(SourceLoc(),
+                       diag::warning_upcoming_feature_on_by_default,
+                       getFeatureName(*feature), *firstVersion);
         continue;
       }
     }
@@ -1777,6 +1773,10 @@ static bool ParseTypeCheckerArgs(TypeCheckerOptions &Opts, ArgList &Args,
                              Opts.DebugConstraintSolverAttempt);
   setUnsignedIntegerArgument(OPT_solver_memory_threshold,
                              Opts.SolverMemoryThreshold);
+  setUnsignedIntegerArgument(OPT_solver_scope_threshold_EQ,
+                             Opts.SolverScopeThreshold);
+  setUnsignedIntegerArgument(OPT_solver_trail_threshold_EQ,
+                             Opts.SolverTrailThreshold);
   setUnsignedIntegerArgument(OPT_solver_shrink_unsolved_threshold,
                              Opts.SolverShrinkUnsolvedThreshold);
 
