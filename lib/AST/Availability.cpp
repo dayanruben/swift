@@ -183,13 +183,10 @@ static AvailableAttr *createAvailableAttr(PlatformKind Platform,
       Inferred.Obsoleted.value_or(llvm::VersionTuple());
 
   return new (Context)
-      AvailableAttr(SourceLoc(), SourceRange(), Platform,
-                    Message, Rename, RenameDecl,
-                    Introduced, /*IntroducedRange=*/SourceRange(),
-                    Deprecated, /*DeprecatedRange=*/SourceRange(),
-                    Obsoleted, /*ObsoletedRange=*/SourceRange(),
-                    Inferred.PlatformAgnostic, /*Implicit=*/true,
-                    Inferred.IsSPI);
+      AvailableAttr(SourceLoc(), SourceRange(), Platform, Message, Rename,
+                    Introduced, SourceRange(), Deprecated, SourceRange(),
+                    Obsoleted, SourceRange(), Inferred.PlatformAgnostic,
+                    /*Implicit=*/true, Inferred.IsSPI);
 }
 
 void AvailabilityInference::applyInferredAvailableAttrs(
@@ -233,10 +230,8 @@ void AvailabilityInference::applyInferredAvailableAttrs(
         if (Message.empty() && !AvAttr->Message.empty())
           Message = AvAttr->Message;
 
-        if (Rename.empty() && !AvAttr->Rename.empty()) {
+        if (Rename.empty() && !AvAttr->Rename.empty())
           Rename = AvAttr->Rename;
-          RenameDecl = AvAttr->RenameDecl;
-        }
       }
 
       MergedAttrs.append(PendingAttrs);
@@ -248,6 +243,7 @@ void AvailabilityInference::applyInferredAvailableAttrs(
   }
 
   DeclAttributes &Attrs = ToDecl->getAttrs();
+  auto *ToValueDecl = dyn_cast<ValueDecl>(ToDecl);
 
   // Create an availability attribute for each observed platform and add
   // to ToDecl.
@@ -255,8 +251,12 @@ void AvailabilityInference::applyInferredAvailableAttrs(
     auto *Attr = createAvailableAttr(Pair.first, Pair.second, Message,
                                      Rename, RenameDecl, Context);
 
-    if (Attr)
+    if (Attr) {
+      if (RenameDecl && ToValueDecl)
+        ToValueDecl->setRenamedDecl(Attr, RenameDecl);
+
       Attrs.add(Attr);
+    }
   }
 }
 
@@ -486,12 +486,214 @@ bool Decl::isAvailableAsSPI() const {
   return AvailabilityInference::isAvailableAsSPI(this);
 }
 
+const AvailableAttr *
+Decl::getActiveAvailableAttrForCurrentPlatform(bool ignoreAppExtensions) const {
+  auto &ctx = getASTContext();
+  const AvailableAttr *bestAttr = nullptr;
+
+  for (auto attr :
+       getAttrs().getAttributes<AvailableAttr, /*AllowInvalid=*/false>()) {
+    if (!attr->hasPlatform() || !attr->isActivePlatform(ctx))
+      continue;
+
+    if (ignoreAppExtensions &&
+        isApplicationExtensionPlatform(attr->getPlatform()))
+      continue;
+
+    // We have an attribute that is active for the platform, but is it more
+    // specific than our current best?
+    if (!bestAttr || inheritsAvailabilityFromPlatform(
+                         attr->getPlatform(), bestAttr->getPlatform())) {
+      bestAttr = attr;
+    }
+  }
+
+  return bestAttr;
+}
+
+const AvailableAttr *Decl::getDeprecatedAttr() const {
+  auto &ctx = getASTContext();
+  auto attrs = getAttrs();
+  const AvailableAttr *result = nullptr;
+  const AvailableAttr *bestActive = getActiveAvailableAttrForCurrentPlatform();
+
+  for (auto attr :
+       attrs.getAttributes<AvailableAttr, /*AllowInvalid=*/false>()) {
+    if (attr->hasPlatform() && (!bestActive || attr != bestActive))
+      continue;
+
+    if (!attr->isActivePlatform(ctx) && !attr->isLanguageVersionSpecific() &&
+        !attr->isPackageDescriptionVersionSpecific())
+      continue;
+
+    // Unconditional deprecated.
+    if (attr->isUnconditionallyDeprecated())
+      return attr;
+
+    std::optional<llvm::VersionTuple> deprecatedVersion = attr->Deprecated;
+
+    StringRef deprecatedPlatform = attr->prettyPlatformString();
+    llvm::VersionTuple remappedDeprecatedVersion;
+    if (AvailabilityInference::updateDeprecatedPlatformForFallback(
+            attr, ctx, deprecatedPlatform, remappedDeprecatedVersion))
+      deprecatedVersion = remappedDeprecatedVersion;
+
+    if (!deprecatedVersion.has_value())
+      continue;
+
+    llvm::VersionTuple minVersion = attr->getActiveVersion(ctx);
+
+    // We treat the declaration as deprecated if it is deprecated on
+    // all deployment targets.
+    if (deprecatedVersion.value() <= minVersion) {
+      result = attr;
+    }
+  }
+  return result;
+}
+
+const AvailableAttr *Decl::getSoftDeprecatedAttr() const {
+  auto &ctx = getASTContext();
+  auto attrs = getAttrs();
+  const AvailableAttr *result = nullptr;
+  const AvailableAttr *bestActive = getActiveAvailableAttrForCurrentPlatform();
+
+  for (auto attr :
+       attrs.getAttributes<AvailableAttr, /*AllowInvalid=*/false>()) {
+    if (attr->hasPlatform() && (!bestActive || attr != bestActive))
+      continue;
+
+    if (!attr->isActivePlatform(ctx) && !attr->isLanguageVersionSpecific() &&
+        !attr->isPackageDescriptionVersionSpecific())
+      continue;
+
+    std::optional<llvm::VersionTuple> deprecatedVersion = attr->Deprecated;
+    if (!deprecatedVersion.has_value())
+      continue;
+
+    llvm::VersionTuple activeVersion = attr->getActiveVersion(ctx);
+
+    if (deprecatedVersion.value() > activeVersion)
+      result = attr;
+  }
+  return result;
+}
+
+const AvailableAttr *Decl::getNoAsyncAttr() const {
+  auto &ctx = getASTContext();
+  const AvailableAttr *bestAttr = nullptr;
+
+  for (auto attr :
+       getAttrs().getAttributes<AvailableAttr, /*AllowInvalid=*/false>()) {
+
+    if (attr->getPlatformAgnosticAvailability() !=
+        PlatformAgnosticAvailabilityKind::NoAsync)
+      continue;
+
+    if (attr->hasPlatform() && !attr->isActivePlatform(ctx))
+      continue;
+
+    if (!bestAttr) {
+      bestAttr = attr;
+      continue;
+    }
+
+    if (!bestAttr) {
+      // If there is no best attr selected  and the attr either has an active
+      // platform, or doesn't have one at all, select it.
+      bestAttr = attr;
+    } else if (bestAttr && attr->hasPlatform() && bestAttr->hasPlatform() &&
+               inheritsAvailabilityFromPlatform(attr->getPlatform(),
+                                                bestAttr->getPlatform())) {
+      // if they both have a viable platform, use the better one
+      bestAttr = attr;
+    } else if (attr->hasPlatform() && !bestAttr->hasPlatform()) {
+      // Use the one more specific
+      bestAttr = attr;
+    }
+  }
+  return bestAttr;
+}
+
+bool Decl::isUnavailableInCurrentSwiftVersion() const {
+  llvm::VersionTuple vers = getASTContext().LangOpts.EffectiveLanguageVersion;
+  for (auto attr :
+       getAttrs().getAttributes<AvailableAttr, /*AllowInvalid=*/false>()) {
+    if (attr->isLanguageVersionSpecific()) {
+      if (attr->Introduced.has_value() && attr->Introduced.value() > vers)
+        return true;
+      if (attr->Obsoleted.has_value() && attr->Obsoleted.value() <= vers)
+        return true;
+    }
+  }
+
+  return false;
+}
+
+static const AvailableAttr *
+getDeclUnavailableAttr(const Decl *D, bool ignoreAppExtensions) {
+  auto &ctx = D->getASTContext();
+  const AvailableAttr *result = nullptr;
+  const AvailableAttr *bestActive =
+      D->getActiveAvailableAttrForCurrentPlatform(ignoreAppExtensions);
+
+  for (auto attr :
+       D->getAttrs().getAttributes<AvailableAttr, /*AllowInvalid=*/false>()) {
+    // If this is a platform-specific attribute and it isn't the most
+    // specific attribute for the current platform, we're done.
+    if (attr->hasPlatform() && (!bestActive || attr != bestActive))
+      continue;
+
+    // If this attribute doesn't apply to the active platform, we're done.
+    if (!attr->isActivePlatform(ctx) && !attr->isLanguageVersionSpecific() &&
+        !attr->isPackageDescriptionVersionSpecific())
+      continue;
+
+    if (ignoreAppExtensions &&
+        isApplicationExtensionPlatform(attr->getPlatform()))
+      continue;
+
+    // Unconditional unavailable.
+    if (attr->isUnconditionallyUnavailable())
+      return attr;
+
+    switch (attr->getVersionAvailability(ctx)) {
+    case AvailableVersionComparison::Available:
+    case AvailableVersionComparison::PotentiallyUnavailable:
+      break;
+
+    case AvailableVersionComparison::Obsoleted:
+    case AvailableVersionComparison::Unavailable:
+      result = attr;
+      break;
+    }
+  }
+  return result;
+}
+
+const AvailableAttr *Decl::getUnavailableAttr(bool ignoreAppExtensions) const {
+  if (auto attr = getDeclUnavailableAttr(this, ignoreAppExtensions))
+    return attr;
+
+  // If D is an extension member, check if the extension is unavailable.
+  //
+  // Skip decls imported from Clang, they could be associated to the wrong
+  // extension and inherit undesired unavailability. The ClangImporter
+  // associates Objective-C protocol members to the first category where the
+  // protocol is directly or indirectly adopted, no matter its availability
+  // and the availability of other categories. rdar://problem/53956555
+  if (!getClangNode())
+    if (auto ext = dyn_cast<ExtensionDecl>(getDeclContext()))
+      return ext->getUnavailableAttr(ignoreAppExtensions);
+
+  return nullptr;
+}
+
 std::optional<AvailableAttrDeclPair>
 SemanticUnavailableAttrRequest::evaluate(Evaluator &evaluator, const Decl *decl,
                                          bool ignoreAppExtensions) const {
   // Directly marked unavailable.
-  if (auto attr = decl->getAttrs().getUnavailable(decl->getASTContext(),
-                                                  ignoreAppExtensions))
+  if (auto attr = decl->getUnavailableAttr(ignoreAppExtensions))
     return std::make_pair(attr, decl);
 
   if (auto *parent =

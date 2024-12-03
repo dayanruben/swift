@@ -370,232 +370,6 @@ DeclAttribute *DeclAttribute::clone(ASTContext &ctx) const {
   }
 }
 
-bool
-DeclAttributes::isUnavailableInSwiftVersion(
-  const version::Version &effectiveVersion) const {
-  llvm::VersionTuple vers = effectiveVersion;
-  for (auto attr : *this) {
-    if (auto available = dyn_cast<AvailableAttr>(attr)) {
-      if (available->isInvalid())
-        continue;
-
-      if (available->isLanguageVersionSpecific()) {
-        if (available->Introduced.has_value() &&
-            available->Introduced.value() > vers)
-          return true;
-        if (available->Obsoleted.has_value() &&
-            available->Obsoleted.value() <= vers)
-          return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-const AvailableAttr *
-DeclAttributes::findMostSpecificActivePlatform(const ASTContext &ctx,
-                                               bool ignoreAppExtensions) const {
-  const AvailableAttr *bestAttr = nullptr;
-
-  for (auto attr : *this) {
-    auto *avAttr = dyn_cast<AvailableAttr>(attr);
-    if (!avAttr)
-      continue;
-
-    if (avAttr->isInvalid())
-      continue;
-
-    if (!avAttr->hasPlatform())
-      continue;
-
-    if (!avAttr->isActivePlatform(ctx))
-      continue;
-
-    if (ignoreAppExtensions &&
-        isApplicationExtensionPlatform(avAttr->getPlatform()))
-      continue;
-
-    // We have an attribute that is active for the platform, but
-    // is it more specific than our current best?
-    if (!bestAttr || inheritsAvailabilityFromPlatform(
-                         avAttr->getPlatform(), bestAttr->getPlatform())) {
-      bestAttr = avAttr;
-    }
-  }
-
-  return bestAttr;
-}
-
-const AvailableAttr *
-DeclAttributes::getUnavailable(const ASTContext &ctx,
-                               bool ignoreAppExtensions) const {
-  const AvailableAttr *conditional = nullptr;
-  const AvailableAttr *bestActive =
-      findMostSpecificActivePlatform(ctx, ignoreAppExtensions);
-
-  for (auto Attr : *this)
-    if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
-      if (AvAttr->isInvalid())
-        continue;
-
-      // If this is a platform-specific attribute and it isn't the most
-      // specific attribute for the current platform, we're done.
-      if (AvAttr->hasPlatform() &&
-          (!bestActive || AvAttr != bestActive))
-        continue;
-
-      // If this attribute doesn't apply to the active platform, we're done.
-      if (!AvAttr->isActivePlatform(ctx) &&
-          !AvAttr->isLanguageVersionSpecific() &&
-          !AvAttr->isPackageDescriptionVersionSpecific())
-        continue;
-
-      if (ignoreAppExtensions &&
-          isApplicationExtensionPlatform(AvAttr->getPlatform()))
-        continue;
-
-      // Unconditional unavailable.
-      if (AvAttr->isUnconditionallyUnavailable())
-        return AvAttr;
-
-      switch (AvAttr->getVersionAvailability(ctx)) {
-      case AvailableVersionComparison::Available:
-      case AvailableVersionComparison::PotentiallyUnavailable:
-        break;
-
-      case AvailableVersionComparison::Obsoleted:
-      case AvailableVersionComparison::Unavailable:
-        conditional = AvAttr;
-        break;
-      }
-    }
-  return conditional;
-}
-
-const AvailableAttr *
-DeclAttributes::getDeprecated(const ASTContext &ctx) const {
-  const AvailableAttr *conditional = nullptr;
-  const AvailableAttr *bestActive = findMostSpecificActivePlatform(ctx);
-  for (auto Attr : *this) {
-    if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
-      if (AvAttr->isInvalid())
-        continue;
-
-      if (AvAttr->hasPlatform() &&
-          (!bestActive || AvAttr != bestActive))
-        continue;
-
-      if (!AvAttr->isActivePlatform(ctx) &&
-          !AvAttr->isLanguageVersionSpecific() &&
-          !AvAttr->isPackageDescriptionVersionSpecific())
-        continue;
-
-      // Unconditional deprecated.
-      if (AvAttr->isUnconditionallyDeprecated())
-        return AvAttr;
-
-      std::optional<llvm::VersionTuple> DeprecatedVersion = AvAttr->Deprecated;
-
-      StringRef DeprecatedPlatform = AvAttr->prettyPlatformString();
-      llvm::VersionTuple RemappedDeprecatedVersion;
-      if (AvailabilityInference::updateDeprecatedPlatformForFallback(
-          AvAttr, ctx, DeprecatedPlatform, RemappedDeprecatedVersion))
-        DeprecatedVersion = RemappedDeprecatedVersion;
-
-      if (!DeprecatedVersion.has_value())
-        continue;
-
-      llvm::VersionTuple MinVersion = AvAttr->getActiveVersion(ctx);
-
-      // We treat the declaration as deprecated if it is deprecated on
-      // all deployment targets.
-      // Once availability checking is enabled by default, we should
-      // query the availability scope tree to determine
-      // whether a declaration is deprecated on all versions
-      // allowed by the context containing the reference.
-      if (DeprecatedVersion.value() <= MinVersion) {
-        conditional = AvAttr;
-      }
-    }
-  }
-  return conditional;
-}
-
-const AvailableAttr *
-DeclAttributes::getSoftDeprecated(const ASTContext &ctx) const {
-  const AvailableAttr *conditional = nullptr;
-  const AvailableAttr *bestActive = findMostSpecificActivePlatform(ctx);
-  for (auto Attr : *this) {
-    if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
-      if (AvAttr->isInvalid())
-        continue;
-
-      if (AvAttr->hasPlatform() &&
-          (!bestActive || AvAttr != bestActive))
-        continue;
-
-      if (!AvAttr->isActivePlatform(ctx) &&
-          !AvAttr->isLanguageVersionSpecific() &&
-          !AvAttr->isPackageDescriptionVersionSpecific())
-        continue;
-
-      std::optional<llvm::VersionTuple> DeprecatedVersion = AvAttr->Deprecated;
-      if (!DeprecatedVersion.has_value())
-        continue;
-
-      llvm::VersionTuple ActiveVersion = AvAttr->getActiveVersion(ctx);
-
-      if (DeprecatedVersion.value() > ActiveVersion) {
-        conditional = AvAttr;
-      }
-    }
-  }
-  return conditional;
-}
-
-const AvailableAttr *DeclAttributes::getNoAsync(const ASTContext &ctx) const {
-  const AvailableAttr *bestAttr = nullptr;
-  for (const DeclAttribute *attr : *this) {
-    if (const AvailableAttr *avAttr = dyn_cast<AvailableAttr>(attr)) {
-      if (avAttr->isInvalid())
-        continue;
-
-      if (avAttr->getPlatformAgnosticAvailability() ==
-          PlatformAgnosticAvailabilityKind::NoAsync) {
-        // An API may only be unavailable on specific platforms.
-        // If it doesn't have a platform associated with it, then it's
-        // unavailable for all platforms, so we should include it. If it does
-        // have a platform and we are not that platform, then it doesn't apply
-        // to us.
-        const bool isGoodForPlatform =
-            (avAttr->hasPlatform() && avAttr->isActivePlatform(ctx)) ||
-            !avAttr->hasPlatform();
-
-        if (!isGoodForPlatform)
-          continue;
-
-        if (!bestAttr) {
-          // If there is no best attr selected
-          // and the attr either has an active platform, or doesn't have one at
-          // all, select it.
-          bestAttr = avAttr;
-        } else if (bestAttr && avAttr->hasPlatform() &&
-                   bestAttr->hasPlatform() &&
-                   inheritsAvailabilityFromPlatform(avAttr->getPlatform(),
-                                                    bestAttr->getPlatform())) {
-          // if they both have a viable platform, use the better one
-          bestAttr = avAttr;
-        } else if (avAttr->hasPlatform() && !bestAttr->hasPlatform()) {
-          // Use the one more specific
-          bestAttr = avAttr;
-        }
-      }
-    }
-  }
-  return bestAttr;
-}
-
 const BackDeployedAttr *
 DeclAttributes::getBackDeployed(const ASTContext &ctx,
                                 bool forTargetVariant) const {
@@ -1113,7 +887,8 @@ ParsedDeclAttrFilter::operator()(const DeclAttribute *Attr) const {
   return Attr;
 }
 
-static void printAvailableAttr(const AvailableAttr *Attr, ASTPrinter &Printer,
+static void printAvailableAttr(const Decl *D, const AvailableAttr *Attr,
+                               ASTPrinter &Printer,
                                const PrintOptions &Options) {
   if (Attr->isLanguageVersionSpecific())
     Printer << "swift";
@@ -1138,17 +913,19 @@ static void printAvailableAttr(const AvailableAttr *Attr, ASTPrinter &Printer,
 
   if (!Attr->Rename.empty()) {
     Printer << ", renamed: \"" << Attr->Rename << "\"";
-  } else if (Attr->RenameDecl) {
-    Printer << ", renamed: \"";
-    if (auto *Accessor = dyn_cast<AccessorDecl>(Attr->RenameDecl)) {
-      SmallString<32> Name;
-      llvm::raw_svector_ostream OS(Name);
-      Accessor->printUserFacingName(OS);
-      Printer << Name.str();
-    } else {
-      Printer << Attr->RenameDecl->getName();
+  } else if (auto *VD = dyn_cast<ValueDecl>(D)) {
+    if (auto *renamedDecl = VD->getRenamedDecl(Attr)) {
+      Printer << ", renamed: \"";
+      if (auto *Accessor = dyn_cast<AccessorDecl>(renamedDecl)) {
+        SmallString<32> Name;
+        llvm::raw_svector_ostream OS(Name);
+        Accessor->printUserFacingName(OS);
+        Printer << Name.str();
+      } else {
+        Printer << renamedDecl->getName();
+      }
+      Printer << "\"";
     }
-    Printer << "\"";
   }
 
   // If there's no message, but this is specifically an imported
@@ -1365,7 +1142,7 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
       Printer.printAttrName("@available");
     }
     Printer << "(";
-    printAvailableAttr(Attr, Printer, Options);
+    printAvailableAttr(D, Attr, Printer, Options);
     Printer << ")";
     break;
   }
@@ -1464,7 +1241,7 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
       Printer << "availability: ";
       auto numAttrs = availAttrs.size();
       if (numAttrs == 1) {
-        printAvailableAttr(availAttrs[0], Printer, Options);
+        printAvailableAttr(D, availAttrs[0], Printer, Options);
         Printer << "; ";
       } else {
         SmallVector<const DeclAttribute *, 8> tmp(availAttrs.begin(),
@@ -2223,19 +2000,21 @@ Type RawLayoutAttr::getResolvedCountType(StructDecl *sd) const {
 
 AvailableAttr::AvailableAttr(
     SourceLoc AtLoc, SourceRange Range, PlatformKind Platform,
-    StringRef Message, StringRef Rename, ValueDecl *RenameDecl,
+    StringRef Message, StringRef Rename,
     const llvm::VersionTuple &Introduced, SourceRange IntroducedRange,
     const llvm::VersionTuple &Deprecated, SourceRange DeprecatedRange,
     const llvm::VersionTuple &Obsoleted, SourceRange ObsoletedRange,
     PlatformAgnosticAvailabilityKind PlatformAgnostic, bool Implicit,
     bool IsSPI, bool IsForEmbedded)
     : DeclAttribute(DeclAttrKind::Available, AtLoc, Range, Implicit),
-      Message(Message), Rename(Rename), RenameDecl(RenameDecl),
+      Message(Message), Rename(Rename),
       INIT_VER_TUPLE(Introduced), IntroducedRange(IntroducedRange),
       INIT_VER_TUPLE(Deprecated), DeprecatedRange(DeprecatedRange),
       INIT_VER_TUPLE(Obsoleted), ObsoletedRange(ObsoletedRange) {
   Bits.AvailableAttr.Platform = static_cast<uint8_t>(Platform);
   Bits.AvailableAttr.PlatformAgnostic = static_cast<uint8_t>(PlatformAgnostic);
+  Bits.AvailableAttr.HasComputedRenamedDecl = false;
+  Bits.AvailableAttr.HasRenamedDecl = false;
   Bits.AvailableAttr.IsSPI = IsSPI;
 
   if (IsForEmbedded) {
@@ -2260,22 +2039,10 @@ AvailableAttr::createPlatformAgnostic(ASTContext &C,
     assert(!Obsoleted.empty());
   }
   return new (C) AvailableAttr(
-    SourceLoc(), SourceRange(), PlatformKind::none, Message, Rename, nullptr,
-    NoVersion, SourceRange(),
-    NoVersion, SourceRange(),
-    Obsoleted, SourceRange(),
-    Kind, /* isImplicit */ false, /*SPI*/false);
-}
-
-AvailableAttr *AvailableAttr::createForAlternative(
-    ASTContext &C, AbstractFunctionDecl *AsyncFunc) {
-  llvm::VersionTuple NoVersion;
-  return new (C) AvailableAttr(
-    SourceLoc(), SourceRange(), PlatformKind::none, "", "", AsyncFunc,
-    NoVersion, SourceRange(),
-    NoVersion, SourceRange(),
-    NoVersion, SourceRange(),
-    PlatformAgnosticAvailabilityKind::None, /*Implicit=*/true, /*SPI*/false);
+      SourceLoc(), SourceRange(), PlatformKind::none, Message, Rename,
+      /*Introduced=*/NoVersion, SourceRange(), /*Deprecated=*/NoVersion,
+      SourceRange(), Obsoleted, SourceRange(), Kind, /*Implicit=*/false,
+      /*SPI=*/false);
 }
 
 bool AvailableAttr::isActivePlatform(const ASTContext &ctx) const {
@@ -2288,19 +2055,16 @@ bool BackDeployedAttr::isActivePlatform(const ASTContext &ctx,
 }
 
 AvailableAttr *AvailableAttr::clone(ASTContext &C, bool implicit) const {
-  return new (C) AvailableAttr(implicit ? SourceLoc() : AtLoc,
-                               implicit ? SourceRange() : getRange(),
-                               getPlatform(), Message, Rename, RenameDecl,
-                               Introduced ? *Introduced : llvm::VersionTuple(),
-                               implicit ? SourceRange() : IntroducedRange,
-                               Deprecated ? *Deprecated : llvm::VersionTuple(),
-                               implicit ? SourceRange() : DeprecatedRange,
-                               Obsoleted ? *Obsoleted : llvm::VersionTuple(),
-                               implicit ? SourceRange() : ObsoletedRange,
-                               getPlatformAgnosticAvailability(),
-                               implicit,
-                               isSPI(),
-                               isForEmbedded());
+  return new (C) AvailableAttr(
+      implicit ? SourceLoc() : AtLoc, implicit ? SourceRange() : getRange(),
+      getPlatform(), Message, Rename,
+      Introduced ? *Introduced : llvm::VersionTuple(),
+      implicit ? SourceRange() : IntroducedRange,
+      Deprecated ? *Deprecated : llvm::VersionTuple(),
+      implicit ? SourceRange() : DeprecatedRange,
+      Obsoleted ? *Obsoleted : llvm::VersionTuple(),
+      implicit ? SourceRange() : ObsoletedRange,
+      getPlatformAgnosticAvailability(), implicit, isSPI(), isForEmbedded());
 }
 
 std::optional<OriginallyDefinedInAttr::ActiveVersion>
@@ -2448,25 +2212,6 @@ AvailableVersionComparison AvailableAttr::getVersionAvailability(
 
   // The entity is available.
   return AvailableVersionComparison::Available;
-}
-
-const AvailableAttr *AvailableAttr::isUnavailable(const Decl *D) {
-  ASTContext &ctx = D->getASTContext();
-  if (auto attr = D->getAttrs().getUnavailable(ctx))
-    return attr;
-
-  // If D is an extension member, check if the extension is unavailable.
-  //
-  // Skip decls imported from Clang, they could be associated to the wrong
-  // extension and inherit undesired unavailability. The ClangImporter
-  // associates Objective-C protocol members to the first category where the
-  // protocol is directly or indirectly adopted, no matter its availability
-  // and the availability of other categories. rdar://problem/53956555
-  if (!D->getClangNode())
-    if (auto ext = dyn_cast<ExtensionDecl>(D->getDeclContext()))
-        return AvailableAttr::isUnavailable(ext);
-
-  return nullptr;
 }
 
 SpecializeAttr::SpecializeAttr(SourceLoc atLoc, SourceRange range,
