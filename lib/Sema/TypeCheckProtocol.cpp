@@ -1198,12 +1198,12 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
     reqLocator =
         cs->getConstraintLocator(req, ConstraintLocator::ProtocolRequirement);
     SmallVector<OpenedType, 4> reqReplacements;
-    reqType = cs->getTypeOfMemberReference(selfTy, req, dc,
-                                           /*isDynamicResult=*/false,
-                                           FunctionRefKind::DoubleApply,
-                                           reqLocator,
-                                           &reqReplacements)
-        .adjustedReferenceType;
+    reqType =
+        cs->getTypeOfMemberReference(selfTy, req, dc,
+                                     /*isDynamicResult=*/false,
+                                     FunctionRefInfo::doubleBaseNameApply(),
+                                     reqLocator, &reqReplacements)
+            .adjustedReferenceType;
     reqType = reqType->getRValueType();
 
     // For any type parameters we replaced in the witness, map them
@@ -1234,15 +1234,17 @@ swift::matchWitness(WitnessChecker::RequirementEnvironmentCache &reqEnvCache,
     witnessLocator =
         cs->getConstraintLocator(req, LocatorPathElt::Witness(witness));
     if (witness->getDeclContext()->isTypeContext()) {
-      openWitnessType = cs->getTypeOfMemberReference(
-          selfTy, witness, dc, /*isDynamicResult=*/false,
-          FunctionRefKind::DoubleApply, witnessLocator)
-        .adjustedReferenceType;
+      openWitnessType =
+          cs->getTypeOfMemberReference(
+                selfTy, witness, dc, /*isDynamicResult=*/false,
+                FunctionRefInfo::doubleBaseNameApply(), witnessLocator)
+              .adjustedReferenceType;
     } else {
-      openWitnessType = cs->getTypeOfReference(
-          witness, FunctionRefKind::DoubleApply, witnessLocator,
-          /*useDC=*/nullptr)
-        .adjustedReferenceType;
+      openWitnessType =
+          cs->getTypeOfReference(
+                witness, FunctionRefInfo::doubleBaseNameApply(), witnessLocator,
+                /*useDC=*/nullptr)
+              .adjustedReferenceType;
     }
     openWitnessType = openWitnessType->getRValueType();
 
@@ -1881,7 +1883,7 @@ RequirementCheck WitnessChecker::checkWitness(ValueDecl *requirement,
       }
 
       if (auto adoptingNominal = DC->getSelfNominalTypeDecl()) {
-        if (adoptingNominal->getSemanticUnavailableAttr())
+        if (adoptingNominal->isSemanticallyUnavailable())
           return true;
       }
 
@@ -6004,7 +6006,7 @@ static void diagnoseUnstableName(ProtocolConformance *conformance,
     // Note: this is intentionally using the Swift 3 mangling,
     // to provide compatibility with archives created in the Swift 3
     // time frame.
-    Mangle::ASTMangler mangler;
+    Mangle::ASTMangler mangler(classDecl->getASTContext());
     std::string mangledName = mangler.mangleObjCRuntimeName(classDecl);
     assert(Lexer::isIdentifier(mangledName) &&
            "mangled name is not an identifier; can't use @objc");

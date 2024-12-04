@@ -1935,7 +1935,7 @@ ConstraintSystem::matchFunctionResultTypes(Type expectedResult, Type fnResult,
             getCalleeLocator(getConstraintLocator(innerCall));
         if (auto innerOverload = findSelectedOverloadFor(innerCalleeLoc)) {
           auto choice = innerOverload->choice;
-          if (choice.getFunctionRefKind() == FunctionRefKind::DoubleApply) {
+          if (choice.getFunctionRefInfo().isDoubleApply()) {
             isSecondApply = true;
             selected.emplace(*innerOverload);
           }
@@ -8031,7 +8031,7 @@ ConstraintSystem::SolutionKind
 ConstraintSystem::simplifyConstructionConstraint(
     Type valueType, FunctionType *fnType, TypeMatchOptions flags,
     DeclContext *useDC,
-    FunctionRefKind functionRefKind, ConstraintLocator *locator) {
+    FunctionRefInfo functionRefInfo, ConstraintLocator *locator) {
 
   // Desugar the value type.
   auto desugarValueType = valueType->getDesugaredType();
@@ -8183,7 +8183,7 @@ ConstraintSystem::simplifyConstructionConstraint(
   addValueMemberConstraint(MetatypeType::get(valueType, getASTContext()),
                            DeclNameRef::createConstructor(),
                            memberType,
-                           useDC, functionRefKind,
+                           useDC, functionRefInfo,
                            /*outerAlternatives=*/{},
                            getConstraintLocator(
                              fnLocator, 
@@ -8427,11 +8427,10 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
 
   // We sometimes get a pack expansion type here.
   if (auto *expansionType = type->getAs<PackExpansionType>()) {
-    // FIXME: Locator
-    addConstraint(ConstraintKind::ConformsTo,
-                  expansionType->getPatternType(),
-                  protocol->getDeclaredInterfaceType(),
-                  locator);
+    addConstraint(
+        ConstraintKind::ConformsTo, expansionType->getPatternType(),
+        protocol->getDeclaredInterfaceType(),
+        locator.withPathElement(LocatorPathElt::PackExpansionPattern()));
 
     return SolutionKind::Solved;
   }
@@ -8625,17 +8624,27 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
       return recordFix(fix) ? SolutionKind::Error : SolutionKind::Solved;
     }
 
-    // If we have something like ... -> type req # -> pack element #, we're
-    // solving a requirement of the form T : P where T is a type parameter pack
-    if (path.back().is<LocatorPathElt::PackElement>())
-      path.pop_back();
+    // Conditional conformance requirements could produce chains of
+    // `path element -> pack expansion pattern -> pack element`.
+    while (!path.empty()) {
+      // If we have something like ... -> type req # -> pack element #, we're
+      // solving a requirement of the form T : P where T is a type parameter pack
+      if (path.back().is<LocatorPathElt::PackElement>()) {
+        path.pop_back();
+        continue;
+      }
 
-    // This is similar to `PackElement` but locator points to the requirement
-    // associted with pack expansion pattern (i.e. `repeat each T: P`) where
-    // the path is something like:
-    // `... -> type req # -> pack expansion pattern`.
-    if (path.back().is<LocatorPathElt::PackExpansionPattern>())
-      path.pop_back();
+      // This is similar to `PackElement` but locator points to the requirement
+      // associated with pack expansion pattern (i.e. `repeat each T: P`) where
+      // the path is something like:
+      // `... -> type req # -> pack expansion pattern`.
+      if (path.back().is<LocatorPathElt::PackExpansionPattern>()) {
+        path.pop_back();
+        continue;
+      }
+
+      break;
+    }
 
     if (auto req = path.back().getAs<LocatorPathElt::AnyRequirement>()) {
       // If this is a requirement associated with `Self` which is bound
@@ -9576,7 +9585,7 @@ static bool isSelfRecursiveKeyPathDynamicMemberLookup(
 /// referenced.
 MemberLookupResult ConstraintSystem::
 performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
-                    Type baseTy, FunctionRefKind functionRefKind,
+                    Type baseTy, FunctionRefInfo functionRefInfo,
                     ConstraintLocator *memberLocator,
                     bool includeInaccessibleMembers) {
   Type baseObjTy = baseTy->getRValueType();
@@ -9895,10 +9904,11 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
         // Otherwise adjust base type and reference kind to make it
         // look as if lookup was done on the instance, that helps
         // with diagnostics.
-        auto choice = instanceTy->isAnyObject()
-                          ? candidate
-                          : OverloadChoice(instanceTy, decl,
-                                           FunctionRefKind::SingleApply);
+        auto choice =
+            instanceTy->isAnyObject()
+                ? candidate
+                : OverloadChoice(instanceTy, decl,
+                                 FunctionRefInfo::singleBaseNameApply());
 
         const bool invalidMethodRef = isa<FuncDecl>(decl) && !hasInstanceMethods;
         const bool invalidMemberRef = !isa<FuncDecl>(decl) && !hasInstanceMembers;
@@ -10095,13 +10105,13 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
       assert(cand->getDeclContext()->isTypeContext() && "Dynamic lookup bug");
       
       // We found this declaration via dynamic lookup, record it as such.
-      return OverloadChoice::getDeclViaDynamic(baseTy, cand, functionRefKind);
+      return OverloadChoice::getDeclViaDynamic(baseTy, cand, functionRefInfo);
     }
     
     // If we have a bridged type, we found this declaration via bridging.
     if (isBridged)
       return OverloadChoice::getDeclViaBridge(bridgedType, cand,
-                                              functionRefKind);
+                                              functionRefInfo);
     
     // If we got the choice by unwrapping an optional type, unwrap the base
     // type.
@@ -10111,7 +10121,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
                                              ->getOptionalObjectType());
       return OverloadChoice::getDeclViaUnwrappedOptional(
           ovlBaseTy, cand,
-          /*isFallback=*/isFallbackUnwrap, functionRefKind);
+          /*isFallback=*/isFallbackUnwrap, functionRefInfo);
     }
 
     // While looking for subscript choices it's possible to find
@@ -10133,7 +10143,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
       }
     }
 
-    return OverloadChoice(baseTy, cand, functionRefKind);
+    return OverloadChoice(baseTy, cand, functionRefInfo);
   };
 
   // Delay solving member constraint for unapplied methods
@@ -10153,7 +10163,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
 
         auto hasAppliedSelf = decl->hasCurriedSelf() &&
                               doesMemberRefApplyCurriedSelf(baseObjTy, decl);
-        return getNumApplications(decl, hasAppliedSelf, functionRefKind,
+        return getNumApplications(decl, hasAppliedSelf, functionRefInfo,
                                   memberLocator) < decl->getNumCurryLevels();
       });
     };
@@ -10239,7 +10249,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
     Type metaObjectType = MetatypeType::get(instanceObjectTy);
     auto result = performMemberLookup(
         constraintKind, memberName, metaObjectType,
-        functionRefKind, memberLocator, includeInaccessibleMembers);
+        functionRefInfo, memberLocator, includeInaccessibleMembers);
     result.numImplicitOptionalUnwraps = optionals.size();
     result.actualBaseType = metaObjectType;
     return result;
@@ -10297,7 +10307,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
       DeclNameRef subscriptName(
           { ctx, DeclBaseName::createSubscript(), { ctx.Id_dynamicMember } });
       auto subscripts = performMemberLookup(
-          constraintKind, subscriptName, baseTy, functionRefKind, memberLocator,
+          constraintKind, subscriptName, baseTy, functionRefInfo, memberLocator,
           includeInaccessibleMembers);
 
       // Reflect the candidates found as `DynamicMemberLookup` results.
@@ -10649,7 +10659,7 @@ static bool inferEnumMemberThroughTildeEqualsOperator(
 
 ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
     ConstraintKind kind, Type baseTy, DeclNameRef member, Type memberTy,
-    DeclContext *useDC, FunctionRefKind functionRefKind,
+    DeclContext *useDC, FunctionRefInfo functionRefInfo,
     ArrayRef<OverloadChoice> outerAlternatives, TypeMatchOptions flags,
     ConstraintLocatorBuilder locatorB) {
   // We'd need to record original base type because it might be a type
@@ -10666,7 +10676,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
     // If requested, generate a constraint.
     if (flags.contains(TMF_GenerateConstraints)) {
       auto *memberRef = Constraint::createMemberOrOuterDisjunction(
-          *this, kind, baseTy, memberTy, member, useDC, functionRefKind,
+          *this, kind, baseTy, memberTy, member, useDC, functionRefInfo,
           outerAlternatives, locator);
 
       addUnsolvedConstraint(memberRef);
@@ -10791,7 +10801,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
 
         return simplifyValueWitnessConstraint(
             ConstraintKind::ValueWitness, baseTy, makeIterator, memberTy, useDC,
-            FunctionRefKind::SingleApply, flags, locator);
+            FunctionRefInfo::singleBaseNameApply(), flags, locator);
       }
 
       // Handle `next` reference.
@@ -10809,13 +10819,13 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
 
         return simplifyValueWitnessConstraint(
             ConstraintKind::ValueWitness, baseTy, next, memberTy, useDC,
-            FunctionRefKind::SingleApply, flags, locator);
+            FunctionRefInfo::singleBaseNameApply(), flags, locator);
       }
     }
   }
 
   MemberLookupResult result =
-      performMemberLookup(kind, member, baseTy, functionRefKind, locator,
+      performMemberLookup(kind, member, baseTy, functionRefInfo, locator,
                           /*includeInaccessibleMembers*/ shouldAttemptFixes());
 
   switch (result.OverallResult) {
@@ -10911,7 +10921,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
   //  let _: Foo? = .none // Although base is inferred as Optional.none
   //  it could be also Foo.none.
   if (auto *fix = SpecifyBaseTypeForOptionalUnresolvedMember::attempt(
-          *this, kind, baseObjTy, member, functionRefKind, result, locator)) {
+          *this, kind, baseObjTy, member, functionRefInfo, result, locator)) {
     (void)recordFix(fix);
   }
 
@@ -11055,7 +11065,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
       // type, or there is no member with a given name.
       result =
           performMemberLookup(kind, member, baseObjTy->getOptionalObjectType(),
-                              functionRefKind, locator,
+                              functionRefInfo, locator,
                               /*includeInaccessibleMembers*/ true);
 
       // If unwrapped type still couldn't find anything for a given name,
@@ -11097,7 +11107,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
 
       // Look through one level of optional.
       addValueMemberConstraint(baseObjTy->getOptionalObjectType(), member,
-                               innerTV, useDC, functionRefKind,
+                               innerTV, useDC, functionRefInfo,
                                outerAlternatives, locator);
       return SolutionKind::Solved;
     }
@@ -11105,7 +11115,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
     auto solveWithNewBaseOrName = [&](Type baseType,
                                       DeclNameRef memberName) -> SolutionKind {
       return simplifyMemberConstraint(kind, baseType, memberName, memberTy,
-                                      useDC, functionRefKind, outerAlternatives,
+                                      useDC, functionRefInfo, outerAlternatives,
                                       flags | TMF_ApplyingFix, locatorB);
     };
 
@@ -11217,7 +11227,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
       }
     }
 
-    result = performMemberLookup(kind, member, baseTy, functionRefKind, locator,
+    result = performMemberLookup(kind, member, baseTy, functionRefInfo, locator,
                                  /*includeInaccessibleMembers*/ true);
 
     // FIXME(diagnostics): If there were no viable results, but there are
@@ -11237,7 +11247,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
 ConstraintSystem::SolutionKind
 ConstraintSystem::simplifyValueWitnessConstraint(
     ConstraintKind kind, Type baseType, ValueDecl *requirement, Type memberType,
-    DeclContext *useDC, FunctionRefKind functionRefKind,
+    DeclContext *useDC, FunctionRefInfo functionRefInfo,
     TypeMatchOptions flags, ConstraintLocatorBuilder locator) {
   // We'd need to record original base type because it might be a type
   // variable representing another missing member.
@@ -11248,7 +11258,7 @@ ConstraintSystem::simplifyValueWitnessConstraint(
     if (flags.contains(TMF_GenerateConstraints)) {
       auto *witnessConstraint = Constraint::createValueWitness(
           *this, kind, origBaseType, memberType, requirement, useDC,
-          functionRefKind, getConstraintLocator(locator));
+          functionRefInfo, getConstraintLocator(locator));
 
       addUnsolvedConstraint(witnessConstraint);
       return SolutionKind::Solved;
@@ -11303,7 +11313,7 @@ ConstraintSystem::simplifyValueWitnessConstraint(
   if (!witness)
     return fail();
 
-  auto choice = OverloadChoice(resolvedBaseType, witness.getDecl(), functionRefKind);
+  auto choice = OverloadChoice(resolvedBaseType, witness.getDecl(), functionRefInfo);
   resolveOverload(getConstraintLocator(locator), memberType, choice,
                   useDC);
   return SolutionKind::Solved;
@@ -13058,10 +13068,10 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyApplicableFnConstraint(
     // type variable.
     auto memberTy = createTypeVariable(memberLoc, /*options=*/0);
     // TODO: Revisit this if `static func callAsFunction` is to be supported.
-    // Static member constraint requires `FunctionRefKind::DoubleApply`.
+    // Static member constraint requires `FunctionRefInfo::DoubleApply`.
     addValueMemberConstraint(origLValueType2,
-                             DeclNameRef(ctx.Id_callAsFunction),
-                             memberTy, DC, FunctionRefKind::SingleApply,
+                             DeclNameRef(ctx.Id_callAsFunction), memberTy, DC,
+                             FunctionRefInfo::singleBaseNameApply(),
                              /*outerAlternatives*/ {}, memberLoc);
     // Add new applicable function constraint based on the member type
     // variable.
@@ -13271,10 +13281,10 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyApplicableFnConstraint(
     }
 
     // Construct the instance from the input arguments.
-    auto simplified = simplifyConstructionConstraint(instance2, func1, subflags,
-                                          /*FIXME?*/ DC,
-                                          FunctionRefKind::SingleApply,
-                                          getConstraintLocator(outerLocator));
+    auto simplified = simplifyConstructionConstraint(
+        instance2, func1, subflags,
+        /*FIXME?*/ DC, FunctionRefInfo::singleBaseNameApply(),
+        getConstraintLocator(outerLocator));
 
     // Record any fixes we attempted to get to the correct solution.
     if (simplified == SolutionKind::Solved) {
@@ -13340,7 +13350,7 @@ lookupDynamicCallableMethods(NominalTypeDecl *decl, ConstraintSystem &CS,
   DeclNameRef methodName({ ctx, ctx.Id_dynamicallyCall, { argumentName } });
   auto matches = CS.performMemberLookup(
       ConstraintKind::ValueMember, methodName, type,
-      FunctionRefKind::SingleApply, CS.getConstraintLocator(locator),
+      FunctionRefInfo::singleBaseNameApply(), CS.getConstraintLocator(locator),
       /*includeInaccessibleMembers*/ false);
   // Filter valid candidates.
   auto candidates = matches.ViableCandidates;
@@ -13499,8 +13509,8 @@ ConstraintSystem::simplifyDynamicCallableApplicableFnConstraint(
   SmallVector<OverloadChoice, 4> choices;
   for (auto candidate : candidates) {
     if (candidate->isInvalid()) continue;
-    choices.push_back(
-      OverloadChoice(type2, candidate, FunctionRefKind::SingleApply));
+    choices.push_back(OverloadChoice(type2, candidate,
+                                     FunctionRefInfo::singleBaseNameApply()));
   }
 
   if (choices.empty()) {
@@ -14728,7 +14738,8 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
 
     addValueMemberConstraint(MetatypeType::get(type2, getASTContext()),
                              DeclNameRef(DeclBaseName::createConstructor()),
-                             memberTy, DC, FunctionRefKind::DoubleApply,
+                             memberTy, DC,
+                             FunctionRefInfo::doubleBaseNameApply(),
                              /*outerAlternatives=*/{}, memberLoc);
 
     addConstraint(ConstraintKind::ApplicableFunction,
@@ -16128,7 +16139,7 @@ ConstraintSystem::simplifyConstraint(const Constraint &constraint) {
     return simplifyMemberConstraint(
         constraint.getKind(), constraint.getFirstType(), constraint.getMember(),
         constraint.getSecondType(), constraint.getMemberUseDC(),
-        constraint.getFunctionRefKind(),
+        constraint.getFunctionRefInfo(),
         /*outerAlternatives=*/{},
         /*flags*/ std::nullopt, constraint.getLocator());
 
@@ -16136,7 +16147,7 @@ ConstraintSystem::simplifyConstraint(const Constraint &constraint) {
     return simplifyValueWitnessConstraint(
         constraint.getKind(), constraint.getFirstType(),
         constraint.getRequirement(), constraint.getSecondType(),
-        constraint.getMemberUseDC(), constraint.getFunctionRefKind(),
+        constraint.getMemberUseDC(), constraint.getFunctionRefInfo(),
         /*flags*/ std::nullopt, constraint.getLocator());
 
   case ConstraintKind::Defaultable:

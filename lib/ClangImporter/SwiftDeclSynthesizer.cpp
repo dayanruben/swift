@@ -954,7 +954,7 @@ getAccessorDeclarationName(clang::ASTContext &Ctx, NominalTypeDecl *structDecl,
                            VarDecl *fieldDecl, const char *suffix) {
   std::string id;
   llvm::raw_string_ostream IdStream(id);
-  Mangle::ASTMangler mangler;
+  Mangle::ASTMangler mangler(structDecl->getASTContext());
   IdStream << "$" << mangler.mangleDeclAsUSR(structDecl, "") << "$"
            << fieldDecl->getName() << "$" << suffix;
 
@@ -2505,7 +2505,7 @@ SwiftDeclSynthesizer::makeDefaultArgument(const clang::ParmVarDecl *param,
   auto declRefExpr = new (ctx)
       DeclRefExpr(ConcreteDeclRef(funcDecl), DeclNameLoc(), /*Implicit*/ true);
   declRefExpr->setType(funcDecl->getInterfaceType());
-  declRefExpr->setFunctionRefKind(FunctionRefKind::SingleApply);
+  declRefExpr->setFunctionRefInfo(FunctionRefInfo::singleBaseNameApply());
 
   auto callExpr = CallExpr::createImplicit(
       ctx, declRefExpr, ArgumentList::forImplicitUnlabeled(ctx, {}));
