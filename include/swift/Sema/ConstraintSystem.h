@@ -482,10 +482,6 @@ public:
   /// Determine whether this type variable represents a subscript result type.
   bool isSubscriptResultType() const;
 
-  /// Determine whether this type variable represents a result type of an
-  /// application i.e. a call, an operator, or a subscript.
-  bool isApplicationResultType() const;
-
   /// Determine whether this type variable represents an opened
   /// type parameter pack.
   bool isParameterPack() const;
@@ -6434,10 +6430,9 @@ Type getPatternTypeOfSingleUnlabeledPackExpansionTuple(Type type);
 /// methods prefixed with `build*` i.e. `buildBlock`, `buildExpression` etc.
 bool isResultBuilderMethodReference(ASTContext &, UnresolvedDotExpr *);
 
-/// Determine the number of applications applied to the given overload.
-unsigned getNumApplications(ValueDecl *decl, bool hasAppliedSelf,
-                            FunctionRefInfo functionRefInfo,
-                            ConstraintLocatorBuilder locator);
+/// Determine the number of applications applied for a given FunctionRefInfo.
+unsigned getNumApplications(bool hasAppliedSelf,
+                            FunctionRefInfo functionRefInfo);
 
 } // end namespace constraints
 
