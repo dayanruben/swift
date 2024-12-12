@@ -75,6 +75,7 @@ private func registerSwiftPasses() {
   registerPass(mergeCondFailsPass, { mergeCondFailsPass.run($0) })
   registerPass(computeEscapeEffects, { computeEscapeEffects.run($0) })
   registerPass(computeSideEffects, { computeSideEffects.run($0) })
+  registerPass(destroyHoisting, { destroyHoisting.run($0) })
   registerPass(initializeStaticGlobalsPass, { initializeStaticGlobalsPass.run($0) })
   registerPass(objCBridgingOptimization, { objCBridgingOptimization.run($0) })
   registerPass(objectOutliner, { objectOutliner.run($0) })
@@ -100,6 +101,7 @@ private func registerSwiftPasses() {
   registerPass(autodiffClosureSpecialization, { autodiffClosureSpecialization.run($0) })
 
   // Instruction passes
+  registerForSILCombine(BeginBorrowInst.self,      { run(BeginBorrowInst.self, $0) })
   registerForSILCombine(BeginCOWMutationInst.self, { run(BeginCOWMutationInst.self, $0) })
   registerForSILCombine(GlobalValueInst.self,      { run(GlobalValueInst.self, $0) })
   registerForSILCombine(StrongRetainInst.self,     { run(StrongRetainInst.self, $0) })
@@ -107,6 +109,7 @@ private func registerSwiftPasses() {
   registerForSILCombine(RetainValueInst.self,      { run(RetainValueInst.self, $0) })
   registerForSILCombine(ReleaseValueInst.self,     { run(ReleaseValueInst.self, $0) })
   registerForSILCombine(LoadInst.self,             { run(LoadInst.self, $0) })
+  registerForSILCombine(LoadBorrowInst.self,       { run(LoadBorrowInst.self, $0) })
   registerForSILCombine(CopyValueInst.self,        { run(CopyValueInst.self, $0) })
   registerForSILCombine(DestroyValueInst.self,     { run(DestroyValueInst.self, $0) })
   registerForSILCombine(DestructureStructInst.self, { run(DestructureStructInst.self, $0) })
