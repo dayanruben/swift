@@ -28,6 +28,12 @@ public extension PathProtocol {
     return Self(result)
   }
 
+  /// Drops the last `n` components, or all components if `n` is greater
+  /// than the number of components.
+  func dropLast(_ n: Int = 1) -> Self {
+    Self(FilePath(root: storage.root, storage.components.dropLast(n)))
+  }
+
   var fileName: String {
     storage.lastComponent?.string ?? ""
   }
@@ -118,7 +124,11 @@ extension PathProtocol {
   }
 
   var isCSourceLike: Bool {
-    hasExtension(.c, .cpp)
+    hasExtension(.c, .cpp, .m, .mm)
+  }
+
+  var isSourceLike: Bool {
+    isCSourceLike || hasExtension(.swift)
   }
 
   var isDocLike: Bool {

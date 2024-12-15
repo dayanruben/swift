@@ -115,11 +115,6 @@ public:
     auto &C = D->getASTContext();
 
     if (isa<DestructorDecl>(D)) {
-      if (!C.LangOpts.hasFeature(Feature::IsolatedDeinit)) {
-        diagnoseAndRemoveAttr(attr, diag::isolated_deinit_experimental);
-        return;
-      }
-
       if (auto nominal = dyn_cast<NominalTypeDecl>(D->getDeclContext())) {
         if (!isa<ClassDecl>(nominal)) {
           // only classes and actors can have isolated deinit.
@@ -127,6 +122,13 @@ public:
           return;
         }
       }
+
+      TypeChecker::checkAvailability(
+        attr->getRange(), C.getIsolatedDeinitAvailability(),
+        D->getDeclContext(),
+        [&](StringRef platformName, llvm::VersionTuple version) {
+          return diagnoseAndRemoveAttr(attr, diag::isolated_deinit_unavailable, platformName, version);
+        });
     }
   }
 
@@ -387,6 +389,7 @@ public:
   void visitWeakLinkedAttr(WeakLinkedAttr *attr);
   void visitSILGenNameAttr(SILGenNameAttr *attr);
   void visitUnsafeAttr(UnsafeAttr *attr);
+  void visitSafeAttr(SafeAttr *attr);
   void visitLifetimeAttr(LifetimeAttr *attr);
   void visitAddressableSelfAttr(AddressableSelfAttr *attr);
 };
@@ -7769,6 +7772,13 @@ void AttributeChecker::visitWeakLinkedAttr(WeakLinkedAttr *attr) {
 }
 
 void AttributeChecker::visitUnsafeAttr(UnsafeAttr *attr) {
+  if (Ctx.LangOpts.hasFeature(Feature::AllowUnsafeAttribute))
+    return;
+
+  diagnoseAndRemoveAttr(attr, diag::unsafe_attr_disabled);
+}
+
+void AttributeChecker::visitSafeAttr(SafeAttr *attr) {
   if (Ctx.LangOpts.hasFeature(Feature::AllowUnsafeAttribute))
     return;
 
