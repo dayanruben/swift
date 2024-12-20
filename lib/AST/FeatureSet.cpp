@@ -103,7 +103,6 @@ UNINTERESTING_FEATURE(OpaqueTypeErasure)
 UNINTERESTING_FEATURE(PackageCMO)
 UNINTERESTING_FEATURE(ParserRoundTrip)
 UNINTERESTING_FEATURE(ParserValidation)
-UNINTERESTING_FEATURE(UnqualifiedLookupValidation)
 UNINTERESTING_FEATURE(ImplicitSome)
 UNINTERESTING_FEATURE(ParserASTGen)
 UNINTERESTING_FEATURE(BuiltinMacros)
@@ -262,8 +261,6 @@ static bool usesFeatureLifetimeDependence(Decl *decl) {
       ->getAs<AnyFunctionType>()
       ->hasLifetimeDependencies();
 }
-
-UNINTERESTING_FEATURE(LifetimeDependenceDiagnoseTrivial)
 
 UNINTERESTING_FEATURE(DynamicActorIsolation)
 UNINTERESTING_FEATURE(NonfrozenEnumExhaustivity)
