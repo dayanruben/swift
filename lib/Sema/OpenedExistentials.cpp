@@ -590,10 +590,10 @@ swift::isMemberAvailableOnExistential(Type baseTy, const ValueDecl *member) {
   return result;
 }
 
-std::optional<std::tuple<GenericTypeParamType *, TypeVariableType *,
-                                Type, OpenedExistentialAdjustments>>
+std::optional<
+    std::tuple<TypeVariableType *, Type, OpenedExistentialAdjustments>>
 swift::canOpenExistentialCallArgument(ValueDecl *callee, unsigned paramIdx,
-	                                  Type paramTy, Type argTy) {
+                                      Type paramTy, Type argTy) {
   if (!callee)
     return std::nullopt;
 
@@ -649,10 +649,11 @@ swift::canOpenExistentialCallArgument(ValueDecl *callee, unsigned paramIdx,
   if (param->isVariadic())
     return std::nullopt;
 
-  // Look through an inout and optional types on the formal type of the
-  // parameter.
+  // Look through an inout and an optional type on the parameter types.
   auto formalParamTy = param->getInterfaceType()->getInOutObjectType()
       ->lookThroughSingleOptionalType();
+  // Look through an inout and optional types on the parameter.
+  paramTy = paramTy->getInOutObjectType()->lookThroughSingleOptionalType();
 
   // If the argument is of an existential metatype, look through the
   // metatype on the parameter.
@@ -660,9 +661,6 @@ swift::canOpenExistentialCallArgument(ValueDecl *callee, unsigned paramIdx,
     formalParamTy = formalParamTy->getMetatypeInstanceType();
     paramTy = paramTy->getMetatypeInstanceType();
   }
-
-  // Look through an inout and optional types on the parameter.
-  paramTy = paramTy->getInOutObjectType()->lookThroughSingleOptionalType();
 
   // The parameter type must be a type variable.
   auto paramTypeVar = paramTy->getAs<TypeVariableType>();
@@ -728,7 +726,7 @@ swift::canOpenExistentialCallArgument(ValueDecl *callee, unsigned paramIdx,
   if (referenceInfo.hasNonCovariantRef())
     return std::nullopt;
 
-  return std::make_tuple(genericParam, paramTypeVar, argTy, adjustments);
+  return std::make_tuple(paramTypeVar, argTy, adjustments);
 }
 
 /// For each occurrence of a type **type** in `refTy` that satisfies

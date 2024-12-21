@@ -34,6 +34,7 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/TypeDeclFinder.h"
+#include "swift/AST/UnsafeUse.h"
 #include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/SourceManager.h"
@@ -345,24 +346,24 @@ static bool computeContainedByDeploymentTarget(AvailabilityScope *scope,
 /// unconditional unavailable declaration for the same platform.
 static bool isInsideCompatibleUnavailableDeclaration(
     const Decl *D, AvailabilityContext availabilityContext,
-    const AvailableAttr *attr) {
+    const SemanticAvailableAttr &attr) {
   auto contextPlatform = availabilityContext.getUnavailablePlatformKind();
   if (!contextPlatform)
     return false;
 
-  if (!attr->isUnconditionallyUnavailable())
+  if (!attr.isUnconditionallyUnavailable())
     return false;
 
   // Refuse calling universally unavailable functions from unavailable code,
   // but allow the use of types.
-  PlatformKind declPlatform = attr->getPlatform();
-  if (declPlatform == PlatformKind::none && !attr->isForEmbedded() &&
+  PlatformKind declPlatform = attr.getPlatform();
+  if (declPlatform == PlatformKind::none && !attr.isEmbeddedSpecific() &&
       !isa<TypeDecl>(D) && !isa<ExtensionDecl>(D))
     return false;
 
   // @_unavailableInEmbedded declarations may be used in contexts that are
   // also @_unavailableInEmbedded.
-  if (attr->isForEmbedded())
+  if (attr.isEmbeddedSpecific())
     return availabilityContext.isUnavailableInEmbedded();
 
   return (*contextPlatform == PlatformKind::none ||
@@ -370,14 +371,14 @@ static bool isInsideCompatibleUnavailableDeclaration(
           inheritsAvailabilityFromPlatform(declPlatform, *contextPlatform));
 }
 
-const AvailableAttr *
+std::optional<SemanticAvailableAttr>
 ExportContext::shouldDiagnoseDeclAsUnavailable(const Decl *D) const {
   auto attr = D->getUnavailableAttr();
   if (!attr)
-    return nullptr;
+    return std::nullopt;
 
-  if (isInsideCompatibleUnavailableDeclaration(D, Availability, attr))
-    return nullptr;
+  if (isInsideCompatibleUnavailableDeclaration(D, Availability, *attr))
+    return std::nullopt;
 
   return attr;
 }
@@ -1683,8 +1684,10 @@ public:
     // is contained in the range we are looking for.
     FoundTarget = SM.rangeContains(TargetRange, Range);
 
-    if (FoundTarget)
+    if (FoundTarget) {
+      walkToNodePost(Node);
       return Action::SkipNode(Node);
+    }
 
     // Search the subtree if the target range is inside its range.
     if (!SM.rangeContains(Range, TargetRange))
@@ -2373,14 +2376,14 @@ diagnosePotentialUnavailability(const RootProtocolConformance *rootConf,
 /// declaration is deprecated or null otherwise.
 static const AvailableAttr *getDeprecated(const Decl *D) {
   auto &Ctx = D->getASTContext();
-  if (auto *Attr = D->getDeprecatedAttr())
-    return Attr;
+  if (auto Attr = D->getDeprecatedAttr())
+    return Attr->getParsedAttr();
 
   if (Ctx.LangOpts.WarnSoftDeprecated) {
     // When -warn-soft-deprecated is specified, treat any declaration that is
     // deprecated in the future as deprecated.
-    if (auto *Attr = D->getSoftDeprecatedAttr())
-      return Attr;
+    if (auto Attr = D->getSoftDeprecatedAttr())
+      return Attr->getParsedAttr();
   }
 
   // Treat extensions methods as deprecated if their extension
@@ -2996,7 +2999,9 @@ static bool diagnoseExplicitUnavailability(const ValueDecl *D, SourceRange R,
                                            DeclAvailabilityFlags Flags) {
   return diagnoseExplicitUnavailability(
       D, R, Where, Flags, [=](InFlightDiagnostic &diag) {
-        fixItAvailableAttrRename(diag, R, D, D->getUnavailableAttr(), call);
+        auto attr = D->getUnavailableAttr();
+        assert(attr);
+        fixItAvailableAttrRename(diag, R, D, attr->getParsedAttr(), call);
       });
 }
 
@@ -3019,20 +3024,18 @@ public:
 
 private:
   Status DiagnosticStatus;
-  const AvailableAttr *Attr;
-  AvailabilityDomain Domain;
+  SemanticAvailableAttr Attr;
 
 public:
-  UnavailabilityDiagnosticInfo(Status status, const AvailableAttr *attr,
-                               AvailabilityDomain domain)
-      : DiagnosticStatus(status), Attr(attr), Domain(domain) {
-    assert(attr);
-  };
+  UnavailabilityDiagnosticInfo(Status status, const SemanticAvailableAttr &attr)
+      : DiagnosticStatus(status), Attr(attr) {};
 
   Status getStatus() const { return DiagnosticStatus; }
-  const AvailableAttr *getAttr() const { return Attr; }
-  AvailabilityDomain getDomain() const { return Domain; }
-  StringRef getDomainName() const { return Domain.getNameForDiagnostics(); }
+  const AvailableAttr *getAttr() const { return Attr.getParsedAttr(); }
+  AvailabilityDomain getDomain() const { return Attr.getDomain(); }
+  StringRef getDomainName() const {
+    return getDomain().getNameForDiagnostics();
+  }
 
   bool shouldHideDomainNameInUnversionedDiagnostics() const {
     switch (getDomain().getKind()) {
@@ -3057,39 +3060,32 @@ public:
 static std::optional<UnavailabilityDiagnosticInfo>
 getExplicitUnavailabilityDiagnosticInfo(const Decl *decl,
                                         const ExportContext &where) {
-  auto *attr = where.shouldDiagnoseDeclAsUnavailable(decl);
+  auto attr = where.shouldDiagnoseDeclAsUnavailable(decl);
   if (!attr)
-    return std::nullopt;
-
-  auto semanticAttr = decl->getSemanticAvailableAttr(attr);
-  if (!semanticAttr)
     return std::nullopt;
 
   ASTContext &ctx = decl->getASTContext();
 
-  switch (semanticAttr->getVersionAvailability(ctx)) {
+  switch (attr->getVersionAvailability(ctx)) {
   case AvailableVersionComparison::Available:
   case AvailableVersionComparison::PotentiallyUnavailable:
     llvm_unreachable("These aren't considered unavailable");
 
   case AvailableVersionComparison::Unavailable:
-    if ((semanticAttr->isSwiftLanguageModeSpecific() ||
-         semanticAttr->isPackageDescriptionVersionSpecific()) &&
-        attr->Introduced.has_value()) {
+    if ((attr->isSwiftLanguageModeSpecific() ||
+         attr->isPackageDescriptionVersionSpecific()) &&
+        attr->getIntroduced()) {
       return UnavailabilityDiagnosticInfo(
-          UnavailabilityDiagnosticInfo::Status::IntroducedInVersion, attr,
-          semanticAttr->getDomain());
+          UnavailabilityDiagnosticInfo::Status::IntroducedInVersion, *attr);
     } else {
       return UnavailabilityDiagnosticInfo(
-          UnavailabilityDiagnosticInfo::Status::AlwaysUnavailable, attr,
-          semanticAttr->getDomain());
+          UnavailabilityDiagnosticInfo::Status::AlwaysUnavailable, *attr);
     }
     break;
 
   case AvailableVersionComparison::Obsoleted:
     return UnavailabilityDiagnosticInfo(
-        UnavailabilityDiagnosticInfo::Status::Obsoleted, attr,
-        semanticAttr->getDomain());
+        UnavailabilityDiagnosticInfo::Status::Obsoleted, *attr);
   }
 }
 
@@ -3161,29 +3157,26 @@ swift::getUnsatisfiedAvailabilityConstraint(
     return std::nullopt;
 
   if (auto attr = decl->getUnavailableAttr()) {
-    auto semanticAttr = decl->getSemanticAvailableAttr(attr);
-    if (!semanticAttr)
-      return std::nullopt;
-
     if (isInsideCompatibleUnavailableDeclaration(decl, availabilityContext,
-                                                 attr))
+                                                 *attr))
       return std::nullopt;
 
-    switch (semanticAttr->getVersionAvailability(ctx)) {
+    auto parsedAttr = attr->getParsedAttr();
+    switch (attr->getVersionAvailability(ctx)) {
     case AvailableVersionComparison::Available:
     case AvailableVersionComparison::PotentiallyUnavailable:
       llvm_unreachable("Decl should be unavailable");
 
     case AvailableVersionComparison::Unavailable:
-      if ((semanticAttr->isSwiftLanguageModeSpecific() ||
-           semanticAttr->isPackageDescriptionVersionSpecific()) &&
-          attr->Introduced.has_value())
-        return AvailabilityConstraint::forRequiresVersion(attr);
+      if ((attr->isSwiftLanguageModeSpecific() ||
+           attr->isPackageDescriptionVersionSpecific()) &&
+          attr->getIntroduced().has_value())
+        return AvailabilityConstraint::forRequiresVersion(parsedAttr);
 
-      return AvailabilityConstraint::forAlwaysUnavailable(attr);
+      return AvailabilityConstraint::forAlwaysUnavailable(parsedAttr);
 
     case AvailableVersionComparison::Obsoleted:
-      return AvailabilityConstraint::forObsoleted(attr);
+      return AvailabilityConstraint::forObsoleted(parsedAttr);
     }
   }
 
@@ -4081,36 +4074,6 @@ private:
 };
 } // end anonymous namespace
 
-static void suggestUnsafeOnEnclosingDecl(
-    SourceRange referenceRange, const DeclContext *referenceDC) {
-  if (referenceRange.isInvalid())
-    return;
-
-  ASTContext &ctx = referenceDC->getASTContext();
-  std::optional<ASTNode> versionCheckNode;
-  const Decl *memberLevelDecl = nullptr;
-  const Decl *typeLevelDecl = nullptr;
-  findAvailabilityFixItNodes(
-                             referenceRange, referenceDC, ctx.SourceMgr,
-      versionCheckNode, memberLevelDecl, typeLevelDecl);
-
-  auto decl = memberLevelDecl ? memberLevelDecl : typeLevelDecl;
-  if (!decl)
-    return;
-
-  if (versionCheckNode.has_value()) {
-    // The unsafe construct is inside the body of the entity, so suggest
-    // @safe(unchecked) on the declaration.
-    decl->diagnose(diag::encapsulate_unsafe_in_enclosing_context, decl)
-      .fixItInsert(decl->getAttributeInsertionLoc(false),
-                   "@safe(unchecked) ");
-  } else {
-    // The unsafe construct is not part of the body, so
-    decl->diagnose(diag::make_enclosing_context_unsafe, decl)
-      .fixItInsert(decl->getAttributeInsertionLoc(false), "@unsafe ");
-  }
-}
-
 /// Diagnose uses of unavailable declarations. Returns true if a diagnostic
 /// was emitted.
 bool ExprAvailabilityWalker::diagnoseDeclRefAvailability(
@@ -4131,11 +4094,12 @@ bool ExprAvailabilityWalker::diagnoseDeclRefAvailability(
   if (D->getModuleContext()->isBuiltinModule())
     return false;
 
-  if (auto *attr = D->getUnavailableAttr()) {
-    if (diagnoseIncDecRemoval(D, R, attr))
+  if (auto attr = D->getUnavailableAttr()) {
+    auto parsedAttr = attr->getParsedAttr();
+    if (diagnoseIncDecRemoval(D, R, parsedAttr))
       return true;
     if (isa_and_nonnull<ApplyExpr>(call) &&
-        diagnoseMemoryLayoutMigration(D, R, attr, cast<ApplyExpr>(call)))
+        diagnoseMemoryLayoutMigration(D, R, parsedAttr, cast<ApplyExpr>(call)))
       return true;
   }
 
@@ -4149,18 +4113,11 @@ bool ExprAvailabilityWalker::diagnoseDeclRefAvailability(
     auto type = D->getInterfaceType();
     if (auto subs = declRef.getSubstitutions())
       type = type.subst(subs);
-    if (type->isUnsafe()) {
-      diagnoseUnsafeType(
-          ctx, R.Start, type,
-          Where.getAvailability(),
-          [&](Type specificType) {
-            ctx.Diags.diagnose(
-                R.Start, diag::reference_to_unsafe_typed_decl,
-                call != nullptr && !isa<ParamDecl>(D), D,
-                specificType);
-            suggestUnsafeOnEnclosingDecl(R, Where.getDeclContext());
-            D->diagnose(diag::unsafe_decl_here, D);
-          });
+    if (type->isUnsafe() && !Where.getAvailability().allowsUnsafe()) {
+      diagnoseUnsafeUse(
+          UnsafeUse::forReferenceToUnsafe(
+            D, call != nullptr && !isa<ParamDecl>(D), Where.getDeclContext(),
+            type, R.Start));
     }
   }
 
@@ -4201,14 +4158,14 @@ diagnoseDeclAsyncAvailability(const ValueDecl *D, SourceRange R,
   }
 
   // @available(noasync) spelling
-  if (const AvailableAttr *attr = D->getNoAsyncAttr()) {
+  if (auto attr = D->getNoAsyncAttr()) {
     SourceLoc diagLoc = call ? call->getLoc() : R.Start;
-    auto diag = ctx.Diags.diagnose(diagLoc, diag::async_unavailable_decl,
-                                   D, attr->Message);
+    auto diag = ctx.Diags.diagnose(diagLoc, diag::async_unavailable_decl, D,
+                                   attr->getMessage());
     diag.warnUntilSwiftVersion(6);
 
-    if (!attr->Rename.empty()) {
-      fixItAvailableAttrRename(diag, R, D, attr, call);
+    if (!attr->getRename().empty()) {
+      fixItAvailableAttrRename(diag, R, D, attr->getParsedAttr(), call);
     }
     return true;
   }
@@ -4229,6 +4186,20 @@ diagnoseDeclAsyncAvailability(const ValueDecl *D, SourceRange R,
   return true;
 }
 
+/// Determine whether a reference to the given variable is treated as
+/// nonisolated(unsafe).
+static bool isReferenceToNonisolatedUnsafe(
+    ValueDecl *decl,
+    DeclContext *fromDC
+) {
+  auto isolation = getActorIsolationForReference(decl, fromDC);
+  if (!isolation.isNonisolated())
+    return false;
+
+  auto attr = decl->getAttrs().getAttribute<NonisolatedAttr>();
+  return attr && attr->isUnsafe();
+}
+
 /// Diagnose uses of unsafe declarations.
 static void
 diagnoseDeclUnsafe(const ValueDecl *D, SourceRange R,
@@ -4237,17 +4208,42 @@ diagnoseDeclUnsafe(const ValueDecl *D, SourceRange R,
   if (!ctx.LangOpts.hasFeature(Feature::WarnUnsafe))
     return;
 
-  if (!D->isUnsafe())
-    return;
-
   if (Where.getAvailability().allowsUnsafe())
     return;
 
   SourceLoc diagLoc = call ? call->getLoc() : R.Start;
-  ctx.Diags
-    .diagnose(diagLoc, diag::reference_to_unsafe_decl, call != nullptr, D);
-  suggestUnsafeOnEnclosingDecl(R, Where.getDeclContext());
-  D->diagnose(diag::unsafe_decl_here, D);
+  if (D->isUnsafe()) {
+    diagnoseUnsafeUse(
+        UnsafeUse::forReferenceToUnsafe(
+          D, call != nullptr, Where.getDeclContext(), Type(), diagLoc));
+    return;
+  }
+
+  if (auto valueDecl = dyn_cast<ValueDecl>(D)) {
+    // Use of a nonisolated(unsafe) declaration is unsafe, but is only
+    // diagnosed as such under strict concurrency.
+    if (ctx.LangOpts.StrictConcurrencyLevel == StrictConcurrency::Complete &&
+        isReferenceToNonisolatedUnsafe(const_cast<ValueDecl *>(valueDecl),
+                                       Where.getDeclContext())) {
+      diagnoseUnsafeUse(
+          UnsafeUse::forNonisolatedUnsafe(
+          valueDecl, R.Start, Where.getDeclContext()));
+      return;
+    }
+
+    if (auto var = dyn_cast<VarDecl>(valueDecl)) {
+      // unowned(unsafe) is unsafe (duh).
+      if (auto ownershipAttr =
+              var->getAttrs().getAttribute<ReferenceOwnershipAttr>()) {
+        if (ownershipAttr->get() == ReferenceOwnership::Unmanaged) {
+          diagnoseUnsafeUse(
+              UnsafeUse::forUnownedUnsafe(var, R.Start,
+                                          Where.getDeclContext()));
+          return;
+        }
+      }
+    }
+  }
 }
 
 /// Diagnose uses of unavailable declarations. Returns true if a diagnostic
@@ -4974,4 +4970,25 @@ void swift::checkExplicitAvailability(Decl *decl) {
       diag.fixItInsert(InsertLoc, AttrText);
     }
   }
+}
+
+std::pair<const Decl *, bool /*inDefinition*/>
+swift::enclosingContextForUnsafe(
+    SourceLoc referenceLoc, const DeclContext *referenceDC) {
+  if (referenceLoc.isInvalid())
+    return { nullptr, false };
+
+  ASTContext &ctx = referenceDC->getASTContext();
+  std::optional<ASTNode> versionCheckNode;
+  const Decl *memberLevelDecl = nullptr;
+  const Decl *typeLevelDecl = nullptr;
+  findAvailabilityFixItNodes(
+      referenceLoc, referenceDC, ctx.SourceMgr,
+      versionCheckNode, memberLevelDecl, typeLevelDecl);
+
+  auto decl = memberLevelDecl ? memberLevelDecl : typeLevelDecl;
+  if (!decl)
+    return { nullptr, false };
+
+  return { decl, versionCheckNode.has_value() };
 }

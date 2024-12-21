@@ -95,6 +95,7 @@ namespace swift {
   class MacroDefinition;
   class ModuleDecl;
   class NamedPattern;
+  enum NLOptions : unsigned;
   class EnumCaseDecl;
   class EnumElementDecl;
   class ParameterList;
@@ -1022,6 +1023,17 @@ public:
   /// attribute macro expansion.
   DeclAttributes getSemanticAttrs() const;
 
+  /// Register the relationship between \c this and \p attr->abiDecl , assuming
+  /// that \p attr is attached to \c this . This is necessary for
+  /// \c ABIRoleInfo::ABIRoleInfo() to determine that \c attr->abiDecl
+  /// is ABI-only and locate its API counterpart.
+  void recordABIAttr(ABIAttr *attr);
+
+  /// Set this declaration's attributes to the specified attribute list,
+  /// applying any post-processing logic appropriate for attributes parsed
+  /// from source code.
+  void attachParsedAttrs(DeclAttributes attrs);
+
   /// True if this declaration provides an implementation for an imported
   /// Objective-C declaration. This implies various restrictions and special
   /// behaviors for it and, if it's an extension, its members.
@@ -1411,24 +1423,24 @@ public:
   /// Returns the active platform-specific `@available` attribute for this decl.
   /// There may be multiple `@available` attributes that are relevant to the
   /// current platform, but the returned one has the highest priority.
-  const AvailableAttr *getActiveAvailableAttrForCurrentPlatform(
+  std::optional<SemanticAvailableAttr> getActiveAvailableAttrForCurrentPlatform(
       bool ignoreAppExtensions = false) const;
 
   /// Returns true if the declaration is deprecated at the current deployment
   /// target.
-  bool isDeprecated() const { return getDeprecatedAttr() != nullptr; }
+  bool isDeprecated() const { return getDeprecatedAttr().has_value(); }
 
   /// Returns the first `@available` attribute that indicates that this decl
   /// is deprecated on current deployment target, or `nullptr` otherwise.
-  const AvailableAttr *getDeprecatedAttr() const;
+  std::optional<SemanticAvailableAttr> getDeprecatedAttr() const;
 
   /// Returns the first `@available` attribute that indicates that this decl
   /// will be deprecated in the future, or `nullptr` otherwise.
-  const AvailableAttr *getSoftDeprecatedAttr() const;
+  std::optional<SemanticAvailableAttr> getSoftDeprecatedAttr() const;
 
   /// Returns the first @available attribute that indicates this decl is
   /// unavailable from asynchronous contexts, or `nullptr` otherwise.
-  const AvailableAttr *getNoAsyncAttr() const;
+  std::optional<SemanticAvailableAttr> getNoAsyncAttr() const;
 
   /// Returns true if the decl has been marked unavailable in the Swift language
   /// version that is currently active.
@@ -1443,12 +1455,12 @@ public:
   ///
   /// Note that this query only considers the attributes that are attached
   /// directly to this decl (or the extension it is declared in, if applicable).
-  bool isUnavailable() const { return getUnavailableAttr() != nullptr; }
+  bool isUnavailable() const { return getUnavailableAttr().has_value(); }
 
   /// If the decl is always unavailable in the current compilation
   /// context, returns the attribute attached to the decl (or its parent
   /// extension) that makes it unavailable.
-  const AvailableAttr *
+  std::optional<SemanticAvailableAttr>
   getUnavailableAttr(bool ignoreAppExtensions = false) const;
 
   /// Returns true if the decl is effectively always unavailable in the current
@@ -2656,6 +2668,11 @@ public:
 
   /// Returns \c true if this pattern binding was created by the debugger.
   bool isDebuggerBinding() const { return Bits.PatternBindingDecl.IsDebugger; }
+
+  /// Returns the \c VarDecl in this PBD at the same offset in the same
+  /// pattern entry as \p otherVar is in its PBD, or \c nullptr if this PBD is
+  /// too different from \p otherVar 's to find an equivalent variable.
+  VarDecl *getVarAtSimilarStructuralPosition(VarDecl *otherVar);
 
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::PatternBinding;
@@ -4344,6 +4361,9 @@ public:
     IncludeAttrImplements = 1 << 0,
     /// Whether to exclude members of macro expansions.
     ExcludeMacroExpansions = 1 << 1,
+    /// If @abi attributes are present, return the decls representing the ABI,
+    /// not the API.
+    ABIProviding = 1 << 2,
   };
 
   /// Find all of the declarations with the given name within this nominal type
@@ -9777,6 +9797,126 @@ const ParamDecl *getParameterAt(const ValueDecl *source, unsigned index);
 /// Retrieve parameter declaration from the given source at given index, or
 /// nullptr if the source does not have a parameter list.
 const ParamDecl *getParameterAt(const DeclContext *source, unsigned index);
+
+class ABIRole {
+public:
+  enum Value : uint8_t {
+    Neither = 0,
+    ProvidesABI = 1 << 0,
+    ProvidesAPI = 1 << 1,
+    Either = ProvidesABI | ProvidesAPI,
+  };
+
+  Value value;
+
+  ABIRole(Value value)
+    : value(value)
+  { }
+
+  ABIRole()
+    : ABIRole(Neither)
+  { }
+
+  explicit ABIRole(NLOptions opts);
+
+  template<typename FlagType>
+  explicit ABIRole(OptionSet<FlagType> flags)
+    : value(flags.contains(FlagType::ABIProviding) ? ProvidesABI : ProvidesAPI)
+  { }
+
+  inline ABIRole operator|(ABIRole rhs) const {
+    return ABIRole(ABIRole::Value(value | rhs.value));
+  }
+  inline ABIRole &operator|=(ABIRole rhs) {
+    value = ABIRole::Value(value | rhs.value);
+    return *this;
+  }
+  inline ABIRole operator&(ABIRole rhs) const {
+    return ABIRole(ABIRole::Value(value & rhs.value));
+  }
+  inline ABIRole &operator&=(ABIRole rhs) {
+    value = ABIRole::Value(value & rhs.value);
+    return *this;
+  }
+  inline ABIRole operator~() const {
+    return ABIRole(ABIRole::Value(~value));
+  }
+
+  operator bool() const {
+    return value != Neither;
+  }
+};
+
+namespace abi_role_detail {
+
+using Storage = llvm::PointerIntPair<Decl *, 2, ABIRole::Value>;
+Storage computeStorage(Decl *decl);
+
+}
+
+/// Specifies the \c ABIAttr -related behavior of this declaration
+/// and provides access to its counterpart.
+///
+/// A given declaration may provide the API, the ABI, or both. If it provides
+/// API, the counterpart is the matching ABI-providing decl; if it provides
+/// ABI, the countepart is the matching API-providing decl. A declaration
+/// which provides both API and ABI is its own counterpart.
+///
+/// If the counterpart is \c nullptr , this indicates a fundamental mismatch
+/// between decl and counterpart. Sometimes this mismatch is a difference in
+/// decl kind; in these cases, \c getCounterpartUnchecked() will return the
+/// incorrect counterpart.
+template<typename SpecificDecl>
+class ABIRoleInfo {
+  friend abi_role_detail::Storage abi_role_detail::computeStorage(Decl *);
+
+  abi_role_detail::Storage counterpartAndFlags;
+
+  ABIRoleInfo(abi_role_detail::Storage storage)
+    : counterpartAndFlags(storage)
+  { }
+
+public:
+  explicit ABIRoleInfo(const SpecificDecl *decl)
+    : ABIRoleInfo(abi_role_detail::computeStorage(const_cast<SpecificDecl *>(decl)))
+  { }
+
+  Decl *getCounterpartUnchecked() const {
+    return counterpartAndFlags.getPointer();
+  }
+
+  SpecificDecl *getCounterpart() const {
+    return dyn_cast_or_null<SpecificDecl>(getCounterpartUnchecked());
+  }
+
+  ABIRole getRole() const {
+    return ABIRole(ABIRole::Value(counterpartAndFlags.getInt()));
+  }
+
+  bool matches(ABIRole desiredRole) const {
+    return getRole() & desiredRole;
+  }
+
+  template<typename Options>
+  bool matchesOptions(Options opts) const {
+    return matches(ABIRole(opts));
+  }
+
+  bool providesABI() const {
+    return matches(ABIRole::ProvidesABI);
+  }
+
+  bool providesAPI() const {
+    return matches(ABIRole::ProvidesAPI);
+  }
+
+  bool hasABIAttr() const {
+    return !providesABI();
+  }
+};
+
+template<typename SpecificDecl>
+ABIRoleInfo(const SpecificDecl *decl) -> ABIRoleInfo<SpecificDecl>;
 
 StringRef
 getAccessorNameForDiagnostic(AccessorDecl *accessor, bool article,

@@ -1441,8 +1441,8 @@ public:
   }
 };
 
-static std::optional<std::tuple<GenericTypeParamType *, TypeVariableType *,
-                                Type, OpenedExistentialAdjustments>>
+static std::optional<
+    std::tuple<TypeVariableType *, Type, OpenedExistentialAdjustments>>
 shouldOpenExistentialCallArgument(ValueDecl *callee, unsigned paramIdx,
                                   Type paramTy, Type argTy, Expr *argExpr,
                                   ConstraintSystem &cs) {
@@ -1819,12 +1819,10 @@ static ConstraintSystem::TypeMatchResult matchCallArguments(
       if (auto existentialArg = shouldOpenExistentialCallArgument(
               callee, paramIdx, paramTy, argTy, argExpr, cs)) {
         // My kingdom for a decent "if let" in C++.
-        GenericTypeParamType *openedGenericParam;
         TypeVariableType *openedTypeVar;
         Type existentialType;
         OpenedExistentialAdjustments adjustments;
-        std::tie(openedGenericParam, openedTypeVar, existentialType,
-                 adjustments) = *existentialArg;
+        std::tie(openedTypeVar, existentialType, adjustments) = *existentialArg;
 
         OpenedArchetypeType *opened;
         std::tie(argTy, opened) = cs.openExistentialType(
@@ -2181,7 +2179,6 @@ ConstraintSystem::matchTupleTypes(TupleType *tuple1, TupleType *tuple2,
   case ConstraintKind::ValueWitness:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::OneWayEqual:
-  case ConstraintKind::OneWayBindParam:
   case ConstraintKind::FallbackType:
   case ConstraintKind::UnresolvedMemberChainBase:
   case ConstraintKind::PropertyWrapper:
@@ -2553,7 +2550,6 @@ static bool matchFunctionRepresentations(FunctionType::ExtInfo einfo1,
   case ConstraintKind::ValueMember:
   case ConstraintKind::ValueWitness:
   case ConstraintKind::OneWayEqual:
-  case ConstraintKind::OneWayBindParam:
   case ConstraintKind::FallbackType:
   case ConstraintKind::UnresolvedMemberChainBase:
   case ConstraintKind::PropertyWrapper:
@@ -3198,7 +3194,6 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
   case ConstraintKind::ValueWitness:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::OneWayEqual:
-  case ConstraintKind::OneWayBindParam:
   case ConstraintKind::FallbackType:
   case ConstraintKind::UnresolvedMemberChainBase:
   case ConstraintKind::PropertyWrapper:
@@ -7134,7 +7129,6 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
     case ConstraintKind::ValueMember:
     case ConstraintKind::ValueWitness:
     case ConstraintKind::OneWayEqual:
-    case ConstraintKind::OneWayBindParam:
     case ConstraintKind::FallbackType:
     case ConstraintKind::UnresolvedMemberChainBase:
     case ConstraintKind::PropertyWrapper:
@@ -11594,14 +11588,9 @@ ConstraintSystem::simplifyOneWayConstraint(
 
   // Translate this constraint into an equality or bind-parameter constraint,
   // as appropriate.
-  if (kind == ConstraintKind::OneWayEqual) {
-    return matchTypes(first, secondSimplified, ConstraintKind::Equal, flags,
-                      locator);
-  }
-
-  assert(kind == ConstraintKind::OneWayBindParam);
-  return matchTypes(
-      secondSimplified, first, ConstraintKind::BindParam, flags, locator);
+  ASSERT(kind == ConstraintKind::OneWayEqual);
+  return matchTypes(first, secondSimplified, ConstraintKind::Equal, flags,
+                    locator);
 }
 
 ConstraintSystem::SolutionKind
@@ -11844,12 +11833,6 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
   // Determine whether a result builder will be applied.
   auto resultBuilderType = getOpenedResultBuilderTypeFor(*this, locator);
 
-  // Determine whether to introduce one-way constraints between the parameter's
-  // type as seen in the body of the closure and the external parameter
-  // type.
-  bool oneWayConstraints =
-      getASTContext().LangOpts.hasFeature(Feature::OneWayClosureParameters);
-
   auto *paramList = closure->getParameters();
   SmallVector<AnyFunctionType::Param, 4> parameters;
   bool hasIsolatedParam = false;
@@ -11942,19 +11925,6 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
       //  - `Int...` -> `[Int]`,
       //  - `inout Int` -> `@lvalue Int`.
       internalType = param.getParameterType();
-
-      // When there are type variables in the type and we have enabled
-      // one-way constraints, create a fresh type variable to handle the
-      // binding.
-      if (oneWayConstraints && internalType->hasTypeVariable()) {
-        auto *paramLoc =
-            getConstraintLocator(closure, LocatorPathElt::TupleElement(i));
-        auto *typeVar = createTypeVariable(paramLoc, TVO_CanBindToLValue |
-                                                         TVO_CanBindToNoEscape);
-        addConstraint(
-            ConstraintKind::OneWayBindParam, typeVar, internalType, paramLoc);
-        internalType = typeVar;
-      }
     } else {
       auto *paramLoc =
           getConstraintLocator(closure, LocatorPathElt::TupleElement(i));
@@ -11986,13 +11956,8 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
           addConstraint(ConstraintKind::Bind, externalType, paramTy, paramLoc);
       }
 
-      if (oneWayConstraints) {
-        addConstraint(
-            ConstraintKind::OneWayBindParam, typeVar, externalType, paramLoc);
-      } else {
-        addConstraint(
-            ConstraintKind::BindParam, externalType, typeVar, paramLoc);
-      }
+      addConstraint(
+          ConstraintKind::BindParam, externalType, typeVar, paramLoc);
     }
 
     hasIsolatedParam |= param.isIsolated();
@@ -15760,7 +15725,6 @@ ConstraintSystem::addConstraintImpl(ConstraintKind kind, Type first,
     return simplifyPropertyWrapperConstraint(first, second, subflags, locator);
 
   case ConstraintKind::OneWayEqual:
-  case ConstraintKind::OneWayBindParam:
     return simplifyOneWayConstraint(kind, first, second, subflags, locator);
 
   case ConstraintKind::UnresolvedMemberChainBase:
@@ -16341,7 +16305,6 @@ ConstraintSystem::simplifyConstraint(const Constraint &constraint) {
     return SolutionKind::Unsolved;
 
   case ConstraintKind::OneWayEqual:
-  case ConstraintKind::OneWayBindParam:
     return simplifyOneWayConstraint(
         constraint.getKind(), constraint.getFirstType(),
         constraint.getSecondType(),

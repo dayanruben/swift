@@ -50,6 +50,7 @@
 #include "swift/AST/TypeDeclFinder.h"
 #include "swift/AST/TypeMatcher.h"
 #include "swift/AST/TypeWalker.h"
+#include "swift/AST/UnsafeUse.h"
 #include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/SourceManager.h"
@@ -1368,20 +1369,6 @@ swift::witnessHasImplementsAttrForExactRequirement(ValueDecl *witness,
   return false;
 }
 
-void swift::suggestUnsafeMarkerOnConformance(
-    NormalProtocolConformance *conformance) {
-  auto dc = conformance->getDeclContext();
-  auto decl = dc->getAsDecl();
-  if (!decl)
-    return;
-
-  decl->diagnose(
-      diag::make_conforming_context_unsafe,
-      decl->getDescriptiveKind(),
-      conformance->getProtocol()->getName()
-  ).fixItInsert(decl->getAttributeInsertionLoc(false), "@unsafe ");
-}
-
 /// Determine whether one requirement match is better than the other.
 static bool isBetterMatch(DeclContext *dc, ValueDecl *requirement,
                           const RequirementMatch &match1,
@@ -2481,9 +2468,9 @@ checkIndividualConformance(NormalProtocolConformance *conformance) {
       Context.LangOpts.StrictConcurrencyLevel == StrictConcurrency::Complete) {
 
     if (!conformance->getDeclContext()->allowsUnsafe()) {
-      Context.Diags.diagnose(
-          ComplainLoc, diag::unchecked_conformance_is_unsafe);
-      suggestUnsafeMarkerOnConformance(conformance);
+      diagnoseUnsafeUse(
+          UnsafeUse::forConformance(conformance, ComplainLoc,
+                                    conformance->getDeclContext()));
     }
   }
 
@@ -4376,7 +4363,7 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
     }
 
     case CheckKind::Unavailable: {
-      auto *attr = requirement->getUnavailableAttr();
+      auto *attr = requirement->getUnavailableAttr()->getParsedAttr();
       diagnoseOverrideOfUnavailableDecl(witness, requirement, attr);
       break;
     }
@@ -4434,8 +4421,8 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
         [witness, requirement](NormalProtocolConformance *conformance) {
           auto &diags = witness->getASTContext().Diags;
           SourceLoc diagLoc = getLocForDiagnosingWitness(conformance, witness);
-          auto *attr = witness->getUnavailableAttr();
-          EncodedDiagnosticMessage EncodedMessage(attr->Message);
+          auto attr = witness->getUnavailableAttr();
+          EncodedDiagnosticMessage EncodedMessage(attr->getMessage());
           diags.diagnose(diagLoc, diag::witness_unavailable, witness,
                          conformance->getProtocol(), EncodedMessage.Message);
           emitDeclaredHereIfNeeded(diags, diagLoc, witness);
@@ -4452,8 +4439,8 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
             auto &ctx = witness->getASTContext();
             auto &diags = ctx.Diags;
             SourceLoc diagLoc = getLocForDiagnosingWitness(conformance, witness);
-            auto *attr = witness->getDeprecatedAttr();
-            EncodedDiagnosticMessage EncodedMessage(attr->Message);
+            auto attr = witness->getDeprecatedAttr();
+            EncodedDiagnosticMessage EncodedMessage(attr->getMessage());
             diags.diagnose(diagLoc, diag::witness_deprecated,
                            witness, conformance->getProtocol()->getName(),
                            EncodedMessage.Message);
@@ -4854,7 +4841,7 @@ static bool diagnoseTypeWitnessAvailability(
         conformance, shouldError,
         [witness, assocType, attr](NormalProtocolConformance *conformance) {
           SourceLoc loc = getLocForDiagnosingWitness(conformance, witness);
-          EncodedDiagnosticMessage encodedMessage(attr->Message);
+          EncodedDiagnosticMessage encodedMessage(attr->getMessage());
           auto &ctx = conformance->getDeclContext()->getASTContext();
           ctx.Diags
               .diagnose(loc, diag::witness_unavailable, witness,
@@ -5166,10 +5153,8 @@ void ConformanceChecker::resolveValueWitnesses() {
       if (C.LangOpts.hasFeature(Feature::WarnUnsafe) &&
           witness->isUnsafe() && !requirement->isUnsafe() &&
           !witness->getDeclContext()->allowsUnsafe()) {
-        witness->diagnose(diag::witness_unsafe,
-                          witness->getDescriptiveKind(),
-                          witness->getName());
-        suggestUnsafeMarkerOnConformance(Conformance);
+        diagnoseUnsafeUse(
+            UnsafeUse::forWitness(witness, requirement, Conformance));
       }
 
       // Objective-C checking for @objc requirements.

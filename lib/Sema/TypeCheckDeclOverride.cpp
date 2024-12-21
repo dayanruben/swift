@@ -28,6 +28,7 @@
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/TypeCheckRequests.h"
+#include "swift/AST/UnsafeUse.h"
 #include "swift/Basic/Assertions.h"
 using namespace swift;
 
@@ -242,18 +243,14 @@ bool swift::isOverrideBasedOnType(const ValueDecl *decl, Type declTy,
 
 static bool isUnavailableInAllVersions(ValueDecl *decl) {
   ASTContext &ctx = decl->getASTContext();
-  auto *attr = decl->getUnavailableAttr();
+  auto attr = decl->getUnavailableAttr();
   if (!attr)
-    return false;
-
-  auto semanticAttr = decl->getSemanticAvailableAttr(attr);
-  if (!semanticAttr)
     return false;
 
   if (attr->isUnconditionallyUnavailable())
     return true;
 
-  return semanticAttr->getVersionAvailability(ctx) ==
+  return attr->getVersionAvailability(ctx) ==
          AvailableVersionComparison::Unavailable;
 }
 
@@ -1744,6 +1741,10 @@ namespace  {
     UNINTERESTING_ATTR(Safe)
 #undef UNINTERESTING_ATTR
 
+    void visitABIAttr(ABIAttr *attr) {
+      // TODO: Match or infer
+    }
+
     void visitAvailableAttr(AvailableAttr *attr) {
       // FIXME: Check that this declaration is at least as available as the
       // one it overrides.
@@ -1942,11 +1943,12 @@ checkOverrideUnavailability(ValueDecl *override, ValueDecl *base) {
     }
   }
 
-  auto *baseUnavailableAttr = base->getUnavailableAttr();
-  auto *overrideUnavailableAttr = override->getUnavailableAttr();
+  auto baseUnavailableAttr = base->getUnavailableAttr();
+  auto overrideUnavailableAttr = override->getUnavailableAttr();
 
   if (baseUnavailableAttr && !overrideUnavailableAttr)
-    return {OverrideUnavailabilityStatus::BaseUnavailable, baseUnavailableAttr};
+    return {OverrideUnavailabilityStatus::BaseUnavailable,
+            baseUnavailableAttr->getParsedAttr()};
 
   return {OverrideUnavailabilityStatus::Compatible, nullptr};
 }
@@ -2254,16 +2256,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     bool shouldDiagnose = !overridingClass || !overridingClass->allowsUnsafe();
 
     if (shouldDiagnose) {
-      override->diagnose(diag::override_safe_withunsafe,
-                         base->getDescriptiveKind());
-      if (overridingClass) {
-        overridingClass->diagnose(
-            diag::make_subclass_unsafe, overridingClass->getName()
-        ).fixItInsert(
-            overridingClass->getAttributeInsertionLoc(false), "@unsafe ");
-      }
-
-      base->diagnose(diag::overridden_here);
+      diagnoseUnsafeUse(UnsafeUse::forOverride(override, base));
     }
   }
   /// Check attributes associated with the base; some may need to merged with
