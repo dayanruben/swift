@@ -1441,8 +1441,7 @@ public:
   }
 };
 
-static std::optional<
-    std::tuple<TypeVariableType *, Type, OpenedExistentialAdjustments>>
+static std::optional<std::pair<TypeVariableType *, Type>>
 shouldOpenExistentialCallArgument(ValueDecl *callee, unsigned paramIdx,
                                   Type paramTy, Type argTy, Expr *argExpr,
                                   ConstraintSystem &cs) {
@@ -1816,25 +1815,29 @@ static ConstraintSystem::TypeMatchResult matchCallArguments(
 
       // If the argument is an existential type and the parameter is generic,
       // consider opening the existential type.
-      if (auto existentialArg = shouldOpenExistentialCallArgument(
+      if (auto typeVarAndBindingTy = shouldOpenExistentialCallArgument(
               callee, paramIdx, paramTy, argTy, argExpr, cs)) {
         // My kingdom for a decent "if let" in C++.
-        TypeVariableType *openedTypeVar;
-        Type existentialType;
-        OpenedExistentialAdjustments adjustments;
-        std::tie(openedTypeVar, existentialType, adjustments) = *existentialArg;
+        TypeVariableType *typeVar;
+        Type bindingTy;
+        std::tie(typeVar, bindingTy) = *typeVarAndBindingTy;
 
-        OpenedArchetypeType *opened;
-        std::tie(argTy, opened) = cs.openExistentialType(
-            existentialType, cs.getConstraintLocator(loc));
+        OpenedArchetypeType *openedArchetype;
 
-        if (adjustments.contains(OpenedExistentialAdjustmentFlags::LValue))
-          argTy = LValueType::get(argTy);
+        // Open the argument type.
+        argTy = argTy.transformRec([&](TypeBase *t) -> std::optional<Type> {
+          if (t->isAnyExistentialType()) {
+            Type openedTy;
+            std::tie(openedTy, openedArchetype) =
+                cs.openAnyExistentialType(t, cs.getConstraintLocator(loc));
 
-        if (adjustments.contains(OpenedExistentialAdjustmentFlags::InOut))
-          argTy = InOutType::get(argTy);
+            return openedTy;
+          }
 
-        openedExistentials.push_back({openedTypeVar, opened});
+          return std::nullopt;
+        });
+
+        openedExistentials.push_back({typeVar, openedArchetype});
       }
 
       // If we have a compound function reference (e.g `fn($x:)`), respect
@@ -2405,40 +2408,31 @@ ConstraintSystem::matchPackExpansionTypes(PackExpansionType *expansion1,
     }
   }
 
-  // If both sides are expanded or neither side is, just match them
+  auto *const pack1 = pattern1->getAs<PackType>();
+  auto *const pack2 = pattern2->getAs<PackType>();
+
+  // If both sides are expanded or neither side is, proceed to matching them
   // directly.
-  if (pattern1->is<PackType>() == pattern2->is<PackType>()) {
-    return matchTypes(pattern1, pattern2, kind, flags, locator);
-
-  // If the right hand side is expanded, we have something like
-  // Foo<$T0>... vs Pack{Foo<Int>, Foo<String>}...; We're going to
-  // bind $T0 to Pack{Int, String}.
-  } else if (!pattern1->is<PackType>() && pattern2->is<PackType>()) {
-    if (auto *pack2 = pattern2->getAs<PackType>()) {
-      if (auto *pack1 = replaceTypeVariablesWithFreshPacks(
-             *this, pattern1, pack2, locator)) {
-        addConstraint(kind, pack1, pack2, locator);
-        return getTypeMatchSuccess();
-      }
+  // Otherwise, we have something like `Foo<$T0>` vs.
+  // `Pack{Foo<Int>, Foo<String>}` or vice versa.
+  // We're going to bind `$T0` to `Pack{Int, String}` and unfold `Foo<$T0>` into
+  // `Pack{Foo<$T3>, Foo<$T4>} first.
+  if ((bool)pack1 != (bool)pack2) {
+    if (pack1) {
+      pattern2 =
+          replaceTypeVariablesWithFreshPacks(*this, pattern2, pack1, locator);
+    } else {
+      pattern1 =
+          replaceTypeVariablesWithFreshPacks(*this, pattern1, pack2, locator);
     }
 
-    return getTypeMatchFailure(locator);
-
-  // If the left hand side is expanded, we have something like
-  // Pack{Foo<Int>, Foo<String>}... vs Foo<$T0>...; We're going to
-  // bind $T0 to Pack{Int, String}.
-  } else {
-    assert(pattern1->is<PackType>() && !pattern2->is<PackType>());
-    if (auto *pack1 = pattern1->getAs<PackType>()) {
-      if (auto *pack2 = replaceTypeVariablesWithFreshPacks(
-              *this, pattern2, pack1, locator)) {
-        addConstraint(kind, pack1, pack2, locator);
-        return getTypeMatchSuccess();
-      }
+    if (!(pattern1 && pattern2)) {
+      return getTypeMatchFailure(locator);
     }
-
-    return getTypeMatchFailure(locator);
   }
+
+  // Continue matching.
+  return matchTypes(pattern1, pattern2, kind, flags, locator);
 }
 
 /// Check where a representation is a subtype of another.
@@ -5186,11 +5180,16 @@ bool ConstraintSystem::repairFailures(
     // side isn't, let's check it would be possible to fix
     // this by forming an explicit call.
     auto convertTo = dstType->lookThroughAllOptionalTypes();
-    // Right-hand side can't be - a function, a type variable or dependent
-    // member, or `Any` (if function conversion to `Any` didn't succeed there
-    // is something else going on e.g. problem with escapiness).
-    if (convertTo->is<FunctionType>() || convertTo->isTypeVariableOrMember() ||
-        convertTo->isAny())
+
+    // If the RHS is a function type, the source must be a function-returning
+    // function.
+    if (convertTo->is<FunctionType>() && !resultType->is<FunctionType>())
+      return false;
+
+    // Right-hand side can't be a type variable or dependent member, or `Any`
+    // (if function conversion to `Any` didn't succeed there is something else
+    // going on e.g. problem with escapiness).
+    if (convertTo->isTypeVariableOrMember() || convertTo->isAny())
       return false;
 
     ConstraintKind matchKind;
@@ -8647,7 +8646,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
     if (type->isExistentialType()) {
       if (auto elt = loc->getLastElementAs<LocatorPathElt::ContextualType>()) {
         if (elt->getPurpose() == CTP_ForEachSequence) {
-          type = openExistentialType(type, loc).first;
+          type = openAnyExistentialType(type, loc).first;
         }
       }
     }
@@ -12430,8 +12429,8 @@ ConstraintSystem::simplifyOpenedExistentialOfConstraint(
   if (type2->isAnyExistentialType()) {
     // We have the existential side. Produce an opened archetype and bind
     // type1 to it.
-    Type openedTy = openExistentialType(type2, getConstraintLocator(locator))
-        .first;
+    Type openedTy =
+        openAnyExistentialType(type2, getConstraintLocator(locator)).first;
     return matchTypes(type1, openedTy, ConstraintKind::Bind, subflags, locator);
   }
   if (!type2->isTypeVariableOrMember())
@@ -15247,12 +15246,6 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
         return SolutionKind::Error;
 
     return result;
-  }
-
-  case FixKind::AutoClosureForwarding: {
-    if (recordFix(fix))
-      return SolutionKind::Error;
-    return matchTypes(type1, type2, matchKind, subflags, locator);
   }
 
   case FixKind::AllowTupleTypeMismatch: {

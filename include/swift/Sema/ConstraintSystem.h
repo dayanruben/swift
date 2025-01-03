@@ -1652,7 +1652,11 @@ public:
 
   /// Simplify the given type by substituting all occurrences of
   /// type variables for their fixed types.
-  Type simplifyType(Type type) const;
+  ///
+  /// \param wantInterfaceType If true, maps the resulting type out of context,
+  /// and replaces type variables for opened generic parameters with the
+  /// generic parameter types. Should only be used for diagnostic logic.
+  Type simplifyType(Type type, bool wantInterfaceType = false) const;
 
   // To aid code completion, we need to attempt to convert type placeholders
   // back into underlying generic parameters if possible, since type
@@ -1788,10 +1792,6 @@ public:
   /// and resolve all of the type variables in contains to form a fully
   /// "resolved" concrete type.
   Type getResolvedType(ASTNode node) const;
-
-  /// Resolve type variables present in the raw type, using generic parameter
-  /// types where possible.
-  Type resolveInterfaceType(Type type) const;
 
   Type getContextualType(ASTNode anchor) const {
     for (const auto &entry : contextualTypes) {
@@ -3277,10 +3277,11 @@ public:
   ConstraintLocator *getOpenOpaqueLocator(
       ConstraintLocatorBuilder locator, OpaqueTypeDecl *opaqueDecl);
 
-  /// Open the given existential type, recording the opened type in the
-  /// constraint system and returning both it and the root opened archetype.
-  std::pair<Type, OpenedArchetypeType *> openExistentialType(
-      Type type, ConstraintLocator *locator);
+  /// Open the given existential type or existential metatype, recording the
+  /// opened archetype in the constraint system and returning both the opened
+  /// type and opened archetype.
+  std::pair<Type, OpenedArchetypeType *>
+  openAnyExistentialType(Type type, ConstraintLocator *locator);
 
   /// Update OpenedExistentials and record a change in the trail.
   void recordOpenedExistentialType(ConstraintLocator *locator,

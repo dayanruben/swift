@@ -1670,13 +1670,19 @@ NominalTypeDecl::takeConformanceLoaderSlow() {
 }
 
 InheritedEntry::InheritedEntry(const TypeLoc &typeLoc)
-    : InheritedEntry(typeLoc, /*isUnchecked=*/false, /*isRetroactive=*/false,
+    : InheritedEntry(typeLoc, ProtocolConformanceOptions(),
                      /*isPreconcurrency=*/false) {
   if (auto typeRepr = typeLoc.getTypeRepr()) {
-    IsUnchecked = typeRepr->findAttrLoc(TypeAttrKind::Unchecked).isValid();
-    IsRetroactive = typeRepr->findAttrLoc(TypeAttrKind::Retroactive).isValid();
-    IsPreconcurrency =
-        typeRepr->findAttrLoc(TypeAttrKind::Preconcurrency).isValid();
+    if (typeRepr->findAttrLoc(TypeAttrKind::Unchecked).isValid())
+      setOption(ProtocolConformanceFlags::Unchecked);
+    if (typeRepr->findAttrLoc(TypeAttrKind::Retroactive).isValid())
+      setOption(ProtocolConformanceFlags::Retroactive);
+    if (typeRepr->findAttrLoc(TypeAttrKind::Unsafe).isValid())
+      setOption(ProtocolConformanceFlags::Unsafe);
+    if (typeRepr->findAttrLoc(TypeAttrKind::Safe).isValid())
+      setOption(ProtocolConformanceFlags::Safe);
+    if (typeRepr->findAttrLoc(TypeAttrKind::Preconcurrency).isValid())
+      setOption(ProtocolConformanceFlags::Preconcurrency);
   }
 }
 
@@ -6835,10 +6841,14 @@ bool ProtocolDecl::existentialConformsToSelf() const {
 }
 
 bool ProtocolDecl::hasSelfOrAssociatedTypeRequirements() const {
+  // Because we will have considered all the protocols in a cyclic hierarchy by
+  // the time the cycle is hit.
+  const bool resultForCycle = false;
+
   return evaluateOrDefault(getASTContext().evaluator,
                            HasSelfOrAssociatedTypeRequirementsRequest{
                                const_cast<ProtocolDecl *>(this)},
-                           true);
+                           resultForCycle);
 }
 
 bool ProtocolDecl::existentialRequiresAny() const {
