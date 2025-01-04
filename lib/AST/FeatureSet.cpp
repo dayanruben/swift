@@ -120,6 +120,7 @@ UNINTERESTING_FEATURE(Volatile)
 UNINTERESTING_FEATURE(SuppressedAssociatedTypes)
 UNINTERESTING_FEATURE(StructLetDestructuring)
 UNINTERESTING_FEATURE(MacrosOnImports)
+UNINTERESTING_FEATURE(NonIsolatedAsyncInheritsIsolationFromContext)
 
 static bool usesFeatureNonescapableTypes(Decl *decl) {
   auto containsNonEscapable =
@@ -304,6 +305,14 @@ static bool usesFeatureAddressableParameters(Decl *d) {
       return true;
     }
   }
+  return false;
+}
+
+static bool usesFeatureAddressableTypes(Decl *d) {
+  if (d->getAttrs().hasAttribute<AddressableForDependenciesAttr>()) {
+    return true;
+  }
+  
   return false;
 }
 

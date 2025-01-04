@@ -2959,6 +2959,10 @@ public:
       printFlag(true, "dynamically_isolated", CapturesColor);
       break;
 
+    case ActorIsolation::CallerIsolationInheriting:
+      printFlag(true, "isolated_to_caller_isolation", CapturesColor);
+      break;
+
     case ActorIsolation::ActorInstance:
       printFieldQuoted(isolation.getActorInstance()->printRef(),
                        "actor_isolated", CapturesColor);
@@ -3756,6 +3760,7 @@ public:
 
   TRIVIAL_ATTR_PRINTER(Actor, actor)
   TRIVIAL_ATTR_PRINTER(AddressableSelf, _addressableSelf)
+  TRIVIAL_ATTR_PRINTER(AddressableForDependencies, _addressableForDependencies)
   TRIVIAL_ATTR_PRINTER(AlwaysEmitConformanceMetadata,
                        always_emit_conformance_metadata)
   TRIVIAL_ATTR_PRINTER(AlwaysEmitIntoClient, always_emit_into_client)

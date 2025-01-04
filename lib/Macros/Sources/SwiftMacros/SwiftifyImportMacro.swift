@@ -6,7 +6,7 @@ import SwiftSyntaxMacros
 
 protocol ParamInfo: CustomStringConvertible {
   var description: String { get }
-  var original: ExprSyntax { get }
+  var original: SyntaxProtocol { get }
   var pointerIndex: Int { get }
   var nonescaping: Bool { get set }
 
@@ -16,12 +16,31 @@ protocol ParamInfo: CustomStringConvertible {
   ) -> BoundsCheckedThunkBuilder
 }
 
+struct CxxSpan: ParamInfo {
+  var pointerIndex: Int
+  var nonescaping: Bool
+  var original: SyntaxProtocol
+  var typeMappings: [String: String]
+
+  var description: String {
+    return "std::span(pointer: \(pointerIndex), nonescaping: \(nonescaping))"
+  }
+
+  func getBoundsCheckedThunkBuilder(
+    _ base: BoundsCheckedThunkBuilder, _ funcDecl: FunctionDeclSyntax,
+    _ variant: Variant
+  ) -> BoundsCheckedThunkBuilder {
+    CxxSpanThunkBuilder(base: base, index: pointerIndex - 1, signature: funcDecl.signature, 
+      typeMappings: typeMappings, node: original)
+  }
+}
+
 struct CountedBy: ParamInfo {
   var pointerIndex: Int
   var count: ExprSyntax
   var sizedBy: Bool
   var nonescaping: Bool
-  var original: ExprSyntax
+  var original: SyntaxProtocol
 
   var description: String {
     if sizedBy {
@@ -43,11 +62,12 @@ struct CountedBy: ParamInfo {
       nonescaping: nonescaping, isSizedBy: sizedBy)
   }
 }
+
 struct EndedBy: ParamInfo {
   var pointerIndex: Int
   var endIndex: Int
   var nonescaping: Bool
-  var original: ExprSyntax
+  var original: SyntaxProtocol
 
   var description: String {
     return ".endedBy(start: \(pointerIndex), end: \(endIndex), nonescaping: \(nonescaping))"
@@ -131,8 +151,19 @@ func getPointerMutability(text: String) -> Mutability? {
   case "UnsafeMutablePointer": return .Mutable
   case "UnsafeRawPointer": return .Immutable
   case "UnsafeMutableRawPointer": return .Mutable
+  case "OpaquePointer": return .Immutable
   default:
     return nil
+  }
+}
+
+func isRawPointerType(text: String) -> Bool {
+  switch text {
+  case "UnsafeRawPointer": return true
+  case "UnsafeMutableRawPointer": return true
+  case "OpaquePointer": return true
+  default:
+    return false
   }
 }
 
@@ -160,8 +191,12 @@ func transformType(_ prev: TypeSyntax, _ variant: Variant, _ isSizedBy: Bool) th
   }
   let name = try getTypeName(prev)
   let text = name.text
-  if !isSizedBy && (text == "UnsafeRawPointer" || text == "UnsafeMutableRawPointer") {
+  let isRaw = isRawPointerType(text: text)
+  if isRaw && !isSizedBy {
     throw DiagnosticError("raw pointers only supported for SizedBy", node: name)
+  }
+  if !isRaw && isSizedBy {
+    throw DiagnosticError("SizedBy only supported for raw pointers", node: name)
   }
 
   guard let kind: Mutability = getPointerMutability(text: text) else {
@@ -196,6 +231,7 @@ func getParam(_ signature: FunctionSignatureSyntax, _ paramIndex: Int) -> Functi
     return params[params.startIndex]
   }
 }
+
 func getParam(_ funcDecl: FunctionDeclSyntax, _ paramIndex: Int) -> FunctionParameterSyntax {
   return getParam(funcDecl.signature, paramIndex)
 }
@@ -254,6 +290,43 @@ struct FunctionCallBuilder: BoundsCheckedThunkBuilder {
       FunctionCallExprSyntax(
         calledExpression: functionRef, leftParen: .leftParenToken(),
         arguments: LabeledExprListSyntax(labeledArgs), rightParen: .rightParenToken()))
+  }
+}
+
+struct CxxSpanThunkBuilder: BoundsCheckedThunkBuilder {
+  public let base: BoundsCheckedThunkBuilder
+  public let index: Int
+  public let signature: FunctionSignatureSyntax
+  public let typeMappings: [String: String] 
+  public let node: SyntaxProtocol
+
+  func buildBoundsChecks(_ variant: Variant) throws -> [CodeBlockItemSyntax.Item] {
+    return []
+  }
+
+  func buildFunctionSignature(_ argTypes: [Int: TypeSyntax?], _ variant: Variant) throws
+    -> FunctionSignatureSyntax {
+    var types = argTypes
+    let param = getParam(signature, index)
+    let typeName = try getTypeName(param.type).text;
+    guard let desugaredType = typeMappings[typeName] else {
+      throw DiagnosticError(
+        "unable to desugar type with name '\(typeName)'", node: node)
+    }
+
+    let parsedDesugaredType = try TypeSyntax("\(raw: desugaredType)")
+    types[index] = TypeSyntax(IdentifierTypeSyntax(name: "Span",
+      genericArgumentClause: parsedDesugaredType.as(IdentifierTypeSyntax.self)!.genericArgumentClause))
+    return try base.buildFunctionSignature(types, variant)
+  }
+
+  func buildFunctionCall(_ pointerArgs: [Int: ExprSyntax], _ variant: Variant) throws -> ExprSyntax {
+    var args = pointerArgs
+    let param = getParam(signature, index)
+    let typeName = try getTypeName(param.type).text;
+    assert(args[index] == nil)
+    args[index] = ExprSyntax("\(raw: typeName)(\(raw: param.secondName ?? param.firstName))")
+    return try base.buildFunctionCall(args, variant)
   }
 }
 
@@ -332,7 +405,7 @@ struct CountedOrSizedPointerThunkBuilder: PointerBoundsThunkBuilder {
     var args = argOverrides
     let argExpr = ExprSyntax("\(unwrappedName).baseAddress")
     assert(args[index] == nil)
-    args[index] = unwrapIfNonnullable(argExpr)
+    args[index] = try castPointerToOpaquePointer(unwrapIfNonnullable(argExpr))
     let call = try base.buildFunctionCall(args, variant)
     let ptrRef = unwrapIfNullable(ExprSyntax(DeclReferenceExprSyntax(baseName: name)))
 
@@ -354,7 +427,26 @@ struct CountedOrSizedPointerThunkBuilder: PointerBoundsThunkBuilder {
     return ExprSyntax("\(name).\(raw: countName)")
   }
 
-  func getPointerArg() -> ExprSyntax {
+  func peelOptionalType(_ type: TypeSyntax) -> TypeSyntax {
+    if let optType = type.as(OptionalTypeSyntax.self) {
+      return optType.wrappedType
+    }
+    if let impOptType = type.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) {
+      return impOptType.wrappedType
+    }
+    return type
+  }
+
+  func castPointerToOpaquePointer(_ baseAddress: ExprSyntax) throws -> ExprSyntax {
+    let i = try getParameterIndexForParamName(signature.parameterClause.parameters, name)
+    let type = peelOptionalType(getParam(signature, i).type)
+    if type.canRepresentBasicType(type: OpaquePointer.self) {
+      return ExprSyntax("OpaquePointer(\(baseAddress))")
+    }
+    return baseAddress
+  }
+
+  func getPointerArg() throws -> ExprSyntax {
     if nullable {
       return ExprSyntax("\(name)?.baseAddress")
     }
@@ -392,7 +484,7 @@ struct CountedOrSizedPointerThunkBuilder: PointerBoundsThunkBuilder {
       return unwrappedCall
     }
 
-    args[index] = getPointerArg()
+    args[index] = try castPointerToOpaquePointer(getPointerArg())
     return try base.buildFunctionCall(args, variant)
   }
 }
@@ -441,10 +533,10 @@ func getOptionalArgumentByName(_ argumentList: LabeledExprListSyntax, _ name: St
   })?.expression
 }
 
-func getParameterIndexForDeclRef(
-  _ parameterList: FunctionParameterListSyntax, _ ref: DeclReferenceExprSyntax
+func getParameterIndexForParamName(
+  _ parameterList: FunctionParameterListSyntax, _ tok: TokenSyntax
 ) throws -> Int {
-  let name = ref.baseName.text
+  let name = tok.text
   guard
     let index = parameterList.enumerated().first(where: {
       (_: Int, param: FunctionParameterSyntax) in
@@ -452,16 +544,23 @@ func getParameterIndexForDeclRef(
       return paramenterName.trimmed.text == name
     })?.offset
   else {
-    throw DiagnosticError("no parameter with name '\(name)' in '\(parameterList)'", node: ref)
+    throw DiagnosticError("no parameter with name '\(name)' in '\(parameterList)'", node: tok)
   }
   return index
+}
+
+func getParameterIndexForDeclRef(
+  _ parameterList: FunctionParameterListSyntax, _ ref: DeclReferenceExprSyntax
+) throws -> Int {
+  return try getParameterIndexForParamName((parameterList), ref.baseName)
 }
 
 /// A macro that adds safe(r) wrappers for functions with unsafe pointer types.
 /// Depends on bounds, escapability and lifetime information for each pointer.
 /// Intended to map to C attributes like __counted_by, __ended_by and __no_escape,
 /// for automatic application by ClangImporter when the C declaration is annotated
-/// appropriately.
+/// appropriately. Moreover, it can wrap C++ APIs using unsafe C++ types like
+/// std::span with APIs that use their safer Swift equivalents.
 public struct SwiftifyImportMacro: PeerMacro {
   static func parseEnumName(_ enumConstructorExpr: FunctionCallExprSyntax) throws -> String {
     guard let calledExpr = enumConstructorExpr.calledExpression.as(MemberAccessExprSyntax.self)
@@ -558,6 +657,54 @@ public struct SwiftifyImportMacro: PeerMacro {
     return pointerParamIndex
   }
 
+  static func parseTypeMappingParam(_ paramAST: LabeledExprSyntax?) throws -> [String: String]? {
+    guard let unwrappedParamAST = paramAST else {
+      return nil
+    }
+    let paramExpr = unwrappedParamAST.expression
+    guard let dictExpr = paramExpr.as(DictionaryExprSyntax.self) else {
+      return nil
+    }
+    var dict : [String: String] = [:]
+    switch dictExpr.content {
+      case .colon(_):
+        return dict
+      case .elements(let types):
+        for element in types {
+          guard let key = element.key.as(StringLiteralExprSyntax.self) else {
+            throw DiagnosticError("expected a string literal, got '\(element.key)'", node: element.key)
+          }
+          guard let value = element.value.as(StringLiteralExprSyntax.self) else {
+            throw DiagnosticError("expected a string literal, got '\(element.value)'", node: element.value)
+          }
+          dict[key.representedLiteralValue!] = value.representedLiteralValue!
+        }
+      default:
+        throw DiagnosticError("unknown dictionary literal", node: dictExpr)
+    }
+    return dict
+  }
+
+  static func parseCxxSpanParams(
+    _ signature: FunctionSignatureSyntax,
+    _ typeMappings: [String: String]?
+  ) throws -> [ParamInfo] {
+    guard let typeMappings else {
+      return []
+    }
+    var result : [ParamInfo] = []
+    for (idx, param) in signature.parameterClause.parameters.enumerated() {
+      let typeName = try getTypeName(param.type).text;
+      if let desugaredType = typeMappings[typeName] {
+        if desugaredType.starts(with: "span") {
+          result.append(CxxSpan(pointerIndex: idx + 1, nonescaping: false,
+            original: param, typeMappings: typeMappings))
+        }
+      }
+    }
+    return result
+  }
+
   static func parseMacroParam(
     _ paramAST: LabeledExprSyntax, _ signature: FunctionSignatureSyntax,
     nonescapingPointers: inout Set<Int>
@@ -652,11 +799,20 @@ public struct SwiftifyImportMacro: PeerMacro {
       }
 
       let argumentList = node.arguments!.as(LabeledExprListSyntax.self)!
+      var arguments = Array<LabeledExprSyntax>(argumentList)
+      let typeMappings = try parseTypeMappingParam(arguments.last)
+      if typeMappings != nil {
+        arguments = arguments.dropLast()
+      }
       var nonescapingPointers = Set<Int>()
-      var parsedArgs = try argumentList.compactMap {
+      var parsedArgs = try arguments.compactMap {
         try parseMacroParam($0, funcDecl.signature, nonescapingPointers: &nonescapingPointers)
       }
+      parsedArgs.append(contentsOf: try parseCxxSpanParams(funcDecl.signature, typeMappings))
       setNonescapingPointers(&parsedArgs, nonescapingPointers)
+      parsedArgs = parsedArgs.filter {
+        !($0 is CxxSpan) || ($0 as! CxxSpan).nonescaping
+      }
       try checkArgs(parsedArgs, funcDecl)
       let baseBuilder = FunctionCallBuilder(funcDecl)
 

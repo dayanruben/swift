@@ -529,6 +529,7 @@ public:
   void visitSafeAttr(SafeAttr *attr);
   void visitLifetimeAttr(LifetimeAttr *attr);
   void visitAddressableSelfAttr(AddressableSelfAttr *attr);
+  void visitAddressableForDependenciesAttr(AddressableForDependenciesAttr *attr);
 };
 
 } // end anonymous namespace
@@ -4873,13 +4874,13 @@ void AttributeChecker::checkBackDeployedAttrs(
   // back deployment, which is to use the ABI version of the declaration when it
   // is available.
   if (auto *AEICA = D->getAttrs().getAttribute<AlwaysEmitIntoClientAttr>()) {
-    diagnoseAndRemoveAttr(AEICA, diag::attr_incompatible_with_back_deploy,
-                          AEICA, D->getDescriptiveKind());
+    diagnoseAndRemoveAttr(AEICA, diag::attr_incompatible_with_back_deployed,
+                          AEICA, D);
   }
 
   if (auto *TA = D->getAttrs().getAttribute<TransparentAttr>()) {
-    diagnoseAndRemoveAttr(TA, diag::attr_incompatible_with_back_deploy, TA,
-                          D->getDescriptiveKind());
+    diagnoseAndRemoveAttr(TA, diag::attr_incompatible_with_back_deployed, TA,
+                          D);
   }
 
   // Only functions, methods, computed properties, and subscripts are
@@ -4887,7 +4888,9 @@ void AttributeChecker::checkBackDeployedAttrs(
   auto *VD = cast<ValueDecl>(D);
   std::map<PlatformKind, SourceLoc> seenPlatforms;
 
-  auto *ActiveAttr = D->getAttrs().getBackDeployed(Ctx, false);
+  const BackDeployedAttr *ActiveAttr = nullptr;
+  if (D->getBackDeployedBeforeOSVersion(Ctx))
+    ActiveAttr = D->getAttrs().getBackDeployed(Ctx, false);
 
   for (auto *Attr : Attrs) {
     // Back deployment only makes sense for public declarations.
@@ -4931,19 +4934,9 @@ void AttributeChecker::checkBackDeployedAttrs(
       continue;
     }
 
-    if (auto *VarD = dyn_cast<VarDecl>(D)) {
-      // There must be a function body to back deploy so for vars we require
-      // that they be computed in order to allow back deployment.
-      if (VarD->hasStorageOrWrapsStorage()) {
-        diagnoseAndRemoveAttr(Attr, diag::attr_not_on_stored_properties, Attr);
-        continue;
-      }
-    }
-
     if (VD->getOpaqueResultTypeDecl()) {
-      diagnoseAndRemoveAttr(Attr,
-                            diag::backdeployed_opaque_result_not_supported,
-                            Attr, D->getDescriptiveKind())
+      diagnoseAndRemoveAttr(
+          Attr, diag::back_deployed_opaque_result_not_supported, Attr, VD)
           .warnInSwiftInterface(D->getDeclContext());
       continue;
     }
@@ -4960,12 +4953,29 @@ void AttributeChecker::checkBackDeployedAttrs(
       continue;
     }
 
-    if (Ctx.LangOpts.DisableAvailabilityChecking)
+    // The remaining diagnostics can only be diagnosed for attributes that
+    // apply to the active platform.
+    if (Attr != ActiveAttr)
       continue;
 
-    // Availability conflicts can only be diagnosed for attributes that apply
-    // to the active platform.
-    if (Attr != ActiveAttr)
+    if (auto *VarD = dyn_cast<VarDecl>(D)) {
+      // There must be a function body to back deploy so for vars we require
+      // that they be computed in order to allow back deployment.
+      if (VarD->hasStorageOrWrapsStorage()) {
+        diagnoseAndRemoveAttr(Attr, diag::attr_not_on_stored_properties, Attr);
+        continue;
+      }
+    }
+
+    if (auto *AFD = dyn_cast<AbstractFunctionDecl>(D)) {
+      if (!AFD->hasBody()) {
+        diagnoseAndRemoveAttr(Attr, diag::back_deployed_requires_body, Attr,
+                              VD);
+        continue;
+      }
+    }
+
+    if (Ctx.LangOpts.DisableAvailabilityChecking)
       continue;
 
     auto availability =
@@ -7929,6 +7939,18 @@ void AttributeChecker::visitAddressableSelfAttr(AddressableSelfAttr *attr) {
   
   if (!D->getDeclContext()->isTypeContext()) {
     Ctx.Diags.diagnose(attr->getLocation(), diag::addressableSelf_not_on_method);
+  }
+}
+
+void
+AttributeChecker::visitAddressableForDependenciesAttr(
+                                         AddressableForDependenciesAttr *attr) {
+  if (!Ctx.LangOpts.hasFeature(Feature::AddressableTypes)) {
+    Ctx.Diags.diagnose(attr->getLocation(), diag::addressable_types_not_enabled);
+  }
+  
+  if (isa<ClassDecl>(D)) {
+    Ctx.Diags.diagnose(attr->getLocation(), diag::class_cannot_be_addressable_for_dependencies);
   }
 }
 
