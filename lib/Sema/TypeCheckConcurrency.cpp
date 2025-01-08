@@ -2947,6 +2947,13 @@ namespace {
       return MacroWalking::Expansion;
     }
 
+    LazyInitializerWalking getLazyInitializerWalkingBehavior() override {
+      // We want to walk lazy initializers as part of their implicit getters
+      // since we're interested in querying capture information, and captures
+      // for lazy inits are computed as part of type-checking the accessor.
+      return LazyInitializerWalking::InAccessor;
+    }
+
     PreWalkResult<Pattern *> walkToPatternPre(Pattern *pattern) override {
       // Walking into patterns leads to nothing good because then we
       // end up visiting the AccessorDecls of a top-level
@@ -6641,20 +6648,19 @@ static void addUnavailableAttrs(ExtensionDecl *ext, NominalTypeDecl *nominal) {
            ? enclosing->getDeclContext()->getAsDecl()
            : nullptr) {
     bool anyPlatformSpecificAttrs = false;
-    for (auto semanticAttr : enclosing->getSemanticAvailableAttrs()) {
-      auto available = semanticAttr.getParsedAttr();
-
-      if (available->getPlatform() == PlatformKind::none)
+    for (auto available : enclosing->getSemanticAvailableAttrs()) {
+      // FIXME: [availability] Generalize to AvailabilityDomain.
+      if (available.getPlatform() == PlatformKind::none)
         continue;
 
       auto attr = new (ctx) AvailableAttr(
-          SourceLoc(), SourceRange(), available->getPlatform(),
-          available->Message,
-          /*Rename=*/"", available->Introduced.value_or(noVersion),
-          SourceRange(), available->Deprecated.value_or(noVersion),
-          SourceRange(), available->Obsoleted.value_or(noVersion),
+          SourceLoc(), SourceRange(), available.getPlatform(),
+          available.getMessage(),
+          /*Rename=*/"", available.getIntroduced().value_or(noVersion),
+          SourceRange(), available.getDeprecated().value_or(noVersion),
+          SourceRange(), available.getObsoleted().value_or(noVersion),
           SourceRange(), PlatformAgnosticAvailabilityKind::Unavailable,
-          /*Implicit=*/true, available->isSPI());
+          /*Implicit=*/true, available.getParsedAttr()->isSPI());
       ext->getAttrs().add(attr);
       anyPlatformSpecificAttrs = true;
     }
