@@ -283,7 +283,7 @@ static void updateRuntimeLibraryPaths(SearchPathOptions &SearchPathOpts,
     RuntimeLibraryImportPaths.push_back(std::string(LibPath.str()));
   }
 
-  if (!SearchPathOpts.getSDKPath().empty()) {
+  if (!SearchPathOpts.ExcludeSDKPathsFromRuntimeLibraryImportPaths && !SearchPathOpts.getSDKPath().empty()) {
     const char *swiftDir = FrontendOpts.UseSharedResourceFolder
       ? "swift" : "swift_static";
 
@@ -2264,6 +2264,7 @@ static bool ParseSearchPathArgs(SearchPathOptions &Opts, ArgList &Args,
     Opts.RuntimeResourcePath = A->getValue();
 
   Opts.SkipRuntimeLibraryImportPaths |= Args.hasArg(OPT_nostdimport);
+  Opts.ExcludeSDKPathsFromRuntimeLibraryImportPaths |= Args.hasArg(OPT_nostdlibimport);
 
   Opts.DisableModulesValidateSystemDependencies |=
       Args.hasArg(OPT_disable_modules_validate_system_headers);
@@ -3840,7 +3841,15 @@ bool CompilerInvocation::parseArgs(
   if (LangOpts.hasFeature(Feature::WarnUnsafe)) {
     if (SILOpts.RemoveRuntimeAsserts ||
         SILOpts.AssertConfig == SILOptions::Unchecked) {
-      Diags.diagnose(SourceLoc(), diag::Ounchecked_with_strict_safety);
+      Diags.diagnose(SourceLoc(),
+                     diag::command_line_conflicts_with_strict_safety,
+                     "-Ounchecked");
+    }
+
+    if (!LangOpts.EnableAccessControl) {
+      Diags.diagnose(SourceLoc(),
+                     diag::command_line_conflicts_with_strict_safety,
+                     "-disable-access-control");
     }
   }
 
