@@ -99,8 +99,8 @@ target_compile_definitions(swiftRuntime
     $<$<BOOL:${SwiftCore_HAS_DLADDR}>:-DSWIFT_STDLIB_HAS_DLADDR>
     $<$<BOOL:${SwiftCore_HAS_DLSYM}>:-DSWIFT_STDLIB_HAS_DLSYM>
     $<$<BOOL:${SwiftCore_ENABLE_FILESYSTEM_SUPPORT}>:-DSWIFT_STDLIB_HAS_FILESYSTEM>
-    $<$<AND:$<BOOL:${SwiftCore_ENABLE_FILESYSTEM_SUPPORT}>,$<COMPILE_LANGUAGE:C,CXX>>:-DSWIFT_ARCH="${SwiftCore_ARCH_SUBDIR}">
-    $<$<AND:$<BOOL:${SwiftCore_ENABLE_FILESYSTEM_SUPPORT}>,$<COMPILE_LANGUAGE:C,CXX>>:-DSWIFT_LIB_SUBDIR="${SwiftCore_PLATFORM_SUBDIR}">)
+    $<$<BOOL:${SwiftCore_ENABLE_FILESYSTEM_SUPPORT}>:-DSWIFT_ARCH="${SwiftCore_ARCH_SUBDIR}">
+    $<$<BOOL:${SwiftCore_ENABLE_FILESYSTEM_SUPPORT}>:-DSWIFT_LIB_SUBDIR="${SwiftCore_PLATFORM_SUBDIR}">)
 
 target_include_directories(swiftRuntime PRIVATE
   "${PROJECT_BINARY_DIR}/include"
@@ -152,6 +152,8 @@ if("${SwiftCore_OBJECT_FORMAT}" STREQUAL "elfx")
   install(TARGETS swiftrt DESTINATION "${CMAKE_INSTALL_LIBDIR}/swift")
 elseif("${SwiftCore_OBJECT_FORMAT}" STREQUAL "coffx")
   add_library(swiftrt OBJECT SwiftRT-COFF.cpp)
+  target_compile_definitions(swiftrt PRIVATE
+    $<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:SWIFT_STATIC_STDLIB>)
   target_link_libraries(swiftrt PRIVATE swiftShims)
   install(TARGETS swiftrt DESTINATION "${CMAKE_INSTALL_LIBDIR}/swift")
 elseif(NOT "${SwiftCore_OBJECT_FORMAT}" STREQUAL "x")

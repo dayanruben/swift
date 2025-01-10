@@ -566,7 +566,8 @@ void importer::getNormalInvocationArguments(
     }
   }
 
-  if (LangOpts.hasFeature(Feature::SafeInteropWrappers))
+  if (LangOpts.hasFeature(Feature::SafeInteropWrappers) &&
+      !LangOpts.EnableCXXInterop)
     invocationArgStrs.push_back("-fexperimental-bounds-safety-attributes");
 
   // Set C language options.
@@ -5075,6 +5076,7 @@ TinyPtrVector<ValueDecl *> CXXNamespaceMemberLookup::evaluate(
 }
 
 static const llvm::StringMap<std::vector<int>> STLConditionalEscapableParams{
+    {"basic_string", {0}},
     {"vector", {0}},
     {"array", {0}},
     {"inplace_vector", {0}},

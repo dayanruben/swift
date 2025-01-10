@@ -60,6 +60,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjCCommon.h"
+#include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/Type.h"
 #include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
@@ -71,10 +72,12 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Path.h"
 
 #include <algorithm>
+#include <utility>
 
 #define DEBUG_TYPE "Clang module importer"
 
@@ -130,6 +133,7 @@ createFuncOrAccessor(ClangImporter::Implementation &impl, SourceLoc funcLoc,
   impl.importSwiftAttrAttributes(decl);
   if (hasBoundsAnnotation)
     impl.importBoundsAttributes(decl);
+  impl.importSpanAttributes(decl);
 
   return decl;
 }
@@ -554,18 +558,9 @@ static void applyAvailableAttribute(Decl *decl, AvailabilityRange &info,
   if (info.isAlwaysAvailable())
     return;
 
-  llvm::VersionTuple noVersion;
-  auto AvAttr = new (C) AvailableAttr(
-      SourceLoc(), SourceRange(), targetPlatform(C.LangOpts),
-      /*Message=*/StringRef(),
-      /*Rename=*/StringRef(), info.getRawMinimumVersion(),
-      /*IntroducedRange=*/SourceRange(),
-      /*Deprecated=*/noVersion,
-      /*DeprecatedRange=*/SourceRange(),
-      /*Obsoleted=*/noVersion,
-      /*ObsoletedRange=*/SourceRange(), PlatformAgnosticAvailabilityKind::None,
-      /*Implicit=*/false,
-      /*SPI=*/false);
+  auto AvAttr = AvailableAttr::createPlatformVersioned(
+      C, targetPlatform(C.LangOpts), /*Message=*/"", /*Rename=*/"",
+      info.getRawMinimumVersion(), /*Deprecated=*/{}, /*Obsoleted=*/{});
 
   decl->getAttrs().add(AvAttr);
 }
@@ -1304,9 +1299,8 @@ namespace {
         // "Raw" is the Objective-C name, which was never available in Swift.
         // Variants within the active version are usually declarations that
         // have been superseded, like the accessors of a property.
-        attr = AvailableAttr::createPlatformAgnostic(
-            ctx, /*Message*/StringRef(), ctx.AllocateCopy(renamed.str()),
-            PlatformAgnosticAvailabilityKind::UnavailableInSwift);
+        attr = AvailableAttr::createUnavailableInSwift(
+            ctx, /*Message*/ StringRef(), ctx.AllocateCopy(renamed.str()));
       } else {
         unsigned majorVersion = getVersion().majorVersionNumber();
         unsigned minorVersion = getVersion().minorVersionNumber();
@@ -1319,10 +1313,9 @@ namespace {
             (majorVersion == 4 && minorVersion < 2)
                 ? llvm::VersionTuple(4, 2)
                 : llvm::VersionTuple(majorVersion + 1);
-          attr = AvailableAttr::createPlatformAgnostic(
-              ctx, /*Message*/StringRef(), ctx.AllocateCopy(renamed.str()),
-              PlatformAgnosticAvailabilityKind::SwiftVersionSpecific,
-              obsoletedVersion);
+          attr = AvailableAttr::createSwiftLanguageModeVersioned(
+              ctx, /*Message=*/"", ctx.AllocateCopy(renamed.str()),
+              /*Introduced=*/{}, obsoletedVersion);
         } else {
           // Future names are introduced in their future version.
           assert(getVersion() > getActiveSwiftVersion());
@@ -1330,15 +1323,9 @@ namespace {
             (majorVersion == 4 && minorVersion == 2)
                 ? llvm::VersionTuple(4, 2)
                 : llvm::VersionTuple(majorVersion);
-          attr = new (ctx) AvailableAttr(
-              SourceLoc(), SourceRange(), PlatformKind::none,
-              /*Message=*/StringRef(), ctx.AllocateCopy(renamed.str()),
-              /*Introduced=*/introducedVersion, SourceRange(),
-              /*Deprecated=*/llvm::VersionTuple(), SourceRange(),
-              /*Obsoleted=*/llvm::VersionTuple(), SourceRange(),
-              PlatformAgnosticAvailabilityKind::SwiftVersionSpecific,
-              /*Implicit=*/false,
-              /*SPI=*/false);
+          attr = AvailableAttr::createSwiftLanguageModeVersioned(
+              ctx, /*Message=*/"", ctx.AllocateCopy(renamed.str()),
+              introducedVersion, /*Obsoleted=*/{});
         }
       }
 
@@ -1525,10 +1512,8 @@ namespace {
 
       // Make Objective-C's 'id' unavailable.
       if (Impl.SwiftContext.LangOpts.EnableObjCInterop && isObjCId(Decl)) {
-        auto attr = AvailableAttr::createPlatformAgnostic(
-                      Impl.SwiftContext,
-                      "'id' is not available in Swift; use 'Any'", "",
-                      PlatformAgnosticAvailabilityKind::UnavailableInSwift);
+        auto attr = AvailableAttr::createUnavailableInSwift(
+            Impl.SwiftContext, "'id' is not available in Swift; use 'Any'", "");
         Result->getAttrs().add(attr);
       }
 
@@ -2391,12 +2376,12 @@ namespace {
             synthesizer.createDefaultConstructor(result);
         ctors.push_back(defaultCtor);
         if (cxxRecordDecl) {
-          auto attr = AvailableAttr::createPlatformAgnostic(
+          auto attr = AvailableAttr::createUniversallyDeprecated(
               defaultCtor->getASTContext(),
               "This zero-initializes the backing memory of the struct, which "
               "is unsafe for some C++ structs. Consider adding an explicit "
               "default initializer for this C++ struct.",
-              "", PlatformAgnosticAvailabilityKind::Deprecated);
+              "");
           defaultCtor->getAttrs().add(attr);
         }
       }
@@ -2910,16 +2895,11 @@ namespace {
         auto availability = Impl.SwiftContext.getSwift58Availability();
         if (!availability.isAlwaysAvailable()) {
           assert(availability.hasMinimumVersion());
-          auto AvAttr = new (Impl.SwiftContext)
-              AvailableAttr(SourceLoc(), SourceRange(),
-                            targetPlatform(Impl.SwiftContext.LangOpts),
-                            /*Message=*/"", /*Rename=*/"",
-                            availability.getRawMinimumVersion(),
-                            /*IntroducedRange=*/SourceRange(), {},
-                            /*DeprecatedRange=*/SourceRange(), {},
-                            /*ObsoletedRange=*/SourceRange(),
-                            PlatformAgnosticAvailabilityKind::None,
-                            /*Implicit=*/false, false);
+          auto AvAttr = AvailableAttr::createPlatformVersioned(
+              Impl.SwiftContext, targetPlatform(Impl.SwiftContext.LangOpts),
+              /*Message=*/"", /*Rename=*/"",
+              availability.getRawMinimumVersion(), /*Deprecated=*/{},
+              /*Obsoleted=*/{});
           classDecl->getAttrs().add(AvAttr);
         }
       }
@@ -4419,7 +4399,7 @@ namespace {
           decl, AccessLevel::Public, loc, name, loc, std::nullopt,
           genericParamList, dc);
 
-      auto attr = AvailableAttr::createPlatformAgnostic(
+      auto attr = AvailableAttr::createUniversallyUnavailable(
           Impl.SwiftContext, "Un-specialized class templates are not currently "
                              "supported. Please use a specialization of this "
                              "type.");
@@ -5389,8 +5369,8 @@ namespace {
         message = "cannot find Swift declaration for this protocol";
       else
         llvm_unreachable("unknown bridged decl kind");
-      auto attr = AvailableAttr::createPlatformAgnostic(Impl.SwiftContext,
-                                                        message);
+      auto attr = AvailableAttr::createUniversallyUnavailable(Impl.SwiftContext,
+                                                              message);
       VD->getAttrs().add(attr);
     }
 
@@ -5443,7 +5423,7 @@ namespace {
             addObjCAttribute(result,
                             Impl.importIdentifier(decl->getIdentifier()));
             result->setImplicit();
-            auto attr = AvailableAttr::createPlatformAgnostic(
+            auto attr = AvailableAttr::createUniversallyUnavailable(
                 Impl.SwiftContext,
                 "This Objective-C protocol has only been forward-declared; "
                 "import its owning module to use it");
@@ -5598,7 +5578,8 @@ namespace {
             auto result = createFakeClass(name, /* cacheResult */ true,
                                               /* inheritFromNSObject */ true);
             result->setImplicit();
-            auto attr = AvailableAttr::createPlatformAgnostic(Impl.SwiftContext,
+            auto attr = AvailableAttr::createUniversallyUnavailable(
+                Impl.SwiftContext,
                 "This Objective-C class has only been forward-declared; "
                 "import its owning module to use it");
             result->getAttrs().add(attr);
@@ -6490,7 +6471,7 @@ SwiftDeclConverter::importOptionConstant(const clang::EnumConstantDecl *decl,
       !CD->isUnavailable()) {
     /// Create an AvailableAttr that indicates specific availability
     /// for all platforms.
-    auto attr = AvailableAttr::createPlatformAgnostic(
+    auto attr = AvailableAttr::createUniversallyUnavailable(
         Impl.SwiftContext, "use [] to construct an empty option set");
     CD->getAttrs().add(attr);
   }
@@ -7127,7 +7108,7 @@ ConstructorDecl *SwiftDeclConverter::importConstructor(
       errorStr += objcMethod->getSelector().getAsString();
       errorStr += ']';
 
-      auto attr = AvailableAttr::createPlatformAgnostic(
+      auto attr = AvailableAttr::createUniversallyUnavailable(
           Impl.SwiftContext, Impl.SwiftContext.AllocateCopy(errorStr.str()));
       ctor->getAttrs().add(attr);
       continue;
@@ -8698,11 +8679,7 @@ public:
 
   void printCountedBy(const clang::CountAttributedType *CAT,
                       size_t pointerIndex) {
-    if (!firstParam) {
-      out << ", ";
-    } else {
-      firstParam = false;
-    }
+    printSeparator();
     clang::Expr *countExpr = CAT->getCountExpr();
     bool isSizedBy = CAT->isCountInBytes();
     out << ".";
@@ -8720,8 +8697,75 @@ public:
         out, {}, {ctx.getLangOpts()}); // TODO: map clang::Expr to Swift Expr
     out << "\")";
   }
+
+  void printNonEscaping(int idx) {
+    printSeparator();
+    out << ".nonescaping(pointer: " << idx << ")";
+  }
+
+  void printTypeMapping(const llvm::StringMap<std::string> &mapping) {
+    printSeparator();
+    out << "typeMappings: [";
+    if (mapping.empty()) {
+      out << ":]";
+      return;
+    }
+    llvm::interleaveComma(mapping, out, [&](const auto &entry) {
+      out << '"' << entry.getKey() << "\" : \"" << entry.getValue() << '"';
+    });
+    out << "]";
+  }
+
+private:
+  void printSeparator() {
+    if (!firstParam) {
+      out << ", ";
+    } else {
+      firstParam = false;
+    }
+  }
 };
 } // namespace
+
+void ClangImporter::Implementation::importSpanAttributes(FuncDecl *MappedDecl) {
+  if (!SwiftContext.LangOpts.hasFeature(Feature::SafeInteropWrappers))
+    return;
+  auto ClangDecl =
+      dyn_cast_or_null<clang::FunctionDecl>(MappedDecl->getClangDecl());
+  if (!ClangDecl)
+    return;
+
+  llvm::SmallString<128> MacroString;
+  bool attachMacro = false;
+  {
+    llvm::raw_svector_ostream out(MacroString);
+    llvm::StringMap<std::string> typeMapping;
+
+    SwiftifyInfoPrinter printer(getClangASTContext(), out);
+    for (auto [index, param] : llvm::enumerate(ClangDecl->parameters())) {
+      auto paramTy = param->getType();
+      const auto *decl = paramTy->getAsTagDecl();
+      if (!decl || !decl->isInStdNamespace())
+        continue;
+      if (decl->getName() != "span")
+        continue;
+      if (param->hasAttr<clang::NoEscapeAttr>()) {
+        printer.printNonEscaping(index + 1);
+        clang::PrintingPolicy policy(param->getASTContext().getLangOpts());
+        policy.SuppressTagKeyword = true;
+        auto param = MappedDecl->getParameters()->get(index);
+        typeMapping.insert(std::make_pair(
+            paramTy.getAsString(policy),
+            param->getInterfaceType()->getDesugaredType()->getString()));
+        attachMacro = true;
+      }
+    }
+    printer.printTypeMapping(typeMapping);
+  }
+
+  if (attachMacro)
+    importNontrivialAttribute(MappedDecl, MacroString);
+}
 
 void ClangImporter::Implementation::importBoundsAttributes(
     FuncDecl *MappedDecl) {
@@ -8808,7 +8852,7 @@ void ClangImporter::Implementation::importAttributes(
     //
     if (auto unavailable = dyn_cast<clang::UnavailableAttr>(*AI)) {
       auto Message = unavailable->getMessage();
-      auto attr = AvailableAttr::createPlatformAgnostic(C, Message);
+      auto attr = AvailableAttr::createUniversallyUnavailable(C, Message);
       MappedDecl->getAttrs().add(attr);
       AnyUnavailable = true;
       continue;
@@ -8821,8 +8865,7 @@ void ClangImporter::Implementation::importAttributes(
     //
     if (auto unavailable_annot = dyn_cast<clang::AnnotateAttr>(*AI))
       if (unavailable_annot->getAnnotation() == "swift1_unavailable") {
-        auto attr = AvailableAttr::createPlatformAgnostic(
-            C, "", "", PlatformAgnosticAvailabilityKind::UnavailableInSwift);
+        auto attr = AvailableAttr::createUnavailableInSwift(C, "", "");
         MappedDecl->getAttrs().add(attr);
         AnyUnavailable = true;
         continue;
@@ -8835,8 +8878,7 @@ void ClangImporter::Implementation::importAttributes(
     //
     if (auto deprecated = dyn_cast<clang::DeprecatedAttr>(*AI)) {
       auto Message = deprecated->getMessage();
-      auto attr = AvailableAttr::createPlatformAgnostic(C, Message, "",
-                    PlatformAgnosticAvailabilityKind::Deprecated);
+      auto attr = AvailableAttr::createUniversallyDeprecated(C, Message, "");
       MappedDecl->getAttrs().add(attr);
       continue;
     }
@@ -8858,9 +8900,8 @@ void ClangImporter::Implementation::importAttributes(
         if (!replacement.empty())
           swiftReplacement = getSwiftNameFromClangName(replacement);
 
-        auto attr = AvailableAttr::createPlatformAgnostic(
-            C, avail->getMessage(), swiftReplacement,
-            PlatformAgnosticAvailabilityKind::UnavailableInSwift);
+        auto attr = AvailableAttr::createUnavailableInSwift(
+            C, avail->getMessage(), swiftReplacement);
         MappedDecl->getAttrs().add(attr);
         AnyUnavailable = true;
         continue;
@@ -8968,7 +9009,7 @@ void ClangImporter::Implementation::importAttributes(
   if (auto ID = dyn_cast<clang::ObjCInterfaceDecl>(ClangDecl)) {
     // Ban NSInvocation.
     if (ID->getName() == "NSInvocation") {
-      auto attr = AvailableAttr::createPlatformAgnostic(C, "");
+      auto attr = AvailableAttr::createUniversallyUnavailable(C, "");
       MappedDecl->getAttrs().add(attr);
       return;
     }
@@ -9001,8 +9042,8 @@ void ClangImporter::Implementation::importAttributes(
         !FD->getAttr<clang::SwiftNameAttr>()) {
       if (auto t = FD->getParamDecl(0)->getType()->getAs<clang::TypedefType>()){
         if (isCFTypeDecl(t->getDecl())) {
-          auto attr = AvailableAttr::createPlatformAgnostic(C,
-            "Core Foundation objects are automatically memory managed");
+          auto attr = AvailableAttr::createUniversallyUnavailable(
+              C, "Core Foundation objects are automatically memory managed");
           MappedDecl->getAttrs().add(attr);
           return;
         }
@@ -9690,8 +9731,8 @@ void ClangImporter::Implementation::
 markUnavailable(ValueDecl *decl, StringRef unavailabilityMsgRef) {
 
   unavailabilityMsgRef = SwiftContext.AllocateCopy(unavailabilityMsgRef);
-  auto ua = AvailableAttr::createPlatformAgnostic(SwiftContext,
-                                                  unavailabilityMsgRef);
+  auto ua = AvailableAttr::createUniversallyUnavailable(SwiftContext,
+                                                        unavailabilityMsgRef);
   decl->getAttrs().add(ua);
 }
 
