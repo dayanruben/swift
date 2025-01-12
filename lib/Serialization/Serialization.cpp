@@ -3058,10 +3058,10 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
 
       assert(theAttr->Rename.empty() || !theAttr->hasCachedRenamedDecl());
 
-      bool isPackageDescriptionVersionSpecific =
-          theAttr->getPlatformAgnosticAvailability() ==
-          PlatformAgnosticAvailabilityKind::PackageDescriptionVersionSpecific;
+      auto domain = theAttr->getCachedDomain();
+      assert(domain);
 
+      // FIXME: [availability] Serialize domain and kind directly.
       llvm::SmallString<32> blob;
       blob.append(theAttr->Message);
       blob.append(theAttr->Rename);
@@ -3072,13 +3072,13 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
           theAttr->isUnconditionallyUnavailable(),
           theAttr->isUnconditionallyDeprecated(),
           theAttr->isNoAsync(),
-          isPackageDescriptionVersionSpecific,
+          domain->isPackageDescription(),
           theAttr->isSPI(),
           theAttr->isForEmbedded(),
           LIST_VER_TUPLE_PIECES(Introduced),
           LIST_VER_TUPLE_PIECES(Deprecated),
           LIST_VER_TUPLE_PIECES(Obsoleted),
-          static_cast<unsigned>(theAttr->getPlatform()),
+          static_cast<unsigned>(domain->getPlatformKind()),
           theAttr->Message.size(),
           theAttr->Rename.size(),
           blob);
@@ -3391,15 +3391,6 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
       NonisolatedDeclAttrLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode,
                                             theAttr->isUnsafe(),
                                             theAttr->isImplicit());
-      return;
-    }
-
-    case DeclAttrKind::Safe: {
-      auto *theAttr = cast<SafeAttr>(DA);
-      auto abbrCode = S.DeclTypeAbbrCodes[SafeDeclAttrLayout::Code];
-      SafeDeclAttrLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode,
-                                     theAttr->isImplicit(),
-                                     theAttr->message);
       return;
     }
 
