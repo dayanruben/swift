@@ -8093,6 +8093,9 @@ NOTE(note_reference_to_unsafe_typed_decl,none,
 NOTE(note_reference_to_unsafe_through_typealias,none,
      "reference to %kind0 whose underlying type involves unsafe type %1",
      (const ValueDecl *, Type))
+NOTE(note_reference_to_unsafe_type,none,
+     "reference to unsafe type %0",
+     (Type))
 NOTE(note_reference_to_nonisolated_unsafe,none,
      "reference to nonisolated(unsafe) %kind0 is unsafe in concurrently-executing code",
      (const ValueDecl *))
@@ -8161,6 +8164,13 @@ ERROR(availability_value_generic_type_only_version_newer, none,
       (StringRef, llvm::VersionTuple))
 ERROR(invalid_value_for_type_same_type,none,
       "cannot constrain type parameter %0 to be integer %1", (Type, Type))
+
+//===----------------------------------------------------------------------===//
+// MARK: Slab
+//===----------------------------------------------------------------------===//
+
+ERROR(slab_literal_incorrect_count,none,
+      "expected %0 elements in slab literal, but got %1", (Type, Type))
 
 //===----------------------------------------------------------------------===//
 // MARK: @abi Attribute
