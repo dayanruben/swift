@@ -3928,22 +3928,19 @@ public:
       printFlag("noasync");
       break;
     }
-    if (Attr->Introduced.has_value())
-      printFieldRaw(
-          [&](auto &out) { out << Attr->Introduced.value().getAsString(); },
-          "introduced");
-    if (Attr->Deprecated.has_value())
-      printFieldRaw(
-          [&](auto &out) { out << Attr->Deprecated.value().getAsString(); },
-          "deprecated");
-    if (Attr->Obsoleted.has_value())
-      printFieldRaw(
-          [&](auto &out) { out << Attr->Obsoleted.value().getAsString(); },
-          "obsoleted");
-    if (!Attr->Message.empty())
-      printFieldQuoted(Attr->Message, "message");
-    if (!Attr->Rename.empty())
-      printFieldQuoted(Attr->Rename, "rename");
+    if (auto introduced = Attr->getRawIntroduced())
+      printFieldRaw([&](auto &out) { out << introduced.value().getAsString(); },
+                    "introduced");
+    if (auto deprecated = Attr->getRawDeprecated())
+      printFieldRaw([&](auto &out) { out << deprecated.value().getAsString(); },
+                    "deprecated");
+    if (auto obsoleted = Attr->getRawObsoleted())
+      printFieldRaw([&](auto &out) { out << obsoleted.value().getAsString(); },
+                    "obsoleted");
+    if (!Attr->getMessage().empty())
+      printFieldQuoted(Attr->getMessage(), "message");
+    if (!Attr->getRename().empty())
+      printFieldQuoted(Attr->getRename(), "rename");
     printFoot();
   }
   void visitBackDeployedAttr(BackDeployedAttr *Attr, StringRef label) {
@@ -4883,6 +4880,7 @@ namespace {
       printCommon(#Name, label);                           \
                                                            \
       printFieldQuoted(T->getDecl()->printRef(), "decl");  \
+      printFlag(T->getDecl()->hasClangNode(), "foreign");  \
                                                            \
       if (T->getParent())                                  \
         printRec(T->getParent(), "parent");                \
@@ -4890,11 +4888,26 @@ namespace {
       printFoot();                                         \
     }
 
-    VISIT_NOMINAL_TYPE(EnumType, enum_type)
-    VISIT_NOMINAL_TYPE(StructType, struct_type)
-    VISIT_NOMINAL_TYPE(ClassType, class_type)
+#define VISIT_BINDABLE_NOMINAL_TYPE(TypeClass, Name)       \
+    VISIT_NOMINAL_TYPE(TypeClass, Name)                    \
+    void visitBoundGeneric##TypeClass(                     \
+        BoundGeneric##TypeClass *T, StringRef label) {     \
+      printCommon("bound_generic_" #Name, label);          \
+      printFieldQuoted(T->getDecl()->printRef(), "decl");  \
+      printFlag(T->getDecl()->hasClangNode(), "foreign");  \
+      if (T->getParent())                                  \
+        printRec(T->getParent(), "parent");                \
+      for (auto arg : T->getGenericArgs())                 \
+        printRec(arg);                                     \
+      printFoot();                                         \
+    }
+
+    VISIT_BINDABLE_NOMINAL_TYPE(EnumType, enum_type)
+    VISIT_BINDABLE_NOMINAL_TYPE(StructType, struct_type)
+    VISIT_BINDABLE_NOMINAL_TYPE(ClassType, class_type)
     VISIT_NOMINAL_TYPE(ProtocolType, protocol_type)
 
+#undef VISIT_BINDABLE_NOMINAL_TYPE
 #undef VISIT_NOMINAL_TYPE
 
     void visitBuiltinTupleType(BuiltinTupleType *T, StringRef label) {
@@ -4929,6 +4942,7 @@ namespace {
     void visitModuleType(ModuleType *T, StringRef label) {
       printCommon("module_type", label);
       printDeclNameField(T->getModule(), "module");
+      printFlag(T->getModule()->isNonSwiftModule(), "foreign");
       printFoot();
     }
 
@@ -5046,7 +5060,7 @@ namespace {
     void printAnyFunctionParamsRec(ArrayRef<AnyFunctionType::Param> params,
                                    StringRef label) {
       printRecArbitrary([&](StringRef label) {
-        printCommon("function_params", label);
+        printHead("function_params", FieldLabelColor, label);
 
         printField(params.size(), "num_params");
         for (const auto &param : params) {
@@ -5254,37 +5268,6 @@ namespace {
       printFieldQuoted(T->getDecl()->printRef(), "decl");
       if (T->getParent())
         printRec(T->getParent(), "parent");
-      printFoot();
-    }
-
-    void visitBoundGenericClassType(BoundGenericClassType *T, StringRef label) {
-      printCommon("bound_generic_class_type", label);
-      printFieldQuoted(T->getDecl()->printRef(), "decl");
-      if (T->getParent())
-        printRec(T->getParent(), "parent");
-      for (auto arg : T->getGenericArgs())
-        printRec(arg);
-      printFoot();
-    }
-
-    void visitBoundGenericStructType(BoundGenericStructType *T,
-                                     StringRef label) {
-      printCommon("bound_generic_struct_type", label);
-      printFieldQuoted(T->getDecl()->printRef(), "decl");
-      if (T->getParent())
-        printRec(T->getParent(), "parent");
-      for (auto arg : T->getGenericArgs())
-        printRec(arg);
-      printFoot();
-    }
-
-    void visitBoundGenericEnumType(BoundGenericEnumType *T, StringRef label) {
-      printCommon("bound_generic_enum_type", label);
-      printFieldQuoted(T->getDecl()->printRef(), "decl");
-      if (T->getParent())
-        printRec(T->getParent(), "parent");
-      for (auto arg : T->getGenericArgs())
-        printRec(arg);
       printFoot();
     }
 

@@ -3564,7 +3564,7 @@ SerializeAttrGenericSignatureRequest::evaluate(Evaluator &evaluator,
       /*addedRequirements=*/{},
       /*inferenceSources=*/{},
       attr->getLocation(),
-      /*isExtension=*/false,
+      /*forExtension=*/nullptr,
       /*allowInverses=*/true};
 
   auto specializedSig = evaluateOrDefault(Ctx.evaluator, request,
@@ -5050,13 +5050,13 @@ void AttributeChecker::checkBackDeployedAttrs(
     if (Ctx.LangOpts.DisableAvailabilityChecking)
       continue;
 
-    auto availability =
-        TypeChecker::availabilityAtLocation(D->getLoc(), D->getDeclContext());
+    auto availability = TypeChecker::availabilityAtLocation(
+        D->getLoc(), D->getInnermostDeclContext());
 
     // Unavailable decls cannot be back deployed.
-    if (auto unavailablePlatform = availability.getUnavailablePlatformKind()) {
-      if (!inheritsAvailabilityFromPlatform(*unavailablePlatform,
-                                            Attr->Platform)) {
+    if (auto unavailableDomain = availability.getUnavailableDomain()) {
+      auto backDeployedDomain = AvailabilityDomain::forPlatform(Attr->Platform);
+      if (unavailableDomain->contains(backDeployedDomain)) {
         auto platformString = prettyPlatformString(Attr->Platform);
         llvm::VersionTuple ignoredVersion;
 
@@ -6161,7 +6161,7 @@ bool resolveDifferentiableAttrDerivativeGenericSignature(
         /*addedRequirements=*/{},
         /*inferenceSources=*/{},
         attr->getLocation(),
-        /*isExtension=*/false,
+        /*forExtension=*/nullptr,
         /*allowInverses=*/true};
 
     // Compute generic signature for derivative functions.
