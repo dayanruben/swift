@@ -105,6 +105,7 @@ option(SwiftCore_ENABLE_OS_TRACE_LAZY_INIT "Use os_trace call to check if lazy i
 
 defaulted_option(SwiftCore_ENABLE_BACKTRACING "Enable backtracing runtime support")
 defaulted_set(SwiftCore_BACKTRACER_PATH STRING "Set a fixed path to the Swift backtracer")
+defaulted_option(SwiftCore_ENABLE_FATALERROR_BACKTRACE "Build stdlib fatalError with backtrace output")
 
 option(SwiftCore_ENABLE_CLOBBER_FREED_OBJECTS "" OFF)
 option(SwiftCore_ENABLE_RUNTIME_LEAK_CHECKER "" OFF)
@@ -112,6 +113,10 @@ option(SwiftCore_ENABLE_INTERNAL_CHECKS "" OFF)
 
 defaulted_set(SwiftCore_OBJECT_FORMAT STRING "Object format: ELF COFF")
 defaulted_set(SwiftCore_THREADING_PACKAGE STRING "Threading Package: C11 Linux PThreads Win32")
+
+option(SwiftCore_INSTALL_NESTED_SUBDIR "Install libraries under a platform and architecture subdirectory" ON)
+set(SwiftCore_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}/swift$<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:_static>$<$<BOOL:${SwiftCore_INSTALL_NESTED_SUBDIR}>:/${SwiftCore_PLATFORM_SUBDIR}/${SwiftCore_ARCH_SUBDIR}>")
+set(SwiftCore_INSTALL_SWIFTMODULEDIR "${CMAKE_INSTALL_LIBDIR}/swift$<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:_static>$<$<BOOL:${SwiftCore_INSTALL_NESTED_SUBDIR}>:/${SwiftCore_PLATFORM_SUBDIR}>")
 
 # TODO: Most of these should be attached to specific targets rather than applied
 #       globally. They can be applied as part of the library interface if they
