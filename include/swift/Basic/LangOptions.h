@@ -421,10 +421,6 @@ namespace swift {
     /// Disable the implicit import of the _StringProcessing module.
     bool DisableImplicitStringProcessingModuleImport = false;
 
-    /// Disable the implicit import of the _Backtracing module.
-    bool DisableImplicitBacktracingModuleImport =
-        !SWIFT_IMPLICIT_BACKTRACING_IMPORT;
-
     /// Disable the implicit import of the Cxx module.
     bool DisableImplicitCxxModuleImport = false;
 
@@ -852,7 +848,7 @@ namespace swift {
 
     /// If non-zero, abort the expression type checker if it takes more
     /// than this many seconds.
-    unsigned ExpressionTimeoutThreshold = 600;
+    unsigned ExpressionTimeoutThreshold = 0;
 
     /// The upper bound, in bytes, of temporary data that can be
     /// allocated by the constraint solver.
