@@ -2033,6 +2033,18 @@ namespace {
       return semanticsKind == CxxRecordSemanticsKind::MoveOnly;
     }
 
+    void markReturnsUnsafeNonescapable(AbstractFunctionDecl *fd) {
+      if (Impl.SwiftContext.LangOpts.hasFeature(Feature::LifetimeDependence)) {
+        fd->getAttrs().add(new (Impl.SwiftContext)
+                               UnsafeNonEscapableResultAttr(/*Implicit=*/true));
+        if (Impl.SwiftContext.LangOpts.hasFeature(Feature::SafeInterop) &&
+            Impl.SwiftContext.LangOpts.hasFeature(
+                Feature::AllowUnsafeAttribute))
+          fd->getAttrs().add(new (Impl.SwiftContext)
+                                 UnsafeAttr(/*Implicit=*/true));
+      }
+    }
+
     Decl *VisitRecordDecl(const clang::RecordDecl *decl) {
       // Track whether this record contains fields we can't reference in Swift
       // as stored properties.
@@ -2228,12 +2240,14 @@ namespace {
                                    MoveOnlyAttr(/*Implicit=*/true));
       }
 
+      bool isNonEscapable = false;
       if (evaluateOrDefault(
               Impl.SwiftContext.evaluator,
               ClangTypeEscapability({decl->getTypeForDecl(), Impl}),
               CxxEscapability::Unknown) == CxxEscapability::NonEscapable) {
         result->getAttrs().add(new (Impl.SwiftContext)
                                    NonEscapableAttr(/*Implicit=*/true));
+        isNonEscapable = true;
       }
 
       // FIXME: Figure out what to do with superclasses in C++. One possible
@@ -2378,6 +2392,9 @@ namespace {
               synthesizer.createValueConstructor(result, member,
                                                  /*want param names*/ true,
                                                  /*wantBody=*/true);
+
+          if (isNonEscapable)
+            markReturnsUnsafeNonescapable(valueCtor);
           ctors.push_back(valueCtor);
         }
         // TODO: we have a problem lazily looking up members of an unnamed
@@ -2402,7 +2419,13 @@ namespace {
                                 (!cxxRecordDecl->hasDefaultConstructor() ||
                                  cxxRecordDecl->ctors().empty());
       }
-      if (hasZeroInitializableStorage && needsEmptyInitializer) {
+
+      // TODO: builtin "zeroInitializer" does not work with non-escapable
+      // types yet. Don't generate an initializer.
+      if (hasZeroInitializableStorage && needsEmptyInitializer &&
+          (!Impl.SwiftContext.LangOpts.hasFeature(
+               Feature::LifetimeDependence) ||
+           !isNonEscapable)) {
         // Add default constructor for the struct if compiling in C mode.
         // If we're compiling for C++:
         // 1. If a default constructor is declared, don't synthesize one.
@@ -2415,7 +2438,6 @@ namespace {
         //    constructor available in Swift.
         ConstructorDecl *defaultCtor =
             synthesizer.createDefaultConstructor(result);
-        ctors.push_back(defaultCtor);
         if (cxxRecordDecl) {
           auto attr = AvailableAttr::createUniversallyDeprecated(
               defaultCtor->getASTContext(),
@@ -2425,6 +2447,7 @@ namespace {
               "");
           defaultCtor->getAttrs().add(attr);
         }
+        ctors.push_back(defaultCtor);
       }
 
       bool forceMemberwiseInitializer = false;
@@ -2453,6 +2476,9 @@ namespace {
             /*want body*/ hasUnreferenceableStorage);
         if (!hasUnreferenceableStorage)
           valueCtor->setIsMemberwiseInitializer();
+
+        if (isNonEscapable)
+          markReturnsUnsafeNonescapable(valueCtor);
 
         ctors.push_back(valueCtor);
       }
@@ -8789,7 +8815,8 @@ public:
 
   void printLifetimeboundReturn(int idx, bool borrow) {
     printSeparator();
-    out << ".lifetimeDependence(dependsOn: " << (idx + 1);
+    out << ".lifetimeDependence(dependsOn: ";
+    printParamOrReturn(idx);
     out << ", pointer: .return, type: ";
     out << (borrow ? ".borrow" : ".copy");
     out << ")";
@@ -8818,7 +8845,9 @@ private:
   }
 
   void printParamOrReturn(ssize_t pointerIndex) {
-    if (pointerIndex == -1)
+    if (pointerIndex == -2)
+      out << ".self";
+    else if (pointerIndex == -1)
       out << ".return";
     else
       out << ".param(" << pointerIndex + 1 << ")";
@@ -8859,15 +8888,21 @@ void ClangImporter::Implementation::importSpanAttributes(FuncDecl *MappedDecl) {
                              ->getDesugaredType()
                              ->getString()));
     }
+    bool lifetimeDependenceOn = MappedDecl->getASTContext().LangOpts.hasFeature(
+        Feature::LifetimeDependence);
+    if (SwiftDeclConverter::getImplicitObjectParamAnnotation<
+            clang::LifetimeBoundAttr>(ClangDecl) &&
+        lifetimeDependenceOn && returnIsSpan) {
+      printer.printLifetimeboundReturn(-2, true);
+      attachMacro = true;
+    }
     for (auto [index, param] : llvm::enumerate(ClangDecl->parameters())) {
       auto paramTy = param->getType();
       const auto *decl = paramTy->getAsTagDecl();
       auto swiftParam = MappedDecl->getParameters()->get(index);
       bool isSpan =
           decl && decl->isInStdNamespace() && decl->getName() == "span";
-      if (param->hasAttr<clang::LifetimeBoundAttr>() &&
-          MappedDecl->getASTContext().LangOpts.hasFeature(
-              Feature::LifetimeDependence) &&
+      if (param->hasAttr<clang::LifetimeBoundAttr>() && lifetimeDependenceOn &&
           (isSpan || returnIsSpan)) {
         printer.printLifetimeboundReturn(
             index, !isSpan && swiftParam->getInterfaceType()->isEscapable());
