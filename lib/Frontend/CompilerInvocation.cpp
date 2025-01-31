@@ -924,11 +924,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableExperimentalConcurrency |=
     Args.hasArg(OPT_enable_experimental_concurrency);
 
-  Opts.EnableInferPublicSendable |=
-    Args.hasFlag(OPT_enable_infer_public_concurrent_value,
-                 OPT_disable_infer_public_concurrent_value,
-                 false);
-
   Opts.DisableExperimentalClangImporterDiagnostics |=
       Args.hasArg(OPT_disable_experimental_clang_importer_diagnostics);
 
@@ -2280,8 +2275,6 @@ static bool ParseSearchPathArgs(SearchPathOptions &Opts, ArgList &Args,
   }
   if (const Arg *A = Args.getLastArg(OPT_placeholder_dependency_module_map))
     Opts.PlaceholderDependencyModuleMap = A->getValue();
-  if (const Arg *A = Args.getLastArg(OPT_batch_scan_input_file))
-    Opts.BatchScanInputFilePath = A->getValue();
 
   if (const Arg *A = Args.getLastArg(OPT_const_gather_protocols_file))
     Opts.ConstGatherProtocolListFilePath = A->getValue();

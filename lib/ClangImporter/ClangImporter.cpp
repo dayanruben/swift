@@ -3099,6 +3099,15 @@ static bool isDeclaredInModule(const ClangModuleUnit *ModuleFilter,
   if (VD->getModuleContext()->getName().str() == CLANG_HEADER_MODULE_NAME) {
     return true;
   }
+  // Because the ClangModuleUnit saved as a decl context will be saved as the top-level module, but
+  // the ModuleFilter we're given might be a submodule (if a submodule was passed to
+  // getTopLevelDecls, for example), we should compare the underlying Clang modules to determine
+  // module membership.
+  if (auto ClangNode = VD->getClangNode()) {
+    if (auto *ClangModule = ClangNode.getOwningClangModule()) {
+      return ModuleFilter->getClangModule() == ClangModule;
+    }
+  }
   auto ContainingUnit = VD->getDeclContext()->getModuleScopeContext();
   return ModuleFilter == ContainingUnit;
 }
@@ -3271,7 +3280,7 @@ public:
   FilteringDeclaredDeclConsumer(swift::VisibleDeclConsumer &consumer,
                                 const ClangModuleUnit *CMU)
       : NextConsumer(consumer), ModuleFilter(CMU) {
-    assert(CMU && CMU->isTopLevel() && "Only top-level modules supported");
+    assert(CMU);
   }
 
   void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason,
@@ -3622,9 +3631,6 @@ public:
 };
 } // unnamed namespace
 
-// FIXME(https://github.com/apple/swift-docc/issues/190): Should submodules still be crawled for the symbol graph?
-bool ClangModuleUnit::shouldCollectDisplayDecls() const { return isTopLevel(); }
-
 void ClangModuleUnit::getTopLevelDecls(SmallVectorImpl<Decl*> &results) const {
   VectorDeclPtrConsumer consumer(results);
   FilteringDeclaredDeclConsumer filterConsumer(consumer, this);
@@ -3645,10 +3651,12 @@ void ClangModuleUnit::getTopLevelDecls(SmallVectorImpl<Decl*> &results) const {
 
     // Add the extensions produced by importing categories.
     for (auto category : lookupTable->categories()) {
-      if (auto extension = cast_or_null<ExtensionDecl>(
-              owner.importDecl(category, owner.CurrentVersion,
-                               /*UseCanonical*/false))) {
-        results.push_back(extension);
+      if (category->getOwningModule() == clangModule) {
+        if (auto extension = cast_or_null<ExtensionDecl>(
+          owner.importDecl(category, owner.CurrentVersion,
+                          /*UseCanonical*/false))) {
+          results.push_back(extension);
+        }
       }
     }
 
@@ -3663,11 +3671,11 @@ void ClangModuleUnit::getTopLevelDecls(SmallVectorImpl<Decl*> &results) const {
     };
     // Retrieve all of the globals that will be mapped to members.
 
-    // FIXME: Since we don't represent Clang submodules as Swift
-    // modules, we're getting everything.
     llvm::SmallPtrSet<ExtensionDecl *, 8> knownExtensions;
     for (auto entry : lookupTable->allGlobalsAsMembers()) {
       auto decl = entry.get<clang::NamedDecl *>();
+      if (decl->getOwningModule() != clangModule) continue;
+
       Decl *importedDecl = owner.importDecl(decl, owner.CurrentVersion);
       if (!importedDecl) continue;
 
@@ -6152,6 +6160,8 @@ TinyPtrVector<ValueDecl *> ClangRecordMemberLookup::evaluate(
   NominalTypeDecl *inheritingDecl = desc.inheritingDecl;
   DeclName name = desc.name;
 
+  bool inheritedLookup = recordDecl != inheritingDecl;
+
   auto &ctx = recordDecl->getASTContext();
   auto directResults = evaluateOrDefault(
       ctx.evaluator,
@@ -6177,7 +6187,7 @@ TinyPtrVector<ValueDecl *> ClangRecordMemberLookup::evaluate(
 
     // If this member is found due to inheritance, clone it from the base class
     // by synthesizing getters and setters.
-    if (inheritingDecl != recordDecl) {
+    if (inheritedLookup) {
       imported = clangModuleLoader->importBaseMemberDecl(
           cast<ValueDecl>(imported), inheritingDecl);
       if (!imported)
@@ -6186,8 +6196,8 @@ TinyPtrVector<ValueDecl *> ClangRecordMemberLookup::evaluate(
     result.push_back(cast<ValueDecl>(imported));
   }
 
-  if (inheritingDecl != recordDecl) {
-    // For inheritied members, add members that are synthesized eagerly, such as
+  if (inheritedLookup) {
+    // For inherited members, add members that are synthesized eagerly, such as
     // subscripts. This is not necessary for non-inherited members because those
     // should already be in the lookup table.
     for (auto member :
@@ -8274,4 +8284,35 @@ importer::getCxxReferencePointeeTypeOrNone(const clang::Type *type) {
 bool importer::isCxxConstReferenceType(const clang::Type *type) {
   auto pointeeType = getCxxReferencePointeeTypeOrNone(type);
   return pointeeType && pointeeType->isConstQualified();
+}
+
+AccessLevel importer::convertClangAccess(clang::AccessSpecifier access) {
+  switch (access) {
+  case clang::AS_public:
+    // C++ 'public' is actually closer to Swift 'open' than Swift 'public',
+    // since C++ 'public' does not prevent users from subclassing a type or
+    // overriding a method. However, subclassing and overriding are currently
+    // unsupported across the interop boundary, so we conservatively map C++
+    // 'public' to Swift 'public' in case there are other C++ subtleties that
+    // are being missed at this time (e.g., C++ 'final' vs Swift 'final').
+    return AccessLevel::Public;
+
+  case clang::AS_protected:
+    // Swift does not have a notion of protected fields, so map C++ 'protected'
+    // to Swift 'private'.
+    return AccessLevel::Private;
+
+  case clang::AS_private:
+    // N.B. Swift 'private' is more restrictive than C++ 'private' because it
+    // also cares about what source file the member is accessed.
+    return AccessLevel::Private;
+
+  case clang::AS_none:
+    // The fictional 'none' specifier is given to top-level C++ declarations,
+    // for which C++ lacks the syntax to give an access specifier. (It may also
+    // be used in other cases I'm not aware of.) Those declarations are globally
+    // visible and thus correspond to Swift 'public' (with the same caveats
+    // about Swift 'public' vs 'open'; see above).
+    return AccessLevel::Public;
+  }
 }

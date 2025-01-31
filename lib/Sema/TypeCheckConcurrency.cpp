@@ -4688,6 +4688,7 @@ getIsolationFromAttributes(const Decl *decl, bool shouldDiagnose = true,
   auto isolatedAttr = decl->getAttrs().getAttribute<IsolatedAttr>();
   auto nonisolatedAttr = decl->getAttrs().getAttribute<NonisolatedAttr>();
   auto globalActorAttr = decl->getGlobalActorAttr();
+  auto concurrentExecutionAttr = decl->getAttrs().getAttribute<ExecutionAttr>();
 
   // Remove implicit attributes if we only care about explicit ones.
   if (onlyExplicit) {
@@ -4697,11 +4698,13 @@ getIsolationFromAttributes(const Decl *decl, bool shouldDiagnose = true,
       isolatedAttr = nullptr;
     if (globalActorAttr && globalActorAttr->first->isImplicit())
       globalActorAttr = std::nullopt;
+    if (concurrentExecutionAttr && concurrentExecutionAttr->isImplicit())
+      concurrentExecutionAttr = nullptr;
   }
 
-  unsigned numIsolationAttrs = (isolatedAttr ? 1 : 0) +
-                               (nonisolatedAttr ? 1 : 0) +
-                               (globalActorAttr ? 1 : 0);
+  unsigned numIsolationAttrs =
+      (isolatedAttr ? 1 : 0) + (nonisolatedAttr ? 1 : 0) +
+      (globalActorAttr ? 1 : 0) + (concurrentExecutionAttr ? 1 : 0);
   if (numIsolationAttrs == 0) {
     if (isa<DestructorDecl>(decl) && !decl->isImplicit()) {
       return ActorIsolation::forNonisolated(false);
@@ -4709,49 +4712,20 @@ getIsolationFromAttributes(const Decl *decl, bool shouldDiagnose = true,
     return std::nullopt;
   }
 
-  // Only one such attribute is valid, but we only actually care of one of
-  // them is a global actor.
-  if (numIsolationAttrs > 1 && globalActorAttr && shouldDiagnose) {
-    struct NameAndRange {
-      StringRef name;
-      SourceRange range;
-
-      NameAndRange(StringRef _name, SourceRange _range)
-          : name(_name), range(_range) {}
-    };
-
-    llvm::SmallVector<NameAndRange, 3> attributes;
-    if (isolatedAttr) {
-      attributes.push_back(NameAndRange(isolatedAttr->getAttrName(),
-                                        isolatedAttr->getRangeWithAt()));
-    }
-    if (nonisolatedAttr) {
-      attributes.push_back(NameAndRange(nonisolatedAttr->getAttrName(),
-                                        nonisolatedAttr->getRangeWithAt()));
-    }
-    if (globalActorAttr) {
-      attributes.push_back(
-          NameAndRange(globalActorAttr->second->getName().str(),
-                       globalActorAttr->first->getRangeWithAt()));
-    }
-    if (attributes.size() == 3) {
-      decl->diagnose(diag::actor_isolation_multiple_attr_3, decl,
-                     attributes[0].name, attributes[1].name, attributes[2].name)
-          .highlight(attributes[0].range)
-          .highlight(attributes[1].range)
-          .highlight(attributes[2].range);
-    } else {
-      assert(attributes.size() == 2);
-      decl->diagnose(diag::actor_isolation_multiple_attr_2, decl,
-                     attributes[0].name, attributes[1].name)
-          .highlight(attributes[0].range)
-          .highlight(attributes[1].range);
-    }
-  }
-
   // If the declaration is explicitly marked 'nonisolated', report it as
   // independent.
   if (nonisolatedAttr) {
+    // If the nonisolated async inherits isolation from context is set, return
+    // caller isolation inheriting.
+    if (decl->getASTContext().LangOpts.hasFeature(
+            Feature::NonIsolatedAsyncInheritsIsolationFromContext)) {
+      if (auto *func = dyn_cast<AbstractFunctionDecl>(decl);
+          func && func->hasAsync() &&
+          func->getModuleContext() == decl->getASTContext().MainModule) {
+        return ActorIsolation::forCallerIsolationInheriting();
+      }
+    }
+
     return ActorIsolation::forNonisolated(nonisolatedAttr->isUnsafe());
   }
 
@@ -4840,6 +4814,17 @@ getIsolationFromAttributes(const Decl *decl, bool shouldDiagnose = true,
     return ActorIsolation::forGlobalActor(
         globalActorType->mapTypeOutOfContext())
         .withPreconcurrency(decl->preconcurrency() || isUnsafe);
+  }
+
+  // If the declaration is explicitly marked with 'execution', return the
+  // appropriate isolation.
+  if (concurrentExecutionAttr) {
+    switch (concurrentExecutionAttr->getBehavior()) {
+    case ExecutionKind::Concurrent:
+      return ActorIsolation::forNonisolated(false /*is unsafe*/);
+    case ExecutionKind::Caller:
+      return ActorIsolation::forCallerIsolationInheriting();
+    }
   }
 
   llvm_unreachable("Forgot about an attribute?");
@@ -5614,15 +5599,6 @@ InferredActorIsolation ActorIsolationRequest::evaluate(
         checkClassGlobalActorIsolation(classDecl, *isolationFromAttr);
     }
 
-    if (ctx.LangOpts.hasFeature(
-            Feature::NonIsolatedAsyncInheritsIsolationFromContext)) {
-      if (auto *func = dyn_cast<AbstractFunctionDecl>(value);
-          func && func->hasAsync() && isolationFromAttr->isNonisolated() &&
-          func->getModuleContext() == ctx.MainModule) {
-        return {ActorIsolation::forCallerIsolationInheriting(), {}};
-      }
-    }
-
     return {*isolationFromAttr,
             IsolationSource(/*source*/ nullptr, IsolationSource::Explicit)};
   }
@@ -5636,7 +5612,26 @@ InferredActorIsolation ActorIsolationRequest::evaluate(
   // within our module, make our default isolation main actor.
   if (ctx.LangOpts.hasFeature(Feature::UnspecifiedMeansMainActorIsolated) &&
       value->getModuleContext() == ctx.MainModule) {
-    defaultIsolation = ActorIsolation::forMainActor(ctx);
+
+    // Default global actor isolation does not apply to any declarations
+    // within actors and distributed actors.
+    bool inActorContext = false;
+    auto *dc = value->getInnermostDeclContext();
+    while (dc && !inActorContext) {
+      if (auto *nominal = dc->getSelfNominalTypeDecl()) {
+        inActorContext = nominal->isAnyActor();
+      }
+      dc = dc->getParent();
+    }
+
+    if (!inActorContext) {
+      // FIXME: deinit should be implicitly MainActor too.
+      if (isa<TypeDecl>(value) || isa<ExtensionDecl>(value) ||
+          isa<AbstractStorageDecl>(value) || isa<FuncDecl>(value) ||
+          isa<ConstructorDecl>(value)) {
+        defaultIsolation = ActorIsolation::forMainActor(ctx);
+      }
+    }
   }
 
   // If we have an async function... by default we inherit isolation.
@@ -5778,32 +5773,6 @@ InferredActorIsolation ActorIsolationRequest::evaluate(
           inferredIsolation(enclosingIsolation),
           IsolationSource(inferenceSource, IsolationSource::LexicalContext)
         };
-      }
-    }
-  }
-
-  // If this is an actor, use the actor isolation of the actor.
-  if (ctx.LangOpts.hasFeature(Feature::UnspecifiedMeansMainActorIsolated)) {
-    // non-async inits and deinits need to be always nonisolated since we can
-    // run the deinit anywhere.
-    //
-    // TODO: We should add a check for if they are marked with global actor
-    // isolation.
-    if (auto *func = dyn_cast<AbstractFunctionDecl>(value)) {
-      if (isa<DestructorDecl>(func) && !func->isAsyncContext())
-        return {ActorIsolation::forNonisolated(false /*unsafe*/),
-                IsolationSource(func, IsolationSource::LexicalContext)};
-
-      if (isa<ConstructorDecl>(func) && !func->isAsyncContext())
-        return {ActorIsolation::forNonisolated(false /*unsafe*/),
-                IsolationSource(func, IsolationSource::LexicalContext)};
-    }
-
-    if (auto nominal = dyn_cast<NominalTypeDecl>(value)) {
-      if (nominal->isActor() && !nominal->isGlobalActor()) {
-        auto isolation = ActorIsolation::forActorInstanceSelf(value);
-        return {inferredIsolation(isolation),
-                IsolationSource(nominal, IsolationSource::LexicalContext)};
       }
     }
   }
@@ -6846,10 +6815,8 @@ ProtocolConformance *swift::deriveImplicitSendableConformance(
 
   SendableCheck check;
 
-  // Okay to infer Sendable conformance for non-public types or when
-  // specifically requested.
-  if (nominal->getASTContext().LangOpts.EnableInferPublicSendable ||
-      !nominal->getFormalAccessScope(
+  // Okay to infer Sendable conformance for non-public types.
+  if (!nominal->getFormalAccessScope(
           /*useDC=*/nullptr, /*treatUsableFromInlineAsPublic=*/true)
             .isPublic()) {
     check = SendableCheck::Implicit;

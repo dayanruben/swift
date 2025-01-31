@@ -259,10 +259,6 @@ def placeholder_dependency_module_map
   : Separate<["-"], "placeholder-dependency-module-map-file">, MetaVarName<"<path>">,
     HelpText<"Specify a JSON file containing information of external Swift module dependencies">;
 
-def batch_scan_input_file
-  : Separate<["-"], "batch-scan-input-file">, MetaVarName<"<path>">,
-    HelpText<"Specify a JSON file containing modules to perform batch dependencies scanning">;
-
 def import_prescan : Flag<["-"], "import-prescan">,
    HelpText<"When performing a dependency scan, only identify all imports of the main Swift module sources">;
 
@@ -290,9 +286,6 @@ def copy_propagation_state_EQ :
   Joined<["-"], "enable-copy-propagation=">,
   HelpText<"Whether to enable copy propagation">,
   MetaVarName<"true|requested-passes-only|false">;
-
-def enable_infer_public_concurrent_value : Flag<["-"], "enable-infer-public-sendable">,
-    HelpText<"Enable inference of Sendable conformances for public structs and enums">;
 
 def disable_infer_public_concurrent_value : Flag<["-"], "disable-infer-public-sendable">,
     HelpText<"Disable inference of Sendable conformances for public structs and enums">;
