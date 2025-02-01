@@ -1345,7 +1345,7 @@ static void diagnoseUnboundGenericType(Type ty, SourceLoc loc) {
                    decl->getName());
   } else {
     ty.findIf([&](Type t) -> bool {
-      if (auto unbound = t->getAs<UnboundGenericType>()) {
+      if (t->is<UnboundGenericType>()) {
         ctx.Diags.diagnose(loc,
             diag::generic_type_requires_arguments, t);
         return true;
@@ -6136,6 +6136,8 @@ Type TypeChecker::substMemberTypeWithBase(TypeDecl *member,
     // Cope with the presence of unbound generic types, which are ill-formed
     // at this point but break the invariants of getContextSubstitutionMap().
     if (baseTy->hasUnboundGenericType()) {
+      memberType = memberType->getReducedType(aliasDecl->getGenericSignature());
+
       if (memberType->hasTypeParameter())
         return ErrorType::get(memberType);
 

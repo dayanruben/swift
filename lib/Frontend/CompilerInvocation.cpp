@@ -2615,7 +2615,9 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   // If we're only emitting a module, stop optimizations once we've serialized
   // the SIL for the module.
   if (FEOpts.RequestedAction == FrontendOptions::ActionType::EmitModuleOnly ||
-      FEOpts.RequestedAction == FrontendOptions::ActionType::CompileModuleFromInterface)
+      FEOpts.RequestedAction ==
+          FrontendOptions::ActionType::CompileModuleFromInterface ||
+      FEOpts.RequestedAction == FrontendOptions::ActionType::EmitSIB)
     Opts.StopOptimizationAfterSerialization = true;
 
   if (Args.getLastArg(OPT_emit_empty_object_file)) {
@@ -3252,7 +3254,7 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
   if (auto A = Args.getLastArg(OPT_enable_round_trip_debug_types,
                                OPT_disable_round_trip_debug_types)) {
     Opts.DisableRoundTripDebugTypes =
-        Args.hasArg(OPT_disable_round_trip_debug_types);
+        A->getOption().matches(OPT_disable_round_trip_debug_types);
   }
 
   if (Args.hasArg(OPT_disable_debugger_shadow_copies))
