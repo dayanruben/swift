@@ -102,6 +102,11 @@ in batch file format instead of executing them.
 .PARAMETER HostArchName
 The architecture where the toolchain will execute.
 
+.PARAMETER Allocator
+The memory allocator used in the toolchain binaries, if it's
+`mimalloc`, it uses mimalloc. Otherwise, it uses the default
+allocator.
+
 .EXAMPLE
 PS> .\Build.ps1
 
@@ -138,6 +143,7 @@ param(
   [switch] $DebugInfo,
   [switch] $EnableCaching,
   [string] $Cache = "",
+  [string] $Allocator = "",
   [switch] $Summary,
   [switch] $ToBatch
 )
@@ -425,6 +431,7 @@ enum TargetComponent {
   Testing
   ClangBuiltins
   ClangRuntime
+  SwiftInspect
 }
 
 function Get-TargetProjectBinaryCache($Arch, [TargetComponent]$Project) {
@@ -452,7 +459,6 @@ enum HostComponent {
   SourceKitLSP
   SymbolKit
   DocC
-  SwiftInspect
 }
 
 function Get-HostProjectBinaryCache([HostComponent]$Project) {
@@ -1678,7 +1684,7 @@ function Build-Compilers() {
 }
 
 # Reference: https://github.com/microsoft/mimalloc/tree/dev/bin#minject
-function Build-mimalloc() {
+function Build-Mimalloc() {
   [CmdletBinding(PositionalBinding = $false)]
   param
   (
@@ -1686,48 +1692,36 @@ function Build-mimalloc() {
     [hashtable]$Arch
   )
 
-  # TODO: migrate to the CMake build
-  $MSBuildArgs = @()
+  $MSBuildArgs = @("$SourceCache\mimalloc\ide\vs2022\mimalloc.sln")
   $MSBuildArgs += "-noLogo"
   $MSBuildArgs += "-maxCpuCount"
-
-  $Properties = @{}
-  TryAdd-KeyValue $Properties Configuration Release
-  TryAdd-KeyValue $Properties OutDir "$($Arch.BinaryCache)\mimalloc\bin\"
-  TryAdd-KeyValue $Properties Platform "$($Arch.ShortName)"
+  $MSBuildArgs += "-p:Configuration=Release"
+  $MSBuildArgs += "-p:Platform=$($Arch.ShortName)"
 
   Isolate-EnvVars {
     Invoke-VsDevShell $Arch
     # Avoid hard-coding the VC tools version number
     $VCRedistDir = (Get-ChildItem "${env:VCToolsRedistDir}\$($HostArch.ShortName)" -Filter "Microsoft.VC*.CRT").FullName
     if ($VCRedistDir) {
-      TryAdd-KeyValue $Properties VCRedistDir "$VCRedistDir\"
+      $MSBuildArgs += "-p:VCRedistDir=$VCRedistDir\"
     }
   }
 
-  foreach ($Property in $Properties.GetEnumerator()) {
-    if ($Property.Value.Contains(" ")) {
-      $MSBuildArgs += "-p:$($Property.Key)=$($Property.Value.Replace('\', '\\'))"
-    } else {
-      $MSBuildArgs += "-p:$($Property.Key)=$($Property.Value)"
-    }
-  }
-
-  Invoke-Program $msbuild "$SourceCache\mimalloc\ide\vs2022\mimalloc-lib.vcxproj" @MSBuildArgs "-p:IntDir=$($Arch.BinaryCache)\mimalloc\mimalloc\"
-  Invoke-Program $msbuild "$SourceCache\mimalloc\ide\vs2022\mimalloc-override-dll.vcxproj" @MSBuildArgs "-p:IntDir=$($Arch.BinaryCache)\mimalloc\mimalloc-override-dll\"
+  Invoke-Program $msbuild @MSBuildArgs
 
   $HostSuffix = if ($Arch -eq $ArchX64) { "" } else { "-arm64" }
   $BuildSuffix = if ($BuildArch -eq $ArchX64) { "" } else { "-arm64" }
-
-  Copy-Item -Path "$($Arch.BinaryCache)\mimalloc\bin\mimalloc.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin\"
-  Copy-Item -Path "$($Arch.BinaryCache)\mimalloc\bin\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin"
+  $Products = @( "mimalloc.dll" )
+  foreach ($Product in $Products) {
+    Copy-Item -Path "$SourceCache\mimalloc\out\msvc-$($Arch.ShortName)\Release\$Product" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin"
+  }
+  Copy-Item -Path "$SourceCache\mimalloc\out\msvc-$($Arch.ShortName)\Release\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin"
   # When cross-compiling, bundle the second mimalloc redirect dll as a workaround for
   # https://github.com/microsoft/mimalloc/issues/997
   if ($IsCrossCompiling) {
-    Copy-Item -Path "$($Arch.BinaryCache)\mimalloc\bin\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin\mimalloc-redirect$BuildSuffix.dll"
+    Copy-Item -Path "$SourceCache\mimalloc\out\msvc-$($Arch.ShortName)\Release\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin\mimalloc-redirect$BuildSuffix.dll"
   }
 
-  # TODO: should we split this out into its own function?
   $Tools = @(
     "swift.exe",
     "swiftc.exe",
@@ -1744,9 +1738,9 @@ function Build-mimalloc() {
   foreach ($Tool in $Tools) {
     $Binary = [IO.Path]::Combine("$($Arch.ToolchainInstallRoot)\usr\bin", $Tool)
     # Binary-patch in place
-    Start-Process -Wait -WindowStyle Hidden -FilePath "$SourceCache\mimalloc\bin\minject$BuildSuffix" -ArgumentList @("-f", "-i", "-v", "$Binary")
+    Invoke-Program "$SourceCache\mimalloc\bin\minject$BuildSuffix" "-f" "-i" "-v" "$Binary"
     # Log the import table
-    Start-Process -Wait -WindowStyle Hidden -FilePath "$SourceCache\mimalloc\bin\minject$BuildSuffix" -ArgumentList @("-l", "$Binary")
+    Invoke-Program "$SourceCache\mimalloc\bin\minject$BuildSuffix" "-l" "$Binary"
   }
 }
 
@@ -2074,25 +2068,28 @@ function Write-SDKSettingsPlist([Platform]$Platform, $Arch) {
 }
 
 function Build-Dispatch([Platform]$Platform, $Arch, [switch]$Test = $false) {
-  if ($Test) {
-    $Targets = @("default", "ExperimentalTest")
-    $InstallPath = ""
-  } else {
-    $Targets = @("install")
-    $InstallPath = "$($Arch.SDKInstallRoot)\usr"
-  }
-
-  Build-CMakeProject `
-    -Src $SourceCache\swift-corelibs-libdispatch `
-    -Bin (Get-TargetProjectBinaryCache $Arch Dispatch) `
-    -InstallTo $InstallPath `
-    -Arch $Arch `
-    -Platform $Platform `
-    -BuildTargets $Targets `
-    -UseBuiltCompilers C,CXX,Swift `
-    -Defines @{
-      ENABLE_SWIFT = "YES";
+  Isolate-EnvVars {
+    if ($Test) {
+      $Targets = @("default", "ExperimentalTest")
+      $InstallPath = ""
+      $env:CTEST_OUTPUT_ON_FAILURE = "YES"
+    } else {
+      $Targets = @("install")
+      $InstallPath = "$($Arch.SDKInstallRoot)\usr"
     }
+
+    Build-CMakeProject `
+      -Src $SourceCache\swift-corelibs-libdispatch `
+      -Bin (Get-TargetProjectBinaryCache $Arch Dispatch) `
+      -InstallTo $InstallPath `
+      -Arch $Arch `
+      -Platform $Platform `
+      -BuildTargets $Targets `
+      -UseBuiltCompilers C,CXX,Swift `
+      -Defines @{
+        ENABLE_SWIFT = "YES";
+      }
+  }
 }
 
 function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
@@ -2879,19 +2876,34 @@ function Install-HostToolchain() {
   Copy-Item -Force $SwiftDriver "$($HostArch.ToolchainInstallRoot)\usr\bin\swiftc.exe"
 }
 
-function Build-Inspect() {
-  $SDKRoot = Get-HostSwiftSDK
+function Build-Inspect([Platform]$Platform, $Arch) {
+  if ($Arch -eq $HostArch) {
+    # When building for the host target, use the host version of the swift-argument-parser,
+    # and place the host swift-inspect executable with the other host toolchain binaries.
+    $ArgumentParserDir = Get-HostProjectCMakeModules ArgumentParser
+    $InstallPath = "$($HostArch.ToolchainInstallRoot)\usr"
+  } else {
+    # When building for non-host target, let CMake fetch the swift-argument-parser dependency
+    # since it is currently only built for the host and and cannot be built for Android until
+    # the pinned version is >= 1.5.0.
+    $ArgumentParserDir = ""
+    $InstallPath = "$($Arch.PlatformInstallRoot)\Developer\Library\$(Get-ModuleTriple $Arch)"
+  }
 
   Build-CMakeProject `
     -Src $SourceCache\swift\tools\swift-inspect `
-    -Bin (Get-HostProjectBinaryCache SwiftInspect) `
-    -InstallTo "$($HostArch.ToolchainInstallRoot)\usr" `
-    -Arch $HostArch `
+    -Bin (Get-TargetProjectBinaryCache $Arch SwiftInspect)`
+    -InstallTo $InstallPath `
+    -Arch $Arch `
+    -Platform $Platform `
     -UseBuiltCompilers C,CXX,Swift `
-    -SwiftSDK $SDKRoot `
+    -SwiftSDK $Arch.SDKInstallRoot `
     -Defines @{
-      CMAKE_Swift_FLAGS = @("-Xcc", "-I$SDKRoot\usr\include\swift\SwiftRemoteMirror");
-      ArgumentParser_DIR = (Get-HostProjectCMakeModules ArgumentParser);
+      CMAKE_Swift_FLAGS = @(
+        "-Xcc", "-I$($Arch.SDKInstallRoot)\usr\lib\swift",
+        "-Xcc", "-I$($Arch.SDKInstallRoot)\usr\include\swift\SwiftRemoteMirror",
+        "-L$($Arch.SDKInstallRoot)\usr\lib\swift\$Platform");
+      ArgumentParser_DIR = $ArgumentParserDir;
     }
 }
 
@@ -2932,13 +2944,16 @@ function Build-Installer($Arch) {
   # TODO(hjyamauchi) Re-enable the swift-inspect and swift-docc builds
   # when cross-compiling https://github.com/apple/swift/issues/71655
   $INCLUDE_SWIFT_DOCC = if ($IsCrossCompiling) { "false" } else { "true" }
+  $ENABLE_MIMALLOC = if ($Allocator -eq "mimalloc") { "true" } else { "false" }
+  # When cross-compiling, bundle the second mimalloc redirect dll as a workaround for
+  # https://github.com/microsoft/mimalloc/issues/997
+  $WORKAROUND_MIMALLOC_ISSUE_997 = if ($IsCrossCompiling) { "true" } else { "false" }
 
   $Properties = @{
     BundleFlavor = "offline";
     TOOLCHAIN_ROOT = "$($Arch.ToolchainInstallRoot)\";
-    # When cross-compiling, bundle the second mimalloc redirect dll as a workaround for
-    # https://github.com/microsoft/mimalloc/issues/997
-    WORKAROUND_MIMALLOC_ISSUE_997 = if ($IsCrossCompiling) { "true" } else { "false" };
+    ENABLE_MIMALLOC = $ENABLE_MIMALLOC;
+    WORKAROUND_MIMALLOC_ISSUE_997 = $WORKAROUND_MIMALLOC_ISSUE_997;
     INCLUDE_SWIFT_DOCC = $INCLUDE_SWIFT_DOCC;
     SWIFT_DOCC_BUILD = "$($Arch.BinaryCache)\swift-docc\release";
     SWIFT_DOCC_RENDER_ARTIFACT_ROOT = "${SourceCache}\swift-docc-render-artifact";
@@ -3053,6 +3068,12 @@ if (-not $SkipBuild) {
     Invoke-BuildStep Build-Sanitizers Android $Arch
     Invoke-BuildStep Build-XCTest Android $Arch
     Invoke-BuildStep Build-Testing Android $Arch
+
+    # Android swift-inspect only supports 64-bit platforms.
+    if ($Arch.AndroidArchABI -eq "arm64-v8a" -or
+        $Arch.AndroidArchABI -eq "x86_64") {
+      Invoke-BuildStep Build-Inspect -Platform Android -Arch $Arch
+    }
     Invoke-BuildStep Write-SDKSettingsPlist Android $Arch
     Invoke-BuildStep Write-PlatformInfoPlist $Arch
   }
@@ -3097,13 +3118,13 @@ if (-not $SkipBuild) {
   Invoke-BuildStep Build-LMDB $HostArch
   Invoke-BuildStep Build-IndexStoreDB $HostArch
   Invoke-BuildStep Build-SourceKitLSP $HostArch
-  Invoke-BuildStep Build-Inspect $HostArch
+  Invoke-BuildStep Build-Inspect Windows $HostArch
 }
 
 Install-HostToolchain
 
-if (-not $SkipBuild) {
-  Invoke-BuildStep Build-mimalloc $HostArch
+if (-not $SkipBuild -and $Allocator -eq "mimalloc") {
+  Invoke-BuildStep Build-Mimalloc $HostArch
 }
 
 if (-not $SkipBuild -and -not $IsCrossCompiling) {
