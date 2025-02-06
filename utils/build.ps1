@@ -102,11 +102,6 @@ in batch file format instead of executing them.
 .PARAMETER HostArchName
 The architecture where the toolchain will execute.
 
-.PARAMETER Allocator
-The memory allocator used in the toolchain binaries, if it's
-`mimalloc`, it uses mimalloc. Otherwise, it uses the default
-allocator.
-
 .EXAMPLE
 PS> .\Build.ps1
 
@@ -143,7 +138,6 @@ param(
   [switch] $DebugInfo,
   [switch] $EnableCaching,
   [string] $Cache = "",
-  [string] $Allocator = "",
   [switch] $Summary,
   [switch] $ToBatch
 )
@@ -225,6 +219,7 @@ $ArchX64 = @{
   BinaryCache = "$BinaryCache\x64";
   PlatformInstallRoot = "$BinaryCache\x64\Windows.platform";
   SDKInstallRoot = "$BinaryCache\x64\Windows.platform\Developer\SDKs\Windows.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\x64\Windows.platform\Developer\SDKs\WindowsExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\x64\Windows.platform\Developer\Library\XCTest-development";
   SwiftTestingInstallRoot = "$BinaryCache\x64\Windows.platform\Developer\Library\Testing-development";
   ToolchainInstallRoot = "$BinaryCache\x64\toolchains\$ProductVersion+Asserts";
@@ -242,6 +237,7 @@ $ArchX86 = @{
   BinaryCache = "$BinaryCache\x86";
   PlatformInstallRoot = "$BinaryCache\x86\Windows.platform";
   SDKInstallRoot = "$BinaryCache\x86\Windows.platform\Developer\SDKs\Windows.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\x86\Windows.platform\Developer\SDKs\WindowsExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\x86\Windows.platform\Developer\Library\XCTest-development";
   SwiftTestingInstallRoot = "$BinaryCache\x86\Windows.platform\Developer\Library\Testing-development";
   Cache = @{};
@@ -258,6 +254,7 @@ $ArchARM64 = @{
   BinaryCache = "$BinaryCache\arm64";
   PlatformInstallRoot = "$BinaryCache\arm64\Windows.platform";
   SDKInstallRoot = "$BinaryCache\arm64\Windows.platform\Developer\SDKs\Windows.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\arm64\Windows.platform\Developer\SDKs\WindowsExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\arm64\Windows.platform\Developer\Library\XCTest-development";
   ToolchainInstallRoot = "$BinaryCache\arm64\toolchains\$ProductVersion+Asserts";
   SwiftTestingInstallRoot = "$BinaryCache\arm64\Windows.platform\Developer\Library\Testing-development";
@@ -275,6 +272,7 @@ $AndroidARM64 = @{
   BinaryCache = "$BinaryCache\aarch64";
   PlatformInstallRoot = "$BinaryCache\arm64\Android.platform";
   SDKInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\SDKs\Android.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\SDKs\AndroidExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\Library\XCTest-development";
   SwiftTestingInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
@@ -291,6 +289,7 @@ $AndroidARMv7 = @{
   BinaryCache = "$BinaryCache\armv7";
   PlatformInstallRoot = "$BinaryCache\armv7\Android.platform";
   SDKInstallRoot = "$BinaryCache\armv7\Android.platform\Developer\SDKs\Android.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\SDKs\AndroidExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\armv7\Android.platform\Developer\Library\XCTest-development";
   SwiftTestingInstallRoot = "$BinaryCache\armv7\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
@@ -307,6 +306,7 @@ $AndroidX86 = @{
   BinaryCache = "$BinaryCache\i686";
   PlatformInstallRoot = "$BinaryCache\x86\Android.platform";
   SDKInstallRoot = "$BinaryCache\x86\Android.platform\Developer\SDKs\Android.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\SDKs\AndroidExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\x86\Android.platform\Developer\Library\XCTest-development";
   SwiftTestingInstallRoot = "$BinaryCache\x86\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
@@ -323,6 +323,7 @@ $AndroidX64 = @{
   BinaryCache = "$BinaryCache\x86_64";
   PlatformInstallRoot = "$BinaryCache\x64\Android.platform";
   SDKInstallRoot = "$BinaryCache\x64\Android.platform\Developer\SDKs\Android.sdk";
+  ExperimentalSDKInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\SDKs\AndroidExperimental.sdk";
   XCTestInstallRoot = "$BinaryCache\x64\Android.platform\Developer\Library\XCTest-development";
   SwiftTestingInstallRoot = "$BinaryCache\x64\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
@@ -432,6 +433,7 @@ enum TargetComponent {
   ClangBuiltins
   ClangRuntime
   SwiftInspect
+  ExperimentalRuntime
 }
 
 function Get-TargetProjectBinaryCache($Arch, [TargetComponent]$Project) {
@@ -1684,7 +1686,7 @@ function Build-Compilers() {
 }
 
 # Reference: https://github.com/microsoft/mimalloc/tree/dev/bin#minject
-function Build-Mimalloc() {
+function Build-mimalloc() {
   [CmdletBinding(PositionalBinding = $false)]
   param
   (
@@ -1692,36 +1694,48 @@ function Build-Mimalloc() {
     [hashtable]$Arch
   )
 
-  $MSBuildArgs = @("$SourceCache\mimalloc\ide\vs2022\mimalloc.sln")
+  # TODO: migrate to the CMake build
+  $MSBuildArgs = @()
   $MSBuildArgs += "-noLogo"
   $MSBuildArgs += "-maxCpuCount"
-  $MSBuildArgs += "-p:Configuration=Release"
-  $MSBuildArgs += "-p:Platform=$($Arch.ShortName)"
+
+  $Properties = @{}
+  TryAdd-KeyValue $Properties Configuration Release
+  TryAdd-KeyValue $Properties OutDir "$($Arch.BinaryCache)\mimalloc\bin\"
+  TryAdd-KeyValue $Properties Platform "$($Arch.ShortName)"
 
   Isolate-EnvVars {
     Invoke-VsDevShell $Arch
     # Avoid hard-coding the VC tools version number
     $VCRedistDir = (Get-ChildItem "${env:VCToolsRedistDir}\$($HostArch.ShortName)" -Filter "Microsoft.VC*.CRT").FullName
     if ($VCRedistDir) {
-      $MSBuildArgs += "-p:VCRedistDir=$VCRedistDir\"
+      TryAdd-KeyValue $Properties VCRedistDir "$VCRedistDir\"
     }
   }
 
-  Invoke-Program $msbuild @MSBuildArgs
+  foreach ($Property in $Properties.GetEnumerator()) {
+    if ($Property.Value.Contains(" ")) {
+      $MSBuildArgs += "-p:$($Property.Key)=$($Property.Value.Replace('\', '\\'))"
+    } else {
+      $MSBuildArgs += "-p:$($Property.Key)=$($Property.Value)"
+    }
+  }
+
+  Invoke-Program $msbuild "$SourceCache\mimalloc\ide\vs2022\mimalloc-lib.vcxproj" @MSBuildArgs "-p:IntDir=$($Arch.BinaryCache)\mimalloc\mimalloc\"
+  Invoke-Program $msbuild "$SourceCache\mimalloc\ide\vs2022\mimalloc-override-dll.vcxproj" @MSBuildArgs "-p:IntDir=$($Arch.BinaryCache)\mimalloc\mimalloc-override-dll\"
 
   $HostSuffix = if ($Arch -eq $ArchX64) { "" } else { "-arm64" }
   $BuildSuffix = if ($BuildArch -eq $ArchX64) { "" } else { "-arm64" }
-  $Products = @( "mimalloc.dll" )
-  foreach ($Product in $Products) {
-    Copy-Item -Path "$SourceCache\mimalloc\out\msvc-$($Arch.ShortName)\Release\$Product" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin"
-  }
-  Copy-Item -Path "$SourceCache\mimalloc\out\msvc-$($Arch.ShortName)\Release\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin"
+
+  Copy-Item -Path "$($Arch.BinaryCache)\mimalloc\bin\mimalloc.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin\"
+  Copy-Item -Path "$($Arch.BinaryCache)\mimalloc\bin\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin"
   # When cross-compiling, bundle the second mimalloc redirect dll as a workaround for
   # https://github.com/microsoft/mimalloc/issues/997
   if ($IsCrossCompiling) {
-    Copy-Item -Path "$SourceCache\mimalloc\out\msvc-$($Arch.ShortName)\Release\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin\mimalloc-redirect$BuildSuffix.dll"
+    Copy-Item -Path "$($Arch.BinaryCache)\mimalloc\bin\mimalloc-redirect$HostSuffix.dll" -Destination "$($Arch.ToolchainInstallRoot)\usr\bin\mimalloc-redirect$BuildSuffix.dll"
   }
 
+  # TODO: should we split this out into its own function?
   $Tools = @(
     "swift.exe",
     "swiftc.exe",
@@ -1738,9 +1752,9 @@ function Build-Mimalloc() {
   foreach ($Tool in $Tools) {
     $Binary = [IO.Path]::Combine("$($Arch.ToolchainInstallRoot)\usr\bin", $Tool)
     # Binary-patch in place
-    Invoke-Program "$SourceCache\mimalloc\bin\minject$BuildSuffix" "-f" "-i" "-v" "$Binary"
+    Start-Process -Wait -WindowStyle Hidden -FilePath "$SourceCache\mimalloc\bin\minject$BuildSuffix" -ArgumentList @("-f", "-i", "-v", "$Binary")
     # Log the import table
-    Invoke-Program "$SourceCache\mimalloc\bin\minject$BuildSuffix" "-l" "$Binary"
+    Start-Process -Wait -WindowStyle Hidden -FilePath "$SourceCache\mimalloc\bin\minject$BuildSuffix" -ArgumentList @("-l", "$Binary")
   }
 }
 
@@ -2038,6 +2052,49 @@ function Build-Runtime([Platform]$Platform, $Arch) {
         SWIFT_PATH_TO_STRING_PROCESSING_SOURCE = "$SourceCache\swift-experimental-string-processing";
         CMAKE_SHARED_LINKER_FLAGS = if ($Platform -eq "Windows") { @("/INCREMENTAL:NO", "/OPT:REF", "/OPT:ICF") } else { @() };
       })
+  }
+}
+
+function Build-ExperimentalRuntime {
+  [CmdletBinding(PositionalBinding = $false)]
+  param
+  (
+    [Parameter(Position = 0, Mandatory = $true)]
+    [Platform] $Platform,
+    [Parameter(Position = 1, Mandatory = $true)]
+    [hashtable] $Arch,
+    [switch] $Static = $false
+  )
+
+  # TODO: remove this once the migration is completed.
+  Isolate-EnvVars {
+    Invoke-VsDevShell $BuildArch
+
+    Push-Location "${SourceCache}\swift\Runtimes"
+    Start-Process -Wait -WindowStyle Hidden -FilePath cmake.exe -ArgumentList @("-P", "Resync.cmake")
+    Pop-Location
+  }
+
+  Isolate-EnvVars {
+    $env:Path = "$(Get-CMarkBinaryCache $Arch)\src;$(Get-PinnedToolchainRuntime);${env:Path}"
+
+    $CompilersBinaryCache = if ($IsCrossCompiling) {
+      Get-BuildProjectBinaryCache Compilers
+    } else {
+      Get-HostProjectBinaryCache Compilers
+    }
+
+   Build-CMakeProject `
+     -Src $SourceCache\swift\Runtimes\Core `
+     -Bin (Get-TargetProjectBinaryCache $Arch ExperimentalRuntime) `
+     -InstallTo "$($Arch.ExperimentalSDKInstallRoot)\usr" `
+     -Arch $Arch `
+     -Platform $Platform `
+     -UseBuiltCompilers C,CXX,Swift `
+     -UseGNUDriver `
+     -Defines @{
+       BUILD_SHARED_LIBS = if ($Static) { "NO" } else { "YES" };
+     }
   }
 }
 
@@ -2762,12 +2819,12 @@ function Test-SourceKitLSP {
     # indexstore-db
     "-Xswiftc", "-I$(Get-HostProjectBinaryCache IndexStoreDB)\swift",
     "-Xlinker", "-L$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB",
-    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\lib\CIndexStoreDB\CIndexStoreDB.lib",
-    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\lib\Core\Core.lib",
-    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\lib\Database\Database.lib",
-    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\lib\Index\Index.lib",
-    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\lib\LLVMSupport\LLVMSupport.lib",
-    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\lib\Support\Support.lib",
+    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB_CIndexStoreDB\CIndexStoreDB.lib",
+    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB_Core\Core.lib",
+    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB_Database\Database.lib",
+    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB_Index\Index.lib",
+    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB_LLVMSupport\LLVMSupport.lib",
+    "-Xlinker", "$(Get-HostProjectBinaryCache IndexStoreDB)\Sources\IndexStoreDB_Support\Support.lib",
     # LMDB
     "-Xlinker", "$(Get-HostProjectBinaryCache LMDB)\lib\CLMDB.lib",
     # sourcekit-lsp
@@ -2944,16 +3001,13 @@ function Build-Installer($Arch) {
   # TODO(hjyamauchi) Re-enable the swift-inspect and swift-docc builds
   # when cross-compiling https://github.com/apple/swift/issues/71655
   $INCLUDE_SWIFT_DOCC = if ($IsCrossCompiling) { "false" } else { "true" }
-  $ENABLE_MIMALLOC = if ($Allocator -eq "mimalloc") { "true" } else { "false" }
-  # When cross-compiling, bundle the second mimalloc redirect dll as a workaround for
-  # https://github.com/microsoft/mimalloc/issues/997
-  $WORKAROUND_MIMALLOC_ISSUE_997 = if ($IsCrossCompiling) { "true" } else { "false" }
 
   $Properties = @{
     BundleFlavor = "offline";
     TOOLCHAIN_ROOT = "$($Arch.ToolchainInstallRoot)\";
-    ENABLE_MIMALLOC = $ENABLE_MIMALLOC;
-    WORKAROUND_MIMALLOC_ISSUE_997 = $WORKAROUND_MIMALLOC_ISSUE_997;
+    # When cross-compiling, bundle the second mimalloc redirect dll as a workaround for
+    # https://github.com/microsoft/mimalloc/issues/997
+    WORKAROUND_MIMALLOC_ISSUE_997 = if ($IsCrossCompiling) { "true" } else { "false" };
     INCLUDE_SWIFT_DOCC = $INCLUDE_SWIFT_DOCC;
     SWIFT_DOCC_BUILD = "$($Arch.BinaryCache)\swift-docc\release";
     SWIFT_DOCC_RENDER_ARTIFACT_ROOT = "${SourceCache}\swift-docc-render-artifact";
@@ -3050,6 +3104,8 @@ if (-not $SkipBuild) {
     Invoke-BuildStep Build-Testing Windows $Arch
     Invoke-BuildStep Write-SDKSettingsPlist Windows $Arch
     Invoke-BuildStep Write-PlatformInfoPlist $Arch
+
+    Invoke-BuildStep Build-ExperimentalRuntime -Static Windows $Arch
   }
 
   foreach ($Arch in $AndroidSDKArchs) {
@@ -3076,6 +3132,8 @@ if (-not $SkipBuild) {
     }
     Invoke-BuildStep Write-SDKSettingsPlist Android $Arch
     Invoke-BuildStep Write-PlatformInfoPlist $Arch
+
+    Invoke-BuildStep Build-ExperimentalRuntime -Static Android $Arch
   }
 
   # Build Macros for distribution
@@ -3123,8 +3181,8 @@ if (-not $SkipBuild) {
 
 Install-HostToolchain
 
-if (-not $SkipBuild -and $Allocator -eq "mimalloc") {
-  Invoke-BuildStep Build-Mimalloc $HostArch
+if (-not $SkipBuild) {
+  Invoke-BuildStep Build-mimalloc $HostArch
 }
 
 if (-not $SkipBuild -and -not $IsCrossCompiling) {
