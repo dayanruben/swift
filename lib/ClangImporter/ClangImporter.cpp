@@ -1266,6 +1266,9 @@ std::optional<std::vector<std::string>> ClangImporter::getClangCC1Arguments(
   }
   CI->getFrontendOpts().ModuleMapFiles = FilteredModuleMapFiles;
 
+  // Clear clang debug flags.
+  CI->getCodeGenOpts().DwarfDebugFlags.clear();
+
   return CI->getCC1CommandLine();
 }
 
@@ -4102,15 +4105,11 @@ void ClangModuleUnit::collectLinkLibraries(
   if (clangModule->UseExportAsModuleLinkName)
     return;
 
-  for (auto clangLinkLib : clangModule->LinkLibraries) {
-    LibraryKind kind;
-    if (clangLinkLib.IsFramework)
-      kind = LibraryKind::Framework;
-    else
-      kind = LibraryKind::Library;
-
-    callback(LinkLibrary(clangLinkLib.Library, kind));
-  }
+  for (auto clangLinkLib : clangModule->LinkLibraries)
+    callback(LinkLibrary{clangLinkLib.Library,
+                         clangLinkLib.IsFramework ? LibraryKind::Framework
+                                                  : LibraryKind::Library,
+                         /*static=*/false});
 }
 
 StringRef ClangModuleUnit::getFilename() const {

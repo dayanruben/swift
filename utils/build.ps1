@@ -183,7 +183,7 @@ $VSInstallRoot = & $vswhere -nologo -latest -products "*" -all -prerelease -prop
 $msbuild = "$VSInstallRoot\MSBuild\Current\Bin\$BuildArchName\MSBuild.exe"
 
 # Hoist to global scope as this is used in two sites.
-$WiXVersion = "4.0.5"
+$WiXVersion = "4.0.6"
 
 # Avoid $env:ProgramFiles in case this script is running as x86
 $UnixToolsBinDir = "$env:SystemDrive\Program Files\Git\usr\bin"
@@ -762,7 +762,7 @@ function Fetch-Dependencies {
   }
 
   $WiXURL = "https://www.nuget.org/api/v2/package/wix/$WiXVersion"
-  $WiXHash = "DF9BDB347183716F82EFE2CECB8C54BB3554AA907A69F47A41741D6FA4D0A754"
+  $WiXHash = "A94DD42AE1FB56B32DA180E2173CEDA4F0D10B4C8871C5EE59ECB502131A1EB6"
   DownloadAndVerify $WixURL "$BinaryCache\WiX-$WiXVersion.zip" $WiXHash
   Extract-ZipFile WiX-$WiXVersion.zip $BinaryCache WiX-$WiXVersion
 
@@ -2203,6 +2203,7 @@ function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
         -Defines @{
           CMAKE_FIND_PACKAGE_PREFER_CONFIG = "YES";
           CMAKE_NINJA_FORCE_RESPONSE_FILE = "YES";
+          CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
           ENABLE_TESTING = "NO";
           FOUNDATION_BUILD_TOOLS = if ($Platform -eq "Windows") { "YES" } else { "NO" };
           CURL_DIR = "$LibraryRoot\curl-8.9.1\usr\lib\$Platform\$ShortArch\cmake\CURL";
@@ -2462,6 +2463,7 @@ function Build-System($Arch) {
     -BuildTargets default `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
     }
 }
 
@@ -2476,6 +2478,7 @@ function Build-ToolsSupportCore($Arch) {
     -SwiftSDK (Get-HostSwiftSDK) `
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
     }
 }
 
@@ -2534,6 +2537,7 @@ function Build-ArgumentParser($Arch) {
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
       BUILD_TESTING = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
     }
 }
 
@@ -2548,6 +2552,7 @@ function Build-Driver($Arch) {
     -SwiftSDK (Get-HostSwiftSDK) `
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
       TSC_DIR = (Get-HostProjectCMakeModules ToolsSupportCore);
       LLBuild_DIR = (Get-HostProjectCMakeModules LLBuild);
       ArgumentParser_DIR = (Get-HostProjectCMakeModules ArgumentParser);
@@ -2571,6 +2576,7 @@ function Build-Crypto($Arch) {
     -BuildTargets default `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
     }
 }
 
@@ -2585,6 +2591,7 @@ function Build-Collections($Arch) {
     -SwiftSDK (Get-HostSwiftSDK) `
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
     }
 }
 
@@ -2598,6 +2605,7 @@ function Build-ASN1($Arch) {
     -BuildTargets default `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
     }
 }
 
@@ -2612,6 +2620,7 @@ function Build-Certificates($Arch) {
     -BuildTargets default `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
       SwiftCrypto_DIR = (Get-HostProjectCMakeModules Crypto);
       SwiftASN1_DIR = (Get-HostProjectCMakeModules ASN1);
     }
@@ -2635,6 +2644,7 @@ function Build-PackageManager($Arch) {
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
       CMAKE_Swift_FLAGS = @("-DCRYPTO_v2");
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
       SwiftSystem_DIR = (Get-HostProjectCMakeModules System);
       TSC_DIR = (Get-HostProjectCMakeModules ToolsSupportCore);
       LLBuild_DIR = (Get-HostProjectCMakeModules LLBuild);
@@ -2661,6 +2671,7 @@ function Build-Markdown($Arch) {
     -SwiftSDK (Get-HostSwiftSDK) `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
       ArgumentParser_DIR = (Get-HostProjectCMakeModules ArgumentParser);
       "cmark-gfm_DIR" = "$($Arch.ToolchainInstallRoot)\usr\lib\cmake";
     }
@@ -2745,6 +2756,7 @@ function Build-IndexStoreDB($Arch) {
     -BuildTargets default `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
       CMAKE_C_FLAGS = @("-I$SDKInstallRoot\usr\include", "-I$SDKInstallRoot\usr\include\Block");
       CMAKE_CXX_FLAGS = @("-I$SDKInstallRoot\usr\include", "-I$SDKInstallRoot\usr\include\Block");
       LMDB_DIR = (Get-HostProjectCMakeModules LMDB);
@@ -2761,6 +2773,7 @@ function Build-SourceKitLSP($Arch) {
     -UseBuiltCompilers C,Swift `
     -SwiftSDK (Get-HostSwiftSDK) `
     -Defines @{
+      CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
       SwiftSyntax_DIR = (Get-HostProjectCMakeModules Compilers);
       TSC_DIR = (Get-HostProjectCMakeModules ToolsSupportCore);
       LLBuild_DIR = (Get-HostProjectCMakeModules LLBuild);

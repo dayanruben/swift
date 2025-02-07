@@ -904,6 +904,7 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(index_block, SUBSTITUTION_MAP_OFFSETS);
   BLOCK_RECORD(index_block, CLANG_TYPE_OFFSETS);
   BLOCK_RECORD(index_block, LOCAL_TYPE_DECLS);
+  BLOCK_RECORD(index_block, OPAQUE_RETURN_TYPE_DECLS);
   BLOCK_RECORD(index_block, PROTOCOL_CONFORMANCE_OFFSETS);
   BLOCK_RECORD(index_block, PACK_CONFORMANCE_OFFSETS);
   BLOCK_RECORD(index_block, SIL_LAYOUT_OFFSETS);
@@ -1506,14 +1507,15 @@ void Serializer::writeInputBlock() {
     }
   }
 
-  if (!Options.ModuleLinkName.empty()) {
+  if (!Options.ModuleLinkName.empty())
     LinkLibrary.emit(ScratchRecord, serialization::LibraryKind::Library,
-                     Options.AutolinkForceLoad, Options.ModuleLinkName);
-  }
-  for (auto dependentLib : Options.PublicDependentLibraries) {
+                     Options.StaticLibrary, Options.AutolinkForceLoad,
+                     Options.ModuleLinkName);
+
+  for (auto dependency : Options.PublicDependentLibraries)
     LinkLibrary.emit(ScratchRecord, serialization::LibraryKind::Library,
-                     Options.AutolinkForceLoad, dependentLib);
-  }
+                     std::get<1>(dependency), Options.AutolinkForceLoad,
+                     std::get<0>(dependency));
 }
 
 /// Translate AST default argument kind to the Serialization enum values, which
