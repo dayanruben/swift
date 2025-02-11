@@ -434,6 +434,7 @@ enum TargetComponent {
   ClangRuntime
   SwiftInspect
   ExperimentalRuntime
+  StaticFoundation
 }
 
 function Get-TargetProjectBinaryCache($Arch, [TargetComponent]$Project) {
@@ -638,7 +639,7 @@ function Invoke-VsDevShell($Arch) {
   if ($ToBatch) {
     Write-Output "call `"$VSInstallRoot\Common7\Tools\VsDevCmd.bat`" $DevCmdArguments"
   } else {
-    # This dll path is valid for VS2019 and VS2022, but it was under a vsdevcmd subfolder in VS2017 
+    # This dll path is valid for VS2019 and VS2022, but it was under a vsdevcmd subfolder in VS2017
     Import-Module "$VSInstallRoot\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
     Enter-VsDevShell -VsInstallPath $VSInstallRoot -SkipAutomaticLocation -DevCmdArguments $DevCmdArguments
 
@@ -1450,7 +1451,7 @@ function Build-WiXProject() {
   $ProductVersionArg = $ProductVersion
   if (-not $Bundle) {
     # WiX v4 will accept a semantic version string for Bundles,
-    # but Packages still require a purely numerical version number, 
+    # but Packages still require a purely numerical version number,
     # so trim any semantic versioning suffixes
     $ProductVersionArg = [regex]::Replace($ProductVersion, "[-+].*", "")
   }
@@ -1795,7 +1796,7 @@ function Build-Sanitizers([Platform]$Platform, $Arch) {
       LLVM_ENABLE_PER_TARGET_RUNTIME_DIR = "YES";
       COMPILER_RT_DEFAULT_TARGET_ONLY = "YES";
     })
-  
+
   Build-CMakeProject `
     -Src $SourceCache\llvm-project\compiler-rt `
     -Bin "$(Get-TargetProjectBinaryCache $Arch ClangRuntime)" `
@@ -2149,7 +2150,18 @@ function Build-Dispatch([Platform]$Platform, $Arch, [switch]$Test = $false) {
   }
 }
 
-function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
+function Build-Foundation {
+  [CmdletBinding(PositionalBinding = $false)]
+  param
+  (
+    [Parameter(Position = 0, Mandatory = $true)]
+    [Platform] $Platform,
+    [Parameter(Position = 1, Mandatory = $true)]
+    [hashtable] $Arch,
+    [switch] $Static = $false,
+    [switch] $Test = $false
+  )
+
   if ($Test) {
     # Foundation tests build via swiftpm rather than CMake
     $OutDir = Join-Path -Path $HostArch.BinaryCache -ChildPath swift-foundation-tests
@@ -2182,7 +2194,11 @@ function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
     }
   } else {
     $DispatchBinaryCache = Get-TargetProjectBinaryCache $Arch Dispatch
-    $FoundationBinaryCache = Get-TargetProjectBinaryCache $Arch DynamicFoundation
+    $FoundationBinaryCache = if ($Static) {
+      Get-TargetProjectBinaryCache $Arch StaticFoundation
+    } else {
+      Get-TargetProjectBinaryCache $Arch DynamicFoundation
+    }
     $ShortArch = $Arch.LLVMName
 
     Isolate-EnvVars {
@@ -2195,12 +2211,13 @@ function Build-Foundation([Platform]$Platform, $Arch, [switch]$Test = $false) {
       Build-CMakeProject `
         -Src $SourceCache\swift-corelibs-foundation `
         -Bin $FoundationBinaryCache `
-        -InstallTo "$($Arch.SDKInstallRoot)\usr" `
+        -InstallTo $(if ($Static) { "$($Arch.ExperimentalSDKInstallRoot)\usr" } else { "$($Arch.SDKInstallRoot)\usr" }) `
         -Arch $Arch `
         -Platform $Platform `
         -UseBuiltCompilers ASM,C,CXX,Swift `
         -SwiftSDK:$SDKRoot `
         -Defines @{
+          BUILD_SHARED_LIBS = if ($Static) { "NO" } else { "YES" };
           CMAKE_FIND_PACKAGE_PREFER_CONFIG = "YES";
           CMAKE_NINJA_FORCE_RESPONSE_FILE = "YES";
           CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
@@ -2719,7 +2736,7 @@ function Test-Format {
     "-Xswiftc", "-I$(Get-HostProjectBinaryCache Format)\swift",
     "-Xlinker", "-L$(Get-HostProjectBinaryCache Format)\lib"
   )
-  
+
   Isolate-EnvVars {
     $env:SWIFTFORMAT_BUILD_ONLY_TESTS=1
     # Testing swift-format is faster in serial mode than in parallel mode, probably because parallel test execution
@@ -3119,6 +3136,7 @@ if (-not $SkipBuild) {
     Invoke-BuildStep Write-PlatformInfoPlist $Arch
 
     Invoke-BuildStep Build-ExperimentalRuntime -Static Windows $Arch
+    Invoke-BuildStep Build-Foundation -Static Windows $Arch
   }
 
   foreach ($Arch in $AndroidSDKArchs) {
@@ -3147,6 +3165,7 @@ if (-not $SkipBuild) {
     Invoke-BuildStep Write-PlatformInfoPlist $Arch
 
     Invoke-BuildStep Build-ExperimentalRuntime -Static Android $Arch
+    Invoke-BuildStep Build-Foundation -Static Android $Arch
   }
 
   # Build Macros for distribution

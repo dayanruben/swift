@@ -525,9 +525,6 @@ static void ParseModuleInterfaceArgs(ModuleInterfaceOptions &Opts,
       Opts.setInterfaceMode(PrintOptions::InterfaceMode::Private);
     }
   }
-  for (auto val: Args.getAllArgValues(OPT_skip_import_in_public_interface)) {
-    Opts.ModulesToSkipInPublicInterface.push_back(val);
-  }
 }
 
 /// Checks if an arg is generally allowed to be included
@@ -3555,6 +3552,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
   }
 
   Opts.InternalizeSymbols = FrontendOpts.Static;
+
+  if (Args.hasArg(OPT_mergeable_symbols)) {
+    Opts.MergeableSymbols = true;
+  }
 
   if (Args.hasArg(OPT_disable_preallocated_instantiation_caches)) {
     Opts.NoPreallocatedInstantiationCaches = true;

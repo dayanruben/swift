@@ -766,6 +766,10 @@ def conditional_runtime_records : Flag<["-"], "conditional-runtime-records">,
   Flags<[FrontendOption, NoInteractiveOption, HelpHidden]>,
   HelpText<"Allow removal of runtime metadata records (public types, protocol conformances) based on whether they're used or unused">;
 
+def mergeable_symbols : Flag<["-"], "mergeable-symbols">,
+  Flags<[FrontendOption, NoInteractiveOption, HelpHidden]>,
+  HelpText<"Emit symbol definitions as mergeable (linkonce_odr)">;
+
 def disable_preallocated_instantiation_caches : Flag<["-"], "disable-preallocated-instantiation-caches">,
   Flags<[FrontendOption, NoInteractiveOption, HelpHidden]>,
   HelpText<"Avoid preallocating metadata instantiation caches in globals">;
@@ -1238,11 +1242,6 @@ def disable_sil_opaque_values : Flag<["-"], "disable-sil-opaque-values">,
 def new_driver_path
   : Separate<["-"], "new-driver-path">, MetaVarName<"<path>">,
   HelpText<"Path of the new driver to be used">;
-
-def skip_import_in_public_interface:
-  Separate<["-"], "skip-import-in-public-interface">,
-  HelpText<"Skip the import statement corresponding to a module name "
-           "when printing the public interface.">;
 
 def disable_fine_module_tracing:
   Flag<["-"], "disable-fine-module-tracing">,
