@@ -568,6 +568,13 @@ SWIFT_NAME("getter:BridgedDeclContext.astContext(self:)")
 BRIDGED_INLINE BridgedASTContext
 BridgedDeclContext_getASTContext(BridgedDeclContext dc);
 
+SWIFT_NAME("getter:BridgedDeclContext.parentSourceFile(self:)")
+BRIDGED_INLINE BridgedSourceFile
+BridgedDeclContext_getParentSourceFile(BridgedDeclContext dc);
+
+SWIFT_NAME("getter:BridgedSourceFile.isScriptMode(self:)")
+BRIDGED_INLINE bool BridgedSourceFile_isScriptMode(BridgedSourceFile sf);
+
 SWIFT_NAME("BridgedPatternBindingInitializer.create(declContext:)")
 BridgedPatternBindingInitializer
 BridgedPatternBindingInitializer_create(BridgedDeclContext cDeclContext);
@@ -626,12 +633,32 @@ struct BridgedAvailabilityMacroDefinition {
 
 enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedAvailabilitySpecKind {
   BridgedAvailabilitySpecKindPlatformVersionConstraint,
-  BridgedAvailabilitySpecKindOtherPlatform,
+  BridgedAvailabilitySpecKindWildcard,
   BridgedAvailabilitySpecKindLanguageVersionConstraint,
   BridgedAvailabilitySpecKindPackageDescriptionVersionConstraint,
 };
 
 struct BridgedAvailabilityDomain;
+
+SWIFT_NAME("BridgedAvailabilitySpec.createWildcard(_:loc:)")
+BridgedAvailabilitySpec
+BridgedAvailabilitySpec_createWildcard(BridgedASTContext cContext,
+                                       BridgedSourceLoc cLoc);
+
+SWIFT_NAME(
+    "BridgedAvailabilitySpec.createPlatformAgnostic(_:kind:nameLoc:version:"
+    "versionRange:)")
+BridgedAvailabilitySpec BridgedAvailabilitySpec_createPlatformAgnostic(
+    BridgedASTContext cContext, BridgedAvailabilitySpecKind cKind,
+    BridgedSourceLoc cLoc, BridgedVersionTuple cVersion,
+    BridgedSourceRange cVersionRange);
+
+SWIFT_NAME("BridgedAvailabilitySpec.createPlatformVersioned(_:platform:"
+           "platformLoc:version:versionRange:)")
+BridgedAvailabilitySpec BridgedAvailabilitySpec_createPlatformVersioned(
+    BridgedASTContext cContext, BridgedPlatformKind cPlatform,
+    BridgedSourceLoc cPlatformLoc, BridgedVersionTuple cVersion,
+    BridgedSourceRange cVersionSrcRange);
 
 SWIFT_NAME("getter:BridgedAvailabilitySpec.sourceRange(self:)")
 BridgedSourceRange
@@ -652,44 +679,6 @@ BridgedAvailabilitySpec_getVersion(BridgedAvailabilitySpec spec);
 SWIFT_NAME("getter:BridgedAvailabilitySpec.versionRange(self:)")
 BridgedSourceRange
 BridgedAvailabilitySpec_getVersionRange(BridgedAvailabilitySpec spec);
-
-SWIFT_NAME("BridgedPlatformVersionConstraintAvailabilitySpec.createParsed(_:"
-           "platform:platformLoc:version:versionRange:)")
-BridgedPlatformVersionConstraintAvailabilitySpec
-BridgedPlatformVersionConstraintAvailabilitySpec_createParsed(
-    BridgedASTContext cContext, BridgedPlatformKind cPlatform,
-    BridgedSourceLoc cPlatformLoc, BridgedVersionTuple cVersion,
-    BridgedSourceRange cVersionSrcRange);
-
-SWIFT_NAME("BridgedPlatformAgnosticVersionConstraintAvailabilitySpec."
-           "createParsed(_:kind:nameLoc:version:versionRange:)")
-BridgedPlatformAgnosticVersionConstraintAvailabilitySpec
-BridgedPlatformAgnosticVersionConstraintAvailabilitySpec_createParsed(
-    BridgedASTContext cContext, BridgedAvailabilitySpecKind cKind,
-    BridgedSourceLoc cNameLoc, BridgedVersionTuple cVersion,
-    BridgedSourceRange cVersionSrcRange);
-
-SWIFT_NAME("BridgedOtherPlatformAvailabilitySpec.createParsed(_:loc:)")
-BridgedOtherPlatformAvailabilitySpec
-BridgedOtherPlatformAvailabilitySpec_createParsed(BridgedASTContext cContext,
-                                                  BridgedSourceLoc cLoc);
-
-SWIFT_NAME("getter:BridgedPlatformVersionConstraintAvailabilitySpec."
-           "asAvailabilitySpec(self:)")
-BridgedAvailabilitySpec
-BridgedPlatformVersionConstraintAvailabilitySpec_asAvailabilitySpec(
-    BridgedPlatformVersionConstraintAvailabilitySpec spec);
-
-SWIFT_NAME("getter:BridgedPlatformAgnosticVersionConstraintAvailabilitySpec."
-           "asAvailabilitySpec(self:)")
-BridgedAvailabilitySpec
-BridgedPlatformAgnosticVersionConstraintAvailabilitySpec_asAvailabilitySpec(
-    BridgedPlatformAgnosticVersionConstraintAvailabilitySpec spec);
-
-SWIFT_NAME(
-    "getter:BridgedOtherPlatformAvailabilitySpec.asAvailabilitySpec(self:)")
-BridgedAvailabilitySpec BridgedOtherPlatformAvailabilitySpec_asAvailabilitySpec(
-    BridgedOtherPlatformAvailabilitySpec spec);
 
 struct BridgedAvailabilityDomain {
   void *_Nullable opaque;
@@ -1143,6 +1132,10 @@ struct BridgedFingerprint;
 SWIFT_NAME("BridgedDecl.attachParsedAttrs(self:_:)")
 void BridgedDecl_attachParsedAttrs(BridgedDecl decl, BridgedDeclAttributes attrs);
 
+SWIFT_NAME("BridgedDecl.forEachDeclToHoist(self:_:)")
+void BridgedDecl_forEachDeclToHoist(BridgedDecl decl,
+                                    BridgedSwiftClosure closure);
+
 enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedStaticSpelling {
   BridgedStaticSpellingNone,
   BridgedStaticSpellingStatic,
@@ -1434,19 +1427,14 @@ BridgedSubscriptDecl BridgedSubscriptDecl_createParsed(
     BridgedParameterList cParamList, BridgedSourceLoc cArrowLoc,
     BridgedTypeRepr returnType);
 
-SWIFT_NAME(
-    "BridgedTopLevelCodeDecl.createParsed(_:declContext:startLoc:stmt:endLoc:)")
-BridgedTopLevelCodeDecl BridgedTopLevelCodeDecl_createStmt(
-    BridgedASTContext cContext, BridgedDeclContext cDeclContext,
-    BridgedSourceLoc cStartLoc, BridgedStmt statement,
-    BridgedSourceLoc cEndLoc);
+SWIFT_NAME("BridgedTopLevelCodeDecl.create(_:declContext:)")
+BridgedTopLevelCodeDecl
+BridgedTopLevelCodeDecl_create(BridgedASTContext cContext,
+                               BridgedDeclContext cDeclContext);
 
-SWIFT_NAME(
-    "BridgedTopLevelCodeDecl.createParsed(_:declContext:startLoc:expr:endLoc:)")
-BridgedTopLevelCodeDecl BridgedTopLevelCodeDecl_createExpr(
-    BridgedASTContext cContext, BridgedDeclContext cDeclContext,
-    BridgedSourceLoc cStartLoc, BridgedExpr expression,
-    BridgedSourceLoc cEndLoc);
+SWIFT_NAME("BridgedTopLevelCodeDecl.setBody(self:body:)")
+void BridgedTopLevelCodeDecl_setBody(BridgedTopLevelCodeDecl cDecl,
+                                     BridgedBraceStmt cBody);
 
 SWIFT_NAME("BridgedTopLevelCodeDecl.dump(self:)")
 void BridgedTopLevelCodeDecl_dump(BridgedTopLevelCodeDecl decl);
@@ -1765,6 +1753,23 @@ BridgedMacroExpansionExpr BridgedMacroExpansionExpr_createParsed(
     BridgedSourceLoc cLeftAngleLoc, BridgedArrayRef cGenericArgs,
     BridgedSourceLoc cRightAngleLoc, BridgedNullableArgumentList cArgList);
 
+enum ENUM_EXTENSIBILITY_ATTR(open) BridgedMagicIdentifierLiteralKind : uint8_t {
+#define MAGIC_IDENTIFIER(NAME, STRING)                                         \
+  BridgedMagicIdentifierLiteralKind##NAME,
+#include "swift/AST/MagicIdentifierKinds.def"
+  BridgedMagicIdentifierLiteralKindNone,
+};
+
+SWIFT_NAME("BridgedMagicIdentifierLiteralKind.init(from:)")
+BridgedMagicIdentifierLiteralKind
+BridgedMagicIdentifierLiteralKind_fromString(BridgedStringRef cStr);
+
+SWIFT_NAME("BridgedMagicIdentifierLiteralExpr.createParsed(_:kind:loc:)")
+BridgedMagicIdentifierLiteralExpr
+BridgedMagicIdentifierLiteralExpr_createParsed(
+    BridgedASTContext cContext, BridgedMagicIdentifierLiteralKind cKind,
+    BridgedSourceLoc cLoc);
+
 SWIFT_NAME("BridgedNilLiteralExpr.createParsed(_:nilKeywordLoc:)")
 BridgedNilLiteralExpr
 BridgedNilLiteralExpr_createParsed(BridgedASTContext cContext,
@@ -2018,6 +2023,12 @@ BridgedBraceStmt BridgedBraceStmt_createParsed(BridgedASTContext cContext,
                                                BridgedSourceLoc cLBLoc,
                                                BridgedArrayRef elements,
                                                BridgedSourceLoc cRBLoc);
+
+SWIFT_NAME("BridgedBraceStmt.createImplicit(_:lBraceLoc:element:rBraceLoc:)")
+BridgedBraceStmt BridgedBraceStmt_createImplicit(BridgedASTContext cContext,
+                                                 BridgedSourceLoc cLBLoc,
+                                                 BridgedASTNode element,
+                                                 BridgedSourceLoc cRBLoc);
 
 SWIFT_NAME("BridgedBreakStmt.createParsed(_:loc:targetName:targetLoc:)")
 BridgedBreakStmt BridgedBreakStmt_createParsed(BridgedDeclContext cDeclContext,
