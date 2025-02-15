@@ -234,7 +234,6 @@ EXPERIMENTAL_FEATURE(MacrosOnImports, true)
 EXPERIMENTAL_FEATURE(TupleConformances, false)
 EXPERIMENTAL_FEATURE(FullTypedThrows, false)
 EXPERIMENTAL_FEATURE(SameElementRequirements, false)
-EXPERIMENTAL_FEATURE(Span, true)
 
 // Whether to enable @_used and @_section attributes
 EXPERIMENTAL_FEATURE(SymbolLinkageMarkers, true)
@@ -445,6 +444,9 @@ EXPERIMENTAL_FEATURE(NonIsolatedAsyncInheritsIsolationFromContext, false)
 
 /// Allow custom availability domains to be defined and referenced.
 SUPPRESSIBLE_EXPERIMENTAL_FEATURE(CustomAvailability, true)
+
+/// Be strict about the Sendable conformance of metatypes.
+EXPERIMENTAL_FEATURE(StrictSendableMetatypes, true)
 
 #undef EXPERIMENTAL_FEATURE_EXCLUDED_FROM_MODULE_INTERFACE
 #undef EXPERIMENTAL_FEATURE

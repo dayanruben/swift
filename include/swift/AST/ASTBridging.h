@@ -335,12 +335,6 @@ bool BridgedASTContext_canImport(BridgedASTContext cContext,
 // MARK: AST nodes
 //===----------------------------------------------------------------------===//
 
-enum ENUM_EXTENSIBILITY_ATTR(open) ASTNodeKind : size_t {
-  ASTNodeKindExpr,
-  ASTNodeKindStmt,
-  ASTNodeKindDecl
-};
-
 void registerBridgedDecl(BridgedStringRef bridgedClassName, SwiftMetatype metatype);
 
 struct OptionalBridgedDeclObj {
@@ -376,15 +370,52 @@ struct BridgedDeclObj {
   BRIDGED_INLINE bool Destructor_isIsolated() const;
 };
 
-struct BridgedASTNode {
-  SWIFT_NAME("raw")
-  void *_Nonnull Raw;
+enum ENUM_EXTENSIBILITY_ATTR(open) BridgedASTNodeKind : uint8_t {
+  BridgedASTNodeKindExpr,
+  BridgedASTNodeKindStmt,
+  BridgedASTNodeKindDecl
+};
 
-  SWIFT_NAME("kind")
-  ASTNodeKind Kind;
+class BridgedASTNode {
+  intptr_t opaque;
+
+  BRIDGED_INLINE BridgedASTNode(void *_Nonnull pointer,
+                                BridgedASTNodeKind kind);
+
+  void *_Nonnull getPointer() const {
+    return reinterpret_cast<void *>(opaque & ~0x7);
+  }
+
+public:
+  SWIFT_NAME("decl(_:)")
+  static BridgedASTNode createDecl(BridgedDecl d) {
+    return BridgedASTNode(d.unbridged(), BridgedASTNodeKindDecl);
+  }
+  SWIFT_NAME("stmt(_:)")
+  static BridgedASTNode createStmt(BridgedStmt s) {
+    return BridgedASTNode(s.unbridged(), BridgedASTNodeKindStmt);
+  }
+  SWIFT_NAME("expr(_:)")
+  static BridgedASTNode createExor(BridgedExpr e) {
+    return BridgedASTNode(e.unbridged(), BridgedASTNodeKindExpr);
+  }
+
+  SWIFT_UNAVAILABLE("use .kind")
+  BridgedASTNodeKind getKind() const {
+    return static_cast<BridgedASTNodeKind>(opaque & 0x7);
+  }
+
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedExpr castToExpr() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedStmt castToStmt() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedDecl castToDecl() const;
 
   BRIDGED_INLINE swift::ASTNode unbridged() const;
 };
+
+SWIFT_NAME("getter:BridgedASTNode.kind(self:)")
+inline BridgedASTNodeKind BridgedASTNode_getKind(BridgedASTNode node) {
+  return node.getKind();
+}
 
 // Declare `.asDecl` on each BridgedXXXDecl type, which upcasts a wrapper for
 // a Decl subclass to a BridgedDecl.
@@ -443,6 +474,15 @@ struct BridgedASTNode {
   BridgedDeclAttribute Bridged##CLASS##Attr_asDeclAttribute(                   \
       Bridged##CLASS##Attr attr);
 #include "swift/AST/DeclAttr.def"
+
+// Declare `.asTypeAttr` on each BridgedXXXTypeAttr type, which upcasts a
+// wrapper for a TypeAttr subclass to a BridgedTypeAttr.
+#define SIMPLE_TYPE_ATTR(...)
+#define TYPE_ATTR(SPELLING, CLASS)                                             \
+  SWIFT_NAME("getter:Bridged" #CLASS "TypeAttr.asTypeAttribute(self:)")        \
+  BridgedTypeAttribute Bridged##CLASS##TypeAttr_asTypeAttribute(               \
+      Bridged##CLASS##TypeAttr attr);
+#include "swift/AST/TypeAttr.def"
 
 struct BridgedPatternBindingEntry {
   BridgedPattern pattern;
@@ -755,18 +795,17 @@ BridgedAvailableAttr BridgedAvailableAttr_createParsed(
     BridgedSourceRange cDeprecatedRange, BridgedVersionTuple cObsoleted,
     BridgedSourceRange cObsoletedRange);
 
-SWIFT_NAME(
-    "BridgedAvailableAttr.createParsed(_:atLoc:range:domainString:domainLoc:kind:message:"
-    "renamed:introduced:introducedRange:deprecated:deprecatedRange:"
-    "obsoleted:obsoletedRange:)")
-BridgedAvailableAttr BridgedAvailableAttr_createParsedStr(
+SWIFT_NAME("BridgedAvailableAttr.createParsed(_:atLoc:range:domainIdentifier:"
+           "domainLoc:kind:message:renamed:introduced:introducedRange:"
+           "deprecated:deprecatedRange:obsoleted:obsoletedRange:)")
+BridgedAvailableAttr BridgedAvailableAttr_createParsedIdentifier(
     BridgedASTContext cContext, BridgedSourceLoc cAtLoc,
-    BridgedSourceRange cRange, BridgedStringRef cDomainString, BridgedSourceLoc cDomainLoc,
-    BridgedAvailableAttrKind cKind, BridgedStringRef cMessage,
-    BridgedStringRef cRenamed, BridgedVersionTuple cIntroduced,
-    BridgedSourceRange cIntroducedRange, BridgedVersionTuple cDeprecated,
-    BridgedSourceRange cDeprecatedRange, BridgedVersionTuple cObsoleted,
-    BridgedSourceRange cObsoletedRange);
+    BridgedSourceRange cRange, BridgedIdentifier cDomainIdentifier,
+    BridgedSourceLoc cDomainLoc, BridgedAvailableAttrKind cKind,
+    BridgedStringRef cMessage, BridgedStringRef cRenamed,
+    BridgedVersionTuple cIntroduced, BridgedSourceRange cIntroducedRange,
+    BridgedVersionTuple cDeprecated, BridgedSourceRange cDeprecatedRange,
+    BridgedVersionTuple cObsoleted, BridgedSourceRange cObsoletedRange);
 
 enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedExecutionKind {
   BridgedExecutionKindConcurrent,
@@ -1775,6 +1814,21 @@ BridgedNilLiteralExpr
 BridgedNilLiteralExpr_createParsed(BridgedASTContext cContext,
                                    BridgedSourceLoc cNilKeywordLoc);
 
+enum ENUM_EXTENSIBILITY_ATTR(open) BridgedObjectLiteralKind : size_t {
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto) BridgedObjectLiteralKind_##Name,
+#include "swift/AST/TokenKinds.def"
+  BridgedObjectLiteralKind_none,
+};
+
+SWIFT_NAME("BridgedObjectLiteralKind.init(from:)")
+BridgedObjectLiteralKind
+BridgedObjectLiteralKind_fromString(BridgedStringRef cStr);
+
+SWIFT_NAME("BridgedObjectLiteralExpr.createParsed(_:poundLoc:kind:args:)")
+BridgedObjectLiteralExpr BridgedObjectLiteralExpr_createParsed(
+    BridgedASTContext cContext, BridgedSourceLoc cPoundLoc,
+    BridgedObjectLiteralKind cKind, BridgedArgumentList args);
+
 SWIFT_NAME("BridgedOptionalTryExpr.createParsed(_:tryLoc:subExpr:questionLoc:)")
 BridgedOptionalTryExpr BridgedOptionalTryExpr_createParsed(
     BridgedASTContext cContext, BridgedSourceLoc cTryLoc, BridgedExpr cSubExpr,
@@ -2200,11 +2254,20 @@ enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedIsolatedTypeAttrIsolationKind {
   BridgedIsolatedTypeAttrIsolationKind_DynamicIsolation,
 };
 
-SWIFT_NAME("BridgedTypeAttribute.createIsolated(_:atLoc:nameLoc:lpLoc:isolationKindLoc:isolationKind:rpLoc:)")
-BridgedTypeAttribute BridgedTypeAttribute_createIsolated(
-    BridgedASTContext cContext,
-    BridgedSourceLoc cAtLoc, BridgedSourceLoc cNameLoc,
-    BridgedSourceLoc cLPLoc, BridgedSourceLoc cIsolationLoc,
+SWIFT_NAME("BridgedConventionTypeAttr.createParsed(_:atLoc:nameLoc:parensRange:"
+           "name:nameLoc:witnessMethodProtocol:clangType:clangTypeLoc:)")
+BridgedConventionTypeAttr BridgedConventionTypeAttr_createParsed(
+    BridgedASTContext cContext, BridgedSourceLoc cAtLoc,
+    BridgedSourceLoc cKwLoc, BridgedSourceRange cParens, BridgedStringRef cName,
+    BridgedSourceLoc cNameLoc, BridgedDeclNameRef cWitnessMethodProtocol,
+    BridgedStringRef cClangType, BridgedSourceLoc cClangTypeLoc);
+
+SWIFT_NAME("BridgedIsolatedTypeAttr.createParsed(_:atLoc:nameLoc:lpLoc:"
+           "isolationKindLoc:isolationKind:rpLoc:)")
+BridgedIsolatedTypeAttr BridgedIsolatedTypeAttr_createParsed(
+    BridgedASTContext cContext, BridgedSourceLoc cAtLoc,
+    BridgedSourceLoc cNameLoc, BridgedSourceLoc cLPLoc,
+    BridgedSourceLoc cIsolationLoc,
     BridgedIsolatedTypeAttrIsolationKind cIsolation, BridgedSourceLoc cRPLoc);
 
 enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedExecutionTypeAttrExecutionKind {
@@ -2212,11 +2275,12 @@ enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedExecutionTypeAttrExecutionKind {
   BridgedExecutionTypeAttrExecutionKind_Caller
 };
 
-SWIFT_NAME("BridgedTypeAttribute.createExecution(_:atLoc:nameLoc:lpLoc:behaviorLoc:behavior:rpLoc:)")
-BridgedTypeAttribute BridgedTypeAttribute_createExecution(
-    BridgedASTContext cContext,
-    BridgedSourceLoc cAtLoc, BridgedSourceLoc cNameLoc,
-    BridgedSourceLoc cLPLoc, BridgedSourceLoc cBehaviorLoc,
+SWIFT_NAME("BridgedExecutionTypeAttr.createParsed(_:atLoc:nameLoc:lpLoc:"
+           "behaviorLoc:behavior:rpLoc:)")
+BridgedExecutionTypeAttr BridgedExecutionTypeAttr_createParsed(
+    BridgedASTContext cContext, BridgedSourceLoc cAtLoc,
+    BridgedSourceLoc cNameLoc, BridgedSourceLoc cLPLoc,
+    BridgedSourceLoc cBehaviorLoc,
     BridgedExecutionTypeAttrExecutionKind behavior, BridgedSourceLoc cRPLoc);
 
 //===----------------------------------------------------------------------===//

@@ -5607,6 +5607,10 @@ ERROR(non_sendable_isolated_capture,none,
       "capture of %1 with non-sendable type %0 in an isolated "
       "%select{local function|closure}2",
       (Type, DeclName, bool))
+ERROR(non_sendable_metatype_capture,none,
+      "capture of non-sendable type %0 in an isolated "
+      "%select{local function|closure}1",
+      (Type, bool))
 ERROR(self_capture_deinit_task,none,
       "capture of 'self' in a closure that outlives deinit",
       ())
@@ -5839,11 +5843,12 @@ ERROR(any_not_existential,none,
 ERROR(incorrect_optional_any,none,
       "optional 'any' type must be written %0",
       (Type))
-ERROR(existential_requires_any,none,
-      "use of %select{protocol |}2%0 as a type must be written %1",
-      (Type, Type, bool))
-ERROR(inverse_requires_any,none,
-      "constraint that suppresses conformance requires 'any'", ())
+
+GROUPED_ERROR(existential_requires_any,ExistentialAny,none,
+              "use of %select{protocol |}2%0 as a type must be written %1",
+              (Type, Type, bool))
+GROUPED_ERROR(inverse_requires_any,ExistentialAny,none,
+              "constraint that suppresses conformance requires 'any'", ())
 
 ERROR(nonisolated_mutable_storage,none,
       "'nonisolated' cannot be applied to mutable stored properties",
@@ -7975,10 +7980,6 @@ ERROR(noncopyable_types_cannot_be_resilient, none,
 ERROR(noncopyable_cannot_have_read_set_accessor,none,
       "noncopyable %select{variable|subscript}0 cannot provide a read and set accessor",
       (unsigned))
-
-ERROR(span_requires_feature_flag,none,
-      "'%0' requires -enable-experimental-feature Span",
-      (StringRef))
 
 //------------------------------------------------------------------------------
 // MARK: Init accessors
