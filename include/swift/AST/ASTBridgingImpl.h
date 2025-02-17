@@ -40,7 +40,6 @@ swift::Identifier BridgedIdentifier::unbridged() const {
   return swift::Identifier::getFromOpaquePointer(Raw);
 }
 
-SWIFT_NAME("getter:BridgedIdentifier.isOperator(self:)")
 bool BridgedIdentifier_isOperator(const BridgedIdentifier ident) {
   return ident.unbridged().isOperator();
 }
@@ -107,7 +106,6 @@ BridgedASTContext BridgedASTContext_fromRaw(void * _Nonnull ptr) {
   return *static_cast<swift::ASTContext *>(ptr);
 }
 
-BRIDGED_INLINE
 void *_Nullable BridgedASTContext_allocate(BridgedASTContext bridged,
                                            size_t size, size_t alignment) {
   return bridged.unbridged().Allocate(size, alignment);
@@ -117,6 +115,12 @@ BridgedStringRef BridgedASTContext_allocateCopyString(BridgedASTContext bridged,
                                                       BridgedStringRef cStr) {
   return bridged.unbridged().AllocateCopy(cStr.unbridged());
 }
+
+#define IDENTIFIER_WITH_NAME(Name, _) \
+BridgedIdentifier BridgedASTContext_id_##Name(BridgedASTContext bridged) { \
+return bridged.unbridged().Id_##Name; \
+}
+#include "swift/AST/KnownIdentifiers.def"
 
 //===----------------------------------------------------------------------===//
 // MARK: BridgedDeclContext
@@ -157,7 +161,7 @@ BridgedDeclContext_getParentSourceFile(BridgedDeclContext dc) {
 // MARK: BridgedSoureFile
 //===----------------------------------------------------------------------===//
 
-BRIDGED_INLINE bool BridgedSourceFile_isScriptMode(BridgedSourceFile sf) {
+bool BridgedSourceFile_isScriptMode(BridgedSourceFile sf) {
   return sf.unbridged()->isScriptMode();
 }
 
@@ -629,6 +633,20 @@ swift::StmtConditionElement BridgedStmtConditionElement::unbridged() const {
   return swift::StmtConditionElement::fromOpaqueValue(Raw);
 }
 
+//===----------------------------------------------------------------------===//
+// MARK: BridgedCaptureListEntry
+//===----------------------------------------------------------------------===//
+
+BridgedCaptureListEntry::BridgedCaptureListEntry(swift::CaptureListEntry CLE)
+    : PBD(CLE.PBD) {}
+
+swift::CaptureListEntry BridgedCaptureListEntry::unbridged() const {
+  return swift::CaptureListEntry(PBD);
+}
+
+BridgedVarDecl BridegedCaptureListEntry_getVar(BridgedCaptureListEntry entry) {
+  return entry.unbridged().getVar();
+}
 
 SWIFT_END_NULLABILITY_ANNOTATIONS
 
