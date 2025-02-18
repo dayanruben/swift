@@ -2040,8 +2040,7 @@ namespace {
       if (Impl.SwiftContext.LangOpts.hasFeature(Feature::LifetimeDependence)) {
         fd->getAttrs().add(new (Impl.SwiftContext)
                                UnsafeNonEscapableResultAttr(/*Implicit=*/true));
-        if (Impl.SwiftContext.LangOpts.hasFeature(Feature::SafeInterop) &&
-            Impl.SwiftContext.LangOpts.hasFeature(
+        if (Impl.SwiftContext.LangOpts.hasFeature(
                 Feature::AllowUnsafeAttribute))
           fd->getAttrs().add(new (Impl.SwiftContext)
                                  UnsafeAttr(/*Implicit=*/true));
@@ -2203,8 +2202,7 @@ namespace {
 
       // We have to do this after populating ImportedDecls to avoid importing
       // the same multiple times.
-      if (Impl.SwiftContext.LangOpts.hasFeature(Feature::SafeInterop) &&
-          Impl.SwiftContext.LangOpts.hasFeature(
+      if (Impl.SwiftContext.LangOpts.hasFeature(
               Feature::AllowUnsafeAttribute)) {
         if (const auto *ctsd =
                 dyn_cast<clang::ClassTemplateSpecializationDecl>(decl)) {
@@ -2246,7 +2244,7 @@ namespace {
       bool isNonEscapable = false;
       if (evaluateOrDefault(
               Impl.SwiftContext.evaluator,
-              ClangTypeEscapability({decl->getTypeForDecl(), Impl}),
+              ClangTypeEscapability({decl->getTypeForDecl(), &Impl}),
               CxxEscapability::Unknown) == CxxEscapability::NonEscapable) {
         result->getAttrs().add(new (Impl.SwiftContext)
                                    NonEscapableAttr(/*Implicit=*/true));
@@ -3922,8 +3920,7 @@ namespace {
             /*failable=*/false, /*FailabilityLoc=*/SourceLoc(),
             /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
             /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
-            /*ThrownType=*/TypeLoc(), bodyParams, genericParams, dc,
-            /*LifetimeDependentTypeRepr*/ nullptr);
+            /*ThrownType=*/TypeLoc(), bodyParams, genericParams, dc);
       } else {
         auto resultTy = importedType.getType();
 
@@ -4012,10 +4009,10 @@ namespace {
                                               /*isImmortal*/ true);
       if (const auto *funDecl = dyn_cast<FuncDecl>(result))
         if (hasUnsafeAPIAttr(decl) && !funDecl->getResultInterfaceType()->isEscapable()) {
+          lifetimeDependencies.push_back(immortalLifetime);
           Impl.SwiftContext.evaluator.cacheOutput(
               LifetimeDependenceInfoRequest{result},
               Impl.SwiftContext.AllocateCopy(lifetimeDependencies));
-          lifetimeDependencies.push_back(immortalLifetime);
           return;
         }
 
@@ -4119,7 +4116,7 @@ namespace {
             evaluateOrDefault(
                 Impl.SwiftContext.evaluator,
                 ClangTypeEscapability(
-                    {ctordecl->getParent()->getTypeForDecl(), Impl}),
+                    {ctordecl->getParent()->getTypeForDecl(), &Impl}),
                 CxxEscapability::Unknown) == CxxEscapability::NonEscapable)
           lifetimeDependencies.push_back(immortalLifetime);
       }
@@ -4136,8 +4133,7 @@ namespace {
             LifetimeDependenceInfoRequest{result},
             Impl.SwiftContext.AllocateCopy(lifetimeDependencies));
       }
-      if (ASTContext.LangOpts.hasFeature(Feature::AllowUnsafeAttribute) &&
-          ASTContext.LangOpts.hasFeature(Feature::SafeInterop)) {
+      if (ASTContext.LangOpts.hasFeature(Feature::AllowUnsafeAttribute)) {
         for (auto [idx, param] : llvm::enumerate(decl->parameters())) {
           if (swiftParams->get(idx)->getInterfaceType()->isEscapable())
             continue;
@@ -6734,8 +6730,7 @@ Decl *SwiftDeclConverter::importGlobalAsInitializer(
       /*FailabilityLoc=*/SourceLoc(),
       /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
       /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(), /*ThrownType=*/TypeLoc(),
-      parameterList, /*GenericParams=*/nullptr, dc,
-      /*LifetimeDependentTypeRepr*/ nullptr);
+      parameterList, /*GenericParams=*/nullptr, dc);
   result->setImplicitlyUnwrappedOptional(isIUO);
   result->getASTContext().evaluator.cacheOutput(InitKindRequest{result},
                                                 std::move(initKind));
@@ -7262,8 +7257,7 @@ ConstructorDecl *SwiftDeclConverter::importConstructor(
       /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
       /*Throws=*/importedName.getErrorInfo().has_value(),
       /*ThrowsLoc=*/SourceLoc(), /*ThrownType=*/TypeLoc(), bodyParams,
-      /*GenericParams=*/nullptr, const_cast<DeclContext *>(dc),
-      /*LifetimeDependentTypeRepr*/ nullptr);
+      /*GenericParams=*/nullptr, const_cast<DeclContext *>(dc));
 
   addObjCAttribute(result, selector);
   recordMemberInContext(dc, result);
@@ -8503,13 +8497,11 @@ static bool importAsUnsafe(ClangImporter::Implementation &impl,
                            const clang::NamedDecl *decl,
                            const Decl *MappedDecl) {
   auto &context = impl.SwiftContext;
-  if (!context.LangOpts.hasFeature(Feature::SafeInterop) ||
-      !context.LangOpts.hasFeature(Feature::AllowUnsafeAttribute))
+  if (!context.LangOpts.hasFeature(Feature::AllowUnsafeAttribute))
     return false;
 
   if (isa<clang::CXXMethodDecl>(decl) &&
-      !evaluateOrDefault(context.evaluator, IsSafeUseOfCxxDecl({decl, context}),
-                         {}))
+      !evaluateOrDefault(context.evaluator, IsSafeUseOfCxxDecl({decl}), {}))
     return true;
 
   if (isa<ClassDecl>(MappedDecl))
@@ -8525,7 +8517,7 @@ static bool importAsUnsafe(ClangImporter::Implementation &impl,
   if (const auto *record = dyn_cast<clang::RecordDecl>(decl))
     return evaluateOrDefault(
                context.evaluator,
-               ClangTypeEscapability({record->getTypeForDecl(), impl, false}),
+               ClangTypeEscapability({record->getTypeForDecl(), &impl, false}),
                CxxEscapability::Unknown) == CxxEscapability::Unknown;
 
   return false;

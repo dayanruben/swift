@@ -1150,6 +1150,14 @@ ExplicitSafety Decl::getExplicitSafety() const {
   if (auto safety = getExplicitSafetyFromAttrs(this))
     return *safety;
 
+  // If this declaration is from C, ask the Clang importer.
+  if (auto clangDecl = getClangDecl()) {
+    ASTContext &ctx = getASTContext();
+    return evaluateOrDefault(ctx.evaluator,
+                             ClangDeclExplicitSafety({clangDecl}),
+                             ExplicitSafety::Unspecified);
+  }
+  
   // Inference: Check the enclosing context.
   if (auto enclosingDC = getDeclContext()) {
     // Is this an extension with @safe or @unsafe on it?
@@ -3994,8 +4002,6 @@ TypeRepr *ValueDecl::getResultTypeRepr() const {
     returnRepr = SD->getElementTypeRepr();
   } else if (auto *MD = dyn_cast<MacroDecl>(this)) {
     returnRepr = MD->resultType.getTypeRepr();
-  } else if (auto *CD = dyn_cast<ConstructorDecl>(this)) {
-    returnRepr = CD->getResultTypeRepr();
   }
 
   return returnRepr;
@@ -6665,11 +6671,9 @@ bool EnumDecl::hasOnlyCasesWithoutAssociatedValues() const {
   bool hasAssociatedValues = false;
 
   for (auto elt : getAllElements()) {
-    for (auto Attr : elt->getAttrs()) {
-      if (auto AvAttr = dyn_cast<AvailableAttr>(Attr)) {
-        if (!AvAttr->isInvalid())
-          hasAnyUnavailableValues = true;
-      }
+    for (auto Attr : elt->getSemanticAvailableAttrs()) {
+      // FIXME: [availability] Deprecation doesn't make an element unavailable
+      hasAnyUnavailableValues = true;
     }
 
     if (!elt->isAvailableDuringLowering())
@@ -10500,10 +10504,6 @@ void FuncDecl::setResultInterfaceType(Type type) {
                                         std::move(type));
 }
 
-void FuncDecl::setDeserializedResultTypeLoc(TypeLoc ResultTyR) {
-  FnRetType = ResultTyR;
-}
-
 FuncDecl *FuncDecl::createImpl(ASTContext &Context,
                                SourceLoc StaticLoc,
                                StaticSpellingKind StaticSpelling,
@@ -10941,7 +10941,7 @@ ConstructorDecl::ConstructorDecl(DeclName Name, SourceLoc ConstructorLoc,
                                  TypeLoc ThrownType,
                                  ParameterList *BodyParams,
                                  GenericParamList *GenericParams,
-                                 DeclContext *Parent, TypeRepr *ResultTyR)
+                                 DeclContext *Parent)
   : AbstractFunctionDecl(DeclKind::Constructor, Parent, Name, ConstructorLoc,
                          Async, AsyncLoc, Throws, ThrowsLoc, ThrownType,
                          /*HasImplicitSelfDecl=*/true,
@@ -10952,7 +10952,6 @@ ConstructorDecl::ConstructorDecl(DeclName Name, SourceLoc ConstructorLoc,
   if (BodyParams)
     setParameters(BodyParams);
 
-  InitRetType = TypeLoc(ResultTyR);
   Bits.ConstructorDecl.HasStubImplementation = 0;
   Bits.ConstructorDecl.Failable = Failable;
 
@@ -10973,14 +10972,9 @@ ConstructorDecl *ConstructorDecl::createImported(
                       failable, failabilityLoc, 
                       async, asyncLoc,
                       throws, throwsLoc, TypeLoc::withoutLoc(thrownType),
-                      bodyParams, genericParams, parent,
-                      /*LifetimeDependenceTypeRepr*/ nullptr);
+                      bodyParams, genericParams, parent);
   ctor->setClangNode(clangNode);
   return ctor;
-}
-
-void ConstructorDecl::setDeserializedResultTypeLoc(TypeLoc ResultTyR) {
-  InitRetType = ResultTyR;
 }
 
 bool ConstructorDecl::isObjCZeroParameterWithLongSelector() const {
