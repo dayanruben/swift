@@ -6345,6 +6345,17 @@ ERROR(invalid_objc_swift_rooted_class,none,
 NOTE(invalid_objc_swift_root_class_insert_nsobject,none,
      "inherit from 'NSObject' to silence this error", ())
 
+WARNING(objc_header_sorting_arbitrary,none,
+        "arbitrarily printing %0 before %1 in generated header; subsequent "
+        "compilations may print them in a different order",
+        (Decl *, Decl *))
+NOTE(objc_header_sorting_arbitrary_other,none,
+     "%1 will be printed after %0 during this compilation",
+     (Decl *, Decl *))
+NOTE(objc_header_sorting_arbitrary_please_report,none,
+     "please report this as a bug in the Swift compiler and describe both "
+     "declarations", ())
+
 ERROR(invalid_nonobjc_decl,none,
       "only class members and extensions of classes can be declared @nonobjc", ())
 ERROR(invalid_nonobjc_extension,none,
@@ -6962,6 +6973,22 @@ GROUPED_WARNING(conformance_availability_deprecated,
 ERROR(conformance_availability_only_version_newer, none,
       "conformance of %0 to %1 is only available in %2 %3 or newer",
       (Type, Type, StringRef, llvm::VersionTuple))
+
+ERROR(availability_must_occur_alone, none,
+      "'%0' version-availability must be specified alone", (StringRef))
+
+//------------------------------------------------------------------------------
+// MARK: if #available(...)
+//------------------------------------------------------------------------------
+
+ERROR(availability_query_swift_not_allowed, none,
+      "Swift language version checks not allowed in %0(...)", (StringRef))
+
+ERROR(availability_query_package_description_not_allowed, none,
+      "PackageDescription version checks not allowed in %0(...)", (StringRef))
+
+ERROR(availability_query_repeated_platform, none,
+      "version for '%0' already specified", (StringRef))
 
 //------------------------------------------------------------------------------
 // MARK: @discardableResult
@@ -8273,32 +8300,27 @@ ERROR(attr_execution_type_attr_only_on_async,none,
       "cannot use '@execution' on non-async function type",
       ())
 
-ERROR(attr_execution_concurrent_incompatible_isolated_parameter,none,
-      "cannot use '@execution(concurrent)' on %kind0 because it has "
+ERROR(attr_execution_incompatible_isolated_parameter,none,
+      "cannot use '@execution' on %kind0 because it has "
       "an isolated parameter: %1",
       (ValueDecl *, ValueDecl *))
 
-ERROR(attr_execution_concurrent_incompatible_dynamically_isolated_parameter,none,
-      "cannot use '@execution(concurrent)' on %kind0 because it has "
+ERROR(attr_execution_incompatible_dynamically_isolated_parameter,none,
+      "cannot use '@execution' on %kind0 because it has "
       "a dynamically isolated parameter: %1",
       (ValueDecl *, ValueDecl *))
 
-ERROR(attr_execution_concurrent_incompatible_with_nonisolated,none,
-      "cannot use '@execution(concurrent)' and 'nonisolated' on the same %0 "
-      "because they serve the same purpose",
-      (ValueDecl *))
-
-ERROR(attr_execution_concurrent_type_attr_incompatible_with_global_isolation,none,
-      "cannot use '@execution(concurrent)' because function type is "
-      "isolated to global actor %0",
+ERROR(attr_execution_type_attr_incompatible_with_global_isolation,none,
+      "cannot use '@execution' because function type is "
+      "isolated to a global actor %0",
       (Type))
 
-ERROR(attr_execution_concurrent_type_attr_incompatible_with_isolated_param,none,
-      "cannot use '@execution(concurrent)' together with isolated parameter",
+ERROR(attr_execution_type_attr_incompatible_with_isolated_param,none,
+      "cannot use '@execution' together with an isolated parameter",
       ())
 
-ERROR(attr_execution_concurrent_type_attr_incompatible_with_isolated_any,none,
-      "cannot use '@execution(concurrent)' together with @isolated(any)",
+ERROR(attr_execution_type_attr_incompatible_with_isolated_any,none,
+      "cannot use '@execution' together with @isolated(any)",
       ())
 
 

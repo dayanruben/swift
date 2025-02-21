@@ -25,6 +25,7 @@
 #include "swift/AST/ASTNode.h"
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/DiagnosticsFrontend.h"
+#include "swift/AST/DiagnosticsParse.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/FreestandingMacroExpansion.h"
 #include "swift/AST/MacroDefinition.h"
@@ -200,7 +201,7 @@ MacroDefinition MacroDefinitionRequest::evaluate(
   if (!typeCheckedType)
     return MacroDefinition::forInvalid();
 
-  // If the expanded macro was one of the the magic literal expressions
+  // If the expanded macro was one of the magic literal expressions
   // (like #file), there's nothing to expand.
   if (isa<MagicIdentifierLiteralExpr>(definition)) {
     StringRef expansionText = externalMacroName.unbridged();
