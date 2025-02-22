@@ -151,6 +151,7 @@ BASELINE_LANGUAGE_FEATURE(BuiltinBuildExecutor, 0, "Executor-building builtins")
 BASELINE_LANGUAGE_FEATURE(BuiltinBuildComplexEqualityExecutor, 0, "Executor-building for 'complexEquality executor' builtins")
 BASELINE_LANGUAGE_FEATURE(BuiltinBuildMainExecutor, 0, "MainActor executor building builtin")
 BASELINE_LANGUAGE_FEATURE(BuiltinCreateAsyncTaskOwnedTaskExecutor, 0, "Task create with owned TaskExecutor")
+BASELINE_LANGUAGE_FEATURE(BuiltinCreateAsyncTaskName, 0, "Task create with a name")
 BASELINE_LANGUAGE_FEATURE(BuiltinCreateAsyncTaskInGroup, 0, "Task create in task group builtin with extra flags")
 BASELINE_LANGUAGE_FEATURE(BuiltinCreateAsyncTaskInGroupWithExecutor, 0, "Task create in task group builtin with extra flags")
 BASELINE_LANGUAGE_FEATURE(BuiltinCreateAsyncDiscardingTaskInGroup, 0, "Task create in discarding task group builtin, accounting for the Void return type")
@@ -436,9 +437,13 @@ SUPPRESSIBLE_EXPERIMENTAL_FEATURE(AddressableTypes, true)
 /// Allow the @abi attribute.
 SUPPRESSIBLE_EXPERIMENTAL_FEATURE(ABIAttribute, true)
 
+/// Allow the @execution attribute. This is also connected to
+/// AsyncCallerExecution feature.
+SUPPRESSIBLE_EXPERIMENTAL_FEATURE(ExecutionAttribute, false)
+
 /// Functions with nonisolated isolation inherit their isolation from the
 /// calling context.
-EXPERIMENTAL_FEATURE(NonIsolatedAsyncInheritsIsolationFromContext, false)
+EXPERIMENTAL_FEATURE(AsyncCallerExecution, false)
 
 /// Allow custom availability domains to be defined and referenced.
 SUPPRESSIBLE_EXPERIMENTAL_FEATURE(CustomAvailability, true)
