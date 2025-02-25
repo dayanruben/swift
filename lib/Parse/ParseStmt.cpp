@@ -1292,48 +1292,18 @@ static void
 validateAvailabilitySpecList(Parser &P,
                              const SmallVectorImpl<AvailabilitySpec *> &Specs,
                              Parser::AvailabilitySpecSource Source) {
-  std::optional<SourceLoc> WildcardSpecLoc = std::nullopt;
+  if (Source != Parser::AvailabilitySpecSource::Macro)
+    return;
 
-  if (Specs.size() == 1) {
-    // @available(swift N) and @available(_PackageDescription N) are allowed
-    // only in isolation; they cannot be combined with other availability specs
-    // in a single list.
-    auto domain = Specs[0]->getDomain();
-    if (domain && !domain->isPlatform())
-      return;
-  }
-
+  std::optional<SourceLoc> WildcardSpecLoc;
   for (auto *Spec : Specs) {
     if (Spec->isWildcard()) {
       WildcardSpecLoc = Spec->getStartLoc();
     }
   }
 
-  switch (Source) {
-  case Parser::AvailabilitySpecSource::Available: {
-    if (WildcardSpecLoc == std::nullopt) {
-      SourceLoc InsertWildcardLoc = P.PreviousLoc;
-      P.diagnose(InsertWildcardLoc, diag::availability_query_wildcard_required)
-        .fixItInsertAfter(InsertWildcardLoc, ", *");
-    }
-    break;
-  }
-  case Parser::AvailabilitySpecSource::Unavailable: {
-    if (WildcardSpecLoc != std::nullopt) {
-      SourceLoc Loc = WildcardSpecLoc.value();
-      P.diagnose(Loc, diag::unavailability_query_wildcard_not_required)
-        .fixItRemove(Loc);
-    }
-    break;
-  }
-  case Parser::AvailabilitySpecSource::Macro: {
-    if (WildcardSpecLoc != std::nullopt) {
-      SourceLoc Loc = WildcardSpecLoc.value();
-      P.diagnose(Loc, diag::attr_availability_wildcard_in_macro);
-    }
-    break;
-  }
-  }
+  if (WildcardSpecLoc)
+    P.diagnose(*WildcardSpecLoc, diag::attr_availability_wildcard_in_macro);
 }
 
 // #available(...)
@@ -1387,6 +1357,9 @@ ParserResult<PoundAvailableInfo> Parser::parseStmtConditionPoundAvailable() {
 
   auto *result = PoundAvailableInfo::create(Context, PoundLoc, LParenLoc, Specs,
                                             RParenLoc, isUnavailability);
+  if (Status.isError())
+    result->setInvalid();
+
   return makeParserResult(Status, result);
 }
 
@@ -2395,6 +2368,7 @@ ParserResult<Stmt> Parser::parseStmtForEach(LabeledStmtInfo LabelInfo) {
   auto StartOfControl = Tok.getLoc();
   SourceLoc AwaitLoc;
   SourceLoc TryLoc;
+  SourceLoc UnsafeLoc;
 
   if (Tok.isContextualKeyword("await")) {
     AwaitLoc = consumeToken();
@@ -2405,10 +2379,15 @@ ParserResult<Stmt> Parser::parseStmtForEach(LabeledStmtInfo LabelInfo) {
     }
   }
 
+  if (Context.LangOpts.hasFeature(Feature::WarnUnsafe) &&
+      Tok.isContextualKeyword("unsafe")) {
+    UnsafeLoc = consumeToken();
+  }
+  
   if (Tok.is(tok::code_complete)) {
     if (CodeCompletionCallbacks) {
       CodeCompletionCallbacks->completeForEachPatternBeginning(
-          TryLoc.isValid(), AwaitLoc.isValid());
+          TryLoc.isValid(), AwaitLoc.isValid(), UnsafeLoc.isValid());
     }
     consumeToken(tok::code_complete);
     // Since 'completeForeachPatternBeginning' is a keyword only completion,
@@ -2522,7 +2501,8 @@ ParserResult<Stmt> Parser::parseStmtForEach(LabeledStmtInfo LabelInfo) {
 
   return makeParserResult(
       Status,
-      new (Context) ForEachStmt(LabelInfo, ForLoc, TryLoc, AwaitLoc, pattern.get(), InLoc,
+      new (Context) ForEachStmt(LabelInfo, ForLoc, TryLoc, AwaitLoc, UnsafeLoc,
+                                pattern.get(), InLoc,
                                 Container.get(), WhereLoc, Where.getPtrOrNull(),
                                 Body.get()));
 }

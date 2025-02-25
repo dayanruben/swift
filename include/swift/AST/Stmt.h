@@ -492,28 +492,36 @@ class alignas(8) PoundAvailableInfo final :
   /// This is filled in by Sema.
   VersionRange VariantAvailableRange;
 
-  /// Indicates that the expression is checking if a version range 
-  /// is **not** available.
-  bool _isUnavailability;
+  struct {
+    unsigned isInvalid : 1;
+
+    /// Indicates that the expression is checking if a version range
+    /// is **not** available.
+    unsigned isUnavailability : 1;
+  } Flags;
 
   PoundAvailableInfo(SourceLoc PoundLoc, SourceLoc LParenLoc,
                      ArrayRef<AvailabilitySpec *> queries, SourceLoc RParenLoc,
                      bool isUnavailability)
-   : PoundLoc(PoundLoc), LParenLoc(LParenLoc), RParenLoc(RParenLoc),
-     NumQueries(queries.size()), AvailableRange(VersionRange::empty()),
-     VariantAvailableRange(VersionRange::empty()), 
-     _isUnavailability(isUnavailability) {
+      : PoundLoc(PoundLoc), LParenLoc(LParenLoc), RParenLoc(RParenLoc),
+        NumQueries(queries.size()), AvailableRange(VersionRange::empty()),
+        VariantAvailableRange(VersionRange::empty()), Flags() {
+    Flags.isInvalid = false;
+    Flags.isUnavailability = isUnavailability;
     std::uninitialized_copy(queries.begin(), queries.end(),
                             getTrailingObjects<AvailabilitySpec *>());
   }
-  
+
 public:
   static PoundAvailableInfo *create(ASTContext &ctx, SourceLoc PoundLoc,
                                     SourceLoc LParenLoc,
                                     ArrayRef<AvailabilitySpec *> queries,
                                     SourceLoc RParenLoc,
                                     bool isUnavailability);
-  
+
+  bool isInvalid() const { return Flags.isInvalid; }
+  void setInvalid() { Flags.isInvalid = true; }
+
   ArrayRef<AvailabilitySpec *> getQueries() const {
     return llvm::ArrayRef(getTrailingObjects<AvailabilitySpec *>(), NumQueries);
   }
@@ -541,7 +549,7 @@ public:
     VariantAvailableRange = Range;
   }
 
-  bool isUnavailability() const { return _isUnavailability; }
+  bool isUnavailability() const { return Flags.isUnavailability; }
 };
 
 /// An expression that guards execution based on whether the symbols for the
@@ -995,6 +1003,7 @@ class ForEachStmt : public LabeledStmt {
   SourceLoc ForLoc;
   SourceLoc TryLoc;
   SourceLoc AwaitLoc;
+  SourceLoc UnsafeLoc;
   Pattern *Pat;
   SourceLoc InLoc;
   Expr *Sequence;
@@ -1012,13 +1021,14 @@ class ForEachStmt : public LabeledStmt {
 
 public:
   ForEachStmt(LabeledStmtInfo LabelInfo, SourceLoc ForLoc, SourceLoc TryLoc,
-              SourceLoc AwaitLoc, Pattern *Pat, SourceLoc InLoc, Expr *Sequence,
+              SourceLoc AwaitLoc, SourceLoc UnsafeLoc, Pattern *Pat,
+              SourceLoc InLoc, Expr *Sequence,
               SourceLoc WhereLoc, Expr *WhereExpr, BraceStmt *Body,
               std::optional<bool> implicit = std::nullopt)
       : LabeledStmt(StmtKind::ForEach, getDefaultImplicitFlag(implicit, ForLoc),
                     LabelInfo),
-        ForLoc(ForLoc), TryLoc(TryLoc), AwaitLoc(AwaitLoc), Pat(nullptr),
-        InLoc(InLoc), Sequence(Sequence), WhereLoc(WhereLoc),
+        ForLoc(ForLoc), TryLoc(TryLoc), AwaitLoc(AwaitLoc), UnsafeLoc(UnsafeLoc),
+        Pat(nullptr), InLoc(InLoc), Sequence(Sequence), WhereLoc(WhereLoc),
         WhereExpr(WhereExpr), Body(Body) {
     setPattern(Pat);
   }
@@ -1056,6 +1066,7 @@ public:
 
   SourceLoc getAwaitLoc() const { return AwaitLoc; }
   SourceLoc getTryLoc() const { return TryLoc; }
+  SourceLoc getUnsafeLoc() const { return UnsafeLoc; }
   
   /// getPattern - Retrieve the pattern describing the iteration variables.
   /// These variables will only be visible within the body of the loop.
