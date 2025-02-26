@@ -464,7 +464,7 @@ class AvailabilityScopeBuilder : private ASTWalker {
   }
 
   const char *stackTraceAction() const {
-    return "building availabiilty scope for";
+    return "building availabilty scope for";
   }
 
   friend class swift::ExpandChildAvailabilityScopesRequest;
@@ -2346,8 +2346,11 @@ diagnosePotentialUnavailability(const RootProtocolConformance *rootConf,
         ctx.getTargetPlatformStringForDiagnostics(),
         availability.getRawMinimumVersion());
 
-    err.warnUntilSwiftVersion(6);
-    err.limitBehavior(behaviorLimitForExplicitUnavailability(rootConf, dc));
+    auto behaviorLimit = behaviorLimitForExplicitUnavailability(rootConf, dc);
+    if (behaviorLimit >= DiagnosticBehavior::Warning)
+      err.limitBehavior(behaviorLimit);
+    else
+      err.warnUntilSwiftVersion(6);
 
     // Direct a fixit to the error if an existing guard is nearly-correct
     if (fixAvailabilityByNarrowingNearbyVersionCheck(loc, dc, availability, ctx,

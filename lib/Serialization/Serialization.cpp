@@ -964,6 +964,8 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(sil_block, SIL_DEBUG_SCOPE_REF);
   BLOCK_RECORD(sil_block, SIL_SOURCE_LOC);
   BLOCK_RECORD(sil_block, SIL_SOURCE_LOC_REF);
+  BLOCK_RECORD(sil_block, SIL_DEBUG_VALUE);
+  BLOCK_RECORD(sil_block, SIL_DEBUG_VALUE_DELIMITER);
 
 
   BLOCK(SIL_INDEX_BLOCK);
@@ -1177,6 +1179,11 @@ void Serializer::writeHeader() {
         options_block::CXXStdlibKindLayout CXXStdlibKind(Out);
         CXXStdlibKind.emit(ScratchRecord,
                            static_cast<uint8_t>(M->getCXXStdlibKind()));
+      }
+
+      if (M->supportsExtensibleEnums()) {
+        options_block::ExtensibleEnumsLayout ExtensibleEnums(Out);
+        ExtensibleEnums.emit(ScratchRecord);
       }
 
       if (Options.SerializeOptionsForDebugging) {
