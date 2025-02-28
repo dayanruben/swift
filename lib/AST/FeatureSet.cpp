@@ -18,6 +18,7 @@
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/Pattern.h"
+#include "swift/AST/ProtocolConformance.h"
 #include "clang/AST/DeclObjC.h"
 #include "swift/Basic/Assertions.h"
 
@@ -330,10 +331,6 @@ UNINTERESTING_FEATURE(ReinitializeConsumeInMultiBlockDefer)
 UNINTERESTING_FEATURE(SE427NoInferenceOnExtension)
 UNINTERESTING_FEATURE(TrailingComma)
 
-static bool usesFeatureAllowUnsafeAttribute(Decl *decl) {
-  return decl->getAttrs().hasAttribute<UnsafeAttr>();
-}
-
 static ABIAttr *getABIAttr(Decl *decl) {
   if (auto pbd = dyn_cast<PatternBindingDecl>(decl))
     for (auto i : range(pbd->getNumPatternEntries()))
@@ -348,7 +345,41 @@ static bool usesFeatureABIAttribute(Decl *decl) {
   return getABIAttr(decl) != nullptr;
 }
 
-UNINTERESTING_FEATURE(WarnUnsafe)
+static bool usesFeatureIsolatedConformances(Decl *decl) { 
+  // FIXME: Check conformances associated with this decl?
+  return false;
+}
+
+static bool usesFeatureMemorySafetyAttributes(Decl *decl) {
+  if (decl->getAttrs().hasAttribute<SafeAttr>() ||
+      decl->getAttrs().hasAttribute<UnsafeAttr>())
+    return true;
+
+  IterableDeclContext *idc;
+  if (auto nominal = dyn_cast<NominalTypeDecl>(decl))
+    idc = nominal;
+  else if (auto ext = dyn_cast<ExtensionDecl>(decl))
+    idc = ext;
+  else
+    idc = nullptr;
+
+  // Look for an @unsafe conformance ascribed to this declaration.
+  if (idc) {
+    auto conformances = idc->getLocalConformances();
+    for (auto conformance : conformances) {
+      auto rootConformance = conformance->getRootConformance();
+      if (auto rootNormalConformance =
+              dyn_cast<NormalProtocolConformance>(rootConformance)) {
+        if (rootNormalConformance->getExplicitSafety() == ExplicitSafety::Unsafe)
+          return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+UNINTERESTING_FEATURE(StrictMemorySafety)
 UNINTERESTING_FEATURE(SafeInteropWrappers)
 UNINTERESTING_FEATURE(AssumeResilientCxxTypes)
 UNINTERESTING_FEATURE(CoroutineAccessorsUnwindOnCallerError)

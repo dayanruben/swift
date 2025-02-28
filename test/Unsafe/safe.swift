@@ -1,7 +1,10 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-feature AllowUnsafeAttribute -enable-experimental-feature WarnUnsafe -print-diagnostic-groups
+// RUN: %target-typecheck-verify-swift -strict-memory-safety -print-diagnostic-groups
 
-// REQUIRES: swift_feature_AllowUnsafeAttribute
-// REQUIRES: swift_feature_WarnUnsafe
+// The feature flag should be enabled.
+#if !hasFeature(StrictMemorySafety)
+#error("Strict memory safety is not enabled!")
+#endif
+
 
 @unsafe
 func unsafeFunction() { }
@@ -95,6 +98,15 @@ func testUnsafeAsSequenceForEach() {
   for unsafe _ in unsafe uas { } // okay
 }
 
+func testForInUnsafeAmbiguity(_ integers: [Int]) {
+  for unsafe in integers {
+    _ = unsafe
+  }
+  for unsafe: Int in integers {
+    _ = unsafe
+  }
+}
+
 struct UnsafeIterator: @unsafe IteratorProtocol {
   @unsafe mutating func next() -> Int? { nil }
 }
@@ -173,7 +185,8 @@ struct MyArray<Element> {
 }
 
 extension UnsafeBufferPointer {
-  @safe var safeCount: Int { unsafe count }
+  @unsafe var unsafeCount: Int { 17 }
+  @safe var safeCount: Int { unsafe unsafeCount }
 }
 
 func testMyArray(ints: MyArray<Int>) {
@@ -182,6 +195,6 @@ func testMyArray(ints: MyArray<Int>) {
     _ = unsafe bufferCopy
 
     print(buffer.safeCount)
-    unsafe print(buffer.baseAddress!)
+    unsafe print(buffer.unsafeCount)
   }
 }
