@@ -1116,6 +1116,10 @@ def prespecialize_generic_metadata : Flag<["-"], "prespecialize-generic-metadata
    HelpText<"Statically specialize metadata for generic types at types that "
             "are known to be used in source.">;
 
+def emit_singleton_metadata_pointer : Flag<["-"], "emit-singleton-metadata-pointer">,
+   HelpText<"Emit a pointer to the corresponding type metadata into non-public "
+            "non-generic type descriptors.">;
+
 def read_legacy_type_info_path_EQ : Joined<["-"], "read-legacy-type-info-path=">,
   HelpText<"Read legacy type layout from the given path instead of default path">;
 
@@ -1148,6 +1152,18 @@ def enable_large_loadable_types_reg2mem : Flag<["-"], "enable-large-loadable-typ
 
 def disable_large_loadable_types_reg2mem : Flag<["-"], "disable-large-loadable-types-reg2mem">,
   HelpText<"Disable large loadable types register to memory pass">;
+
+def enable_x86_64_corocc : Flag<["-"], "enable-x86_64-corocc">,
+  HelpText<"Use swiftcorocc for yield_once_2 routines on x86_64.">;
+
+def disable_x86_64_corocc : Flag<["-"], "disable-x86_64-corocc">,
+  HelpText<"Don't use swiftcorocc for yield_once_2 routines on x86_64.">;
+
+def enable_arm64_corocc : Flag<["-"], "enable-arm64-corocc">,
+  HelpText<"Use swiftcorocc for yield_once_2 routines on arm64 variants.">;
+
+def disable_arm64_corocc : Flag<["-"], "disable-arm64-corocc">,
+  HelpText<"Don't use swiftcorocc for yield_once_2 routines on arm64 variants.">;
 
 let Flags = [FrontendOption, NoDriverOption, HelpHidden, ModuleInterfaceOptionIgnorable] in {
   def enable_pack_metadata_stack_promotion :
