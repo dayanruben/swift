@@ -4531,7 +4531,7 @@ ConformanceChecker::resolveWitnessViaLookup(ValueDecl *requirement) {
           SourceLoc diagLoc = getLocForDiagnosingWitness(conformance, witness);
           diags.diagnose(diagLoc, diag::availability_protocol_requires_version,
                          conformance->getProtocol(), witness,
-                         ctx.getTargetPlatformStringForDiagnostics(),
+                         ctx.getTargetAvailabilityDomain(),
                          check.RequiredAvailability.getRawMinimumVersion());
           emitDeclaredHereIfNeeded(diags, diagLoc, witness);
           diags.diagnose(requirement,
@@ -5049,8 +5049,7 @@ static bool diagnoseTypeWitnessAvailability(
           ctx.Diags
               .diagnose(loc, diag::availability_protocol_requires_version,
                         conformance->getProtocol(), witness,
-                        ctx.getTargetPlatformStringForDiagnostics(),
-                        requiredVersion)
+                        ctx.getTargetAvailabilityDomain(), requiredVersion)
               .warnUntilSwiftVersion(warnBeforeVersion);
 
           emitDeclaredHereIfNeeded(ctx.Diags, loc, witness);
@@ -5100,6 +5099,7 @@ static void ensureRequirementsAreSatisfied(ASTContext &ctx,
   }
 
   const auto result = TypeChecker::checkGenericArgumentsForDiagnostics(
+      proto->getGenericSignature(),
       reqSig, QuerySubstitutionMap{substitutions});
   switch (result.getKind()) {
   case CheckRequirementsResult::Success:
@@ -5233,8 +5233,8 @@ static void ensureRequirementsAreSatisfied(ASTContext &ctx,
       }
 
       if (!diagnosedIsolatedConformanceIssue) {
-        bool foundIssue = forEachIsolatedConformance(
-            ProtocolConformanceRef(assocConf),
+        bool foundIssue = ProtocolConformanceRef(assocConf)
+          .forEachIsolatedConformance(
             [&](ProtocolConformance *isolatedConformance) {
               // If the conformance we're checking isn't isolated at all, it
               // needs "isolated".
