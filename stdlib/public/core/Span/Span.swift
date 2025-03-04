@@ -102,7 +102,7 @@ extension Span where Element: ~Copyable {
   ) {
     //FIXME: Workaround for https://github.com/swiftlang/swift/issues/77235
     let baseAddress = unsafe UnsafeRawPointer(buffer.baseAddress)
-    unsafe _precondition(
+    _precondition(
       ((Int(bitPattern: baseAddress) &
         (MemoryLayout<Element>.alignment &- 1)) == 0),
       "baseAddress must be properly aligned to access Element"
@@ -224,7 +224,7 @@ extension Span where Element: BitwiseCopyable {
   ) {
     //FIXME: Workaround for https://github.com/swiftlang/swift/issues/77235
     let baseAddress = buffer.baseAddress
-    unsafe _precondition(
+    _precondition(
       ((Int(bitPattern: baseAddress) &
         (MemoryLayout<Element>.alignment &- 1)) == 0),
       "baseAddress must be properly aligned to access Element"
@@ -367,6 +367,7 @@ extension Span where Element: ~Copyable {
   ///
   /// - Complexity: O(1)
   @_alwaysEmitIntoClient
+  @_semantics("fixed_storage.get_count")
   public var count: Int { _count }
 
   /// A Boolean value indicating whether the span is empty.
@@ -390,6 +391,12 @@ extension Span where Element: ~Copyable {
 
 @available(SwiftStdlib 6.1, *)
 extension Span where Element: ~Copyable {
+  @_semantics("fixed_storage.check_index")
+  @inline(__always)
+  @_alwaysEmitIntoClient
+  internal func _checkIndex(_ position: Index) {
+    _precondition(indices.contains(position), "Index out of bounds")
+  }
 
   /// Accesses the element at the specified position in the `Span`.
   ///
@@ -401,7 +408,7 @@ extension Span where Element: ~Copyable {
   public subscript(_ position: Index) -> Element {
     //FIXME: change to unsafeRawAddress when ready
     unsafeAddress {
-      _precondition(indices.contains(position), "Index out of bounds")
+      _checkIndex(position)
       return unsafe _unsafeAddressOfElement(unchecked: position)
     }
   }
@@ -437,7 +444,6 @@ extension Span where Element: ~Copyable {
 
 @available(SwiftStdlib 6.1, *)
 extension Span where Element: BitwiseCopyable {
-
   /// Accesses the element at the specified position in the `Span`.
   ///
   /// - Parameter position: The offset of the element to access. `position`
@@ -447,10 +453,7 @@ extension Span where Element: BitwiseCopyable {
   @_alwaysEmitIntoClient
   public subscript(_ position: Index) -> Element {
     get {
-      _precondition(
-        UInt(bitPattern: position) <  UInt(bitPattern: _count),
-        "Index out of bounds"
-      )
+      _checkIndex(position)
       return unsafe self[unchecked: position]
     }
   }
