@@ -521,21 +521,13 @@ function Get-TargetInfo($Arch) {
   # Cache the result of "swift -print-target-info" as $Arch.Cache.TargetInfo
   $CacheKey = "TargetInfo"
   if (-not $Arch.Cache.ContainsKey($CacheKey)) {
-    $CompilersBinaryCache = if ($IsCrossCompiling) {
-      Get-BuildProjectBinaryCache Compilers
-    } else {
-      Get-HostProjectBinaryCache Compilers
-    }
-    $ToolchainBinDir = Join-Path -Path $CompilersBinaryCache -ChildPath "bin"
-    $CMarkDir = Join-Path -Path (Get-CMarkBinaryCache $BuildArch) -ChildPath "src"
-    $SwiftExe = Join-Path -Path $ToolchainBinDir -ChildPath "swift.exe"
     Isolate-EnvVars {
-      $env:Path = "$ToolchainBinDir;$CMarkDir;$(Get-PinnedToolchainRuntime);${env:Path}"
-      $TargetInfoJson = & $SwiftExe -target $Arch.LLVMTarget -print-target-info
+      $env:Path = "$(Get-PinnedToolchainRuntime);$(Get-PinnedToolchainToolsDir);${env:Path}"
+      $TargetInfo = & swiftc -target $Arch.LLVMTarget -print-target-info
       if ($LastExitCode -ne 0) {
-        throw "Unable to print target info for $($Arch.LLVMTarget) $TargetInfoJson"
+        throw "Unable to print target info for '$($Arch.LLVMTarget)'"
       }
-      $TargetInfo = $TargetInfoJson | ConvertFrom-Json
+      $TargetInfo = $TargetInfo | ConvertFrom-JSON
       $Arch.Cache[$CacheKey] = $TargetInfo.target
     }
   }
@@ -543,8 +535,7 @@ function Get-TargetInfo($Arch) {
 }
 
 function Get-ModuleTriple($Arch) {
-  $targetInfo = Get-TargetInfo -Arch $Arch
-  return $targetInfo.moduleTriple
+  return (Get-TargetInfo -Arch $Arch).moduleTriple
 }
 
 function Copy-File($Src, $Dst) {
@@ -577,6 +568,7 @@ function Invoke-Program() {
     [string] $Executable,
     [switch] $OutNull = $false,
     [string] $OutFile = "",
+    [string] $ErrorFile = "",
     [Parameter(Position = 1, ValueFromRemainingArguments)]
     [string[]] $Args
   )
@@ -605,16 +597,23 @@ function Invoke-Program() {
 
     if ($OutNull) {
       $OutputLine += " > nul"
-    } elseif ("" -ne $OutFile) {
+    } elseif ($OutFile) {
       $OutputLine += " > `"$OutFile`""
+    }
+    if ($ErrorFile) {
+      $OutputLine += " 2> `"$ErrorFile`""
     }
 
     Write-Output $OutputLine
   } else {
     if ($OutNull) {
       & $Executable @Args | Out-Null
-    } elseif ("" -ne $OutFile) {
-      & $Executable @Args | Out-File -Encoding UTF8 $OutFile
+    } elseif ($OutFile -and $ErrorFile) {
+      & $Executable @Args > $OutFile 2> $ErrorFile
+    } elseif ($OutFile) {
+      & $Executable @Args > $OutFile
+    } elseif ($ErrorFile) {
+      & $Executable @Args 2> $ErrorFile
     } else {
       & $Executable @Args
     }
@@ -1822,9 +1821,17 @@ function Build-mimalloc() {
   foreach ($Tool in $Tools) {
     $Binary = [IO.Path]::Combine($Arch.ToolchainInstallRoot, "usr", "bin", $Tool)
     # Binary-patch in place
-    Start-Process -Wait -WindowStyle Hidden -FilePath "$SourceCache\mimalloc\bin\minject$BuildSuffix" -ArgumentList @("-f", "-i", "-v", "$Binary")
+    Invoke-Program "$SourceCache\mimalloc\bin\minject$BuildSuffix" "-f" "-i" "-v" "$Binary"
     # Log the import table
-    Start-Process -Wait -WindowStyle Hidden -FilePath "$SourceCache\mimalloc\bin\minject$BuildSuffix" -ArgumentList @("-l", "$Binary")
+    $LogFile = "$BinaryCache\$($Arch.LLVMTarget)\mimalloc\minject-log-$Tool.txt"
+    $ErrorFile = "$BinaryCache\$($Arch.LLVMTarget)\mimalloc\minject-log-$Tool-error.txt"
+    Invoke-Program "$SourceCache\mimalloc\bin\minject$BuildSuffix" "-l" "$Binary" -OutFile $LogFile -ErrorFile $ErrorFile
+    # Verify patching
+    $Found = Select-String -Path $LogFile -Pattern "mimalloc"
+    if (-not $Found) {
+      Get-Content $ErrorFile
+      throw "Failed to patch mimalloc for $Tool"
+    }
   }
 }
 

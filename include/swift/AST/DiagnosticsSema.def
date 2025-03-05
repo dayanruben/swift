@@ -1898,6 +1898,11 @@ ERROR(objc_implementation_type_mismatch,none,
       "%kind0 of type %1 does not match type %2 declared by the header",
       (ValueDecl *, Type, Type))
 
+ERROR(objc_implementation_sendability_mismatch,none,
+      "sendability of function types in %kind0 of type %1 does not match "
+      "type %2 declared by the header",
+      (ValueDecl *, Type, Type))
+
 ERROR(objc_implementation_required_attr_mismatch,none,
       "%kind0 %select{should not|should}2 be 'required' to match %1 declared "
       "by the header",
@@ -7810,6 +7815,10 @@ ERROR(conformance_macro,none,
       "conformance macros are replaced by extension macros",
       ())
 
+ERROR(experimental_macro,none,
+      "macro %0 is experimental",
+      (DeclName))
+
 ERROR(macro_resolve_circular_reference, none,
       "circular reference resolving %select{freestanding|attached}0 macro %1",
       (bool, DeclName))
@@ -8320,6 +8329,9 @@ ERROR(isolated_conformance_with_sendable_simple,none,
       "isolated conformance of %0 to %1 cannot be used to satisfy conformance "
       "requirement for a `Sendable` type parameter ",
       (Type, DeclName))
+ERROR(isolated_conformance_wrong_domain,none,
+      "%0 isolated conformance of %1 to %2 cannot be used in %3 context",
+      (ActorIsolation, Type, DeclName, ActorIsolation))
 
 //===----------------------------------------------------------------------===//
 // MARK: @execution Attribute
@@ -8355,6 +8367,13 @@ ERROR(attr_execution_type_attr_incompatible_with_isolated_param,none,
 ERROR(attr_execution_type_attr_incompatible_with_isolated_any,none,
       "cannot use '@execution' together with @isolated(any)",
       ())
+
+ERROR(invalid_function_conversion_with_non_sendable,none,
+      "cannot convert %0 to %1 because crossing of an isolation boundary "
+      "requires parameter and result types to conform to 'Sendable' protocol",
+      (Type, Type))
+NOTE(type_does_not_conform_to_Sendable,none,
+     "type %0 does not conform to 'Sendable' protocol", (Type))
 
 
 #define UNDEFINE_DIAGNOSTIC_MACROS
