@@ -58,17 +58,15 @@ void VersionRange::Profile(llvm::FoldingSetNodeID &id) const {
 
 AvailabilityRange
 AvailabilityRange::forDeploymentTarget(const ASTContext &Ctx) {
-  return AvailabilityRange(
-      VersionRange::allGTE(Ctx.LangOpts.getMinPlatformVersion()));
+  return AvailabilityRange(Ctx.LangOpts.getMinPlatformVersion());
 }
 
 AvailabilityRange AvailabilityRange::forInliningTarget(const ASTContext &Ctx) {
-  return AvailabilityRange(
-      VersionRange::allGTE(Ctx.LangOpts.MinimumInliningTargetVersion));
+  return AvailabilityRange(Ctx.LangOpts.MinimumInliningTargetVersion);
 }
 
 AvailabilityRange AvailabilityRange::forRuntimeTarget(const ASTContext &Ctx) {
-  return AvailabilityRange(VersionRange::allGTE(Ctx.LangOpts.RuntimeVersion));
+  return AvailabilityRange(Ctx.LangOpts.RuntimeVersion);
 }
 
 namespace {
@@ -771,7 +769,25 @@ SemanticAvailableAttrRequest::evaluate(swift::Evaluator &evaluator,
   if (!domain)
     return std::nullopt;
 
-  auto semanticAttr = SemanticAvailableAttr(attr);
+  auto checkVersion = [&](std::optional<llvm::VersionTuple> version,
+                          SourceRange sourceRange) {
+    if (version && !VersionRange::isValidVersion(*version)) {
+      diags
+          .diagnose(attrLoc, diag::availability_unsupported_version_number,
+                    *version)
+          .highlight(sourceRange);
+      return true;
+    }
+
+    return false;
+  };
+
+  if (checkVersion(attr->getRawIntroduced(), attr->IntroducedRange))
+    return std::nullopt;
+  if (checkVersion(attr->getRawDeprecated(), attr->DeprecatedRange))
+    return std::nullopt;
+  if (checkVersion(attr->getRawObsoleted(), attr->ObsoletedRange))
+    return std::nullopt;
 
   bool hasIntroduced = attr->getRawIntroduced().has_value();
   bool hasDeprecated = attr->getRawDeprecated().has_value();
@@ -781,11 +797,11 @@ SemanticAvailableAttrRequest::evaluate(swift::Evaluator &evaluator,
   if (!domain->isVersioned() && hasVersionSpec) {
     SourceRange versionSourceRange;
     if (hasIntroduced)
-      versionSourceRange = semanticAttr.getIntroducedSourceRange();
+      versionSourceRange = attr->IntroducedRange;
     else if (hasDeprecated)
-      versionSourceRange = semanticAttr.getDeprecatedSourceRange();
+      versionSourceRange = attr->DeprecatedRange;
     else if (hasObsoleted)
-      versionSourceRange = semanticAttr.getObsoletedSourceRange();
+      versionSourceRange = attr->ObsoletedRange;
 
     diags.diagnose(attrLoc, diag::availability_unexpected_version, *domain)
         .limitBehaviorIf(domain->isUniversal(), DiagnosticBehavior::Warning)
@@ -829,7 +845,7 @@ SemanticAvailableAttrRequest::evaluate(swift::Evaluator &evaluator,
     }
   }
 
-  return semanticAttr;
+  return SemanticAvailableAttr(attr);
 }
 
 std::optional<llvm::VersionTuple> SemanticAvailableAttr::getIntroduced() const {
@@ -853,7 +869,7 @@ SemanticAvailableAttr::getIntroducedRange(const ASTContext &Ctx) const {
           *this, Ctx, unusedDomain, remappedVersion))
     introducedVersion = remappedVersion;
 
-  return AvailabilityRange{VersionRange::allGTE(introducedVersion)};
+  return AvailabilityRange{introducedVersion};
 }
 
 std::optional<llvm::VersionTuple> SemanticAvailableAttr::getDeprecated() const {
@@ -877,7 +893,7 @@ SemanticAvailableAttr::getDeprecatedRange(const ASTContext &Ctx) const {
           *this, Ctx, unusedDomain, remappedVersion))
     deprecatedVersion = remappedVersion;
 
-  return AvailabilityRange{VersionRange::allGTE(deprecatedVersion)};
+  return AvailabilityRange{deprecatedVersion};
 }
 
 std::optional<llvm::VersionTuple> SemanticAvailableAttr::getObsoleted() const {
@@ -901,7 +917,7 @@ SemanticAvailableAttr::getObsoletedRange(const ASTContext &Ctx) const {
           *this, Ctx, unusedDomain, remappedVersion))
     obsoletedVersion = remappedVersion;
 
-  return AvailabilityRange{VersionRange::allGTE(obsoletedVersion)};
+  return AvailabilityRange{obsoletedVersion};
 }
 
 namespace {
@@ -931,8 +947,7 @@ AvailabilityRange ASTContext::getSwiftFutureAvailability() const {
   auto target = LangOpts.Target;
 
   auto getFutureAvailabilityRange = []() -> AvailabilityRange {
-    return AvailabilityRange(
-        VersionRange::allGTE(llvm::VersionTuple(99, 99, 0)));
+    return AvailabilityRange(llvm::VersionTuple(99, 99, 0));
   };
 
   if (target.isMacOSX()) {
