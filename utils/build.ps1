@@ -130,7 +130,7 @@ param
   [string[]] $AndroidSDKs = @(),
   [string[]] $WindowsSDKs = @("X64","X86","Arm64"),
   [string] $ProductVersion = "0.0.0",
-  [string] $ToolchainIdentifier = $(if ($Env:TOOLCHAIN_VERSION) { $Env:TOOLCHAIN_VERSION } else { "$Env:USERNAME.development" }),
+  [string] $ToolchainIdentifier = $(if ($env:TOOLCHAIN_VERSION) { $env:TOOLCHAIN_VERSION } else { "$env:USERNAME.development" }),
   [string] $PinnedBuild = "",
   [ValidatePattern("^[A-Fa-f0-9]{64}$")]
   [string] $PinnedSHA256 = "",
@@ -158,7 +158,7 @@ param
     "ZLib")]
   [string] $BuildTo = "",
   [ValidateSet("AMD64", "ARM64")]
-  [string] $HostArchName = $(if ($Env:PROCESSOR_ARCHITEW6432) { $Env:PROCESSOR_ARCHITEW6432 } else { $Env:PROCESSOR_ARCHITECTURE }),
+  [string] $HostArchName = $(if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }),
   [ValidateSet("Asserts", "NoAsserts")]
   [string] $Variant = "Asserts",
   [switch] $Clean,
@@ -174,14 +174,14 @@ Set-StrictMode -Version 3.0
 
 # Avoid being run in a "Developer" shell since this script launches its own sub-shells targeting
 # different architectures, and these variables cause confusion.
-if ($Env:VSCMD_ARG_HOST_ARCH -or $Env:VSCMD_ARG_TGT_ARCH) {
+if ($env:VSCMD_ARG_HOST_ARCH -or $env:VSCMD_ARG_TGT_ARCH) {
   throw "At least one of VSCMD_ARG_HOST_ARCH and VSCMD_ARG_TGT_ARCH is set, which is incompatible with this script. Likely need to run outside of a Developer shell."
 }
 
 # Prevent elsewhere-installed swift modules from confusing our builds.
 $env:SDKROOT = ""
 
-$BuildArchName = if ($Env:PROCESSOR_ARCHITEW6432) { $Env:PROCESSOR_ARCHITEW6432 } else { $Env:PROCESSOR_ARCHITECTURE }
+$BuildArchName = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 
 if ($PinnedBuild -eq "") {
   switch ($BuildArchName) {
@@ -560,28 +560,30 @@ function Copy-Directory($Src, $Dst) {
 
 function Invoke-Program() {
   [CmdletBinding(PositionalBinding = $false)]
-  param(
+  param
+  (
     [Parameter(Position = 0, Mandatory = $true)]
     [string] $Executable,
-    [switch] $OutNull = $false,
+    [switch] $Silent,
+    [switch] $OutNull,
     [string] $OutFile = "",
     [string] $ErrorFile = "",
     [Parameter(Position = 1, ValueFromRemainingArguments)]
-    [string[]] $Args
+    [string[]] $ExecutableArgs
   )
 
   if ($ToBatch) {
     # Print the invocation in batch file-compatible format
     $OutputLine = "`"$Executable`""
     $ShouldBreakLine = $false
-    for ($i = 0; $i -lt $Args.Length; $i++) {
+    for ($i = 0; $i -lt $ExecutableArgs.Length; $i++) {
       if ($ShouldBreakLine -or $OutputLine.Length -ge 40) {
         $OutputLine += " ^"
         Write-Output $OutputLine
         $OutputLine = "  "
       }
 
-      $Arg = $Args[$i]
+      $Arg = $ExecutableArgs[$i]
       if ($Arg.Contains(" ")) {
         $OutputLine += " `"$Arg`""
       } else {
@@ -594,32 +596,34 @@ function Invoke-Program() {
 
     if ($OutNull) {
       $OutputLine += " > nul"
-    } elseif ($OutFile) {
-      $OutputLine += " > `"$OutFile`""
-    }
-    if ($ErrorFile) {
-      $OutputLine += " 2> `"$ErrorFile`""
+    } elseif ($Silent) {
+      $OutputLine += " *> nul"
+    } else {
+      if ($OutFile) { $OutputLine += " > `"$OutFile`"" }
+      if ($ErrorFile) { $OutputLine += " 2> `"$ErrorFile`"" }
     }
 
     Write-Output $OutputLine
   } else {
     if ($OutNull) {
-      & $Executable @Args | Out-Null
+      & $Executable @ExecutableArgs | Out-Null
+    } elseif ($Silent) {
+      & $Executable @ExecutableArgs *> $null
     } elseif ($OutFile -and $ErrorFile) {
-      & $Executable @Args > $OutFile 2> $ErrorFile
+      & $Executable @ExecutableArgs > $OutFile 2> $ErrorFile
     } elseif ($OutFile) {
-      & $Executable @Args > $OutFile
+      & $Executable @ExecutableArgs > $OutFile
     } elseif ($ErrorFile) {
-      & $Executable @Args 2> $ErrorFile
+      & $Executable @ExecutableArgs 2> $ErrorFile
     } else {
-      & $Executable @Args
+      & $Executable @ExecutableArgs
     }
 
     if ($LastExitCode -ne 0) {
       $ErrorMessage = "Error: $([IO.Path]::GetFileName($Executable)) exited with code $($LastExitCode).`n"
 
       $ErrorMessage += "Invocation:`n"
-      $ErrorMessage += "  $Executable $Args`n"
+      $ErrorMessage += "  $Executable $ExecutableArgs`n"
 
       $ErrorMessage += "Call stack:`n"
       foreach ($Frame in @(Get-PSCallStack)) {
@@ -827,7 +831,7 @@ function Fetch-Dependencies {
 
   function Install-PythonWheel([string] $ModuleName, [string] $WheelFile, [string] $WheelURL, [string] $WheelHash) {
     try {
-      Invoke-Program "$(Get-PythonExecutable)" -c "import $ModuleName" *> $null
+      Invoke-Program -Silent "$(Get-PythonExecutable)" -c "import $ModuleName"
     } catch {
       DownloadAndVerify $WheelURL "$BinaryCache\python\$WheelFile" $WheelHash
       Write-Output "Installing '$WheelFile' ..."
@@ -838,7 +842,7 @@ function Fetch-Dependencies {
   function Install-PythonModules() {
     # First ensure pip is installed, else bootstrap it
     try {
-      Invoke-Program "$(Get-PythonExecutable)" -m pip *> $null
+      Invoke-Program -Silent "$(Get-PythonExecutable)" -m pip
     } catch {
       Write-Output "Installing pip ..."
       Invoke-Program -OutNull "$(Get-PythonExecutable)" '-I' -m ensurepip -U --default-pip
