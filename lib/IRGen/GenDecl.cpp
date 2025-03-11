@@ -2611,7 +2611,6 @@ void IRGenModule::emitGlobalDecl(Decl *D) {
   case DeclKind::TypeAlias:
   case DeclKind::GenericTypeParam:
   case DeclKind::AssociatedType:
-  case DeclKind::PoundDiagnostic:
   case DeclKind::Macro:
     return;
 
@@ -3911,8 +3910,11 @@ IRGenModule::getAddrOfLLVMVariable(LinkEntity entity,
   LinkInfo link = LinkInfo::get(*this, entity, forDefinition);
 
   // Clang may have defined the variable already.
-  if (auto existing = Module.getNamedGlobal(link.getName()))
-    return getElementBitCast(existing, defaultType);
+  if (auto existing = Module.getNamedGlobal(link.getName())) {
+    auto var = getElementBitCast(existing, defaultType);
+    GlobalVars[entity] = var;
+    return var;
+  }
 
   const LazyConstantInitializer *lazyInitializer = nullptr;
   std::optional<ConstantInitBuilder> lazyBuilder;
@@ -4051,6 +4053,7 @@ IRGenModule::getAddrOfLLVMVariableOrGOTEquivalent(LinkEntity entity) {
   getAddrOfLLVMVariable(entity, ConstantInit(), DebugTypeInfo());
 
   auto entry = GlobalVars[entity];
+  assert(entry);
   
   /// Returns a direct reference.
   auto direct = [&]() -> ConstantReference {
@@ -5794,7 +5797,6 @@ void IRGenModule::emitNestedTypeDecls(DeclRange members) {
     case DeclKind::Missing:
       llvm_unreachable("missing decl in IRGen");
 
-    case DeclKind::PoundDiagnostic:
     case DeclKind::Macro:
       continue;
 
