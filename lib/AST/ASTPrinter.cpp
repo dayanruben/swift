@@ -3267,7 +3267,7 @@ suppressingFeatureExecutionAttribute(PrintOptions &options,
 static void suppressingFeature(PrintOptions &options, Feature feature,
                                llvm::function_ref<void()> action) {
   switch (feature) {
-#define LANGUAGE_FEATURE(FeatureName, IsAdoptable, SENumber, Description)      \
+#define LANGUAGE_FEATURE(FeatureName, SENumber, Description)                   \
   case Feature::FeatureName:                                                   \
     llvm_unreachable("not a suppressible feature");
 #define SUPPRESSIBLE_LANGUAGE_FEATURE(FeatureName, SENumber, Description)      \
@@ -4709,6 +4709,9 @@ void PrintAST::visitMacroDecl(MacroDecl *decl) {
           break;
         case BuiltinMacroKind::IsolationMacro:
           Printer << "IsolationMacro";
+          break;
+        case BuiltinMacroKind::SwiftSettingsMacro:
+          Printer << "SwiftSettingsMacro";
           break;
         }
         break;
