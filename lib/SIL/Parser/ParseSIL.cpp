@@ -4113,8 +4113,6 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
 
     auto kind = llvm::StringSwitch<ThunkInst::Kind>(attrName)
                     .Case("identity", ThunkInst::Kind::Identity)
-                    .Case("hop_to_mainactor_if_needed",
-                          ThunkInst::Kind::HopToMainActorIfNeeded)
                     .Default(ThunkInst::Kind::Invalid);
     if (!kind) {
       P.diagnose(OpcodeLoc, diag::sil_thunkinst_failed_to_parse_kind, attrName);
@@ -6213,7 +6211,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
 
       // Lower the type at the abstraction level of the existential.
       auto archetype =
-          OpenedArchetypeType::get(Val->getType().getASTType())
+          ExistentialArchetypeType::get(Val->getType().getASTType())
               ->getCanonicalType();
 
       auto &F = B.getFunction();

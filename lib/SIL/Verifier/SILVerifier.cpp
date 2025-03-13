@@ -3553,7 +3553,7 @@ public:
     if (auto *AEBI = dyn_cast<AllocExistentialBoxInst>(PEBI->getOperand())) {
       // The lowered type must be the properly-abstracted form of the AST type.
       SILType exType = AEBI->getExistentialType();
-      auto archetype = OpenedArchetypeType::get(exType.getASTType());
+      auto archetype = ExistentialArchetypeType::get(exType.getASTType());
 
       auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                         AEBI->getFormalConcreteType())
@@ -4637,7 +4637,7 @@ public:
             "existential type");
     
     // The lowered type must be the properly-abstracted form of the AST type.
-    auto archetype = OpenedArchetypeType::get(exType.getASTType());
+    auto archetype = ExistentialArchetypeType::get(exType.getASTType());
 
     auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                       AEI->getFormalConcreteType())
@@ -4666,7 +4666,7 @@ public:
             "init_existential_value result must not be an address");
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
-    auto archetype = OpenedArchetypeType::get(exType.getASTType());
+    auto archetype = ExistentialArchetypeType::get(exType.getASTType());
     auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                       IEI->getFormalConcreteType());
     requireSameType(
@@ -4698,7 +4698,7 @@ public:
     
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
-    auto archetype = OpenedArchetypeType::get(exType.getASTType());
+    auto archetype = ExistentialArchetypeType::get(exType.getASTType());
     auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                       IEI->getFormalConcreteType());
     requireSameType(concreteType, loweredTy,
@@ -5248,27 +5248,6 @@ public:
     require(resTI == ti->getThunkKind().getDerivedFunctionType(
                          ti->getFunction(), objTI, ti->getSubstitutionMap()),
             "resTI is not the thunk kind assigned derived function type");
-
-    auto originalCalleeFuncType =
-        ti->getOperand()->getType().castTo<SILFunctionType>();
-
-    switch (ti->getThunkKind()) {
-    case ThunkInst::Kind::Invalid:
-      break;
-    case ThunkInst::Kind::Identity:
-      break;
-    case ThunkInst::Kind::HopToMainActorIfNeeded:
-      require(originalCalleeFuncType->getParameters().empty(),
-              "Hop To Main Actor If Needed cannot have any parameters");
-      require(originalCalleeFuncType->getResults().empty(),
-              "Hop To Main Actor If Needed cannot have any results");
-      // We require that hop_to_main_actor inputs do not an error since we
-      // have to have no results.
-      require(!originalCalleeFuncType->hasErrorResult(),
-              "HopToMainActorIfNeeded thunks cannot have input without an "
-              "error result");
-      break;
-    }
   }
 
   void checkConvertEscapeToNoEscapeInst(ConvertEscapeToNoEscapeInst *ICI) {

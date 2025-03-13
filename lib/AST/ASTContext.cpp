@@ -2136,14 +2136,18 @@ void ASTContext::setModuleAliases(const llvm::StringMap<StringRef> &aliasMap) {
   for (auto k: aliasMap.keys()) {
     auto v = aliasMap.lookup(k);
     if (!v.empty()) {
-      auto key = getIdentifier(k);
-      auto val = getIdentifier(v);
-      // key is a module alias, val is its corresponding real name
-      ModuleAliasMap[key] = std::make_pair(val, true);
-      // add an entry with an alias as key for an easier lookup later
-      ModuleAliasMap[val] = std::make_pair(key, false);
+      addModuleAlias(k, v);
     }
   }
+}
+
+void ASTContext::addModuleAlias(StringRef moduleAlias, StringRef realName) {
+  auto key = getIdentifier(moduleAlias);
+  auto val = getIdentifier(realName);
+  // key is a module alias, val is its corresponding real name
+  ModuleAliasMap[key] = std::make_pair(val, true);
+  // add an entry with an alias as key for an easier lookup later
+  ModuleAliasMap[val] = std::make_pair(key, false);
 }
 
 Identifier ASTContext::getRealModuleName(Identifier key, ModuleAliasLookupOption option) const {
@@ -5595,7 +5599,7 @@ Type OpaqueTypeArchetypeType::get(
   return env->getOrCreateArchetypeFromInterfaceType(interfaceType);
 }
 
-CanTypeWrapper<OpenedArchetypeType> OpenedArchetypeType::getNew(
+CanTypeWrapper<ExistentialArchetypeType> ExistentialArchetypeType::getNew(
     GenericEnvironment *environment, Type interfaceType,
     ArrayRef<ProtocolDecl *> conformsTo, Type superclass,
     LayoutConstraint layout) {
@@ -5603,21 +5607,21 @@ CanTypeWrapper<OpenedArchetypeType> OpenedArchetypeType::getNew(
       RecursiveTypeProperties::HasOpenedExistential, conformsTo, superclass,
       environment->getOuterSubstitutions());
   auto arena = getArena(properties);
-  auto size = OpenedArchetypeType::totalSizeToAlloc<
+  auto size = ExistentialArchetypeType::totalSizeToAlloc<
       ProtocolDecl *, Type, LayoutConstraint>(
       conformsTo.size(),
       superclass ? 1 : 0,
       layout ? 1 : 0);
 
   ASTContext &ctx = interfaceType->getASTContext();
-  void *mem = ctx.Allocate(size, alignof(OpenedArchetypeType), arena);
+  void *mem = ctx.Allocate(size, alignof(ExistentialArchetypeType), arena);
 
-  return CanOpenedArchetypeType(::new (mem) OpenedArchetypeType(
+  return CanExistentialArchetypeType(::new (mem) ExistentialArchetypeType(
       environment, interfaceType, conformsTo, superclass, layout,
       properties));
 }
 
-CanOpenedArchetypeType OpenedArchetypeType::get(CanType existential) {
+CanExistentialArchetypeType ExistentialArchetypeType::get(CanType existential) {
   auto &ctx = existential->getASTContext();
   auto existentialSig = ctx.getOpenedExistentialSignature(existential);
 
@@ -5625,17 +5629,17 @@ CanOpenedArchetypeType OpenedArchetypeType::get(CanType existential) {
       existentialSig.OpenedSig, existentialSig.Shape,
       existentialSig.Generalization, UUID::fromTime());
 
-  return cast<OpenedArchetypeType>(
+  return cast<ExistentialArchetypeType>(
     genericEnv->mapTypeIntoContext(existentialSig.SelfType)
       ->getCanonicalType());
 }
 
-Type OpenedArchetypeType::getAny(Type existential) {
+Type ExistentialArchetypeType::getAny(Type existential) {
   assert(existential->isAnyExistentialType());
 
   if (auto metatypeTy = existential->getAs<ExistentialMetatypeType>()) {
     auto instanceTy = metatypeTy->getExistentialInstanceType();
-    auto openedInstanceTy = OpenedArchetypeType::getAny(instanceTy);
+    auto openedInstanceTy = ExistentialArchetypeType::getAny(instanceTy);
     if (metatypeTy->hasRepresentation()) {
       return MetatypeType::get(openedInstanceTy,
                                metatypeTy->getRepresentation());
@@ -5643,7 +5647,7 @@ Type OpenedArchetypeType::getAny(Type existential) {
     return MetatypeType::get(openedInstanceTy);
   }
 
-  return OpenedArchetypeType::get(existential->getCanonicalType());
+  return ExistentialArchetypeType::get(existential->getCanonicalType());
 }
 
 void SubstitutionMap::Storage::Profile(

@@ -179,7 +179,7 @@ Solution ConstraintSystem::finalize() {
   // Remember the opened existential types.
   for (auto &openedExistential : OpenedExistentialTypes) {
     openedExistential.second = simplifyType(openedExistential.second)
-        ->castTo<OpenedArchetypeType>();
+        ->castTo<ExistentialArchetypeType>();
 
     assert(solution.OpenedExistentialTypes.count(openedExistential.first) == 0||
            solution.OpenedExistentialTypes[openedExistential.first]
@@ -1342,8 +1342,8 @@ void ConstraintSystem::shrink(Expr *expr) {
   }
 }
 
-static bool debugConstraintSolverForTarget(ASTContext &C,
-                                           SyntacticElementTarget target) {
+bool constraints::debugConstraintSolverForTarget(
+    ASTContext &C, SyntacticElementTarget target) {
   if (C.TypeCheckerOpts.DebugConstraintSolver)
     return true;
 
@@ -1880,8 +1880,8 @@ static Constraint *selectBestBindingDisjunction(
     if (!firstBindDisjunction)
       firstBindDisjunction = disjunction;
 
-    auto constraints = cs.getConstraintGraph().gatherConstraints(
-        typeVar, ConstraintGraph::GatheringKind::EquivalenceClass,
+    auto constraints = cs.getConstraintGraph().gatherNearbyConstraints(
+        typeVar,
         [](Constraint *constraint) {
           return constraint->getKind() == ConstraintKind::Conversion;
         });
@@ -1910,8 +1910,8 @@ ConstraintSystem::findConstraintThroughOptionals(
   while (visitedVars.insert(rep).second) {
     // Look for a disjunction that binds this type variable to an overload set.
     TypeVariableType *optionalObjectTypeVar = nullptr;
-    auto constraints = getConstraintGraph().gatherConstraints(
-        rep, ConstraintGraph::GatheringKind::EquivalenceClass,
+    auto constraints = getConstraintGraph().gatherNearbyConstraints(
+        rep,
         [&](Constraint *match) {
           // If we have an "optional object of" constraint, we may need to
           // look through it to find the constraint we're looking for.
@@ -2553,9 +2553,8 @@ void DisjunctionChoice::propagateConversionInfo(ConstraintSystem &cs) const {
     }
   }
 
-  auto constraints = cs.CG.gatherConstraints(
+  auto constraints = cs.CG.gatherNearbyConstraints(
       typeVar,
-      ConstraintGraph::GatheringKind::EquivalenceClass,
       [](Constraint *constraint) -> bool {
         switch (constraint->getKind()) {
         case ConstraintKind::Conversion:
