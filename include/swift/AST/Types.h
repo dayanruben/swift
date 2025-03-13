@@ -114,9 +114,6 @@ enum class TypeKind : uint8_t {
 #define TYPE_RANGE(Id, FirstId, LastId) \
   First_##Id##Type = FirstId, Last_##Id##Type = LastId,
 #include "swift/AST/TypeNodes.def"
-  // For backward compatibility in LLDB sources.
-  // TODO: remove this once OpenedArchetype is renamed in LLDB sources.
-  OpenedArchetype = ExistentialArchetype
 };
 
 enum : unsigned {
@@ -4334,9 +4331,7 @@ inline bool isConsumedParameterInCaller(ParameterConvention conv) {
   return isConsumedParameter<false>(conv);
 }
 
-/// Returns true if conv is a guaranteed parameter. This may look unnecessary
-/// but this will allow code to generalize to handle Indirect_Guaranteed
-/// parameters when they are added.
+/// Returns true if conv is a guaranteed parameter.
 template <bool InCallee>
 bool isGuaranteedParameter(ParameterConvention conv) {
   switch (conv) {
