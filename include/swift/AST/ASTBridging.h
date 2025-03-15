@@ -388,7 +388,7 @@ struct BridgedDeclObj {
   BRIDGED_INLINE bool Destructor_isIsolated() const;
 };
 
-enum ENUM_EXTENSIBILITY_ATTR(open) BridgedASTNodeKind : uint8_t {
+enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedASTNodeKind : uint8_t {
   BridgedASTNodeKindExpr,
   BridgedASTNodeKindStmt,
   BridgedASTNodeKindDecl
@@ -1746,10 +1746,6 @@ SWIFT_NAME("BridgedNominalTypeDecl.isClass(self:)")
 BRIDGED_INLINE
 bool BridgedNominalTypeDecl_isClass(BridgedNominalTypeDecl decl);
 
-SWIFT_NAME("BridgedNominalTypeDecl.isGenericAtAnyLevel(self:)")
-BRIDGED_INLINE
-bool BridgedNominalTypeDecl_isGenericAtAnyLevel(BridgedNominalTypeDecl decl);
-
 SWIFT_NAME("BridgedNominalTypeDecl.setParsedMembers(self:_:fingerprint:)")
 void BridgedNominalTypeDecl_setParsedMembers(BridgedNominalTypeDecl decl,
                                              BridgedArrayRef members,
@@ -2323,6 +2319,13 @@ BridgedPoundAvailableInfo BridgedPoundAvailableInfo_createParsed(
     BridgedSourceLoc cLParenLoc, BridgedArrayRef cSpecs,
     BridgedSourceLoc cRParenLoc, bool isUnavailability);
 
+SWIFT_NAME("BridgedStmtConditionElement.createHasSymbol(_:poundLoc:lParenLoc:"
+           "symbol:rParenLoc:)")
+BridgedStmtConditionElement BridgedStmtConditionElement_createHasSymbol(
+    BridgedASTContext cContext, BridgedSourceLoc cPoundLoc,
+    BridgedSourceLoc cLParenLoc, BridgedNullableExpr cSymbolExpr,
+    BridgedSourceLoc cRParenLoc);
+
 struct BridgedCaseLabelItemInfo {
   SWIFT_NAME("isDefault")
   bool IsDefault;
@@ -2424,6 +2427,11 @@ BridgedIfStmt BridgedIfStmt_createParsed(
     BridgedASTContext cContext, BridgedLabeledStmtInfo cLabelInfo,
     BridgedSourceLoc cIfLoc, BridgedArrayRef cConds, BridgedBraceStmt cThen,
     BridgedSourceLoc cElseLoc, BridgedNullableStmt cElse);
+
+SWIFT_NAME("BridgedPoundAssertStmt.createParsed(_:range:condition:message:)")
+BridgedPoundAssertStmt BridgedPoundAssertStmt_createParsed(
+    BridgedASTContext cContext, BridgedSourceRange cRange,
+    BridgedExpr cConditionExpr, BridgedStringRef cMessage);
 
 SWIFT_NAME("BridgedRepeatWhileStmt.createParsed(_:labelInfo:repeatLoc:cond:"
            "whileLoc:body:)")
@@ -3012,23 +3020,37 @@ struct BridgedASTType {
   BRIDGED_INLINE swift::Type unbridged() const;
   BridgedOwnedString getDebugDescription() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType getCanonicalType() const;
+  BRIDGED_INLINE bool hasArchetype() const;
   BRIDGED_INLINE bool isLegalFormalType() const;
+  BRIDGED_INLINE bool isGenericAtAnyLevel() const;
   BRIDGED_INLINE bool hasTypeParameter() const;
   BRIDGED_INLINE bool hasLocalArchetype() const;
   BRIDGED_INLINE bool isExistentialArchetype() const;
   BRIDGED_INLINE bool isExistentialArchetypeWithError() const;
   BRIDGED_INLINE bool isExistential() const;
+  BRIDGED_INLINE bool isDynamicSelf() const;
+  BRIDGED_INLINE bool isClassExistential() const;
   BRIDGED_INLINE bool isEscapable() const;
   BRIDGED_INLINE bool isNoEscape() const;
   BRIDGED_INLINE bool isInteger() const;
+  BRIDGED_INLINE bool isUnownedStorageType() const;
   BRIDGED_INLINE bool isMetatypeType() const;
   BRIDGED_INLINE bool isExistentialMetatypeType() const;
+  BRIDGED_INLINE bool isTuple() const;
+  BRIDGED_INLINE bool isFunction() const;
+  BRIDGED_INLINE bool isBuiltinInteger() const;
+  BRIDGED_INLINE bool isBuiltinFloat() const;
+  BRIDGED_INLINE bool isBuiltinVector() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType getBuiltinVectorElementType() const;
+  BRIDGED_INLINE bool isBuiltinFixedWidthInteger(SwiftInt width) const;
   BRIDGED_INLINE bool isOptional() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE OptionalBridgedDeclObj getNominalOrBoundGenericNominal() const;
   BRIDGED_INLINE TraitResult canBeClass() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE OptionalBridgedDeclObj getAnyNominal() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType getInstanceTypeOfMetatype() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType getSuperClassType() const;
   BRIDGED_INLINE MetatypeRepresentation getRepresentationOfMetatype() const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedGenericSignature getInvocationGenericSignatureOfFunctionType() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedSubstitutionMap getContextSubstitutionMap() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType subst(BridgedSubstitutionMap substMap) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType subst(BridgedASTType fromType, BridgedASTType toType) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedConformance checkConformance(BridgedDeclObj proto) const;  
@@ -3040,7 +3062,7 @@ class BridgedCanType {
 public:
   BRIDGED_INLINE BridgedCanType(swift::CanType ty);
   BRIDGED_INLINE swift::CanType unbridged() const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType getType() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType getRawType() const;
 };
 
 struct BridgedASTTypeArray {
@@ -3109,6 +3131,15 @@ struct BridgedFingerprint {
 
   BRIDGED_INLINE swift::Fingerprint unbridged() const;
 };
+
+enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedPoundKeyword : uint8_t {
+#define POUND_KEYWORD(NAME) BridgedPoundKeyword_##NAME,
+#include "swift/AST/TokenKinds.def"
+  BridgedPoundKeyword_None,
+};
+
+SWIFT_NAME("BridgedPoundKeyword.init(from:)")
+BridgedPoundKeyword BridgedPoundKeyword_fromString(BridgedStringRef cStr);
 
 //===----------------------------------------------------------------------===//
 // MARK: #if handling

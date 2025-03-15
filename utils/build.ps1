@@ -206,9 +206,6 @@ $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.e
 $VSInstallRoot = & $vswhere -nologo -latest -products "*" -all -prerelease -property installationPath
 $msbuild = "$VSInstallRoot\MSBuild\Current\Bin\$BuildArchName\MSBuild.exe"
 
-# Hoist to global scope as this is used in two sites.
-$WiXVersion = "4.0.6"
-
 # Avoid $env:ProgramFiles in case this script is running as x86
 $UnixToolsBinDir = "$env:SystemDrive\Program Files\Git\usr\bin"
 
@@ -241,8 +238,6 @@ $ArchX64 = @{
   LLVMTarget = "x86_64-unknown-windows-msvc";
   CMakeName = "AMD64";
   BinaryDir = "bin64";
-  XCTestInstallRoot = "$BinaryCache\x64\Windows.platform\Developer\Library\XCTest-development";
-  SwiftTestingInstallRoot = "$BinaryCache\x64\Windows.platform\Developer\Library\Testing-development";
   ToolchainInstallRoot = "$BinaryCache\x64\toolchains\$ProductVersion+$Variant";
   Cache = @{};
 }
@@ -254,8 +249,6 @@ $ArchX86 = @{
   LLVMTarget = "i686-unknown-windows-msvc";
   CMakeName = "i686";
   BinaryDir = "bin32";
-  XCTestInstallRoot = "$BinaryCache\x86\Windows.platform\Developer\Library\XCTest-development";
-  SwiftTestingInstallRoot = "$BinaryCache\x86\Windows.platform\Developer\Library\Testing-development";
   Cache = @{};
 }
 
@@ -266,9 +259,7 @@ $ArchARM64 = @{
   LLVMTarget = "aarch64-unknown-windows-msvc";
   CMakeName = "ARM64";
   BinaryDir = "bin64a";
-  XCTestInstallRoot = "$BinaryCache\arm64\Windows.platform\Developer\Library\XCTest-development";
   ToolchainInstallRoot = "$BinaryCache\arm64\toolchains\$ProductVersion+$Variant";
-  SwiftTestingInstallRoot = "$BinaryCache\arm64\Windows.platform\Developer\Library\Testing-development";
   Cache = @{};
 }
 
@@ -279,8 +270,6 @@ $AndroidARM64 = @{
   LLVMName = "aarch64";
   LLVMTarget = "aarch64-unknown-linux-android$AndroidAPILevel";
   ShortName = "arm64";
-  XCTestInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\Library\XCTest-development";
-  SwiftTestingInstallRoot = "$BinaryCache\arm64\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
 }
 
@@ -291,8 +280,6 @@ $AndroidARMv7 = @{
   LLVMName = "armv7";
   LLVMTarget = "armv7-unknown-linux-androideabi$AndroidAPILevel";
   ShortName = "armv7";
-  XCTestInstallRoot = "$BinaryCache\armv7\Android.platform\Developer\Library\XCTest-development";
-  SwiftTestingInstallRoot = "$BinaryCache\armv7\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
 }
 
@@ -303,8 +290,6 @@ $AndroidX86 = @{
   LLVMName = "i686";
   LLVMTarget = "i686-unknown-linux-android$AndroidAPILevel";
   ShortName = "x86";
-  XCTestInstallRoot = "$BinaryCache\x86\Android.platform\Developer\Library\XCTest-development";
-  SwiftTestingInstallRoot = "$BinaryCache\x86\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
 }
 
@@ -315,8 +300,6 @@ $AndroidX64 = @{
   LLVMName = "x86_64";
   LLVMTarget = "x86_64-unknown-linux-android$AndroidAPILevel";
   ShortName = "x64";
-  XCTestInstallRoot = "$BinaryCache\x64\Android.platform\Developer\Library\XCTest-development";
-  SwiftTestingInstallRoot = "$BinaryCache\x64\Android.platform\Developer\Library\Testing-development";
   Cache = @{};
 }
 
@@ -330,6 +313,13 @@ $BuildArch = switch ($BuildArchName) {
   "AMD64" { $ArchX64 }
   "ARM64" { $ArchARM64 }
   default { throw "Unsupported processor architecture" }
+}
+
+$WiX = @{
+  Version = "4.0.6";
+  URL = "https://www.nuget.org/api/v2/package/wix/4.0.6";
+  SHA256 = "A94DD42AE1FB56B32DA180E2173CEDA4F0D10B4C8871C5EE59ECB502131A1EB6";
+  Path = [IO.Path]::Combine("$BinaryCache\WiX-4.0.6", "tools", "net6.0", "any");
 }
 
 $KnownPythons = @{
@@ -381,10 +371,40 @@ $KnownNDKs = @{
   }
 }
 
-
 $IsCrossCompiling = $HostArchName -ne $BuildArchName
 
 $TimingData = New-Object System.Collections.Generic.List[System.Object]
+
+function Add-TimingData {
+  param
+  (
+    [Parameter(Mandatory)]
+    [string] $Arch,
+    [Parameter(Mandatory)]
+    [Platform] $Platform,
+    [Parameter(Mandatory)]
+    [string] $BuildStep,
+    [Parameter(Mandatory)]
+    [System.TimeSpan] $ElapsedTime
+  )
+
+  $TimingData.Add([PSCustomObject]@{
+    Arch = $Arch
+    Platform = $Platform
+    "Build Step" = $BuildStep
+    "Elapsed Time" = $ElapsedTime.ToString()
+  })
+}
+
+function Write-Summary {
+  Write-Host "Summary:" -ForegroundColor Cyan
+
+  # Sort timing data by elapsed time (descending)
+  $TimingData `
+    | Select-Object "Build Step",Platform,Arch,"Elapsed Time" `
+    | Sort-Object -Descending -Property "Elapsed Time" `
+    | Format-Table -AutoSize
+}
 
 function Get-AndroidNDK {
   $NDK = $KnownNDKs[$AndroidNDKVersion]
@@ -458,8 +478,29 @@ $WindowsSDKArchs = @($WindowsSDKs | ForEach-Object {
 })
 
 # Build functions
-function Invoke-BuildStep([string]$Name) {
+function Invoke-BuildStep([string] $Name) {
+  if ($Summary) {
+    # TODO: Replace hacky introspection of $Args with Platform object.
+    $BuildStepPlatform = "Windows"
+    $BuildStepArch = "(n/a)"
+    $Stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($Arg in $Args) {
+      switch ($Arg.GetType().Name) {
+        "Hashtable" {
+          if ($Arg.ContainsKey("LLVMName")) { $BuildStepArch = $Arg["LLVMName"] }
+        }
+        "string" {
+          if ($Arg -eq "Windows" -or $Arg -eq "Android") { $BuildStepPlatform = $Arg }
+        }
+      }
+    }
+  }
+
   & $Name @Args
+
+  if ($Summary) {
+    Add-TimingData $BuildStepArch $BuildStepPlatform ($Name -replace "Build-","") $Stopwatch.Elapsed
+  }
   if ($Name.Replace("Build-", "") -eq $BuildTo) {
     exit 0
   }
@@ -732,6 +773,7 @@ function Invoke-VsDevShell($Arch) {
 }
 
 function Get-Dependencies {
+  Write-Host "[$([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))] Fetch-Dependencies ..." -ForegroundColor Cyan
   $ProgressPreference = "SilentlyContinue"
 
   $WebClient = New-Object Net.WebClient
@@ -811,7 +853,7 @@ function Get-Dependencies {
 
     # The new runtime MSI is built to expand files into the immediate directory. So, setup the installation location.
     New-Item -ItemType Directory -ErrorAction Ignore $BinaryCache\toolchains\$PinnedToolchain\LocalApp\Programs\Swift\Runtimes\$(Get-PinnedToolchainVersion)\usr\bin | Out-Null
-    Invoke-Program $BinaryCache\WiX-$WiXVersion\tools\net6.0\any\wix.exe -- burn extract $BinaryCache\$InstallerExeName -out $BinaryCache\toolchains\ -outba $BinaryCache\toolchains\
+    Invoke-Program "$($WiX.Path)\wix.exe" -- burn extract $BinaryCache\$InstallerExeName -out $BinaryCache\toolchains\ -outba $BinaryCache\toolchains\
     Get-ChildItem "$BinaryCache\toolchains\WixAttachedContainer" -Filter "*.msi" | ForEach-Object {
       $LogFile = [System.IO.Path]::ChangeExtension($_.Name, "log")
       $TARGETDIR = if ($_.Name -eq "rtl.msi") { "$BinaryCache\toolchains\$ToolchainName\LocalApp\Programs\Swift\Runtimes\$(Get-PinnedToolchainVersion)\usr\bin" } else { "$BinaryCache\toolchains\$ToolchainName" }
@@ -826,10 +868,8 @@ function Get-Dependencies {
     Write-Host -ForegroundColor Cyan "[$([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))] Get-Dependencies..."
   }
 
-  $WiXURL = "https://www.nuget.org/api/v2/package/wix/$WiXVersion"
-  $WiXHash = "A94DD42AE1FB56B32DA180E2173CEDA4F0D10B4C8871C5EE59ECB502131A1EB6"
-  DownloadAndVerify $WixURL "$BinaryCache\WiX-$WiXVersion.zip" $WiXHash
-  Expand-ZipFile WiX-$WiXVersion.zip $BinaryCache WiX-$WiXVersion
+  DownloadAndVerify $WiX.URL "$BinaryCache\WiX-$($WiX.Version).zip" $WiX.SHA256
+  Expand-ZipFile WiX-$($WiX.Version).zip $BinaryCache WiX-$($WiX.Version)
 
   if ($SkipBuild) { return }
 
@@ -949,12 +989,7 @@ function Get-Dependencies {
     Write-Host ""
   }
   if ($Summary) {
-    $TimingData.Add([PSCustomObject]@{
-      Arch = $BuildArch.LLVMName
-      Platform = 'Windows'
-      Checkout = 'Get-Dependencies'
-      "Elapsed Time" = $Stopwatch.Elapsed.ToString()
-    })
+    Add-TimingData $BuildArch.LLVMName "Windows" "Get-Dependencies" $Stopwatch.Elapsed
   }
 }
 
@@ -1400,15 +1435,6 @@ function Build-CMakeProject {
     Write-Host -ForegroundColor Cyan "[$([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))] Finished building '$Src' to '$Bin' in $($Stopwatch.Elapsed)"
     Write-Host ""
   }
-
-  if ($Summary) {
-    $TimingData.Add([PSCustomObject]@{
-      Arch = $Arch.LLVMName
-      Platform = $Platform
-      Checkout = $Src.Replace($SourceCache, '')
-      "Elapsed Time" = $Stopwatch.Elapsed.ToString()
-    })
-  }
 }
 
 enum SPMBuildAction {
@@ -1494,12 +1520,7 @@ function Build-SPMProject {
   }
 
   if ($Summary) {
-    $TimingData.Add([PSCustomObject]@{
-      Arch = $Arch.LLVMName
-      Checkout = $Src.Replace($SourceCache, '')
-      Platform = "Windows"
-      "Elapsed Time" = $Stopwatch.Elapsed.ToString()
-    })
+    Add-TimingData $BuildArch.LLVMName "Windows" $Src.Replace($SourceCache, '') $Stopwatch.Elapsed
   }
 }
 
@@ -2383,15 +2404,18 @@ function Build-XCTest([Platform]$Platform, $Arch) {
   Build-CMakeProject `
     -Src $SourceCache\swift-corelibs-xctest `
     -Bin $(Get-TargetProjectBinaryCache $Arch XCTest) `
-    -InstallTo "$($Arch.XCTestInstallRoot)\usr" `
+    -InstallTo "$([IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "XCTest-development", "usr"))" `
     -Arch $Arch `
     -Platform $Platform `
     -UseBuiltCompilers Swift `
     -Defines @{
+      BUILD_SHARED_LIBS = "YES";
       CMAKE_BUILD_WITH_INSTALL_RPATH = "YES";
+      CMAKE_INSTALL_BINDIR = $Arch.BinaryDir;
       ENABLE_TESTING = "NO";
       dispatch_DIR = $(Get-TargetProjectCMakeModules $Arch Dispatch);
       Foundation_DIR = $(Get-TargetProjectCMakeModules $Arch DynamicFoundation);
+      XCTest_INSTALL_NESTED_SUBDIR = "YES";
     }
 }
 
@@ -2423,18 +2447,20 @@ function Build-Testing([Platform]$Platform, $Arch) {
   Build-CMakeProject `
     -Src $SourceCache\swift-testing `
     -Bin (Get-TargetProjectBinaryCache $Arch Testing) `
-    -InstallTo "$($Arch.SwiftTestingInstallRoot)\usr" `
+    -InstallTo "$([IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "Testing-development", "usr"))" `
     -Arch $Arch `
     -Platform $Platform `
     -UseBuiltCompilers C,CXX,Swift `
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
       CMAKE_BUILD_WITH_INSTALL_RPATH = "YES";
+      CMAKE_INSTALL_BINDIR = $Arch.BinaryDir;
       dispatch_DIR = (Get-TargetProjectCMakeModules $Arch Dispatch);
       Foundation_DIR = (Get-TargetProjectCMakeModules $Arch DynamicFoundation);
       # TODO: ensure that host and target platform match
       SwiftSyntax_DIR = (Get-HostProjectCMakeModules Compilers);
       SwiftTesting_MACRO = "$(Get-BuildProjectBinaryCache TestingMacros)\TestingMacros.dll";
+      SwiftTesting_INSTALL_NESTED_SUBDIR = "YES";
     }
 }
 
@@ -2472,32 +2498,6 @@ function Install-Platform([Platform]$Platform, $Archs) {
         Copy-File $_.FullName "$PlatformResources\$($_.BaseName).swiftmodule\$(Get-ModuleTriple $Arch)$($_.Extension)"
       }
     }
-
-    # Copy XCTest
-    $XCTestInstallRoot = [IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "XCTest-development")
-    switch ($Platform) {
-      Windows {
-        Copy-File "$($Arch.XCTestInstallRoot)\usr\bin\XCTest.dll" "$XCTestInstallRoot\usr\$($Arch.BinaryDir)\"
-        Copy-File "$($Arch.XCTestInstallRoot)\usr\lib\swift\windows\XCTest.lib" "$XCTestInstallRoot\usr\lib\swift\windows\$($Arch.LLVMName)\"
-      }
-      default {
-        Copy-File "$($Arch.XCTestInstallRoot)\usr\lib\swift\$($Platform.ToString().ToLowerInvariant())\libXCTest.so" "$XCTestInstallRoot\usr\lib\$($Arch.BinaryDir)\"
-      }
-    }
-    Copy-Directory "$($Arch.XCTestInstallRoot)\usr\lib\swift\$($Platform.ToString().ToLowerInvariant())\XCTest.swiftmodule" "$XCTestInstallRoot\usr\lib\swift\$($Platform.ToString().ToLowerInvariant())\"
-
-    # Copy Testing
-    $SwiftTestingInstallRoot = [IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "Testing-development")
-    switch ($Platform) {
-      Windows {
-        Copy-File "$($Arch.SwiftTestingInstallRoot)\usr\bin\Testing.dll" "$SwiftTestingInstallRoot\usr\$($Arch.BinaryDir)\"
-        Copy-File "$($Arch.SwiftTestingInstallRoot)\usr\lib\swift\windows\Testing.lib" "$SwiftTestingInstallRoot\usr\lib\swift\windows\$($Arch.LLVMName)\"
-      }
-      default {
-        Copy-File "$($Arch.SwiftTestingInstallRoot)\usr\lib\swift\$($Platform.ToString().ToLowerInvariant())\libTesting.so" "$SwiftTestingInstallRoot\usr\lib\$($Arch.BinaryDir)\"
-      }
-    }
-    Copy-Directory "$($Arch.SwiftTestingInstallRoot)\usr\lib\swift\$($Platform.ToString().ToLowerInvariant())\Testing.swiftmodule" "$SwiftTestingInstallRoot\usr\lib\swift\$($Platform.ToString().ToLowerInvariant())\"
   }
 }
 
@@ -3135,7 +3135,7 @@ function Copy-BuildArtifactsToStage($Arch) {
   } else {
     New-Item -Type Directory -Path "$BinaryCache\$($Arch.LLVMTarget)\installer\$($Arch.VSName)" -ErrorAction Ignore | Out-Null
   }
-  Invoke-Program "$BinaryCache\wix-$WiXVersion\tools\net6.0\any\wix.exe" -- burn detach "$BinaryCache\$($Arch.LLVMTarget)\installer\Release\$($Arch.VSName)\installer.exe" -engine "$Stage\installer-engine.exe" -intermediateFolder "$BinaryCache\$($Arch.LLVMTarget)\installer\$($Arch.VSName)\"
+  Invoke-Program "$($WiX.Path)\wix.exe" -- burn detach "$BinaryCache\$($Arch.LLVMTarget)\installer\Release\$($Arch.VSName)\installer.exe" -engine "$Stage\installer-engine.exe" -intermediateFolder "$BinaryCache\$($Arch.LLVMTarget)\installer\$($Arch.VSName)\"
 }
 
 #-------------------------------------------------------------------
@@ -3352,6 +3352,6 @@ if (-not $IsCrossCompiling) {
   exit 1
 } finally {
   if ($Summary) {
-    $TimingData | Select-Object Platform,Arch,Checkout,"Elapsed Time" | Sort-Object -Descending -Property "Elapsed Time" | Format-Table -AutoSize
+    Write-Summary
   }
 }
