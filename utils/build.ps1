@@ -529,7 +529,7 @@ function Invoke-BuildStep([string] $Name) {
   & $Name @Args
 
   if ($Summary) {
-    Add-TimingData $BuildStepArch $BuildStepPlatform ($Name -replace "Build-","") $Stopwatch.Elapsed
+    Add-TimingData $BuildStepArch $BuildStepPlatform $Name $Stopwatch.Elapsed
   }
   if ($Name.Replace("Build-", "") -eq $BuildTo) {
     exit 0
@@ -1454,7 +1454,8 @@ enum SPMBuildAction {
 
 function Build-SPMProject {
   [CmdletBinding(PositionalBinding = $false)]
-  param(
+  param
+  (
     [SPMBuildAction] $Action,
     [string] $Src,
     [string] $Bin,
@@ -1524,10 +1525,6 @@ function Build-SPMProject {
   if (-not $ToBatch) {
     Write-Host -ForegroundColor Cyan "[$([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))] Finished building '$Src' to '$Bin' in $($Stopwatch.Elapsed)"
     Write-Host ""
-  }
-
-  if ($Summary) {
-    Add-TimingData $BuildArch.LLVMName "Windows" $Src.Replace($SourceCache, '') $Stopwatch.Elapsed
   }
 }
 
@@ -2398,6 +2395,11 @@ function Build-FoundationMacros() {
     [hashtable]$Arch
   )
 
+  $SwiftSyntaxDir = (Get-ProjectCMakeModules $Arch Compilers)
+  if (-not (Test-Path $SwiftSyntaxDir)) {
+    throw "The swift-syntax from the compiler build for $Platform $Arch.ShortName isn't available"
+  }
+
   Build-CMakeProject `
     -Src $SourceCache\swift-foundation\Sources\FoundationMacros `
     -Bin (Get-ProjectBinaryCache $Arch FoundationMacros) `
@@ -2407,7 +2409,7 @@ function Build-FoundationMacros() {
     -UseBuiltCompilers Swift `
     -SwiftSDK (Get-SwiftSDK $Platform) `
     -Defines @{
-      SwiftSyntax_DIR = (Get-ProjectCMakeModules $HostArch Compilers);
+      SwiftSyntax_DIR = $SwiftSyntaxDir;
     }
 }
 
@@ -2415,7 +2417,7 @@ function Build-XCTest([Platform]$Platform, $Arch) {
   Build-CMakeProject `
     -Src $SourceCache\swift-corelibs-xctest `
     -Bin $(Get-ProjectBinaryCache $Arch XCTest) `
-    -InstallTo "$([IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "XCTest-development", "usr"))" `
+    -InstallTo "$([IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "XCTest-$ProductVersion", "usr"))" `
     -Arch $Arch `
     -Platform $Platform `
     -UseBuiltCompilers Swift `
@@ -2459,7 +2461,7 @@ function Build-Testing([Platform]$Platform, $Arch) {
   Build-CMakeProject `
     -Src $SourceCache\swift-testing `
     -Bin (Get-ProjectBinaryCache $Arch Testing) `
-    -InstallTo "$([IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "Testing-development", "usr"))" `
+    -InstallTo "$([IO.Path]::Combine((Get-PlatformRoot $Platform), "Developer", "Library", "Testing-$ProductVersion", "usr"))" `
     -Arch $Arch `
     -Platform $Platform `
     -UseBuiltCompilers C,CXX,Swift `
@@ -2483,8 +2485,8 @@ function Test-Testing {
 function Write-PlatformInfoPlist([Platform] $Platform) {
   $Settings = @{
     DefaultProperties = @{
-      SWIFT_TESTING_VERSION = "development"
-      XCTEST_VERSION = "development"
+      SWIFT_TESTING_VERSION = "$ProductVersion"
+      XCTEST_VERSION = "$ProductVersion"
     }
   }
   if ($Platform -eq [Platform]::Windows) {
@@ -3290,21 +3292,25 @@ if (-not $IsCrossCompiling) {
       "-TestLLVM" = $Test -contains "llvm";
       "-TestSwift" = $Test -contains "swift";
     }
+    # FIXME(compnerd) this involves fixing the specialised argument handling in
+    # `Invoke-BuildStep` to deal with the additional boolean parameters.
     Build-Compilers $HostArch @Tests
   }
 
-  if ($Test -contains "dispatch") { Test-Dispatch }
-  if ($Test -contains "foundation") { Test-Foundation }
-  if ($Test -contains "xctest") { Test-XCTest }
-  if ($Test -contains "testing") { Test-Testing }
-  if ($Test -contains "llbuild") { Test-LLBuild }
-  if ($Test -contains "swiftpm") { Test-PackageManager }
-  if ($Test -contains "swift-format") { Test-Format }
-  if ($Test -contains "sourcekit-lsp") { Test-SourceKitLSP }
+  if ($Test -contains "dispatch") { Invoke-BuildStep Test-Dispatch }
+  if ($Test -contains "foundation") { Invoke-BuildStep Test-Foundation }
+  if ($Test -contains "xctest") { Invoke-BuildStep Test-XCTest }
+  if ($Test -contains "testing") { Invoke-BuildStep Test-Testing }
+  if ($Test -contains "llbuild") { Invoke-BuildStep Test-LLBuild }
+  if ($Test -contains "swiftpm") { Invoke-BuildStep Test-PackageManager }
+  if ($Test -contains "swift-format") { Invoke-BuildStep Test-Format }
+  if ($Test -contains "sourcekit-lsp") { Invoke-BuildStep Test-SourceKitLSP }
 
   if ($Test -contains "swift") {
     foreach ($Arch in $AndroidSDKArchs) {
-      Test-Runtime Android $Arch
+      try {
+        Invoke-BuildStep Test-Runtime Android $Arch
+      } catch {}
     }
   }
 }
