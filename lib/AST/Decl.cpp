@@ -427,6 +427,19 @@ void Decl::attachParsedAttrs(DeclAttributes attrs) {
   for (auto attr : attrs.getAttributes<ABIAttr, /*AllowInvalid=*/true>())
     recordABIAttr(attr);
 
+  // @implementation requires an explicit @objc attribute, but
+  // @_objcImplementation didn't. Insert one if necessary.
+  auto implAttr = attrs.getAttribute<ObjCImplementationAttr>();
+  if (implAttr && isa<ExtensionDecl>(this) && implAttr->isEarlyAdopter() &&
+      !attrs.hasAttribute<ObjCAttr>()) {
+    ObjCAttr *objcAttr =
+        implAttr->CategoryName.empty()
+            ? ObjCAttr::createUnnamedImplicit(getASTContext())
+            : ObjCAttr::createNullary(getASTContext(), implAttr->CategoryName,
+                                      /*isNameImplicit=*/false);
+    attrs.add(objcAttr);
+  }
+
   getAttrs() = attrs;
 }
 
@@ -902,6 +915,10 @@ static ModuleDecl *getModuleContextForNameLookupForCxxDecl(const Decl *decl) {
   auto clangModule = decl->getClangDecl()->getOwningModule();
   if (!clangModule)
     return nullptr;
+
+  // Swift groups all submodules of a Clang module together, and imports them as
+  // a single top-level module.
+  clangModule = clangModule->getTopLevelModule();
 
   return ctx.getClangModuleLoader()->getWrapperForModule(clangModule);
 }

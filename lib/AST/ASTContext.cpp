@@ -1447,6 +1447,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   case KnownProtocolKind::Executor:
   case KnownProtocolKind::TaskExecutor:
   case KnownProtocolKind::SerialExecutor:
+  case KnownProtocolKind::ExecutorFactory:
     M = getLoadedModule(Id_Concurrency);
     break;
   case KnownProtocolKind::DistributedActor:
@@ -7097,8 +7098,9 @@ ValueOwnership swift::asValueOwnership(ParameterOwnership o) {
 }
 
 AvailabilityDomain ASTContext::getTargetAvailabilityDomain() const {
-  if (auto domain = AvailabilityDomain::forTargetPlatform(*this))
-    return *domain;
+  auto platform = swift::targetPlatform(LangOpts);
+  if (platform != PlatformKind::none)
+    return AvailabilityDomain::forPlatform(platform);
 
   // Fall back to the universal domain for triples without a platform.
   return AvailabilityDomain::forUniversal();
