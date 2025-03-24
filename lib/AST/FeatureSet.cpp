@@ -195,6 +195,12 @@ static bool usesFeatureNonescapableTypes(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureInlineArrayTypeSugar(Decl *D) {
+  return usesTypeMatching(D, [&](Type ty) {
+    return isa<InlineArrayType>(ty.getPointer());
+  });
+}
+
 UNINTERESTING_FEATURE(StaticExclusiveOnly)
 UNINTERESTING_FEATURE(ExtractConstantsFromMembers)
 UNINTERESTING_FEATURE(GroupActorErrors)
@@ -332,6 +338,7 @@ UNINTERESTING_FEATURE(ReinitializeConsumeInMultiBlockDefer)
 UNINTERESTING_FEATURE(SE427NoInferenceOnExtension)
 UNINTERESTING_FEATURE(TrailingComma)
 UNINTERESTING_FEATURE(RawIdentifiers)
+UNINTERESTING_FEATURE(InferIsolatedConformances)
 
 static ABIAttr *getABIAttr(Decl *decl) {
   if (auto pbd = dyn_cast<PatternBindingDecl>(decl))

@@ -3093,7 +3093,11 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
 
     case DeclAttrKind::Available: {
       auto theAttr = D->getSemanticAvailableAttr(cast<AvailableAttr>(DA));
-      assert(theAttr);
+
+      // In lazy typechecking mode, it's possible that we just discovered that
+      // the attribute is invalid.
+      if (!theAttr)
+        return;
 
       ENCODE_VER_TUPLE(Introduced, theAttr->getIntroduced())
       ENCODE_VER_TUPLE(Deprecated, theAttr->getDeprecated())
@@ -5976,6 +5980,14 @@ public:
   void visitArraySliceType(const ArraySliceType *sliceTy) {
     using namespace decls_block;
     serializeSimpleWrapper<ArraySliceTypeLayout>(sliceTy->getBaseType());
+  }
+
+  void visitInlineArrayType(const InlineArrayType *T) {
+    using namespace decls_block;
+    unsigned abbrCode = S.DeclTypeAbbrCodes[InlineArrayTypeLayout::Code];
+    InlineArrayTypeLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode,
+                                      S.addTypeRef(T->getCountType()),
+                                      S.addTypeRef(T->getElementType()));
   }
 
   void visitDictionaryType(const DictionaryType *dictTy) {
