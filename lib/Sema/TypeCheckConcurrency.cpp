@@ -2982,6 +2982,12 @@ namespace {
             ->mapTypeIntoContext(decl->getInterfaceType())
             ->getReferenceStorageReferent();
 
+        // Pack expansions are okay to capture as long as the pattern
+        // type is Sendable.
+        if (auto *expansion = type->getAs<PackExpansionType>()) {
+          type = expansion->getPatternType();
+        }
+
         if (type->hasError())
           continue;
 
@@ -5798,7 +5804,7 @@ computeDefaultInferredActorIsolation(ValueDecl *value) {
 
     // If we are required to use main actor... just use that.
     if (!ignoreUnspecifiedMeansMainActorIsolated &&
-        ctx.LangOpts.hasFeature(Feature::UnspecifiedMeansMainActorIsolated))
+        ctx.LangOpts.DefaultIsolationBehavior == DefaultIsolation::MainActor)
       if (auto result =
               globalActorHelper(ctx.getMainActorType()->mapTypeOutOfContext()))
         return *result;
