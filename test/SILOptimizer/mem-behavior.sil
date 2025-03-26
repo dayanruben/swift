@@ -1289,18 +1289,18 @@ bb0(%0 : $*C, %1 : $*C, %2 : @owned $C):
 
 // CHECK-LABEL: @test_builtin_zeroInitializer
 // CHECK:       PAIR #0.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %0 = alloc_stack
 // CHECK-NEXT:    r=0,w=0
 // CHECK:       PAIR #1.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %1 = alloc_stack
 // CHECK-NEXT:    r=0,w=1
 sil @test_builtin_zeroInitializer : $@convention(thin) () -> () {
 bb0:
   %0 = alloc_stack $C
   %1 = alloc_stack $C
-  %2 = builtin "zeroInitializer"<C>(%1 : $*C) : $()
+  %2 = builtin "zeroInitializer"(%1 : $*C) : $()
   %3 = apply undef<C>(%1) : $@convention(thin) <C> () -> @out C
   copy_addr [take] %1 to [init] %0 : $*C
   dealloc_stack %1 : $*C
@@ -1312,18 +1312,18 @@ bb0:
 
 // CHECK-LABEL: @test_builtin_zeroInitializer_atomicload
 // CHECK:       PAIR #0.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %0 = alloc_stack
 // CHECK-NEXT:    r=0,w=0
 // CHECK:       PAIR #1.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %1 = alloc_stack
 // CHECK-NEXT:    r=0,w=1
 sil @test_builtin_zeroInitializer_atomicload : $@convention(thin) () -> Builtin.Int64 {
 bb0:
   %0 = alloc_stack $C
   %1 = alloc_stack $C
-  %2 = builtin "zeroInitializer"<C>(%1 : $*C) : $()
+  %2 = builtin "zeroInitializer"(%1 : $*C) : $()
   %3 = apply undef<C>(%1) : $@convention(thin) <C> () -> @out C
   copy_addr [take] %1 to [init] %0 : $*C
   dealloc_stack %1 : $*C
@@ -1336,18 +1336,18 @@ bb0:
 
 // CHECK-LABEL: @test_builtin_zeroInitializer_atomicstore
 // CHECK:       PAIR #0.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %0 = alloc_stack
 // CHECK-NEXT:    r=0,w=0
 // CHECK:       PAIR #1.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %1 = alloc_stack
 // CHECK-NEXT:    r=0,w=1
 sil @test_builtin_zeroInitializer_atomicstore : $@convention(thin) () -> () {
 bb0:
   %0 = alloc_stack $C
   %1 = alloc_stack $C
-  %2 = builtin "zeroInitializer"<C>(%1 : $*C) : $()
+  %2 = builtin "zeroInitializer"(%1 : $*C) : $()
   %3 = apply undef<C>(%1) : $@convention(thin) <C> () -> @out C
   copy_addr [take] %1 to [init] %0 : $*C
   dealloc_stack %1 : $*C
@@ -1362,18 +1362,18 @@ bb0:
 
 // CHECK-LABEL: @test_builtin_zeroInitializer_atomicrmw
 // CHECK:       PAIR #0.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %0 = alloc_stack
 // CHECK-NEXT:    r=0,w=0
 // CHECK:       PAIR #1.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %1 = alloc_stack
 // CHECK-NEXT:    r=0,w=1
 sil @test_builtin_zeroInitializer_atomicrmw : $@convention(thin) () -> (Builtin.Int64, Builtin.Int64) {
 bb0:
   %0 = alloc_stack $C
   %1 = alloc_stack $C
-  %2 = builtin "zeroInitializer"<C>(%1 : $*C) : $()
+  %2 = builtin "zeroInitializer"(%1 : $*C) : $()
   %3 = apply undef<C>(%1) : $@convention(thin) <C> () -> @out C
   copy_addr [take] %1 to [init] %0 : $*C
   dealloc_stack %1 : $*C
@@ -1389,18 +1389,18 @@ bb0:
 
 // CHECK-LABEL: @test_builtin_zeroInitializer_cmpxchg
 // CHECK:       PAIR #0.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %0 = alloc_stack
 // CHECK-NEXT:    r=0,w=0
 // CHECK:       PAIR #1.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %1 = alloc_stack
 // CHECK-NEXT:    r=0,w=1
 sil @test_builtin_zeroInitializer_cmpxchg : $@convention(thin) () -> (Builtin.Int64, Builtin.Int1) {
 bb0:
   %0 = alloc_stack $C
   %1 = alloc_stack $C
-  %2 = builtin "zeroInitializer"<C>(%1 : $*C) : $()
+  %2 = builtin "zeroInitializer"(%1 : $*C) : $()
   %3 = apply undef<C>(%1) : $@convention(thin) <C> () -> @out C
   copy_addr [take] %1 to [init] %0 : $*C
   dealloc_stack %1 : $*C
@@ -1414,18 +1414,18 @@ bb0:
 
 // CHECK-LABEL: @test_builtin_zeroInitializer_fence
 // CHECK:       PAIR #0.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %0 = alloc_stack
 // CHECK-NEXT:    r=0,w=0
 // CHECK:       PAIR #1.
-// CHECK-NEXT:      %2 = builtin "zeroInitializer"<C>(%1 : $*C)
+// CHECK-NEXT:      %2 = builtin "zeroInitializer"(%1 : $*C)
 // CHECK-NEXT:      %1 = alloc_stack
 // CHECK-NEXT:    r=0,w=1
 sil @test_builtin_zeroInitializer_fence : $@convention(thin) () -> () {
 bb0:
   %0 = alloc_stack $C
   %1 = alloc_stack $C
-  %2 = builtin "zeroInitializer"<C>(%1 : $*C) : $()
+  %2 = builtin "zeroInitializer"(%1 : $*C) : $()
   %3 = apply undef<C>(%1) : $@convention(thin) <C> () -> @out C
   copy_addr [take] %1 to [init] %0 : $*C
   dealloc_stack %1 : $*C
@@ -1915,4 +1915,29 @@ bb0(%0 : $*C, %1 : $*C, %2 : @owned $C):
   %4 = mark_dependence %2 on %0
   %5 = mark_dependence %1 on %0
   return %4
+}
+
+// CHECK-LABEL: @test_mark_dependence_addr
+// CHECK:      PAIR #0.
+// CHECK-NEXT:   mark_dependence_addr %1 : $*C on %2 : $C
+// CHECK-NEXT:   %0 = argument of bb0 : $*C
+// CHECK-NEXT:   r=0,w=0
+// CHECK:      PAIR #1.
+// CHECK-NEXT:   mark_dependence_addr %1 : $*C on %2 : $C
+// CHECK-NEXT:   %1 = argument of bb0 : $*C
+// CHECK-NEXT:   r=0,w=0
+// CHECK:      PAIR #2.
+// CHECK-NEXT:     mark_dependence_addr %1 : $*C on %0 : $*C
+// CHECK-NEXT:   %0 = argument of bb0 : $*C
+// CHECK-NEXT:  r=1,w=0
+// CHECK:      PAIR #3.
+// CHECK-NEXT:    mark_dependence_addr %1 : $*C on %0 : $*C
+// CHECK-NEXT:  %1 = argument of bb0 : $*C
+// CHECK-NEXT:  r=0,w=0
+sil [ossa] @test_mark_dependence_addr : $@convention(thin) (@in_guaranteed C, @in_guaranteed C, @guaranteed C) -> () {
+bb0(%0 : $*C, %1 : $*C, %2 : @guaranteed $C):
+  mark_dependence_addr %1 on %2
+  mark_dependence_addr %1 on %0
+  %99 = tuple ()
+  return %99 : $()
 }

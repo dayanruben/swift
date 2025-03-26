@@ -2338,6 +2338,14 @@ public:
                     forwardingOwnershipKind, dependenceKind));
   }
 
+  MarkDependenceAddrInst *
+  createMarkDependenceAddr(SILLocation Loc, SILValue address, SILValue base,
+                           MarkDependenceKind dependenceKind) {
+    return insert(new (getModule()) MarkDependenceAddrInst(
+                    getSILDebugLocation(Loc), address, base,
+                    dependenceKind));
+  }
+
   IsUniqueInst *createIsUnique(SILLocation Loc, SILValue operand) {
     auto Int1Ty = SILType::getBuiltinIntegerType(1, getASTContext());
     return insert(new (getModule()) IsUniqueInst(getSILDebugLocation(Loc),
@@ -2421,6 +2429,16 @@ public:
                               getSILDebugLocation(loc),
                               valueType, paramType));
   }
+
+  /// Create a zero-initialized value of the given (loadable) type.
+  ///
+  /// This is currently only expected to be used in narrow situations
+  /// involving bridging and only makes a best effort attempt.
+  SILValue createZeroInitValue(SILLocation loc, SILType loweredTy);
+
+  /// Zero-initialize an object in memory of the given type (which may
+  /// or may not be loadable).
+  BuiltinInst *createZeroInitAddr(SILLocation loc, SILValue addr);
 
   //===--------------------------------------------------------------------===//
   // Unchecked cast helpers
