@@ -5986,7 +5986,7 @@ class TypePrinter : public TypeVisitor<TypePrinter> {
       for (auto attr: D->getAttrs().getAttributes<OriginallyDefinedInAttr>()) {
         Name = Mod->getASTContext()
           .getIdentifier(const_cast<OriginallyDefinedInAttr*>(attr)
-                         ->OriginalModuleName);
+                         ->ManglingModuleName);
         break;
       }
     }
@@ -7823,7 +7823,7 @@ std::string TypeBase::getStringAsComponent(const PrintOptions &PO) const {
   return OS.str();
 }
 
-void TypeBase::dumpPrint() const {
+void TypeBase::print() const {
   print(llvm::errs());
   llvm::errs() << '\n';
 }

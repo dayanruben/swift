@@ -945,6 +945,7 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(sil_block, SIL_WITNESS_CONDITIONAL_CONFORMANCE);
   BLOCK_RECORD(sil_block, SIL_DEFAULT_WITNESS_TABLE);
   BLOCK_RECORD(sil_block, SIL_DEFAULT_WITNESS_TABLE_NO_ENTRY);
+  BLOCK_RECORD(sil_block, SIL_DEFAULT_OVERRIDE_TABLE);
   BLOCK_RECORD(sil_block, SIL_INST_WITNESS_METHOD);
   BLOCK_RECORD(sil_block, SIL_SPECIALIZE_ATTR);
   BLOCK_RECORD(sil_block, SIL_ARG_EFFECTS_ATTR);
@@ -986,6 +987,8 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(sil_index_block, SIL_PROPERTY_OFFSETS);
   BLOCK_RECORD(sil_index_block, SIL_DIFFERENTIABILITY_WITNESS_NAMES);
   BLOCK_RECORD(sil_index_block, SIL_DIFFERENTIABILITY_WITNESS_OFFSETS);
+  BLOCK_RECORD(sil_index_block, SIL_DEFAULT_OVERRIDE_TABLE_NAMES);
+  BLOCK_RECORD(sil_index_block, SIL_DEFAULT_OVERRIDE_TABLE_OFFSETS);
 
   BLOCK(INCREMENTAL_INFORMATION_BLOCK);
   BLOCK_RECORD(fine_grained_dependencies::record_block, METADATA);
@@ -3094,7 +3097,9 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
           Moved, std::optional<llvm::VersionTuple>(theAttr->MovedVersion));
       auto abbrCode = S.DeclTypeAbbrCodes[OriginallyDefinedInDeclAttrLayout::Code];
       llvm::SmallString<32> blob;
-      blob.append(theAttr->OriginalModuleName.str());
+      blob.append(theAttr->ManglingModuleName.str());
+      blob.push_back('\0');
+      blob.append(theAttr->LinkerModuleName.str());
       blob.push_back('\0');
       OriginallyDefinedInDeclAttrLayout::emitRecord(
           S.Out, S.ScratchRecord, abbrCode,

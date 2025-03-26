@@ -1101,7 +1101,7 @@ StringRef Decl::getAlternateModuleName() const {
   for (auto *Att: Attrs) {
     if (auto *OD = dyn_cast<OriginallyDefinedInAttr>(Att)) {
       if (!OD->isInvalid() && OD->isActivePlatform(getASTContext())) {
-        return OD->OriginalModuleName;
+        return OD->ManglingModuleName;
       }
     }
   }
@@ -1292,6 +1292,10 @@ std::optional<Type> AbstractFunctionDecl::getEffectiveThrownErrorType() const {
 
 bool AbstractStorageDecl::isCompileTimeLiteral() const {
   return getAttrs().hasAttribute<CompileTimeLiteralAttr>();
+}
+
+bool AbstractStorageDecl::isConstVal() const {
+  return getAttrs().hasAttribute<ConstValAttr>();
 }
 
 bool AbstractStorageDecl::isTransparent() const {
