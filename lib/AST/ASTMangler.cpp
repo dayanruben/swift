@@ -596,7 +596,7 @@ std::string ASTMangler::mangleReabstractionThunkHelper(
     appendOperator("Ty");
   else
     appendOperator("TR");
-  
+
   if (GlobalActorBound) {
     appendType(GlobalActorBound, GenSig);
     appendOperator("TU");
@@ -828,14 +828,12 @@ std::string ASTMangler::mangleAutoDiffGeneratedDeclaration(
 // Since we don't have a distinct mangling for sugared generic
 // parameter types, we must desugar them here.
 static Type getTypeForDWARFMangling(Type t) {
-  return t.subst(
-    [](SubstitutableType *t) -> Type {
-      if (t->isRootParameterPack()) {
-        return PackType::getSingletonPackExpansion(t->getCanonicalType());
-      }
-      return t->getCanonicalType();
-    },
-    MakeAbstractConformanceForGenericType());
+  return t.transformRec(
+    [](TypeBase *t) -> std::optional<Type> {
+      if (isa<GenericTypeParamType>(t))
+        return t->getCanonicalType();
+      return std::nullopt;
+    });
 }
 
 std::string ASTMangler::mangleTypeForDebugger(Type Ty, GenericSignature sig) {
@@ -2287,7 +2285,7 @@ void ASTMangler::appendImplFunctionType(SILFunctionType *fn,
   if (!fn->isNoEscape())
     OpArgs.push_back('e');
 
-  switch (fn->getIsolation()) {
+  switch (fn->getIsolation().getKind()) {
   case SILFunctionTypeIsolation::Unknown:
     break;
   case SILFunctionTypeIsolation::Erased:
