@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Strings.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTMangler.h"
@@ -1228,10 +1229,6 @@ ExplicitSafety Decl::getExplicitSafety() const {
       if (auto extSafety = getExplicitSafetyFromAttrs(ext))
         return *extSafety;
     }
-
-    if (auto enclosingNominal = enclosingDC->getSelfNominalTypeDecl())
-      if (auto nominalSafety = getExplicitSafetyFromAttrs(enclosingNominal))
-        return *nominalSafety;
   }
 
   // If an extension extends an unsafe nominal type, it's unsafe.
@@ -1241,11 +1238,12 @@ ExplicitSafety Decl::getExplicitSafety() const {
         return ExplicitSafety::Unsafe;
   }
 
-  // If this is a pattern binding declaration, check whether the first
-  // variable is @unsafe.
+  // If this is a pattern binding declaration, check whether there is a
+  // safety-related attribute on the first variable we find.
   if (auto patternBinding = dyn_cast<PatternBindingDecl>(this)) {
-    if (auto var = patternBinding->getSingleVar())
-      return var->getExplicitSafety();
+    for (auto index : range(patternBinding->getNumPatternEntries()))
+      if (auto var = patternBinding->getAnchoringVarDecl(index))
+        return var->getExplicitSafety();
   }
 
   return ExplicitSafety::Unspecified;
@@ -5434,9 +5432,29 @@ int TypeDecl::compare(const TypeDecl *type1, const TypeDecl *type2) {
 
   // Prefer module names earlier in the alphabet.
   if (dc1->isModuleScopeContext() && dc2->isModuleScopeContext()) {
-    auto module1 = dc1->getParentModule();
-    auto module2 = dc2->getParentModule();
-    if (int result = module1->getName().str().compare(module2->getName().str()))
+    // For protocol declarations specifically, the order here is part
+    // of the ABI, and so we must take care to get the correct module
+    // name for the comparison.
+    auto getModuleNameForOrder = [&](const TypeDecl *decl) -> StringRef {
+      // Respect @_originallyDefinedIn on the type itself, so that
+      // moving a protocol across modules does not change its
+      // position in the order.
+      auto alternateName = decl->getAlternateModuleName();
+      if (!alternateName.empty())
+        return alternateName;
+
+      // This used to just call getName(), which caused accidental ABI breaks
+      // when a module is imported under different aliases.
+      //
+      // Ideally, we would use getABIName() here. However, this would
+      // cause ABI breaks with the _Concurrency and CompilerSwiftSyntax
+      // builds, which already passed in a -module-abi-name but had
+      // existing symbols mangled with the wrong order.
+      auto *module = decl->getDeclContext()->getParentModule();
+      return module->getRealName().str();
+    };
+
+    if (int result = getModuleNameForOrder(type1).compare(getModuleNameForOrder(type2)))
       return result;
   }
 
@@ -11017,6 +11035,9 @@ AccessorDecl *AccessorDecl::createParsed(
 
       newParams.push_back(param);
     }
+
+    if (isa<SendingTypeRepr>(SD->getElementTypeRepr()))
+      accessor->setSendingResult();
   }
   accessor->setParameters(
       ParameterList::create(ctx, paramsStart, newParams, paramsEnd));

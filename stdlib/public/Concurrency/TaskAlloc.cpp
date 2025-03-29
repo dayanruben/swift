@@ -20,7 +20,6 @@
 #include "TaskPrivate.h"
 #include "swift/ABI/Task.h"
 #include "swift/Runtime/Concurrency.h"
-#include "swift/Runtime/Coro.h"
 
 #include <stdlib.h>
 
@@ -71,20 +70,4 @@ void swift::_swift_task_dealloc_specific(AsyncTask *task, void *ptr) {
 
 void swift::swift_task_dealloc_through(void *ptr) {
   allocator(swift_task_getCurrent()).deallocThrough(ptr);
-}
-
-void *swift::swift_coro_alloc(CoroAllocator *allocator, size_t size) {
-  return allocator->allocate(size);
-}
-
-void swift::swift_coro_dealloc(CoroAllocator *allocator, void *ptr) {
-  if (!allocator)
-    return;
-  // Calls to swift_coro_dealloc are emitted in resume funclets for every
-  // live-across dynamic allocation.  Whether such calls immediately deallocate
-  // memory depends on the allocator.
-  if (!allocator->shouldDeallocateImmediately()) {
-    return;
-  }
-  allocator->deallocate(ptr);
 }

@@ -5118,39 +5118,133 @@ void irgen::emitYieldManyCoroutineEntry(
                            allocFn, deallocFn, {});
 }
 
-static llvm::Constant *getCoroAllocWrapperFn(IRGenModule &IGM) {
+static llvm::Constant *getCoroAllocFn(IRGenModule &IGM) {
+  auto isSwiftCoroCCAvailable = IGM.SwiftCoroCC == llvm::CallingConv::SwiftCoro;
   return IGM.getOrCreateHelperFunction(
-      "__swift_coro_alloc_", IGM.Int8PtrTy,
-      {IGM.CoroAllocatorPtrTy, IGM.SizeTy},
-      [](IRGenFunction &IGF) {
+      "_swift_coro_alloc", IGM.Int8PtrTy, {IGM.CoroAllocatorPtrTy, IGM.SizeTy},
+      [isSwiftCoroCCAvailable](IRGenFunction &IGF) {
         auto parameters = IGF.collectParameters();
         auto *allocator = parameters.claimNext();
         auto *size = parameters.claimNext();
-        auto *nullAllocator = IGF.Builder.CreateCmp(
-            llvm::CmpInst::Predicate::ICMP_EQ, allocator,
-            llvm::ConstantPointerNull::get(
-                cast<llvm::PointerType>(allocator->getType())));
-        auto *poplessReturn = IGF.createBasicBlock("coro.return.popless");
-        auto *normalReturn = IGF.createBasicBlock("coro.return.normal");
-        IGF.Builder.CreateCondBr(nullAllocator, poplessReturn, normalReturn);
-        IGF.Builder.emitBlock(poplessReturn);
-        // Emit the dynamic alloca.
-        auto *alloca =
-            IGF.Builder.IRBuilderBase::CreateAlloca(IGF.IGM.Int8Ty, size);
-        alloca->setAlignment(llvm::Align(MaximumAlignment));
-        auto *retPopless = IGF.Builder.CreateIntrinsic(
-            IGF.IGM.VoidTy, llvm::Intrinsic::ret_popless, {});
-        retPopless->setTailCallKind(llvm::CallInst::TailCallKind::TCK_MustTail);
-        IGF.Builder.CreateRet(alloca);
-        IGF.Builder.emitBlock(normalReturn);
-        auto *call = IGF.Builder.CreateCall(
-            IGF.IGM.getCoroAllocFunctionPointer(), {allocator, size});
+        if (isSwiftCoroCCAvailable) {
+          // swiftcorocc is available, so if there's no allocator pointer,
+          // allocate storage on the stack and return a pointer to it without
+          // popping the stack.
+          auto *nullAllocator = IGF.Builder.CreateCmp(
+              llvm::CmpInst::Predicate::ICMP_EQ, allocator,
+              llvm::ConstantPointerNull::get(
+                  cast<llvm::PointerType>(allocator->getType())));
+          auto *poplessReturn = IGF.createBasicBlock("popless");
+          auto *normalReturn = IGF.createBasicBlock("normal");
+          IGF.Builder.CreateCondBr(nullAllocator, poplessReturn, normalReturn);
+          IGF.Builder.emitBlock(poplessReturn);
+          // Emit the dynamic alloca.
+          auto *alloca =
+              IGF.Builder.IRBuilderBase::CreateAlloca(IGF.IGM.Int8Ty, size);
+          alloca->setAlignment(llvm::Align(MaximumAlignment));
+          auto *retPopless = IGF.Builder.CreateIntrinsic(
+              IGF.IGM.VoidTy, llvm::Intrinsic::ret_popless, {});
+          retPopless->setTailCallKind(
+              llvm::CallInst::TailCallKind::TCK_MustTail);
+          IGF.Builder.CreateRet(alloca);
+          // Start emitting the "normal" block.
+          IGF.Builder.emitBlock(normalReturn);
+        }
+        auto *calleePtr = IGF.Builder.CreateInBoundsGEP(
+            IGF.IGM.CoroAllocatorTy, allocator,
+            {llvm::ConstantInt::get(IGF.IGM.Int32Ty, 0),
+             llvm::ConstantInt::get(IGF.IGM.Int32Ty, 1)});
+        auto *callee = IGF.Builder.CreateLoad(
+            Address(calleePtr, IGF.IGM.CoroAllocateFnTy->getPointerTo(),
+                    IGF.IGM.getPointerAlignment()),
+            "allocate_fn");
+        auto fnPtr = FunctionPointer::createUnsigned(
+            FunctionPointer::Kind::Function, callee,
+            Signature(cast<llvm::FunctionType>(IGF.IGM.CoroAllocateFnTy), {},
+                      IGF.IGM.SwiftCC));
+        auto *call = IGF.Builder.CreateCall(fnPtr, {size});
+        call->setDoesNotThrow();
+        call->setCallingConv(IGF.IGM.SwiftCC);
         IGF.Builder.CreateRet(call);
       },
-      /*setIsNoInline=*/false,
+      /*setIsNoInline=*/true,
       /*forPrologue=*/false,
       /*isPerformanceConstraint=*/false,
-      /*optionalLinkageOverride=*/nullptr, llvm::CallingConv::SwiftCoro);
+      /*optionalLinkageOverride=*/nullptr, IGM.SwiftCoroCC);
+}
+
+static llvm::Constant *getCoroDeallocFn(IRGenModule &IGM) {
+  auto isSwiftCoroCCAvailable = IGM.SwiftCoroCC == llvm::CallingConv::SwiftCoro;
+  return IGM.getOrCreateHelperFunction(
+      "_swift_coro_dealloc", IGM.VoidTy,
+      {IGM.CoroAllocatorPtrTy, IGM.Int8PtrTy},
+      [isSwiftCoroCCAvailable](IRGenFunction &IGF) {
+        auto parameters = IGF.collectParameters();
+        auto *allocator = parameters.claimNext();
+        auto *ptr = parameters.claimNext();
+        if (isSwiftCoroCCAvailable) {
+          // swiftcorocc is available, so if there's no allocator pointer,
+          // storage was allocated on the stack which will be naturally cleaned
+          // up when the coroutine's frame is "freed".
+          auto *nullAllocator = IGF.Builder.CreateCmp(
+              llvm::CmpInst::Predicate::ICMP_EQ, allocator,
+              llvm::ConstantPointerNull::get(
+                  cast<llvm::PointerType>(allocator->getType())));
+          auto *bailBlock = IGF.createBasicBlock("null_allocator");
+          auto *normalBlock = IGF.createBasicBlock("nonnull_allocator");
+          IGF.Builder.CreateCondBr(nullAllocator, bailBlock, normalBlock);
+          IGF.Builder.emitBlock(bailBlock);
+          // Nothing to do here.
+          IGF.Builder.CreateRetVoid();
+          // Start emitting the "normal" block.
+          IGF.Builder.emitBlock(normalBlock);
+        }
+        auto shouldDeallocateImmediatelyFlag = CoroAllocatorFlags(0);
+        shouldDeallocateImmediatelyFlag.setShouldDeallocateImmediately(true);
+        auto *flagsPtr = IGF.Builder.CreateInBoundsGEP(
+            IGF.IGM.CoroAllocatorTy, allocator,
+            {llvm::ConstantInt::get(IGF.IGM.Int32Ty, 0),
+             llvm::ConstantInt::get(IGF.IGM.Int32Ty, 0)});
+        auto *flags = IGF.Builder.CreateLoad(
+            Address(flagsPtr, IGF.IGM.Int32Ty, Alignment(4)), "");
+        auto *deallocDeferringAllocator = IGF.Builder.CreateAnd(
+            flags,
+            llvm::APInt(IGF.IGM.Int32Ty->getBitWidth(),
+                        shouldDeallocateImmediatelyFlag.getOpaqueValue()));
+        auto *isDeallocDeferringAllocator = IGF.Builder.CreateICmpNE(
+            deallocDeferringAllocator,
+            llvm::ConstantInt::get(IGF.IGM.Int32Ty, 0));
+        auto *deferringAllocatorBlock =
+            IGF.createBasicBlock("deferring_allocator");
+        auto *normalBlock = IGF.createBasicBlock("normal");
+        IGF.Builder.CreateCondBr(isDeallocDeferringAllocator,
+                                 deferringAllocatorBlock, normalBlock);
+        IGF.Builder.emitBlock(deferringAllocatorBlock);
+        // Nothing to do here.
+        IGF.Builder.CreateRetVoid();
+        // Start emitting the "normal" block.
+        IGF.Builder.emitBlock(normalBlock);
+        auto *calleePtr = IGF.Builder.CreateInBoundsGEP(
+            IGF.IGM.CoroAllocatorTy, allocator,
+            {llvm::ConstantInt::get(IGF.IGM.Int32Ty, 0),
+             llvm::ConstantInt::get(IGF.IGM.Int32Ty, 2)});
+        auto *callee = IGF.Builder.CreateLoad(
+            Address(calleePtr, IGF.IGM.CoroDeallocateFnTy->getPointerTo(),
+                    IGF.IGM.getPointerAlignment()),
+            "deallocate_fn");
+        auto fnPtr = FunctionPointer::createUnsigned(
+            FunctionPointer::Kind::Function, callee,
+            Signature(cast<llvm::FunctionType>(IGF.IGM.CoroDeallocateFnTy), {},
+                      IGF.IGM.SwiftCC));
+        auto *call = IGF.Builder.CreateCall(fnPtr, {ptr});
+        call->setDoesNotThrow();
+        call->setCallingConv(IGF.IGM.SwiftCC);
+        IGF.Builder.CreateRetVoid();
+      },
+      /*setIsNoInline=*/true,
+      /*forPrologue=*/false,
+      /*isPerformanceConstraint=*/false,
+      /*optionalLinkageOverride=*/nullptr, IGM.SwiftCoroCC);
 }
 
 void irgen::emitYieldOnce2CoroutineEntry(IRGenFunction &IGF,
@@ -5159,12 +5253,8 @@ void irgen::emitYieldOnce2CoroutineEntry(IRGenFunction &IGF,
                                          llvm::Value *allocator,
                                          llvm::GlobalVariable *cfp) {
   IGF.setCoroutineAllocator(allocator);
-  auto isSwiftCoroCCAvailable =
-      IGF.IGM.SwiftCoroCC == llvm::CallingConv::SwiftCoro;
-  auto allocFn = IGF.IGM.getOpaquePtr(isSwiftCoroCCAvailable
-                                          ? getCoroAllocWrapperFn(IGF.IGM)
-                                          : IGF.IGM.getCoroAllocFn());
-  auto deallocFn = IGF.IGM.getOpaquePtr(IGF.IGM.getCoroDeallocFn());
+  auto allocFn = IGF.IGM.getOpaquePtr(getCoroAllocFn(IGF.IGM));
+  auto deallocFn = IGF.IGM.getOpaquePtr(getCoroDeallocFn(IGF.IGM));
   emitRetconCoroutineEntry(
       IGF, fnType, buffer, llvm::Intrinsic::coro_id_retcon_once_dynamic,
       Size(-1) /*dynamic-to-IRGen size*/, IGF.IGM.getCoroStaticFrameAlignment(),
@@ -5199,16 +5289,51 @@ Address irgen::emitAllocYieldManyCoroutineBuffer(IRGenFunction &IGF) {
                                  getYieldManyCoroutineBufferAlignment(IGF.IGM));
 }
 
-static llvm::Constant *getAddrOfGlobalCoroAllocator(IRGenModule &IGM,
-                                                    CoroAllocatorKind kind,
-                                                    llvm::Constant *allocFn,
-                                                    llvm::Constant *deallocFn) {
+static llvm::Constant *getAddrOfSwiftCCMalloc(IRGenModule &IGM) {
+  auto mallocFnPtr = IGM.getMallocFunctionPointer();
+  auto sig = mallocFnPtr.getSignature();
+  if (sig.getCallingConv() == IGM.SwiftCC) {
+    return IGM.getMallocFn();
+  }
+  return IGM.getOrCreateHelperFunction(
+      "_swift_malloc", sig.getType()->getReturnType(), sig.getType()->params(),
+      [](IRGenFunction &IGF) {
+        auto parameters = IGF.collectParameters();
+        auto *size = parameters.claimNext();
+        auto malloc = IGF.IGM.getMallocFunctionPointer();
+        auto *call = IGF.Builder.CreateCall(malloc, {size});
+        IGF.Builder.CreateRet(call);
+      });
+}
+
+static llvm::Constant *getAddrOfSwiftCCFree(IRGenModule &IGM) {
+  auto freeFnPtr = IGM.getFreeFunctionPointer();
+  auto sig = freeFnPtr.getSignature();
+  if (sig.getCallingConv() == IGM.SwiftCC) {
+    return IGM.getFreeFn();
+  }
+  return IGM.getOrCreateHelperFunction(
+      "_swift_free", sig.getType()->getReturnType(), sig.getType()->params(),
+      [](IRGenFunction &IGF) {
+        auto parameters = IGF.collectParameters();
+        auto *ptr = parameters.claimNext();
+        auto free = IGF.IGM.getFreeFunctionPointer();
+        IGF.Builder.CreateCall(free, {ptr});
+        IGF.Builder.CreateRetVoid();
+      });
+}
+
+static llvm::Constant *getAddrOfGlobalCoroAllocator(
+    IRGenModule &IGM, CoroAllocatorKind kind, bool shouldDeallocateImmediately,
+    llvm::Constant *allocFn, llvm::Constant *deallocFn) {
   auto entity = LinkEntity::forCoroAllocator(kind);
   auto taskAllocator = IGM.getOrCreateLazyGlobalVariable(
       entity,
       [&](ConstantInitBuilder &builder) -> ConstantInitFuture {
         auto allocator = builder.beginStruct(IGM.CoroAllocatorTy);
-        allocator.addInt32(CoroAllocatorFlags(kind).getOpaqueValue());
+        auto flags = CoroAllocatorFlags(kind);
+        flags.setShouldDeallocateImmediately(shouldDeallocateImmediately);
+        allocator.addInt32(flags.getOpaqueValue());
         allocator.add(allocFn);
         allocator.add(deallocFn);
         return allocator.finishAndCreateFuture();
@@ -5218,10 +5343,13 @@ static llvm::Constant *getAddrOfGlobalCoroAllocator(IRGenModule &IGM,
 }
 llvm::Constant *IRGenModule::getAddrOfGlobalCoroMallocAllocator() {
   return getAddrOfGlobalCoroAllocator(*this, CoroAllocatorKind::Malloc,
-                                      getMallocFn(), getFreeFn());
+                                      /*shouldDeallocateImmediately=*/true,
+                                      getAddrOfSwiftCCMalloc(*this),
+                                      getAddrOfSwiftCCFree(*this));
 }
 llvm::Constant *IRGenModule::getAddrOfGlobalCoroAsyncTaskAllocator() {
   return getAddrOfGlobalCoroAllocator(*this, CoroAllocatorKind::Async,
+                                      /*shouldDeallocateImmediately=*/false,
                                       getTaskAllocFn(), getTaskDeallocFn());
 }
 llvm::Value *
