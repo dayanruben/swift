@@ -3011,7 +3011,7 @@ namespace {
       // FIXME: When passing to a sending parameter, should this be handled
       // by region isolation? Or should it always be handled by region
       // isolation?
-      if (ctx.LangOpts.hasFeature(Feature::StrictSendableMetatypes) &&
+      if (ctx.LangOpts.hasFeature(Feature::IsolatedConformances) &&
           (mayExecuteConcurrentlyWith(
               localFunc.getAsDeclContext(), getDeclContext()) ||
            (explicitClosure && explicitClosure->isPassedToSendingParameter()))) {
@@ -4192,8 +4192,7 @@ namespace {
         // Form a <global actor type>.shared reference.
         Type globalActorType = getDeclContext()->mapTypeIntoContext(
             isolation.getGlobalActor());
-        auto typeExpr = TypeExpr::createForDecl(
-            DeclNameLoc(loc), globalActorType->getAnyNominal(), dc);
+        auto typeExpr = TypeExpr::createImplicit(globalActorType, ctx);
         actorExpr = new (ctx) UnresolvedDotExpr(
             typeExpr, loc, DeclNameRef(ctx.Id_shared), DeclNameLoc(loc),
             /*implicit=*/false);

@@ -957,8 +957,12 @@ static CharSourceRange getExpansionInsertionRange(MacroRole role,
   }
 
   case MacroRole::Extension: {
+    // Extensions are expanded at the top-level.
+    auto *NTD = cast<NominalTypeDecl>(target.get<Decl *>());
+    auto *topLevelDecl = NTD->getTopmostDeclarationDeclContext();
+
     SourceLoc afterDeclLoc =
-        Lexer::getLocForEndOfToken(sourceMgr, target.getEndLoc());
+        Lexer::getLocForEndOfToken(sourceMgr, topLevelDecl->getEndLoc());
     return CharSourceRange(afterDeclLoc, 0);
   }
 
@@ -984,6 +988,12 @@ static CharSourceRange getExpansionInsertionRange(MacroRole role,
                                  closure->getEndLoc()));
     }
 
+    // If the function has a body, that's what's being replaced.
+    auto *AFD = cast<AbstractFunctionDecl>(target.get<Decl *>());
+    if (auto range = AFD->getBodySourceRange())
+      return Lexer::getCharSourceRangeFromSourceRange(sourceMgr, range);
+
+    // Otherwise we have no body, just use the end of the decl.
     SourceLoc afterDeclLoc =
         Lexer::getLocForEndOfToken(sourceMgr, target.getEndLoc());
     return CharSourceRange(afterDeclLoc, 0);
@@ -2089,7 +2099,7 @@ std::optional<unsigned> swift::expandExtensions(CustomAttr *attr,
                                                 MacroDecl *macro,
                                                 MacroRole role,
                                                 NominalTypeDecl *nominal) {
-  if (nominal->getDeclContext()->isLocalContext()) {
+  if (nominal->getLocalContext()) {
     nominal->diagnose(diag::local_extension_macro);
     return std::nullopt;
   }

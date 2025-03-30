@@ -152,6 +152,8 @@ add_library(swiftCore
   Sort.swift
   Span/Span.swift
   Span/RawSpan.swift
+  Span/MutableSpan.swift
+  Span/MutableRawSpan.swift
   StaticString.swift
   StaticPrint.swift
   Stride.swift
@@ -290,7 +292,6 @@ target_compile_options(swiftCore PRIVATE
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-enable-experimental-feature AddressableTypes>"
   $<$<COMPILE_LANGUAGE:Swift>:-parse-stdlib>
   $<$<COMPILE_LANGUAGE:Swift>:-nostdimport>
-  $<$<COMPILE_LANGUAGE:Swift>:-explicit-module-build>
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -group-info-path -Xfrontend ${CMAKE_CURRENT_SOURCE_DIR}/GroupInfo.json>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -disable-objc-attr-requires-foundation-module>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -require-explicit-availability=ignore>")
