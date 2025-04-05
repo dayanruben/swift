@@ -241,6 +241,21 @@ public:
     }
   }
 
+  void visitExtensibleAttr(ExtensibleAttr *attr) {
+    auto *E = cast<EnumDecl>(D);
+
+    if (D->getAttrs().hasAttribute<FrozenAttr>()) {
+      diagnoseAndRemoveAttr(attr, diag::extensible_attr_on_frozen_type);
+      return;
+    }
+
+    if (E->getFormalAccess() < AccessLevel::Package) {
+      diagnoseAndRemoveAttr(attr, diag::extensible_attr_on_internal_type,
+                            E->getName(), E->getFormalAccess());
+      return;
+    }
+  }
+
   void visitAlignmentAttr(AlignmentAttr *attr) {
     // Alignment must be a power of two.
     auto value = attr->getValue();
@@ -1951,7 +1966,7 @@ bool swift::isValidDynamicCallableMethod(FuncDecl *decl,
   auto dictConf = checkConformance(argType, dictLitProto);
   if (dictConf.isInvalid())
     return false;
-  auto keyType = dictConf.getTypeWitnessByName(argType, ctx.Id_Key);
+  auto keyType = dictConf.getTypeWitnessByName(ctx.Id_Key);
   return (bool) checkConformance(keyType, stringLitProtocol);
 }
 
@@ -5577,7 +5592,7 @@ static bool conformsToDifferentiable(Type type,
     return false;
   if (!tangentVectorEqualsSelf)
     return true;
-  auto tanType = conf.getTypeWitnessByName(type, ctx.Id_TangentVector);
+  auto tanType = conf.getTypeWitnessByName(ctx.Id_TangentVector);
   return type->isEqual(tanType);
 }
 

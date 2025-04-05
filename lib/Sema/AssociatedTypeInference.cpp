@@ -2496,7 +2496,11 @@ AssociatedTypeInference::computeFailureTypeWitness(
     if (!isAsyncIteratorProtocolNext(witness.first))
       continue;
 
-    if (!witness.second || witness.second->getDeclContext() != dc)
+    // Different extensions of the same nominal are OK, but if the witness is in
+    // a protocol extension or a superclass or something, give up.
+    if (!witness.second ||
+        witness.second->getDeclContext()->getSelfNominalTypeDecl()
+            != dc->getSelfNominalTypeDecl())
       continue;
 
     if (auto witnessFunc = dyn_cast<AbstractFunctionDecl>(witness.second)) {
@@ -2901,18 +2905,14 @@ bool AssociatedTypeInference::checkCurrentTypeWitnesses(
   // Check any same-type requirements in the protocol's requirement signature.
   SubstOptions options = getSubstOptionsWithCurrentTypeWitnesses();
 
-  auto typeInContext = adoptee;
   ProtocolConformanceRef conformanceInContext(conformance);
   if (auto *genericEnv = conformance->getGenericEnvironment()) {
-    typeInContext = genericEnv->mapTypeIntoContext(typeInContext);
-    conformanceInContext =
-      conformanceInContext.subst(conformance->getType(),
-                                 genericEnv->getForwardingSubstitutionMap());
+    conformanceInContext = conformanceInContext.subst(
+        genericEnv->getForwardingSubstitutionMap());
   }
 
   auto substitutions =
-    SubstitutionMap::getProtocolSubstitutions(
-      proto, typeInContext, conformanceInContext);
+    SubstitutionMap::getProtocolSubstitutions(conformanceInContext);
 
   SmallVector<Requirement, 4> sanitizedRequirements;
   auto requirements = proto->getRequirementSignature().getRequirements();
@@ -4544,8 +4544,6 @@ AssociatedConformanceRequest::evaluate(Evaluator &eval,
                                        CanType origTy, ProtocolDecl *reqProto,
                                        unsigned index) const {
   auto subMap = SubstitutionMap::getProtocolSubstitutions(
-      conformance->getProtocol(),
-      conformance->getType(),
       ProtocolConformanceRef(conformance));
   auto substTy = origTy.subst(subMap);
 
