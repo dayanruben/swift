@@ -270,6 +270,29 @@ static bool usesFeatureLifetimeDependence(Decl *decl) {
   return false;
 }
 
+static bool usesFeatureInoutLifetimeDependence(Decl *decl) {
+  auto hasInoutLifetimeDependence = [](Decl *decl) {
+    for (auto attr : decl->getAttrs().getAttributes<LifetimeAttr>()) {
+      for (auto source : attr->getLifetimeEntry()->getSources()) {
+        if (source.getParsedLifetimeDependenceKind() ==
+            ParsedLifetimeDependenceKind::Inout) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  switch (decl->getKind()) {
+  case DeclKind::Var: {
+    auto *var = cast<VarDecl>(decl);
+    return llvm::any_of(var->getAllAccessors(), hasInoutLifetimeDependence);
+  }
+  default:
+    return hasInoutLifetimeDependence(decl);
+  }
+}
+
 UNINTERESTING_FEATURE(DynamicActorIsolation)
 UNINTERESTING_FEATURE(NonfrozenEnumExhaustivity)
 UNINTERESTING_FEATURE(ClosureIsolation)
@@ -529,7 +552,7 @@ void FeatureSet::collectRequiredFeature(Feature feature,
 
 void FeatureSet::collectSuppressibleFeature(Feature feature,
                                             InsertOrRemove operation) {
-  suppressible.insertOrRemove(numFeatures() - size_t(feature),
+  suppressible.insertOrRemove(Feature::getNumFeatures() - size_t(feature),
                               operation == Insert);
 }
 

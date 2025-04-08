@@ -2570,7 +2570,7 @@ ParserResult<LifetimeAttr> Parser::parseLifetimeAttribute(SourceLoc atLoc,
   if (!Context.LangOpts.hasFeature(Feature::LifetimeDependence) &&
       !Context.SourceMgr.isImportMacroGeneratedLoc(atLoc)) {
     diagnose(loc, diag::requires_experimental_feature, "@lifetime", false,
-             getFeatureName(Feature::LifetimeDependence));
+             Feature::LifetimeDependence.getName());
     status.setIsParseError();
     return status;
   }
@@ -4772,7 +4772,7 @@ ParserStatus Parser::parseTypeAttribute(TypeOrCustomAttr &result,
   case TypeAttrKind::Execution: {
     if (!Context.LangOpts.hasFeature(Feature::ExecutionAttribute)) {
       diagnose(Tok, diag::requires_experimental_feature, "@execution", false,
-               getFeatureName(Feature::ExecutionAttribute));
+               Feature::ExecutionAttribute.getName());
       return makeParserError();
     }
 
@@ -5019,7 +5019,12 @@ ParserResult<LifetimeEntry> Parser::parseLifetimeEntry(SourceLoc loc) {
     if (Tok.isContextualKeyword("borrow") &&
         peekToken().isAny(tok::identifier, tok::integer_literal,
                           tok::kw_self)) {
-      return ParsedLifetimeDependenceKind::Scope;
+      return ParsedLifetimeDependenceKind::Borrow;
+    }
+    if (Tok.is(tok::amp_prefix) &&
+        peekToken().isAny(tok::identifier, tok::integer_literal,
+                          tok::kw_self)) {
+      return ParsedLifetimeDependenceKind::Inout;
     }
     return std::nullopt;
   };
@@ -5347,7 +5352,7 @@ ParserStatus Parser::ParsedTypeAttributeList::slowParse(Parser &P) {
     if (Tok.isContextualKeyword("sending")) {
       if (!P.Context.LangOpts.hasFeature(Feature::SendingArgsAndResults)) {
         P.diagnose(Tok, diag::requires_experimental_feature, Tok.getRawText(),
-                   false, getFeatureName(Feature::SendingArgsAndResults));
+                   false, Feature::SendingArgsAndResults.getName());
       }
 
       // Only allow for 'sending' to be written once.
@@ -5371,7 +5376,7 @@ ParserStatus Parser::ParsedTypeAttributeList::slowParse(Parser &P) {
       if (!P.Context.LangOpts.hasFeature(Feature::LifetimeDependence)) {
         P.diagnose(Tok, diag::requires_experimental_feature,
                    "lifetime dependence specifier", false,
-                   getFeatureName(Feature::LifetimeDependence));
+                   Feature::LifetimeDependence.getName());
       }
       P.consumeToken(); // consume '@'
       auto loc = P.consumeToken(); // consume 'lifetime'
