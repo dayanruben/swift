@@ -476,6 +476,11 @@ function Add-TimingData {
 function Write-Summary {
   Write-Host "Summary:" -ForegroundColor Cyan
 
+  if ($EnableCaching) {
+    Write-Host "SCCache:" -ForegroundColor Green
+    & sccache.exe --show-stats
+  }
+
   $TotalTime = [TimeSpan]::Zero
   foreach ($Entry in $TimingData) {
     $TotalTime = $TotalTime.Add($Entry."Elapsed Time")
@@ -796,16 +801,17 @@ function Invoke-IsolatingEnvVars([scriptblock]$Block) {
   foreach ($Var in (Get-ChildItem env:*).GetEnumerator()) {
     $OldVars.Add($Var.Key, $Var.Value)
   }
+  try {
+    & $Block
+  } finally {
+    Remove-Item env:*
+    foreach ($Var in $OldVars.GetEnumerator()) {
+      New-Item -Path "env:\$($Var.Key)" -Value $Var.Value -ErrorAction Ignore | Out-Null
+    }
 
-  & $Block
-
-  Remove-Item env:*
-  foreach ($Var in $OldVars.GetEnumerator()) {
-    New-Item -Path "env:\$($Var.Key)" -Value $Var.Value -ErrorAction Ignore | Out-Null
-  }
-
-  if ($ToBatch) {
-    Write-Output "endlocal"
+    if ($ToBatch) {
+      Write-Output "endlocal"
+    }
   }
 }
 
@@ -2311,7 +2317,7 @@ function Write-SDKSettingsPlist([OS] $OS) {
       DEFAULT_COMPILER = "${ToolchainIdentifier}"
     }
     SupportedTargets = @{
-      $OS.ToString() = @{
+      $OS.ToString().ToLowerInvariant() = @{
         PlatformFamilyDisplayName = $OS.ToString()
         PlatformFamilyName = $OS.ToString()
       }
@@ -2320,16 +2326,16 @@ function Write-SDKSettingsPlist([OS] $OS) {
   switch ($OS) {
     Windows {
       $SDKSettings.DefaultProperties.DEFAULT_USE_RUNTIME = "MD"
-      $SDKSettings.SupportedTargets.Windows.LLVMTargetVendor = "unknown"
-      $SDKSettings.SupportedTargets.Windows.LLVMTargetSys = "windows"
-      $SDKSettings.SupportedTargets.Windows.LLVMTargetTripleEnvironment = "msvc"
-      $SDKSettings.SupportedTargets.Windows.Archs = $WindowsSDKPlatforms | ForEach-Object { $_.Architecture.LLVMName } | Sort-Object
+      $SDKSettings.SupportedTargets.windows.LLVMTargetVendor = "unknown"
+      $SDKSettings.SupportedTargets.windows.LLVMTargetSys = "windows"
+      $SDKSettings.SupportedTargets.windows.LLVMTargetTripleEnvironment = "msvc"
+      $SDKSettings.SupportedTargets.windows.Archs = $WindowsSDKPlatforms | ForEach-Object { $_.Architecture.LLVMName } | Sort-Object
     }
     Android {
-      $SDKSettings.SupportedTargets.Android.LLVMTargetVendor = "unknown"
-      $SDKSettings.SupportedTargets.Android.LLVMTargetSys = "linux"
-      $SDKSettings.SupportedTargets.Android.LLVMTargetTripleEnvironment = "android${AndroidAPILevel}"
-      $SDKSettings.SupportedTargets.Android.Archs = $AndroidSDKPlatforms | ForEach-Object { $_.Architecture.LLVMName } | Sort-Object
+      $SDKSettings.SupportedTargets.android.LLVMTargetVendor = "unknown"
+      $SDKSettings.SupportedTargets.android.LLVMTargetSys = "linux"
+      $SDKSettings.SupportedTargets.android.LLVMTargetTripleEnvironment = "android${AndroidAPILevel}"
+      $SDKSettings.SupportedTargets.android.Archs = $AndroidSDKPlatforms | ForEach-Object { $_.Architecture.LLVMName } | Sort-Object
     }
   }
   $SDKSettings | ConvertTo-JSON -Depth 4 | Out-FIle -FilePath "$(Get-SwiftSDK $OS)\SDKSettings.json"
@@ -3197,8 +3203,11 @@ if ($Clean) {
 }
 
 if (-not $SkipBuild) {
-  if ($EnableCaching -And (-Not (Test-SCCacheAtLeast -Major 0 -Minor 7 -Patch 4))) {
-    throw "Minimum required sccache version is 0.7.4"
+  if ($EnableCaching) {
+    if (-Not (Test-SCCacheAtLeast -Major 0 -Minor 7 -Patch 4)) {
+      throw "Minimum required sccache version is 0.7.4"
+    }
+    & sccache.exe --zero-stats
   }
 
   Remove-Item -Force -Recurse ([IO.Path]::Combine((Get-InstallDir $HostPlatform), "Platforms")) -ErrorAction Ignore
