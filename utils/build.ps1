@@ -765,13 +765,13 @@ function Invoke-Program() {
     if ($OutNull) {
       & $Executable @ExecutableArgs | Out-Null
     } elseif ($Silent) {
-      & $Executable @ExecutableArgs *> $null
+      & $Executable @ExecutableArgs | Out-Null 2>&1| Out-Null
     } elseif ($OutFile -and $ErrorFile) {
-      & $Executable @ExecutableArgs > $OutFile 2> $ErrorFile
+      & $Executable @ExecutableArgs | Out-File -FilePath $OutFile -Encoding UTF8 2>&1| Out-File -FilePath $ErrorFile -Encoding UTF8
     } elseif ($OutFile) {
-      & $Executable @ExecutableArgs > $OutFile
+      & $Executable @ExecutableArgs | Out-File -FilePath $OutFile -Encoding UTF8
     } elseif ($ErrorFile) {
-      & $Executable @ExecutableArgs 2> $ErrorFile
+      & $Executable @ExecutableArgs 2>&1| Out-File -FilePath $ErrorFile -Encoding UTF8
     } else {
       & $Executable @ExecutableArgs
     }
@@ -3169,7 +3169,9 @@ function Build-Installer([Hashtable] $Platform) {
 function Copy-BuildArtifactsToStage([Hashtable] $Platform) {
   Copy-File "$BinaryCache\$($Platform.Triple)\installer\Release\$($Platform.Architecture.VSName)\*.cab" $Stage
   Copy-File "$BinaryCache\$($Platform.Triple)\installer\Release\$($Platform.Architecture.VSName)\*.msi" $Stage
-  Copy-File "$BinaryCache\$($Platform.Triple)\installer\Release\$($Platform.Architecture.VSName)\*.msm" $Stage
+  foreach ($SDKPlatform in $WindowsSDKPlatforms) {
+    Copy-File "$BinaryCache\$($Platform.Triple)\installer\Release\$($SDKPlatform.Architecture.VSName)\*.msm" $Stage
+  }
   Copy-File "$BinaryCache\$($Platform.Triple)\installer\Release\$($Platform.Architecture.VSName)\installer.exe" $Stage
   # Extract installer engine to ease code-signing on swift.org CI
   if ($ToBatch) {
