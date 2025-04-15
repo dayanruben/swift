@@ -1364,12 +1364,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.enableFeature(Feature::RegionBasedIsolation);
   }
 
-  // Get the executor factory name
-  if (const Arg *A = Args.getLastArg(OPT_executor_factory)) {
-    printf("Got executor-factory option\n");
-    Opts.ExecutorFactory = A->getValue();
-  }
-
   Opts.WarnImplicitOverrides =
     Args.hasArg(OPT_warn_implicit_overrides);
 
@@ -2219,6 +2213,25 @@ static void ParseSymbolGraphArgs(symbolgraphgen::SymbolGraphOptions &Opts,
             .Default(AccessLevel::Public);
   } else {
     Opts.MinimumAccessLevel = AccessLevel::Public;
+  }
+
+  if (auto *A = Args.getLastArg(OPT_symbol_graph_allow_availability_platforms)) {
+    llvm::SmallVector<StringRef> AvailabilityPlatforms;
+    StringRef(A->getValue())
+        .split(AvailabilityPlatforms, ',', /*MaxSplits*/ -1,
+               /*KeepEmpty*/ false);
+    Opts.AvailabilityPlatforms = llvm::DenseSet<StringRef>(
+        AvailabilityPlatforms.begin(), AvailabilityPlatforms.end());
+    Opts.AvailabilityIsBlockList = false;
+  } else if (auto *A = Args.getLastArg(
+                 OPT_symbol_graph_block_availability_platforms)) {
+    llvm::SmallVector<StringRef> AvailabilityPlatforms;
+    StringRef(A->getValue())
+        .split(AvailabilityPlatforms, ',', /*MaxSplits*/ -1,
+               /*KeepEmpty*/ false);
+    Opts.AvailabilityPlatforms = llvm::DenseSet<StringRef>(
+        AvailabilityPlatforms.begin(), AvailabilityPlatforms.end());
+    Opts.AvailabilityIsBlockList = true;
   }
 
   // default values for generating symbol graphs during a build
