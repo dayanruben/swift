@@ -294,6 +294,23 @@ static bool usesFeatureInoutLifetimeDependence(Decl *decl) {
   }
 }
 
+static bool usesFeatureLifetimeDependenceMutableAccessors(Decl *decl) {
+  if (!isa<VarDecl>(decl)) {
+    return false;
+  }
+  auto var = cast<VarDecl>(decl);
+  if (!var->isGetterMutating()) {
+    return false;
+  }
+  if (auto dc = var->getDeclContext()) {
+    if (auto nominal = dc->getSelfNominalTypeDecl()) {
+      auto sig = nominal->getGenericSignature();
+      return !var->getInterfaceType()->isEscapable(sig);
+    }
+  }
+  return false;
+}
+
 UNINTERESTING_FEATURE(DynamicActorIsolation)
 UNINTERESTING_FEATURE(NonfrozenEnumExhaustivity)
 UNINTERESTING_FEATURE(ClosureIsolation)
@@ -391,6 +408,11 @@ static bool usesFeatureCompileTimeValues(Decl *decl) {
 
 static bool usesFeatureClosureBodyMacro(Decl *decl) {
   return false;
+}
+
+static bool usesFeatureCDecl(Decl *decl) {
+  auto attr = decl->getAttrs().getAttribute<CDeclAttr>();
+  return attr && !attr->Underscored;
 }
 
 static bool usesFeatureMemorySafetyAttributes(Decl *decl) {
