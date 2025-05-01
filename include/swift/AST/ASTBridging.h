@@ -395,6 +395,7 @@ struct BridgedDeclObj {
   BRIDGED_INLINE bool ProtocolDecl_requiresClass() const;
   BRIDGED_INLINE bool AbstractFunction_isOverridden() const;
   BRIDGED_INLINE bool Destructor_isIsolated() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedStringRef AccessorDecl_getKindName() const;
 };
 
 enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedASTNodeKind : uint8_t {
@@ -3115,7 +3116,6 @@ struct BridgedASTType {
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedSubstitutionMap getContextSubstitutionMap() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedGenericSignature getInvocationGenericSignatureOfFunctionType() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType subst(BridgedSubstitutionMap substMap) const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedASTType subst(BridgedASTType fromType, BridgedASTType toType) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedConformance checkConformance(BridgedDeclObj proto) const;  
 };
 
