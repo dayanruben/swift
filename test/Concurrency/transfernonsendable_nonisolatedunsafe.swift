@@ -1008,7 +1008,7 @@ func closureTests() async {
   func testWithTaskDetached() async {
     let x1 = NonSendableKlass()
     Task.detached { _ = x1 } // expected-warning {{sending value of non-Sendable type '() async -> ()' risks causing data races}}
-    // expected-note @-1 {{Passing value of non-Sendable type '() async -> ()' as a 'sending' argument to static method 'detached(priority:operation:)' risks causing races in between local and caller code}}
+    // expected-note @-1 {{Passing value of non-Sendable type '() async -> ()' as a 'sending' argument to static method 'detached(name:priority:operation:)' risks causing races in between local and caller code}}
     Task.detached { _ = x1 } // expected-note {{access can happen concurrently}}
 
     nonisolated(unsafe) let x2 = NonSendableKlass()
@@ -1023,7 +1023,21 @@ func closureTests() async {
     nonisolated(unsafe) let x4a = NonSendableKlass()
     let x4b = NonSendableKlass()
     Task.detached { _ = x4a; _ = x4b } // expected-warning {{sending value of non-Sendable type '() async -> ()' risks causing data races}}
-    // expected-note @-1 {{Passing value of non-Sendable type '() async -> ()' as a 'sending' argument to static method 'detached(priority:operation:)' risks causing races in between local and caller code}}
+    // expected-note @-1 {{Passing value of non-Sendable type '() async -> ()' as a 'sending' argument to static method 'detached(name:priority:operation:)' risks causing races in between local and caller code}}
     Task.detached { _ = x4a; _ = x4b } // expected-note {{access can happen concurrently}}
+  }
+
+  // The reason why this works is that we do not infer nonisolated(unsafe)
+  // passed the begin_borrow [var_decl] of y. So we think the closure is
+  // nonisolated(unsafe), but its uses via the begin_borrow [var_decl] is
+  // not.
+  func testNamedClosure() async {
+    nonisolated(unsafe) let x = NonSendableKlass()
+    let y = {
+      _ = x
+    }
+    sendingClosure(y) // expected-warning {{sending 'y' risks causing data races}}
+    // expected-note @-1 {{'y' used after being passed as a 'sending' parameter}}
+    sendingClosure(y) // expected-note {{access can happen concurrently}}
   }
 }
