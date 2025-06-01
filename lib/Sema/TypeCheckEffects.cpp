@@ -1685,6 +1685,8 @@ public:
     const bool hasAnyConformances =
         llvm::any_of(substitutions.getConformances(),
                      [](const ProtocolConformanceRef conformance) {
+                       if (conformance.isInvalid())
+                         return false;
                        auto *requirement = conformance.getProtocol();
                        return !requirement->getInvertibleProtocolKind();
                      });
@@ -4596,6 +4598,10 @@ private:
         auto insertionLoc = S->getPattern()->getStartLoc();
         Ctx.Diags.diagnose(S->getForLoc(), diag::for_unsafe_without_unsafe)
           .fixItInsert(insertionLoc, "unsafe ");
+
+        for (const auto &unsafeUse : classification.getUnsafeUses()) {
+          diagnoseUnsafeUse(unsafeUse);
+        }
       }
     } else if (S->getUnsafeLoc().isValid()) {
       // Extraneous "unsafe" on the sequence.
