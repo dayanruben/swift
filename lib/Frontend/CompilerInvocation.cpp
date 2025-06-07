@@ -800,6 +800,8 @@ static bool ParseCASArgs(CASOptions &Opts, ArgList &Args,
                                             std::string(Value));
   }
 
+  Opts.ImportModuleFromCAS |= Args.hasArg(OPT_module_import_from_cas);
+
   if (auto *A = Args.getLastArg(OPT_clang_include_tree_root))
     Opts.ClangIncludeTree = A->getValue();
   if (auto *A = Args.getLastArg(OPT_clang_include_tree_filelist))
@@ -1571,6 +1573,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     ModuleInterfaceOpts.PublicFlags.IgnorableFlags +=
         " " + printFormalCxxInteropVersion(Opts);
 
+  Opts.UseStaticStandardLibrary = Args.hasArg(OPT_use_static_resource_dir);
   Opts.EnableObjCInterop =
       Args.hasFlag(OPT_enable_objc_interop, OPT_disable_objc_interop,
                    Target.isOSDarwin() && !Opts.hasFeature(Feature::Embedded));
