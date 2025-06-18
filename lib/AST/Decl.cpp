@@ -1244,9 +1244,10 @@ ExplicitSafety Decl::getExplicitSafety() const {
   // If this declaration is from C, ask the Clang importer.
   if (auto clangDecl = getClangDecl()) {
     ASTContext &ctx = getASTContext();
-    return evaluateOrDefault(ctx.evaluator,
-                             ClangDeclExplicitSafety({clangDecl}),
-                             ExplicitSafety::Unspecified);
+    return evaluateOrDefault(
+        ctx.evaluator,
+        ClangDeclExplicitSafety({clangDecl, isa<ClassDecl>(this)}),
+        ExplicitSafety::Unspecified);
   }
   
   // Inference: Check the enclosing context, unless this is a type.
@@ -6366,6 +6367,9 @@ ConstructorDecl *NominalTypeDecl::getDefaultInitializer() const {
 }
 
 void NominalTypeDecl::synthesizeSemanticMembersIfNeeded(DeclName member) {
+  if (isa<ProtocolDecl>(this))
+    return;
+
   // Silently break cycles here because we can't be sure when and where a
   // request to synthesize will come from yet.
   // FIXME: rdar://56844567
