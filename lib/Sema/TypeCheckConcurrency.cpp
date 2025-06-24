@@ -5253,9 +5253,18 @@ getIsolationFromWitnessedRequirements(ValueDecl *value) {
       case ActorIsolation::Erased:
         llvm_unreachable("requirement cannot have erased isolation");
 
+      case ActorIsolation::CallerIsolationInheriting: {
+        if (value->isAsync())
+          break;
+
+        // It's possible to witness requirement with an non-async
+        // declaration, in such cases `nonisolated(nonsending)` does
+        // not apply.
+        continue;
+      }
+
       case ActorIsolation::GlobalActor:
       case ActorIsolation::Nonisolated:
-      case ActorIsolation::CallerIsolationInheriting:
       case ActorIsolation::NonisolatedUnsafe:
         break;
       }
@@ -7991,6 +8000,9 @@ ActorReferenceResult ActorReferenceResult::forReference(
         getInnermostIsolatedContext(fromDC, getClosureActorIsolation);
   }
 
+  if (declIsolation.isCallerIsolationInheriting())
+    return forSameConcurrencyDomain(declIsolation, options);
+
   // When the declaration is not actor-isolated, it can always be accessed
   // directly.
   if (!declIsolation.isActorIsolated()) {
@@ -8227,16 +8239,28 @@ ActorIsolation swift::inferConformanceIsolation(
     return nominalIsolation;
   }
 
-  bool anyIsolatedWitness = false;
   auto protocol = conformance->getProtocol();
-  for (auto requirement : protocol->getMembers()) {
+
+  // Also check the value witnesses of each implied conformance to every
+  // inherited protocol, recursively.
+  for (auto req : protocol->getRequirementSignature().getRequirements()) {
+    if (req.getKind() != RequirementKind::Conformance ||
+        !req.getFirstType()->isEqual(ctx.TheSelfType))
+      continue;
+
+    auto *assocConf = conformance->getAssociatedConformance(
+        req.getFirstType(), req.getProtocolDecl()).getConcrete();
+    auto isolation = assocConf->getIsolation();
+    if (isolation.isGlobalActor())
+      return isolation;
+  }
+
+  bool anyIsolatedWitness = false;
+  for (auto requirement : protocol->getProtocolRequirements()) {
     if (isa<TypeDecl>(requirement))
       continue;
 
-    auto valueReq = dyn_cast<ValueDecl>(requirement);
-    if (!valueReq)
-      continue;
-
+    auto valueReq = cast<ValueDecl>(requirement);
     auto witness = conformance->getWitnessDecl(valueReq);
     if (!witness)
       continue;
