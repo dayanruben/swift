@@ -102,6 +102,7 @@ add_library(swift_Concurrency
 
 include(${SwiftCore_CONCURRENCY_GLOBAL_EXECUTOR}.cmake)
 target_compile_definitions(swift_Concurrency PRIVATE
+  $<$<COMPILE_LANGUAGE:C,CXX>:-DSWIFT_RUNTIME>
   $<$<COMPILE_LANGUAGE:C,CXX>:-DSWIFT_TARGET_LIBRARY_NAME=swift_Concurrency>
   # NOTE: VS2017 <15.8 would round clamp alignment to alignof(max_align_t) which
   # was non-conformant. Indicate that we wish to use extended alignment.
@@ -122,6 +123,9 @@ target_include_directories(swift_Concurrency PRIVATE
   # FIXME: grant access to `runtime/CMakeConfig.h` which should be available
   # through the swiftRuntime target.
   "${PROJECT_BINARY_DIR}/include")
+# FIXME: Why is this not implicitly in the interface flags?
+target_include_directories(swift_Concurrency INTERFACE
+  "$<$<COMPILE_LANGUAGE:Swift>:$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${SwiftCore_INSTALL_SWIFTMODULEDIR}>>")
 target_link_libraries(swift_Concurrency PRIVATE
   swiftShims
   swiftConcurrencyInternalShims

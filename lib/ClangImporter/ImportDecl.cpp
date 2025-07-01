@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CFTypeInfo.h"
+#include "CXXMethodBridging.h"
 #include "ClangDerivedConformances.h"
 #include "ImporterImpl.h"
 #include "SwiftDeclSynthesizer.h"
@@ -50,7 +51,6 @@
 #include "swift/Basic/Statistic.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Basic/Version.h"
-#include "swift/ClangImporter/CXXMethodBridging.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangImporterRequests.h"
 #include "swift/ClangImporter/ClangModule.h"
@@ -4097,7 +4097,8 @@ namespace {
             func->setSelfIndex(selfIdx.value());
             if (Impl.SwiftContext.LangOpts.hasFeature(
                     Feature::AddressableParameters))
-              func->getImplicitSelfDecl()->setAddressable();
+              func->getAttrs().add(new (Impl.SwiftContext)
+                                       AddressableSelfAttr(true));
           } else {
             func->setStatic();
             func->setImportAsStaticMember();
@@ -4145,6 +4146,34 @@ namespace {
       return false;
     }
 
+    // Inject lifetime annotations selectively for some STL types so we can use
+    // unsafeAddress to avoid copies.
+    bool inferSelfDependence(const clang::FunctionDecl *decl,
+                             AbstractFunctionDecl *result, size_t returnIdx) {
+      const auto *method = dyn_cast<clang::CXXMethodDecl>(decl);
+      if (!method)
+        return false;
+      const auto *enclosing = method->getParent();
+      if (enclosing->isInStdNamespace() &&
+          (enclosing->getName() == "unique_ptr" ||
+           enclosing->getName() == "shared_ptr") &&
+          method->isOverloadedOperator() &&
+          method->getOverloadedOperator() == clang::OO_Star) {
+        SmallVector<LifetimeDependenceInfo, 1> lifetimeDependencies;
+        SmallBitVector dependenciesOfRet(returnIdx);
+        dependenciesOfRet[result->getSelfIndex()] = true;
+        lifetimeDependencies.push_back(LifetimeDependenceInfo(
+            nullptr, IndexSubset::get(Impl.SwiftContext, dependenciesOfRet),
+            returnIdx,
+            /*isImmortal*/ false));
+        Impl.SwiftContext.evaluator.cacheOutput(
+            LifetimeDependenceInfoRequest{result},
+            Impl.SwiftContext.AllocateCopy(lifetimeDependencies));
+        return true;
+      }
+      return false;
+    }
+
     void addLifetimeDependencies(const clang::FunctionDecl *decl,
                                  AbstractFunctionDecl *result) {
       if (decl->getTemplatedKind() == clang::FunctionDecl::TK_FunctionTemplate)
@@ -4163,10 +4192,19 @@ namespace {
                    CxxEscapability::Unknown) != CxxEscapability::NonEscapable;
       };
 
+      auto swiftParams = result->getParameters();
+      bool hasSelf =
+          result->hasImplicitSelfDecl() && !isa<ConstructorDecl>(result);
+      auto returnIdx = swiftParams->size() + hasSelf;
+
+      if (inferSelfDependence(decl, result, returnIdx))
+        return;
+
       // FIXME: this uses '0' as the result index. That only works for
       // standalone functions with no parameters.
       // See markReturnsUnsafeNonescapable() for a general approach.
       auto &ASTContext = result->getASTContext();
+
       SmallVector<LifetimeDependenceInfo, 1> lifetimeDependencies;
       LifetimeDependenceInfo immortalLifetime(nullptr, nullptr, 0,
                                               /*isImmortal*/ true);
@@ -4189,10 +4227,7 @@ namespace {
         }
       };
 
-      auto swiftParams = result->getParameters();
-      bool hasSelf =
-          result->hasImplicitSelfDecl() && !isa<ConstructorDecl>(result);
-      const auto dependencyVecSize = swiftParams->size() + hasSelf;
+      const auto dependencyVecSize = returnIdx;
       SmallBitVector inheritLifetimeParamIndicesForReturn(dependencyVecSize);
       SmallBitVector scopedLifetimeParamIndicesForReturn(dependencyVecSize);
       SmallBitVector paramHasAnnotation(dependencyVecSize);
@@ -4271,7 +4306,7 @@ namespace {
                 ? IndexSubset::get(Impl.SwiftContext,
                                    scopedLifetimeParamIndicesForReturn)
                 : nullptr,
-            swiftParams->size() + hasSelf,
+            returnIdx,
             /*isImmortal*/ false));
       else if (auto *ctordecl = dyn_cast<clang::CXXConstructorDecl>(decl)) {
         // Assume default constructed view types have no dependencies.
@@ -8988,6 +9023,14 @@ ClangImporter::Implementation::importSwiftAttrAttributes(Decl *MappedDecl) {
 }
 
 namespace {
+ValueDecl *getKnownSingleDecl(ASTContext &SwiftContext, StringRef DeclName) {
+  SmallVector<ValueDecl *, 1> decls;
+  SwiftContext.lookupInSwiftModule(DeclName, decls);
+  assert(decls.size() < 2);
+  if (decls.size() != 1) return nullptr;
+  return decls[0];
+}
+
 class SwiftifyInfoPrinter {
 public:
   static const ssize_t SELF_PARAM_INDEX = -2;
@@ -8995,9 +9038,10 @@ public:
   clang::ASTContext &ctx;
   ASTContext &SwiftContext;
   llvm::raw_ostream &out;
+  MacroDecl &SwiftifyImportDecl;
   bool firstParam = true;
-  SwiftifyInfoPrinter(clang::ASTContext &ctx, ASTContext &SwiftContext, llvm::raw_ostream &out)
-      : ctx(ctx), SwiftContext(SwiftContext), out(out) {
+  SwiftifyInfoPrinter(clang::ASTContext &ctx, ASTContext &SwiftContext, llvm::raw_ostream &out, MacroDecl &SwiftifyImportDecl)
+      : ctx(ctx), SwiftContext(SwiftContext), out(out), SwiftifyImportDecl(SwiftifyImportDecl) {
     out << "@_SwiftifyImport(";
   }
   ~SwiftifyInfoPrinter() { out << ")"; }
@@ -9055,22 +9099,23 @@ public:
   }
 
   void printAvailability() {
+    if (!hasMacroParameter("spanAvailability"))
+      return;
     printSeparator();
     out << "spanAvailability: ";
     printAvailabilityOfType("Span");
   }
 
 private:
-  ValueDecl *getDecl(StringRef DeclName) {
-    SmallVector<ValueDecl *, 1> decls;
-    SwiftContext.lookupInSwiftModule(DeclName, decls);
-    assert(decls.size() == 1);
-    if (decls.size() != 1) return nullptr;
-    return decls[0];
+  bool hasMacroParameter(StringRef ParamName) {
+    for (auto *Param : *SwiftifyImportDecl.parameterList)
+      if (Param->getArgumentName().str() == ParamName)
+        return true;
+    return false;
   }
 
   void printAvailabilityOfType(StringRef Name) {
-    ValueDecl *D = getDecl(Name);
+    ValueDecl *D = getKnownSingleDecl(SwiftContext, Name);
     out << "\"";
     llvm::SaveAndRestore<bool> hasAvailbilitySeparatorRestore(firstParam, true);
     for (auto attr : D->getSemanticAvailableAttrs(/*includingInactive=*/true)) {
@@ -9234,6 +9279,10 @@ void ClangImporter::Implementation::swiftify(AbstractFunctionDecl *MappedDecl) {
   if (ClangDecl->getNumParams() != MappedDecl->getParameters()->size())
     return;
 
+  MacroDecl *SwiftifyImportDecl = dyn_cast_or_null<MacroDecl>(getKnownSingleDecl(SwiftContext, "_SwiftifyImport"));
+  if (!SwiftifyImportDecl)
+    return;
+
   {
     UnaliasedInstantiationVisitor visitor;
     visitor.TraverseType(ClangDecl->getType());
@@ -9262,7 +9311,7 @@ void ClangImporter::Implementation::swiftify(AbstractFunctionDecl *MappedDecl) {
           }
           return false;
         };
-    SwiftifyInfoPrinter printer(getClangASTContext(), SwiftContext, out);
+    SwiftifyInfoPrinter printer(getClangASTContext(), SwiftContext, out, *SwiftifyImportDecl);
     Type swiftReturnTy;
     if (const auto *funcDecl = dyn_cast<FuncDecl>(MappedDecl))
       swiftReturnTy = funcDecl->getResultInterfaceType();
