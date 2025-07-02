@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.29)
+# TODO before requiring CMake 4.1 or later
+# and/or enforcing CMP0195, please check/update
+# the implementation  of `emit_swift_interface`
+# in `EmitSwiftInterface.cmake`
+# to ensure it keeps laying down nested swiftmodule folders
 
 if(POLICY CMP0157 AND CMAKE_Swift_COMPILER_USE_OLD_DRIVER)
   cmake_policy(SET CMP0157 OLD)
@@ -47,6 +52,7 @@ option(${PROJECT_NAME}_ENABLE_PRESPECIALIZATION "Enable generic metadata prespec
 add_compile_options(
   $<$<COMPILE_LANGUAGE:Swift>:-explicit-module-build>
   $<$<COMPILE_LANGUAGE:Swift>:-nostdlibimport>
+  "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -disable-implicit-concurrency-module-import>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -disable-implicit-string-processing-module-import>"
   "$<$<AND:$<BOOL:${${PROJECT_NAME}_ENABLE_LIBRARY_EVOLUTION}>,$<COMPILE_LANGUAGE:Swift>>:-enable-library-evolution>"
   "$<$<AND:$<BOOL:${${PROJECT_NAME}_ENABLE_PRESPECIALIZATION}>,$<COMPILE_LANGUAGE:Swift>>:SHELL:-Xfrontend -prespecialize-generic-metadata>")
