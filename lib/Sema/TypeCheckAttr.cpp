@@ -123,15 +123,17 @@ public:
           diagnoseAndRemoveAttr(attr, diag::isolated_deinit_on_value_type);
           return;
         }
-      }
 
-      TypeChecker::checkAvailability(
-          attr->getRange(), C.getIsolatedDeinitAvailability(),
-          D->getDeclContext(),
-          [&](AvailabilityDomain domain, AvailabilityRange range) {
-            return diagnoseAndRemoveAttr(
-                attr, diag::isolated_deinit_unavailable, domain, range);
-          });
+        if (!getActorIsolation(nominal).isMainActor()) {
+          TypeChecker::checkAvailability(
+              attr->getRange(), C.getIsolatedDeinitAvailability(),
+              D->getDeclContext(),
+              [&](AvailabilityDomain domain, AvailabilityRange range) {
+                return diagnoseAndRemoveAttr(
+                    attr, diag::isolated_deinit_unavailable, domain, range);
+              });
+        }
+      }
     }
   }
 
@@ -227,17 +229,6 @@ public:
             attr, diag::execution_behavior_incompatible_isolated_parameter,
             attr, decl, P);
         return;
-      }
-
-      if (auto *attrType = dyn_cast<AttributedTypeRepr>(repr)) {
-        if (attrType->has(TypeAttrKind::Isolated)) {
-          diagnoseAndRemoveAttr(
-              attr,
-              diag::
-                  execution_behavior_incompatible_dynamically_isolated_parameter,
-              attr, decl, P);
-          return;
-        }
       }
     }
   }
