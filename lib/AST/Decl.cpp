@@ -909,6 +909,17 @@ static ModuleDecl *getModuleContextForNameLookupForCxxDecl(const Decl *decl) {
   if (!ctx.LangOpts.EnableCXXInterop)
     return nullptr;
 
+  // When we clone members for base classes the cloned members have no
+  // corresponding Clang nodes. Look up the original imported declaration to
+  // figure out what Clang module does the cloned member originate from.
+  bool isClonedMember = false;
+  if (auto VD = dyn_cast<ValueDecl>(decl))
+    if (auto loader = ctx.getClangModuleLoader())
+      if (auto original = loader->getOriginalForClonedMember(VD)) {
+        isClonedMember = true;
+        decl = original;
+      }
+
   if (!decl->hasClangNode())
     return nullptr;
 
@@ -916,8 +927,11 @@ static ModuleDecl *getModuleContextForNameLookupForCxxDecl(const Decl *decl) {
 
   // We only need to look for the real parent module when the existing parent
   // is the imported header module.
-  if (!parentModule->isClangHeaderImportModule())
+  if (!parentModule->isClangHeaderImportModule()) {
+    if (isClonedMember)
+      return parentModule;
     return nullptr;
+  }
 
   auto clangModule = decl->getClangDecl()->getOwningModule();
   if (!clangModule)
@@ -7034,9 +7048,9 @@ bool EnumDecl::treatAsExhaustiveForDiags(const DeclContext *useDC) const {
     if (enumModule->inSamePackage(useDC->getParentModule()))
       return true;
 
-    // When the enum is marked as `@extensible` cross-module access
+    // When the enum is marked as `@nonexhaustive` cross-module access
     // cannot be exhaustive and requires `@unknown default:`.
-    if (getAttrs().hasAttribute<ExtensibleAttr>() &&
+    if (getAttrs().hasAttribute<NonexhaustiveAttr>() &&
         enumModule != useDC->getParentModule())
       return false;
   }
