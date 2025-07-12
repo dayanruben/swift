@@ -907,7 +907,7 @@ public:
     for (auto Range : ranges) {
       auto Start = std::get<0>(Range);
       auto End = std::get<1>(Range);
-      if (Start <= Address && Address < End)
+      if (Address.inRange(Start, End))
         return true;
     }
 
@@ -1386,8 +1386,7 @@ public:
     for (StoredSize i = 0; i < Count; i++) {
       auto &Element = ElementsData[i];
       Call(RemoteAddress(Element.Type, ConformancesPtr.getAddressSpace()),
-           RemoteAddress(Element.Proto.SignedValue,
-                         ConformancesPtr.getAddressSpace()));
+           stripSignedPointer(Element.Proto));
     }
   }
 

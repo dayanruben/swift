@@ -50,10 +50,20 @@ class WASILibc(product.Product):
 
     def _build(self, host_target, thread_model='single', target_triple='wasm32-wasi'):
         build_root = os.path.dirname(self.build_dir)
-        llvm_build_bin_dir = os.path.join(
-            '..', build_root, '%s-%s' % ('llvm', host_target), 'bin')
-        llvm_tools_path = self.args.native_llvm_tools_path or llvm_build_bin_dir
-        clang_tools_path = self.args.native_clang_tools_path or llvm_build_bin_dir
+
+        if self.args.build_runtime_with_host_compiler:
+            clang_path = self.toolchain.cc
+            ar_path = self.toolchain.llvm_ar
+            nm_path = self.toolchain.llvm_nm
+        else:
+            llvm_build_bin_dir = os.path.join(
+                '..', build_root, '%s-%s' % ('llvm', host_target), 'bin')
+            llvm_tools_path = self.args.native_llvm_tools_path or llvm_build_bin_dir
+            clang_tools_path = self.args.native_clang_tools_path or llvm_build_bin_dir
+            clang_path = os.path.join(clang_tools_path, 'clang')
+            ar_path = os.path.join(llvm_tools_path, 'llvm-ar')
+            nm_path = os.path.join(llvm_tools_path, 'llvm-nm')
+
         build_jobs = self.args.build_jobs or multiprocessing.cpu_count()
 
         sysroot_build_dir = WASILibc.sysroot_build_path(
@@ -67,9 +77,9 @@ class WASILibc(product.Product):
             'OBJDIR=' + os.path.join(self.build_dir, 'obj-' + thread_model),
             'SYSROOT=' + sysroot_build_dir,
             'INSTALL_DIR=' + sysroot_install_path,
-            'CC=' + os.path.join(clang_tools_path, 'clang'),
-            'AR=' + os.path.join(llvm_tools_path, 'llvm-ar'),
-            'NM=' + os.path.join(llvm_tools_path, 'llvm-nm'),
+            'CC=' + clang_path,
+            'AR=' + ar_path,
+            'NM=' + nm_path,
             'THREAD_MODEL=' + thread_model,
             'TARGET_TRIPLE=' + target_triple,
         ])
@@ -147,10 +157,21 @@ class WasmLLVMRuntimeLibs(cmake_product.CMakeProduct):
             build_dir=os.path.join(self.build_dir, target_triple))
 
         build_root = os.path.dirname(self.build_dir)
-        llvm_build_bin_dir = os.path.join(
-            '..', build_root, '%s-%s' % ('llvm', host_target), 'bin')
-        llvm_tools_path = cmake.args.native_llvm_tools_path or llvm_build_bin_dir
-        clang_tools_path = cmake.args.native_clang_tools_path or llvm_build_bin_dir
+
+        if self.args.build_runtime_with_host_compiler:
+            cc_path = self.toolchain.cc
+            cxx_path = self.toolchain.cxx
+            ar_path = self.toolchain.llvm_ar
+            ranlib_path = self.toolchain.llvm_ranlib
+        else:
+            llvm_build_bin_dir = os.path.join(
+                '..', build_root, '%s-%s' % ('llvm', host_target), 'bin')
+            llvm_tools_path = cmake.args.native_llvm_tools_path or llvm_build_bin_dir
+            clang_tools_path = cmake.args.native_clang_tools_path or llvm_build_bin_dir
+            ar_path = os.path.join(llvm_tools_path, 'llvm-ar')
+            ranlib_path = os.path.join(llvm_tools_path, 'llvm-ranlib')
+            cc_path = os.path.join(clang_tools_path, 'clang')
+            cxx_path = os.path.join(clang_tools_path, 'clang++')
 
         cmake_has_threads = 'TRUE' if enable_wasi_threads else 'FALSE'
 
@@ -181,14 +202,10 @@ class WasmLLVMRuntimeLibs(cmake_product.CMakeProduct):
 
         cmake.cmake_options.define('CMAKE_SYSTEM_NAME:STRING', 'WASI')
         cmake.cmake_options.define('CMAKE_SYSTEM_PROCESSOR:STRING', 'wasm32')
-        cmake.cmake_options.define('CMAKE_AR:FILEPATH',
-                                   os.path.join(llvm_tools_path, 'llvm-ar'))
-        cmake.cmake_options.define('CMAKE_RANLIB:FILEPATH',
-                                   os.path.join(llvm_tools_path, 'llvm-ranlib'))
-        cmake.cmake_options.define('CMAKE_C_COMPILER:FILEPATH',
-                                   os.path.join(clang_tools_path, 'clang'))
-        cmake.cmake_options.define('CMAKE_CXX_COMPILER:STRING',
-                                   os.path.join(clang_tools_path, 'clang++'))
+        cmake.cmake_options.define('CMAKE_AR:FILEPATH', ar_path)
+        cmake.cmake_options.define('CMAKE_RANLIB:FILEPATH', ranlib_path)
+        cmake.cmake_options.define('CMAKE_C_COMPILER:FILEPATH', cc_path)
+        cmake.cmake_options.define('CMAKE_CXX_COMPILER:STRING', cxx_path)
 
         c_flags = []
         # Explicitly disable exceptions even though it's usually implicitly disabled by
@@ -234,7 +251,7 @@ class WasmLLVMRuntimeLibs(cmake_product.CMakeProduct):
         cmake.cmake_options.define('UNIX:BOOL', 'TRUE')
 
         cmake.build_with_cmake([], cmake.args.build_variant, [],
-                               prefer_native_toolchain=True,
+                               prefer_native_toolchain=not self.args.build_runtime_with_host_compiler,
                                ignore_extra_cmake_options=True)
         cmake.install_with_cmake(
             ["install"], WASILibc.sysroot_install_path(build_root, target_triple))

@@ -3667,10 +3667,8 @@ TypeResolver::resolveAttributedType(TypeRepr *repr, TypeResolutionOptions option
     }
   }
 
-  if (getASTContext().LangOpts.hasFeature(Feature::LayoutPrespecialization)) {
-    (void) claim<NoMetadataTypeAttr>(attrs);
-    // TODO: add proper validation
-  }
+  (void)claim<NoMetadataTypeAttr>(attrs);
+  // TODO: add proper validation
 
   // There are a bunch of attributes in SIL that are essentially new
   // type constructors.  Some of these are allowed even in AST positions;
@@ -4219,11 +4217,6 @@ NeverNullType TypeResolver::resolveASTFunctionType(
                       attr->getAttrName());
     }
 
-    if (options.contains(TypeResolutionFlags::InheritsActorContext)) {
-      diagnoseInvalid(repr, attr->getAttrLoc(),
-                      diag::inherit_actor_context_with_concurrent, attr);
-    }
-
     switch (isolation.getKind()) {
     case FunctionTypeIsolation::Kind::NonIsolated:
       break;
@@ -4270,20 +4263,18 @@ NeverNullType TypeResolver::resolveASTFunctionType(
     if (!repr->isInvalid())
       isolation = FunctionTypeIsolation::forNonIsolated();
   } else if (!getWithoutClaiming<CallerIsolatedTypeRepr>(attrs)) {
-    if (!options.contains(TypeResolutionFlags::InheritsActorContext)) {
-      // Infer async function type as `nonisolated(nonsending)` if there is
-      // no `@concurrent` or `nonisolated(nonsending)` attribute and isolation
-      // is nonisolated.
-      if (ctx.LangOpts.hasFeature(Feature::NonisolatedNonsendingByDefault) &&
-          repr->isAsync() && isolation.isNonIsolated()) {
-        isolation = FunctionTypeIsolation::forNonIsolatedCaller();
-      } else if (ctx.LangOpts
-                     .getFeatureState(Feature::NonisolatedNonsendingByDefault)
-                     .isEnabledForMigration()) {
-        // Diagnose only in the interface stage, which is run once.
-        if (inStage(TypeResolutionStage::Interface)) {
-          warnAboutNewNonisolatedAsyncExecutionBehavior(ctx, repr, isolation);
-        }
+    // Infer async function type as `nonisolated(nonsending)` if there is
+    // no `@concurrent` or `nonisolated(nonsending)` attribute and isolation
+    // is nonisolated.
+    if (ctx.LangOpts.hasFeature(Feature::NonisolatedNonsendingByDefault) &&
+        repr->isAsync() && isolation.isNonIsolated()) {
+      isolation = FunctionTypeIsolation::forNonIsolatedCaller();
+    } else if (ctx.LangOpts
+                   .getFeatureState(Feature::NonisolatedNonsendingByDefault)
+                   .isEnabledForMigration()) {
+      // Diagnose only in the interface stage, which is run once.
+      if (inStage(TypeResolutionStage::Interface)) {
+        warnAboutNewNonisolatedAsyncExecutionBehavior(ctx, repr, isolation);
       }
     }
   }
@@ -5331,12 +5322,6 @@ TypeResolver::resolveCallerIsolatedTypeRepr(CallerIsolatedTypeRepr *repr,
     diagnoseInvalid(repr, repr->getStartLoc(),
                     diag::nonisolated_nonsending_only_on_function_types, repr);
     return ErrorType::get(getASTContext());
-  }
-
-  if (options.contains(TypeResolutionFlags::InheritsActorContext)) {
-    diagnoseInvalid(repr, repr->getLoc(),
-                    diag::inherit_actor_context_with_nonisolated_nonsending,
-                    repr);
   }
 
   if (!fnType->isAsync()) {
