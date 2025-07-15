@@ -6255,10 +6255,12 @@ static InferredActorIsolation computeActorIsolation(Evaluator &evaluator,
   if (isolationFromAttr && isolationFromAttr->getKind() ==
           ActorIsolation::CallerIsolationInheriting) {
     auto nonisolated = value->getAttrs().getAttribute<NonisolatedAttr>();
-    if (!nonisolated || !nonisolated->isNonSending())
-      value->getAttrs().add(new (ctx) NonisolatedAttr(
-          /*atLoc*/ {}, /*range=*/{}, NonIsolatedModifier::NonSending,
-          /*implicit=*/true));
+    // Replace `nonisolated` with `nonisolated(nonsending)`
+    if (!nonisolated || !nonisolated->isNonSending()) {
+      value->getAttrs().removeAttribute(nonisolated);
+      value->getAttrs().add(NonisolatedAttr::createImplicit(
+          ctx, NonIsolatedModifier::NonSending));
+    }
   }
 
   if (auto *fd = dyn_cast<FuncDecl>(value)) {
@@ -7251,9 +7253,9 @@ bool swift::checkSendableConformance(
 
     // An non-final class cannot conform to `Sendable`.
     if (!classDecl->isSemanticallyFinal()) {
-      classDecl->diagnose(diag::concurrent_value_nonfinal_class,
-                          classDecl->getName())
-        .limitBehaviorUntilSwiftVersion(behavior, 6);
+      classDecl->diagnose(diag::concurrent_value_nonfinal_class,classDecl->getName())
+          .fixItInsert(classDecl->getStartLoc(), "final")
+          .limitBehaviorUntilSwiftVersion(behavior, 6);
 
       if (behavior == DiagnosticBehavior::Unspecified)
         return true;
