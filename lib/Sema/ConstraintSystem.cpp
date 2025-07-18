@@ -1451,17 +1451,11 @@ FunctionType::ExtInfo ClosureEffectsRequest::evaluate(
   if (!body)
     return ASTExtInfoBuilder().withSendable(sendable).build();
 
-  // `@concurrent` attribute is only valid on asynchronous function types.
-  bool asyncFromAttr = false;
-  if (expr->getAttrs().hasAttribute<ConcurrentAttr>()) {
-    asyncFromAttr = true;
-  }
-
   auto throwFinder = FindInnerThrows(expr);
   body->walk(throwFinder);
   return ASTExtInfoBuilder()
       .withThrows(throwFinder.foundThrow(), /*FIXME:*/Type())
-      .withAsync(asyncFromAttr || bool(findAsyncNode(expr)))
+      .withAsync(bool(findAsyncNode(expr)))
       .withSendable(sendable)
       .build();
 }
@@ -5003,11 +4997,7 @@ bool ConstraintSystem::isReadOnlyKeyPathComponent(
   // If the setter is unavailable, then the keypath ought to be read-only
   // in this context.
   if (auto setter = storage->getOpaqueAccessor(AccessorKind::Set)) {
-    // FIXME: [availability] Fully unavailable setters should cause the key path
-    // to be readonly too.
-    auto constraint =
-        getUnsatisfiedAvailabilityConstraint(setter, DC, referenceLoc);
-    if (constraint && constraint->isPotentiallyAvailable())
+    if (getUnsatisfiedAvailabilityConstraint(setter, DC, referenceLoc))
       return true;
   }
 
