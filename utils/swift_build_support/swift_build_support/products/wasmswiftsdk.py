@@ -193,6 +193,26 @@ class WasmSwiftSDK(product.Product):
             shell.call([self.toolchain.cmake, '--install', '.', '--prefix', '/usr'],
                        env={'DESTDIR': dest_dir})
 
+    def _build_xctest(self, swift_host_triple, has_pthread, wasi_sysroot):
+        xctest = CMakeProduct(
+            args=self.args,
+            toolchain=self.toolchain,
+            source_dir=os.path.join(
+                os.path.dirname(self.source_dir), 'swift-corelibs-xctest'),
+            build_dir=os.path.join(self.build_dir, 'xctest', swift_host_triple))
+        self._append_platform_cmake_options(
+            xctest.cmake_options, swift_host_triple, has_pthread, wasi_sysroot,
+            extra_swift_flags=[])
+        xctest.cmake_options.define('BUILD_SHARED_LIBS', 'FALSE')
+
+        xctest.build_with_cmake([], self.args.build_variant, [],
+                                prefer_native_toolchain=True,
+                                ignore_extra_cmake_options=True)
+        dest_dir = self._target_package_path(swift_host_triple)
+        with shell.pushd(xctest.build_dir):
+            shell.call([self.toolchain.cmake, '--install', '.', '--prefix', '/usr'],
+                       env={'DESTDIR': dest_dir})
+
     def _build_target_package(self, swift_host_triple, has_pthread,
                               stdlib_build_path, llvm_runtime_libs_build_path,
                               wasi_sysroot):
@@ -218,6 +238,7 @@ class WasmSwiftSDK(product.Product):
         self._build_foundation(swift_host_triple, has_pthread, wasi_sysroot)
         # Build swift-testing
         self._build_swift_testing(swift_host_triple, has_pthread, wasi_sysroot)
+        self._build_xctest(swift_host_triple, has_pthread, wasi_sysroot)
 
         return dest_dir
 
@@ -231,7 +252,7 @@ class WasmSwiftSDK(product.Product):
         #    and header paths from the sysroot
         #    https://github.com/llvm/llvm-project/blob/73ef397fcba35b7b4239c00bf3e0b4e689ca0add/clang/lib/Driver/ToolChains/WebAssembly.cpp#L29-L36
         for swift_host_triple, clang_multiarch_triple, build_basename, build_sdk, has_pthread in [
-            ('wasm32-unknown-wasi', 'wasm32-wasi', 'wasmstdlib', True, False),
+            ('wasm32-unknown-wasip1', 'wasm32-wasip1', 'wasmstdlib', True, False),
             # TODO: Include p1-threads in the Swift SDK once sdk-generator supports multi-target SDK
             ('wasm32-unknown-wasip1-threads', 'wasm32-wasip1-threads',
              'wasmthreadsstdlib', False, True),
