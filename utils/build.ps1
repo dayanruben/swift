@@ -2595,6 +2595,7 @@ function Build-ExperimentalRuntime {
         CMAKE_SYSTEM_NAME = $Platform.OS.ToString();
 
         SwiftCore_DIR = "$(Get-ProjectBinaryCache $Platform ExperimentalRuntime)\cmake\SwiftCore";
+        SwiftOverlay_DIR = "$(Get-ProjectBinaryCache $Platform ExperimentalOverlay)\cmake\SwiftOverlay";
       }
   }
 }
@@ -3694,12 +3695,12 @@ if (-not $SkipBuild) {
 
 Install-HostToolchain
 
-if (-not $SkipBuild -and $IncludeNoAsserts) {
-  Build-NoAssertsToolchain
-}
-
 if (-not $SkipBuild) {
   Invoke-BuildStep Build-mimalloc $HostPlatform
+}
+
+if (-not $SkipBuild -and $IncludeNoAsserts) {
+  Build-NoAssertsToolchain
 }
 
 if (-not $SkipBuild -and -not $IsCrossCompiling) {
