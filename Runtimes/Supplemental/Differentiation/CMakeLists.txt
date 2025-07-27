@@ -38,11 +38,14 @@ set(${PROJECT_NAME}_VENDOR_MODULE_DIR "${CMAKE_SOURCE_DIR}/../cmake/modules/vend
   CACHE FILEPATH "Location for private build system extension")
 
 find_package(SwiftCore REQUIRED)
+find_package(SwiftOverlay REQUIRED)
+
 include(GNUInstallDirs)
 
 include(AvailabilityMacros)
 include(EmitSwiftInterface)
 include(InstallSwiftInterface)
+include(PlatformInfo)
 include(gyb)
 include(ResourceEmbedding)
 include(CatalystSupport)
@@ -103,7 +106,8 @@ set_target_properties(swift_Differentiation PROPERTIES
   Swift_MODULE_NAME _Differentiation)
 
 target_link_libraries(swift_Differentiation PRIVATE
-  swiftCore)
+  swiftCore
+  $<$<PLATFORM_ID:Windows>:swiftCRT>)
 
 
 install(TARGETS swift_Differentiation
