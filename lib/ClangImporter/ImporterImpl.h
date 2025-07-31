@@ -2087,13 +2087,15 @@ findAnonymousEnumForTypedef(const ASTContext &ctx,
   auto foundDecls = lookupTable->lookup(
       SerializedSwiftName(typedefDecl->getName()), EffectiveClangContext());
 
-  auto found = llvm::find_if(foundDecls, [](SwiftLookupTable::SingleEntry decl) {
-    return decl.is<clang::NamedDecl *>() &&
-        isa<clang::EnumDecl>(decl.get<clang::NamedDecl *>());
-  });
+  auto found =
+      llvm::find_if(foundDecls, [](SwiftLookupTable::SingleEntry decl) {
+        return isa<clang::NamedDecl *>(decl) &&
+               isa<clang::EnumDecl>(cast<clang::NamedDecl *>(decl));
+      });
 
-  if (found != foundDecls.end())
-    return cast<clang::EnumDecl>(found->get<clang::NamedDecl *>());
+  if (found != foundDecls.end()) {
+    return cast<clang::EnumDecl>(cast<clang::NamedDecl *>(*found));
+  }
 
   // If a swift_private attribute has been attached to the enum, its name will
   // be prefixed with two underscores
@@ -2106,14 +2108,15 @@ findAnonymousEnumForTypedef(const ASTContext &ctx,
 
   auto swiftPrivateFound =
       llvm::find_if(foundDecls, [](SwiftLookupTable::SingleEntry decl) {
-        return decl.is<clang::NamedDecl *>() &&
-               isa<clang::EnumDecl>(decl.get<clang::NamedDecl *>()) &&
-               decl.get<clang::NamedDecl *>()
+        return isa<clang::NamedDecl *>(decl) &&
+               isa<clang::EnumDecl>(cast<clang::NamedDecl *>(decl)) &&
+               cast<clang::NamedDecl *>(decl)
                    ->hasAttr<clang::SwiftPrivateAttr>();
       });
 
-  if (swiftPrivateFound != foundDecls.end())
-    return cast<clang::EnumDecl>(swiftPrivateFound->get<clang::NamedDecl *>());
+  if (swiftPrivateFound != foundDecls.end()) {
+    return cast<clang::EnumDecl>(cast<clang::NamedDecl *>(*swiftPrivateFound));
+  }
 
   return std::nullopt;
 }
@@ -2137,7 +2140,7 @@ bool hasUnsafeAPIAttr(const clang::Decl *decl);
 bool hasIteratorAPIAttr(const clang::Decl *decl);
 
 bool hasNonEscapableAttr(const clang::RecordDecl *decl);
-
+bool hasNonCopyableAttr(const clang::RecordDecl *decl);
 bool hasEscapableAttr(const clang::RecordDecl *decl);
 
 bool isViewType(const clang::CXXRecordDecl *decl);
@@ -2179,6 +2182,14 @@ inline clang::QualType desugarIfBoundsAttributed(clang::QualType type) {
 /// If \a type is an elaborated type, it should be desugared first.
 ImportedType findOptionSetEnum(clang::QualType type,
                                ClangImporter::Implementation &Impl);
+
+/// Find value declarations in the same module as the given Clang declaration
+/// and with the given name.
+///
+/// The name we're looking for is the Swift name.
+llvm::SmallVector<ValueDecl *, 1>
+getValueDeclsForName(const clang::Decl *decl, ASTContext &ctx, StringRef name);
+
 } // end namespace importer
 } // end namespace swift
 
