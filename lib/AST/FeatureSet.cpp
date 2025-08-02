@@ -270,7 +270,6 @@ static bool usesFeatureAddressableTypes(Decl *d) {
   return false;
 }
 
-UNINTERESTING_FEATURE(AddressableInterop)
 UNINTERESTING_FEATURE(IsolatedAny2)
 UNINTERESTING_FEATURE(GlobalActorIsolatedTypesUsability)
 UNINTERESTING_FEATURE(ObjCImplementation)
@@ -440,7 +439,7 @@ static bool usesFeatureDefaultIsolationPerFile(Decl *D) {
 UNINTERESTING_FEATURE(BuiltinSelect)
 UNINTERESTING_FEATURE(BuiltinInterleave)
 UNINTERESTING_FEATURE(BuiltinVectorsExternC)
-UNINTERESTING_FEATURE(AddressOfProperty)
+UNINTERESTING_FEATURE(AddressOfProperty2)
 
 // ----------------------------------------------------------------------------
 // MARK: - FeatureSet
