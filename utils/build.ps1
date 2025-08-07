@@ -1678,8 +1678,10 @@ function Build-CMakeProject {
 
           $ArgWithForwardSlashes = $Arg.Replace("\", "/")
           if ($ArgWithForwardSlashes.Contains(" ")) {
-            # Quote and escape the quote so it makes it through
-            $Value += "\""$ArgWithForwardSlashes\"""
+            # Escape the quote so it makes it through. PowerShell 5 and Core
+            # handle quotes differently, so we need to check the version.
+            $quote = if ($PSEdition  -eq "Core") { '"' } else { '\"' }
+            $Value += "$quote$ArgWithForwardSlashes$quote"
           } else {
             $Value += $ArgWithForwardSlashes
           }
@@ -2841,7 +2843,8 @@ function Test-Foundation {
       -Src $SourceCache\swift-corelibs-foundation `
       -Bin "$BinaryCache\$($BuildPlatform.Triple)\FoundationTests" `
       -Platform $BuildPlatform `
-      -Configuration $FoundationTestConfiguration
+      -Configuration $FoundationTestConfiguration `
+      -j 1
   }
 }
 
