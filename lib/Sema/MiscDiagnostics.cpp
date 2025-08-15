@@ -1781,23 +1781,34 @@ public:
       return false;
     }
 
-    // Require that the RHS of the `let self = self` condition
-    // refers to a variable defined in a capture list.
-    // This lets us reject invalid examples like:
-    //
-    //   var `self` = self ?? .somethingElse
-    //   guard let self = self else { return }
-    //   method() // <- implicit self is not allowed
-    //
-    // In 5.10, instead of this check, compiler was checking that RHS of the
-    // self binding is loaded from a mutable variable. This is incorrect, but
-    // before SE-0481 compiler was trying to maintain this behavior in Swift 5
-    // mode for source compatibility. After SE-0481 this does not work
-    // anymore, because even in Swift 5 mode `weak self` capture is not mutable.
-    // So we have to introduce a breaking change as part of the SE-0481, and use
-    // proper check for capture list even in Swift 5 mode.
-    //
-    return conditionalStmt->rebindsSelf(Ctx, /*requiresCaptureListRef*/ true);
+    if (Ctx.LangOpts.hasFeature(Feature::ImmutableWeakCaptures)) {
+      // Require that the RHS of the `let self = self` condition
+      // refers to a variable defined in a capture list.
+      // This lets us reject invalid examples like:
+      //
+      //   var `self` = self ?? .somethingElse
+      //   guard let self = self else { return }
+      //   method() // <- implicit self is not allowed
+      //
+      // In 5.10, instead of this check, compiler was checking that RHS of the
+      // self binding is loaded from a mutable variable. This is incorrect, but
+      // before immutable weak captures compiler was trying to maintain this
+      // behavior in Swift 5 mode for source compatibility. With immutable weak
+      // captures this does not work anymore, because even in Swift 5 mode there
+      // is no `LoadExpr` to use.
+      //
+      return conditionalStmt->rebindsSelf(Ctx, /*requiresCaptureListRef*/ true);
+    } else {
+      // Require `LoadExpr`s when validating the self binding.
+      // This lets us reject invalid examples like:
+      //
+      //   let `self` = self ?? .somethingElse
+      //   guard let self = self else { return }
+      //   method() // <- implicit self is not allowed
+      //
+      return conditionalStmt->rebindsSelf(Ctx, /*requiresCaptureListRef*/ false,
+                                          /*requireLoadExpr*/ true);
+    }
   }
 
   static bool
@@ -4087,6 +4098,14 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
       access &= ~RK_Written;
     }
     
+    // If this variable has WeakStorageType, then it can be mutated in ways we
+    // don't know.
+    if (var->getInterfaceType()->is<WeakStorageType>() &&
+        (access & RK_CaptureList) &&
+        !DC->getASTContext().LangOpts.hasFeature(
+            Feature::ImmutableWeakCaptures))
+      access |= RK_Written;
+
     // Diagnose variables that were never used (other than their
     // initialization).
     //
@@ -4257,6 +4276,8 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
       if (isUsedInInactive(var))
         continue;
 
+      bool isWeak = var->getInterfaceType()->is<WeakStorageType>();
+
       // If this is a parameter explicitly marked 'var', remove it.
       if (FixItLoc.isInvalid()) {
         bool suggestCaseLet = false;
@@ -4267,10 +4288,14 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
           suggestCaseLet = isa<ForEachStmt>(stmt);
         }
         if (suggestCaseLet)
-          Diags.diagnose(var->getLoc(), diag::variable_tuple_elt_never_mutated,
+          Diags.diagnose(var->getLoc(),
+                         isWeak ? diag::weak_variable_tuple_elt_never_mutated
+                                : diag::variable_tuple_elt_never_mutated,
                          var->getName(), var->getNameStr());
         else
-          Diags.diagnose(var->getLoc(), diag::variable_never_mutated,
+          Diags.diagnose(var->getLoc(),
+                         isWeak ? diag::weak_variable_never_mutated
+                                : diag::variable_never_mutated,
                          var->getName(), true);
 
       }
@@ -4283,7 +4308,9 @@ VarDeclUsageChecker::~VarDeclUsageChecker() {
           suggestLet = !isa<ForEachStmt>(stmt);
         }
 
-        auto diag = Diags.diagnose(var->getLoc(), diag::variable_never_mutated,
+        auto diag = Diags.diagnose(var->getLoc(),
+                                   isWeak ? diag::weak_variable_never_mutated
+                                          : diag::variable_never_mutated,
                                    var->getName(), suggestLet);
 
         if (suggestLet)
@@ -6471,7 +6498,7 @@ void swift::performStmtDiagnostics(const Stmt *S, DeclContext *DC) {
 
 void swift::fixItAccess(InFlightDiagnostic &diag, ValueDecl *VD,
                         AccessLevel desiredAccess, bool isForSetter,
-                        bool shouldUseDefaultAccess) {
+                        bool shouldUseDefaultAccess, bool updateAttr) {
   StringRef fixItString;
   switch (desiredAccess) {
   case AccessLevel::Private:      fixItString = "private ";      break;
@@ -6486,27 +6513,35 @@ void swift::fixItAccess(InFlightDiagnostic &diag, ValueDecl *VD,
   AbstractAccessControlAttr *attr;
   if (isForSetter) {
     attr = attrs.getAttribute<SetterAccessAttr>();
-    cast<AbstractStorageDecl>(VD)->overwriteSetterAccess(desiredAccess);
+    if (updateAttr)
+      cast<AbstractStorageDecl>(VD)->overwriteSetterAccess(desiredAccess);
   } else {
     attr = attrs.getAttribute<AccessControlAttr>();
-    VD->overwriteAccess(desiredAccess);
+    if (updateAttr)
+      VD->overwriteAccess(desiredAccess);
 
     if (auto *ASD = dyn_cast<AbstractStorageDecl>(VD)) {
-      if (auto *getter = ASD->getAccessor(AccessorKind::Get))
-        getter->overwriteAccess(desiredAccess);
+      if (auto *getter = ASD->getAccessor(AccessorKind::Get)) {
+        if (updateAttr)
+          getter->overwriteAccess(desiredAccess);
+      }
 
       if (auto *setterAttr = attrs.getAttribute<SetterAccessAttr>()) {
         if (setterAttr->getAccess() > desiredAccess)
-          fixItAccess(diag, VD, desiredAccess, true);
+          fixItAccess(diag, VD, desiredAccess, /*isForSetter=*/true,
+                      /*shouldUseDefaultAccess=*/false, updateAttr);
       } else {
-        ASD->overwriteSetterAccess(desiredAccess);
+        if (updateAttr)
+          ASD->overwriteSetterAccess(desiredAccess);
       }
     }
   }
 
   if (isForSetter && VD->getFormalAccess() == desiredAccess) {
     assert(attr);
-    attr->setInvalid();
+    if (updateAttr)
+      attr->setInvalid();
+
     // Remove the setter attribute.
     diag.fixItRemove(attr->Range);
 
@@ -6526,7 +6561,8 @@ void swift::fixItAccess(InFlightDiagnostic &diag, ValueDecl *VD,
         // replace the "(set)" part of a setter attribute.
         diag.fixItReplace(attr->getLocation(), fixItString.drop_back());
       }
-      attr->setInvalid();
+      if (updateAttr)
+        attr->setInvalid();
     }
 
   } else if (auto *override = VD->getAttrs().getAttribute<OverrideAttr>()) {
