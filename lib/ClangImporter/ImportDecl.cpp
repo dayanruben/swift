@@ -2742,7 +2742,7 @@ namespace {
 
       enum class RetainReleaseOperationKind {
         notAfunction,
-        doesntReturnVoidOrSelf,
+        invalidReturnType,
         invalidParameters,
         valid
       };
@@ -2770,10 +2770,20 @@ namespace {
         // The return type should be void (for release functions), or void
         // or the parameter type (for retain functions).
         auto resultInterfaceType = operationFn->getResultInterfaceType();
-        if (!resultInterfaceType->isVoid()) {
+        if (!resultInterfaceType->isVoid() &&
+            !resultInterfaceType->isUInt() &&
+            !resultInterfaceType->isUInt8() &&
+            !resultInterfaceType->isUInt16() &&
+            !resultInterfaceType->isUInt32() &&
+            !resultInterfaceType->isUInt64() &&
+            !resultInterfaceType->isInt() &&
+            !resultInterfaceType->isInt8() &&
+            !resultInterfaceType->isInt16() &&
+            !resultInterfaceType->isInt32() &&
+            !resultInterfaceType->isInt64()) {
           if (operationKind == CustomRefCountingOperationKind::release ||
               !resultInterfaceType->lookThroughSingleOptionalType()->isEqual(paramType))
-            return RetainReleaseOperationKind::doesntReturnVoidOrSelf;
+            return RetainReleaseOperationKind::invalidReturnType;
         }
 
         // The parameter of the retain/release function should be pointer to the
@@ -2838,7 +2848,7 @@ namespace {
               diag::foreign_reference_types_retain_release_not_a_function_decl,
               false, retainOperation.name);
           break;
-        case RetainReleaseOperationKind::doesntReturnVoidOrSelf:
+        case RetainReleaseOperationKind::invalidReturnType:
           Impl.diagnose(
               loc,
               diag::foreign_reference_types_retain_non_void_or_self_return_type,
@@ -2903,7 +2913,7 @@ namespace {
               diag::foreign_reference_types_retain_release_not_a_function_decl,
               true, releaseOperation.name);
           break;
-        case RetainReleaseOperationKind::doesntReturnVoidOrSelf:
+        case RetainReleaseOperationKind::invalidReturnType:
           Impl.diagnose(
               loc,
               diag::foreign_reference_types_release_non_void_return_type,
@@ -4107,6 +4117,50 @@ namespace {
       return false;
     }
 
+    // Inject lifetime annotations selectively for some STL types so we can use
+    // unsafeAddress to avoid copies.
+    bool inferSelfDependence(const clang::FunctionDecl *decl,
+                             AbstractFunctionDecl *result, size_t returnIdx) {
+      const auto *method = dyn_cast<clang::CXXMethodDecl>(decl);
+      if (!method)
+        return false;
+      const auto *enclosing = method->getParent();
+      if (enclosing->isInStdNamespace() &&
+          (enclosing->getName() == "unique_ptr" ||
+           enclosing->getName() == "shared_ptr") &&
+          method->isOverloadedOperator() &&
+          method->getOverloadedOperator() == clang::OO_Star) {
+        SmallVector<LifetimeDependenceInfo, 1> lifetimeDependencies;
+        SmallBitVector dependenciesOfRet(returnIdx);
+        dependenciesOfRet[result->getSelfIndex()] = true;
+        lifetimeDependencies.push_back(LifetimeDependenceInfo(
+            nullptr, IndexSubset::get(Impl.SwiftContext, dependenciesOfRet),
+            returnIdx,
+            /*isImmortal*/ false));
+        Impl.SwiftContext.evaluator.cacheOutput(
+            LifetimeDependenceInfoRequest{result},
+            Impl.SwiftContext.AllocateCopy(lifetimeDependencies));
+        Impl.returnsSelfDependentValue.insert(result);
+        return true;
+      }
+      return false;
+    }
+
+    static bool isReturnDependsOnSelf(
+        AbstractFunctionDecl *f,
+        const ArrayRef<LifetimeDependenceInfo> &lifetimeDeps) {
+      if (isa<ConstructorDecl>(f) || !f->getImportAsMemberStatus().isInstance())
+        return false;
+      for (auto dependence : lifetimeDeps) {
+        auto returnIdx = f->getParameters()->size() + !isa<ConstructorDecl>(f);
+        if (!dependence.hasInheritLifetimeParamIndices() &&
+            dependence.hasScopeLifetimeParamIndices() &&
+            dependence.getTargetIndex() == returnIdx)
+          return dependence.getScopeIndices()->contains(f->getSelfIndex());
+      }
+      return false;
+    }
+
     void addLifetimeDependencies(const clang::FunctionDecl *decl,
                                  AbstractFunctionDecl *result) {
       if (decl->getTemplatedKind() == clang::FunctionDecl::TK_FunctionTemplate)
@@ -4125,10 +4179,19 @@ namespace {
                    CxxEscapability::Unknown) != CxxEscapability::NonEscapable;
       };
 
+      auto swiftParams = result->getParameters();
+      bool hasSelf =
+          result->hasImplicitSelfDecl() && !isa<ConstructorDecl>(result);
+      auto returnIdx = swiftParams->size() + hasSelf;
+
+      if (inferSelfDependence(decl, result, returnIdx))
+        return;
+
       // FIXME: this uses '0' as the result index. That only works for
       // standalone functions with no parameters.
       // See markReturnsUnsafeNonescapable() for a general approach.
       auto &ASTContext = result->getASTContext();
+
       SmallVector<LifetimeDependenceInfo, 1> lifetimeDependencies;
       LifetimeDependenceInfo immortalLifetime(nullptr, nullptr, 0,
                                               /*isImmortal*/ true);
@@ -4151,10 +4214,7 @@ namespace {
         }
       };
 
-      auto swiftParams = result->getParameters();
-      bool hasSelf =
-          result->hasImplicitSelfDecl() && !isa<ConstructorDecl>(result);
-      const auto dependencyVecSize = swiftParams->size() + hasSelf;
+      const auto dependencyVecSize = returnIdx;
       SmallBitVector inheritLifetimeParamIndicesForReturn(dependencyVecSize);
       SmallBitVector scopedLifetimeParamIndicesForReturn(dependencyVecSize);
       SmallBitVector paramHasAnnotation(dependencyVecSize);
@@ -4233,7 +4293,7 @@ namespace {
                 ? IndexSubset::get(Impl.SwiftContext,
                                    scopedLifetimeParamIndicesForReturn)
                 : nullptr,
-            swiftParams->size() + hasSelf,
+            returnIdx,
             /*isImmortal*/ false));
       else if (auto *ctordecl = dyn_cast<clang::CXXConstructorDecl>(decl)) {
         // Assume default constructed view types have no dependencies.
@@ -4272,6 +4332,10 @@ namespace {
       }
 
       Impl.diagnoseTargetDirectly(decl);
+
+      if (isReturnDependsOnSelf(result, lifetimeDependencies)) {
+        Impl.returnsSelfDependentValue.insert(result);
+      }
     }
 
     void finishFuncDecl(const clang::FunctionDecl *decl,
