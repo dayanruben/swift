@@ -756,6 +756,8 @@ function Invoke-BuildStep {
 enum Project {
   BuildTools
   RegsGen2
+  BootstrapFoundationMacros
+  BootstrapTestingMacros
 
   CDispatch
   Compilers
@@ -2910,58 +2912,19 @@ function Test-Dispatch {
   }
 }
 
-function Build-Foundation {
-  [CmdletBinding(PositionalBinding = $false)]
-  param
-  (
-    [Parameter(Position = 0, Mandatory = $true)]
-    [Hashtable] $Platform,
-    [switch] $Static = $false
-  )
-
-  $FoundationBinaryCache = if ($Static) {
-    Get-ProjectBinaryCache $Platform ExperimentalStaticFoundation
-  } else {
-    Get-ProjectBinaryCache $Platform DynamicFoundation
-  }
-
-  $FoundationImage = if ($Static) {
-    "$(Get-SwiftSDK $Platform.OS -Identifier "$($Platform.OS)Experimental")\usr"
-  } else {
-    "$(Get-SwiftSDK $Platform.OS)\usr"
-  }
-
-  $SwiftSDK = if ($Static) {
-    Get-SwiftSDK $Platform.OS -Identifier "$($Platform.OS)Experimental"
-  } else {
-    Get-SwiftSDK $Platform.OS
-  }
-
-  $SwiftFlags = if ($Static) {
-    @("-static-stdlib", "-Xfrontend", "-use-static-resource-dir")
-  } else {
-    @()
-  }
-
-  $DispatchCMakeModules = if ($Static) {
-    Get-ProjectCMakeModules $Platform ExperimentalStaticDispatch
-  } else {
-    Get-ProjectCMakeModules $Platform Dispatch
-  }
-
+function Build-Foundation([Hashtable] $Platform) {
   Build-CMakeProject `
     -Src $SourceCache\swift-corelibs-foundation `
-    -Bin $FoundationBinaryCache `
-    -InstallTo $FoundationImage `
+    -Bin (Get-ProjectBinaryCache $Platform DynamicFoundation) `
+    -InstallTo "$(Get-SwiftSDK $Platform.OS)\usr" `
     -Platform $Platform `
     -UseBuiltCompilers C,CXX,Swift `
-    -SwiftSDK $SwiftSDK `
+    -SwiftSDK (Get-SwiftSDK $Platform.OS) `
     -Defines @{
-      BUILD_SHARED_LIBS = if ($Static) { "NO" } else { "YES" };
+      BUILD_SHARED_LIBS = "YES";
       # FIXME(compnerd) - workaround ARM64 build failure when cross-compiling.
       CMAKE_NINJA_FORCE_RESPONSE_FILE = "YES";
       CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
-      CMAKE_Swift_FLAGS = $SwiftFlags;
       FOUNDATION_BUILD_TOOLS = if ($Platform.OS -eq [OS]::Windows) { "YES" } else { "NO" };
       CURL_DIR = "$BinaryCache\$($Platform.Triple)\usr\lib\cmake\CURL";
       LibXml2_DIR = "$BinaryCache\$($Platform.Triple)\usr\lib\cmake\libxml2-2.11.5";
@@ -2971,11 +2934,11 @@ function Build-Foundation {
         "$BinaryCache\$($Platform.Triple)\usr\lib\libz.a"
       };
       ZLIB_INCLUDE_DIR = "$BinaryCache\$($Platform.Triple)\usr\include";
-      dispatch_DIR = $DispatchCMakeModules;
+      dispatch_DIR = (Get-ProjectCMakeModules $Platform Dispatch);
       _SwiftFoundation_SourceDIR = "$SourceCache\swift-foundation";
       _SwiftFoundationICU_SourceDIR = "$SourceCache\swift-foundation-icu";
       _SwiftCollections_SourceDIR = "$SourceCache\swift-collections";
-      SwiftFoundation_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform FoundationMacros)\bin"
+      SwiftFoundation_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform BootstrapFoundationMacros)\bin"
     }
 }
 
@@ -3084,7 +3047,7 @@ function Build-Testing([Hashtable] $Platform) {
       CMAKE_INSTALL_BINDIR = $Platform.BinaryDir;
       dispatch_DIR = (Get-ProjectCMakeModules $Platform Dispatch);
       Foundation_DIR = (Get-ProjectCMakeModules $Platform DynamicFoundation);
-      SwiftTesting_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform TestingMacros)\TestingMacros.dll";
+      SwiftTesting_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform BootstrapTestingMacros)\TestingMacros.dll";
       SwiftTesting_INSTALL_NESTED_SUBDIR = "YES";
     }
 }
@@ -3135,7 +3098,7 @@ function Install-SDK([Hashtable[]] $Platforms, [OS] $OS = $Platforms[0].OS, [str
   }
 }
 
-function Build-SDK([Hashtable] $Platform, [switch] $IncludeMacros = $false) {
+function Build-SDK([Hashtable] $Platform) {
   if ($IncludeDS2) {
     Invoke-BuildStep Build-DS2 $Platform
   }
@@ -3149,10 +3112,6 @@ function Build-SDK([Hashtable] $Platform, [switch] $IncludeMacros = $false) {
   # Libraries
   Invoke-BuildStep Build-Runtime $Platform
   Invoke-BuildStep Build-Dispatch $Platform
-  if ($IncludeMacros) {
-    Invoke-BuildStep Build-FoundationMacros $Platform
-    Invoke-BuildStep Build-TestingMacros $Platform
-  }
   Invoke-BuildStep Build-Foundation $Platform
   Invoke-BuildStep Build-Sanitizers $Platform
   Invoke-BuildStep Build-XCTest $Platform
@@ -3229,7 +3188,7 @@ function Build-ExperimentalSDK([Hashtable] $Platform) {
       _SwiftFoundation_SourceDIR = "$SourceCache\swift-foundation";
       _SwiftFoundationICU_SourceDIR = "$SourceCache\swift-foundation-icu";
       _SwiftCollections_SourceDIR = "$SourceCache\swift-collections";
-      SwiftFoundation_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform FoundationMacros)\bin"
+      SwiftFoundation_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform BootstrapFoundationMacros)\bin"
     }
 
   Build-CMakeProject `
@@ -3261,7 +3220,7 @@ function Build-ExperimentalSDK([Hashtable] $Platform) {
       _SwiftFoundation_SourceDIR = "$SourceCache\swift-foundation";
       _SwiftFoundationICU_SourceDIR = "$SourceCache\swift-foundation-icu";
       _SwiftCollections_SourceDIR = "$SourceCache\swift-collections";
-      SwiftFoundation_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform FoundationMacros)\bin"
+      SwiftFoundation_MACRO = "$(Get-ProjectBinaryCache $BuildPlatform BootstrapFoundationMacros)\bin"
     }
 }
 
@@ -3959,7 +3918,28 @@ if (-not $SkipBuild) {
   Invoke-BuildStep Build-CDispatch $HostPlatform
   Invoke-BuildStep Build-Compilers $HostPlatform -Variant "Asserts"
 
-  Invoke-BuildStep Build-SDK $BuildPlatform -IncludeMacros
+  # Build Macros
+  Build-CMakeProject `
+    -Src $SourceCache\swift-foundation\Sources\FoundationMacros `
+    -Bin (Get-ProjectBinaryCache $BuildPlatform BootstrapFoundationMacros) `
+    -BuildTargets default `
+    -Platform $BuildPlatform `
+    -UsePinnedCompilers Swift `
+    -SwiftSDK (Get-PinnedToolchainSDK -OS $BuildPlatform.OS) `
+    -Defines @{
+      SwiftSyntax_DIR = (Get-ProjectCMakeModules $BuildPlatform Compilers);
+    }
+
+  Build-CMakeProject `
+    -Src $SourceCache\swift-testing\Sources\TestingMacros `
+    -Bin (Get-ProjectBinaryCache $BuildPlatform BootstrapTestingMacros) `
+    -BuildTargets default `
+    -Platform $BuildPlatform `
+    -UsePinnedCompilers Swift `
+    -SwiftSDK (Get-PinnedToolchainSDK -OS $BuildPlatform.OS) `
+    -Defines @{
+      SwiftSyntax_DIR = (Get-ProjectCMakeModules $BuildPlatform Compilers);
+    }
 
   foreach ($SDK in $WindowsSDKVersions) {
     switch ($SDK) {

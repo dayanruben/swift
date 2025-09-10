@@ -2241,8 +2241,8 @@ static void ParseSymbolGraphArgs(symbolgraphgen::SymbolGraphOptions &Opts,
   }
 
   // default values for generating symbol graphs during a build
-  Opts.PrettyPrint = false;
-  Opts.EmitSynthesizedMembers = true;
+  Opts.PrettyPrint = Args.hasArg(OPT_symbol_graph_pretty_print);
+  Opts.EmitSynthesizedMembers = !Args.hasArg(OPT_symbol_graph_skip_synthesized_members);
   Opts.PrintMessages = false;
   Opts.IncludeClangDocs = false;
 }
@@ -3766,10 +3766,6 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
 
   Opts.InternalizeSymbols = FrontendOpts.Static;
 
-  if (Args.hasArg(OPT_mergeable_symbols)) {
-    Opts.MergeableSymbols = true;
-  }
-
   if (Args.hasArg(OPT_disable_preallocated_instantiation_caches)) {
     Opts.NoPreallocatedInstantiationCaches = true;
   }
@@ -3905,6 +3901,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
   Opts.EmitCASIDFile |= Args.hasArg(OPT_cas_emit_casid_file);
 
   Opts.DebugCallsiteInfo |= Args.hasArg(OPT_debug_callsite_info);
+
+  if (Args.hasArg(OPT_mergeable_symbols))
+    Diags.diagnose(SourceLoc(), diag::warn_flag_deprecated,
+                   "-mergeable-symbols");
 
   return false;
 }
