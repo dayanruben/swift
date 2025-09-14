@@ -1103,6 +1103,8 @@ public:
   void printRequirement(const InverseRequirement &inverse,
                         bool forInherited);
 
+  void printArgumentList(ArgumentList *args, bool forSubscript = false);
+
 private:
   bool shouldPrint(const Decl *D, bool Notify = false);
   bool shouldPrintPattern(const Pattern *P);
@@ -1138,8 +1140,6 @@ private:
   void printFunctionParameters(AbstractFunctionDecl *AFD);
 
   void printArgument(const Argument &arg);
-  
-  void printArgumentList(ArgumentList *args, bool forSubscript = false);
 
   void printAvailabilitySpec(AvailabilitySpec *spec);
 
@@ -4843,6 +4843,19 @@ void PrintAST::visitMacroExpansionDecl(MacroExpansionDecl *decl) {
   Printer << ')';
 }
 
+void CustomAttr::printCustomAttr(ASTPrinter &Printer, const PrintOptions &Options) const {
+  Printer.callPrintNamePre(PrintNameContext::Attribute);
+  Printer << "@";
+  if (auto type = getType())
+    type.print(Printer, Options);
+  else
+    getTypeRepr()->print(Printer, Options);
+  Printer.printNamePost(PrintNameContext::Attribute);
+  if (hasArgs() && Options.PrintExprs) {
+    PrintAST(Printer, Options).printArgumentList(argList);
+  }
+}
+
 void PrintAST::visitIntegerLiteralExpr(IntegerLiteralExpr *expr) {
   Printer << expr->getDigitsText();
 }
@@ -7515,10 +7528,37 @@ public:
       Printer << ") __";
 
       if (genericSig) {
-        printGenericArgs(decl->getASTContext(),
-                         genericSig.getGenericParams(),
-                         T->getSubstitutions().getReplacementTypes());
+        auto &ctx = decl->getASTContext();
+        auto params = genericSig.getGenericParams();
+        auto args = T->getSubstitutions().getReplacementTypes();
+
+        // Use the new "nested" syntax if there is at least one parameter pack,
+        // because that case didn't round trip at all before anyway. Otherwise,
+        // use the old "flat" syntax, even when the owner declaration is in a
+        // nested generic context, because we want the generated swiftinterface
+        // to continue to work on old compilers.
+        if (genericSig->hasParameterPack()) {
+          bool first = true;
+
+          while (!params.empty()) {
+            if (!first) { Printer << ".__"; }
+            first = false;
+
+            unsigned end = 1;
+            unsigned depth = params.front()->getDepth();
+            while (end < params.size() && params[end]->getDepth() == depth) {
+              ++end;
+            }
+
+            printGenericArgs(ctx, params.take_front(end), args.take_front(end));
+            params = params.slice(end);
+            args = args.slice(end);
+          }
+        } else {
+          printGenericArgs(ctx, params, args);
+        }
       }
+
       return;
     }
     case PrintOptions::OpaqueReturnTypePrintingMode::Description: {
