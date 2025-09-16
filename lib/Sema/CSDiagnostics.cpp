@@ -411,6 +411,14 @@ ValueDecl *RequirementFailure::getDeclRef() const {
     }
   }
 
+  // If this is a key path to function conversion, the requirements come
+  // from a key path type implicitly formed by the solver.
+  if (isExpr<KeyPathExpr>(getRawAnchor()) &&
+      getLocator()->isFirstElement<LocatorPathElt::KeyPathType>() &&
+      getOwnerType()->is<FunctionType>()) {
+    return getASTContext().getKeyPathDecl();
+  }
+
   return getAffectedDeclFromType(getOwnerType());
 }
 
@@ -4793,6 +4801,8 @@ bool InvalidMemberRefOnExistential::diagnoseAsError() {
     case AccessorKind::Modify2:
     case AccessorKind::Address:
     case AccessorKind::MutableAddress:
+    case AccessorKind::Borrow:
+    case AccessorKind::Mutate:
       PD = SD->getIndices()->get(idx);
       break;
     }
