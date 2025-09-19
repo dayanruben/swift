@@ -254,13 +254,6 @@ ERROR(cannot_apply_lvalue_binop_to_subelement,none,
 ERROR(cannot_apply_lvalue_binop_to_rvalue,none,
       "left side of mutating operator has immutable type %0", (Type))
 
-ERROR(cannot_subscript_base,none,
-      "cannot subscript a value of type %0",
-      (Type))
-
-ERROR(cannot_subscript_ambiguous_base,none,
-      "cannot subscript a value of incorrect or ambiguous type", ())
-
 ERROR(cannot_subscript_nil_literal,none,
       "cannot subscript a nil literal value", ())
 ERROR(conditional_cast_from_nil,none,
@@ -2144,6 +2137,10 @@ ERROR(attr_static_exclusive_only_mutating,none,
       "type %0 cannot have mutating function %1", (Type, ValueDecl *))
 ERROR(attr_static_exclusive_no_setters,none,
       "variable of type %0 must not have a setter", (Type))
+
+// @_manualOwnership
+ERROR(attr_manual_ownership_experimental,none,
+      "'@_manualOwnership' requires '-enable-experimental-feature ManualOwnership'", ())
 
 // @extractConstantsFromMembers
 ERROR(attr_extractConstantsFromMembers_experimental,none,

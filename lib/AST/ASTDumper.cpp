@@ -3817,12 +3817,6 @@ public:
 
     printFoot();
   }
-  void visitUnresolvedTypeConversionExpr(UnresolvedTypeConversionExpr *E,
-                                         Label label) {
-    printCommon(E, "unresolvedtype_conversion_expr", label);
-    printRec(E->getSubExpr(), Label::optional("sub_expr"));
-    printFoot();
-  }
   void visitFunctionConversionExpr(FunctionConversionExpr *E, Label label) {
     printCommon(E, "function_conversion_expr", label);
     printRec(E->getSubExpr(), Label::optional("sub_expr"));
@@ -5030,6 +5024,7 @@ public:
   TRIVIAL_ATTR_PRINTER(NoLocks, no_locks)
   TRIVIAL_ATTR_PRINTER(NoMetadata, no_metadata)
   TRIVIAL_ATTR_PRINTER(NoObjCBridging, no_objc_bridging)
+  TRIVIAL_ATTR_PRINTER(ManualOwnership, manual_ownership)
   TRIVIAL_ATTR_PRINTER(NoRuntime, no_runtime)
   TRIVIAL_ATTR_PRINTER(NonEphemeral, non_ephemeral)
   TRIVIAL_ATTR_PRINTER(NonEscapable, non_escapable)
