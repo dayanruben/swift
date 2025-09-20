@@ -4863,10 +4863,6 @@ NOTE(descriptive_generic_type_declared_here,none,
 
 ERROR(placeholder_type_not_allowed,none,
       "type placeholder not allowed here", ())
-ERROR(placeholder_type_not_allowed_in_return_type,none,
-      "type placeholder may not appear in function return type", ())
-ERROR(placeholder_type_not_allowed_in_parameter,none,
-      "type placeholder may not appear in top-level parameter", ())
 ERROR(placeholder_type_not_allowed_in_pattern,none,
       "placeholder type may not appear as type of a variable", ())
 NOTE(replace_placeholder_with_inferred_type,none,
@@ -8616,6 +8612,18 @@ GROUPED_ERROR(weak_unowned_in_embedded_swift, EmbeddedRestrictions, none,
 GROUPED_WARNING(untyped_throws_in_embedded_swift, EmbeddedRestrictions,
                 DefaultIgnore,
                 "untyped throws is not available in Embedded Swift; add a thrown error type with '(type)'", ())
+GROUPED_WARNING(generic_nonfinal_in_embedded_swift, EmbeddedRestrictions,
+                DefaultIgnore,
+                "generic %kind0 in a class %select{must be 'final'|cannot be 'required'}1 in Embedded Swift",
+                (const Decl *, bool))
+GROUPED_WARNING(use_generic_member_of_existential_in_embedded_swift,
+                EmbeddedRestrictions, DefaultIgnore,
+                "cannot use generic %kind0 on a value of type %1 in Embedded Swift",
+                (const Decl *, Type))
+GROUPED_WARNING(dynamic_cast_involving_protocol_in_embedded_swift,
+                EmbeddedRestrictions, DefaultIgnore,
+                "cannot perform a dynamic cast to a type involving %kind0 in Embedded Swift",
+                (const Decl *))
 
 //===----------------------------------------------------------------------===//
 // MARK: @abi Attribute
