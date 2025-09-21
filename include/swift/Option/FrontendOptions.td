@@ -282,12 +282,12 @@ def no_parallel_scan : Flag<["-"], "no-parallel-scan">,
    HelpText<"Perform dependency scanning in a single-threaded fashion.">;
 
 def enable_copy_propagation : Flag<["-"], "enable-copy-propagation">,
-  HelpText<"Run SIL copy propagation with lexical lifetimes to shorten object "
+  HelpText<"Always run SIL copy propagation with lexical lifetimes to shorten object "
            "lifetimes while preserving variable lifetimes.">;
 def copy_propagation_state_EQ :
   Joined<["-"], "enable-copy-propagation=">,
   HelpText<"Whether to enable copy propagation">,
-  MetaVarName<"true|requested-passes-only|false">;
+  MetaVarName<"always|optimizing|requested-passes-only|false">;
 
 def disable_infer_public_concurrent_value : Flag<["-"], "disable-infer-public-sendable">,
     HelpText<"Disable inference of Sendable conformances for public structs and enums">;
@@ -432,6 +432,9 @@ def dump_macro_expansions : Flag<["-"], "dump-macro-expansions">,
   HelpText<"Dumps the results of each macro expansion">;
 def emit_macro_expansion_files : Separate<["-"], "emit-macro-expansion-files">,
   HelpText<"Specify when to emit macro expansion file: 'none', 'debug', or 'diagnostics'">;
+
+def dump_source_file_imports : Flag<["-"], "dump-source-file-imports">,
+  HelpText<"Dumps the list of imports for each source file">;
 
 def analyze_request_evaluator : Flag<["-"], "analyze-request-evaluator">,
   Flags<[FrontendOption, HelpHidden, DoesNotAffectIncrementalBuild]>,
