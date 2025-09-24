@@ -363,6 +363,8 @@ setBridgingHeaderFromFrontendOptions(ClangImporterOptions &ImporterOpts,
   if (!FrontendOpts.InputsAndOutputs.hasInputs())
     return;
 
+  ImporterOpts.BridgingHeaderIsInternal = FrontendOpts.ImportHeaderAsInternal;
+
   // If we aren't asked to output a bridging header, we don't need to set this.
   if (ImporterOpts.PrecompiledHeaderOutputDir.empty())
     return;
@@ -1008,6 +1010,9 @@ static bool ParseEnabledFeatureArgs(LangOptions &Opts, ArgList &Args,
     Opts.enableFeature(Feature::StrictMemorySafety);
   else if (Args.hasArg(OPT_strict_memory_safety_migrate))
     Opts.enableFeature(Feature::StrictMemorySafety, /*forMigration=*/true);
+
+  if (Args.hasArg(OPT_enable_library_evolution, OPT_enable_resilience))
+    Opts.enableFeature(Feature::LibraryEvolution);
 
   return HadError;
 }
@@ -1800,7 +1805,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
       HadError = true;
     }
 
-    if (FrontendOpts.EnableLibraryEvolution) {
+    if (Opts.hasFeature(Feature::LibraryEvolution)) {
       Diags.diagnose(SourceLoc(), diag::evolution_with_embedded);
       HadError = true;
     }
@@ -2116,10 +2121,32 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts, ArgList &Args,
   else if (Args.hasArg(OPT_emit_pcm) || Args.hasArg(OPT_dump_pcm))
     Opts.Mode = ClangImporterOptions::Modes::PrecompiledModule;
 
-  if (auto *A = Args.getLastArg(OPT_import_objc_header))
+  bool hadNormalBridgingHeader = false;
+  if (auto *A = Args.getLastArg(OPT_import_bridging_header,
+                                OPT_internal_import_bridging_header)) {
     Opts.BridgingHeader = A->getValue();
-  if (auto *A = Args.getLastArg(OPT_import_pch))
+    Opts.BridgingHeaderIsInternal =
+        A->getOption().getID() == OPT_internal_import_bridging_header;
+  }
+  if (auto *A = Args.getLastArg(OPT_import_pch, OPT_internal_import_pch)) {
     Opts.BridgingHeaderPCH = A->getValue();
+    bool importAsInternal = A->getOption().getID() == OPT_internal_import_pch;
+    if (hadNormalBridgingHeader &&
+        importAsInternal != Opts.BridgingHeaderIsInternal) {
+      Diags.diagnose(SourceLoc(),
+                     diag::bridging_header_and_pch_internal_mismatch);
+    }
+    Opts.BridgingHeaderIsInternal = importAsInternal;
+  }
+
+  // Until we have some checking in place, internal bridging headers are a
+  // bit unsafe without library evolution.
+  if (Opts.BridgingHeaderIsInternal &&
+      !LangOpts.hasFeature(Feature::LibraryEvolution)) {
+    Diags.diagnose(SourceLoc(),
+                   diag::internal_bridging_header_without_library_evolution);
+  }
+
   Opts.DisableSwiftBridgeAttr |= Args.hasArg(OPT_disable_swift_bridge_attr);
 
   Opts.DisableOverlayModules |= Args.hasArg(OPT_emit_imported_modules);
@@ -3041,7 +3068,7 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
           FrontendOptions::ActionType::TypecheckModuleFromInterface)
         Diags.diagnose(SourceLoc(), diag::ignoring_option_requires_option,
                        "-package-cmo", "-allow-non-resilient-access");
-    } else if (!FEOpts.EnableLibraryEvolution) {
+    } else if (!LangOpts.hasFeature(Feature::LibraryEvolution)) {
       Diags.diagnose(SourceLoc(), diag::package_cmo_requires_library_evolution);
     } else {
       Opts.EnableSerializePackage = true;
@@ -4144,6 +4171,7 @@ bool CompilerInvocation::parseArgs(
     IRGenOpts.ReflectionMetadata = ReflectionMetadataMode::None;
     IRGenOpts.EnableReflectionNames = false;
     FrontendOpts.DisableBuildingInterface = true;
+    SearchPathOpts.ModuleLoadMode = ModuleLoadingMode::OnlySerialized;
     TypeCheckerOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.CMOMode = CrossModuleOptimizationMode::Everything;

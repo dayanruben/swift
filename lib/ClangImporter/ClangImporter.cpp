@@ -2714,6 +2714,7 @@ ClangImporter::Implementation::Implementation(
       DisableSwiftBridgeAttr(ctx.ClangImporterOpts.DisableSwiftBridgeAttr),
       BridgingHeaderExplicitlyRequested(
           !ctx.ClangImporterOpts.BridgingHeader.empty()),
+      BridgingHeaderIsInternal(ctx.ClangImporterOpts.BridgingHeaderIsInternal),
       DisableOverlayModules(ctx.ClangImporterOpts.DisableOverlayModules),
       EnableClangSPI(ctx.ClangImporterOpts.EnableClangSPI),
       IsReadingBridgingPCH(false),
@@ -3834,8 +3835,13 @@ ImportDecl *swift::createImportDecl(ASTContext &Ctx,
   auto *ID = ImportDecl::create(Ctx, DC, SourceLoc(),
                                 ImportKind::Module, SourceLoc(),
                                 importPath.get(), ClangN);
-  if (IsExported)
+  if (Ctx.ClangImporterOpts.BridgingHeaderIsInternal) {
+    ID->getAttrs().add(
+        new (Ctx) AccessControlAttr(SourceLoc(), SourceRange(),
+                                    AccessLevel::Internal, /*implicit=*/true));
+  } else if (IsExported) {
     ID->getAttrs().add(new (Ctx) ExportedAttr(/*IsImplicit=*/false));
+  }
   return ID;
 }
 
@@ -5148,11 +5154,6 @@ static bool isDirectLookupMemberContext(const clang::Decl *foundClangDecl,
         return firstDecl->getCanonicalDecl() == parent->getCanonicalDecl();
     }
   }
-  // Look through `extern` blocks.
-  if (auto linkageSpecDecl = dyn_cast<clang::LinkageSpecDecl>(memberContext)) {
-    if (auto parentDecl = dyn_cast<clang::Decl>(linkageSpecDecl->getParent()))
-      return isDirectLookupMemberContext(foundClangDecl, parentDecl, parent);
-  }
   return false;
 }
 
@@ -6345,7 +6346,7 @@ static ValueDecl *cloneBaseMemberDecl(ValueDecl *decl, DeclContext *newContext,
     auto out = new (rawMemory) TypeAliasDecl(
         typeDecl->getLoc(), typeDecl->getLoc(), typeDecl->getName(),
         typeDecl->getLoc(), nullptr, newContext);
-    out->setUnderlyingType(typeDecl->getInterfaceType());
+    out->setUnderlyingType(typeDecl->getDeclaredInterfaceType());
     out->setAccess(access);
     inheritance.setUnavailableIfNecessary(decl, out);
     return out;

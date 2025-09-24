@@ -66,11 +66,15 @@ public:
 
   bool isOutputFileDirectory() const;
 
-  /// An Objective-C header to import and make implicitly visible.
+  /// A C header to import and make implicitly visible.
   std::string ImplicitObjCHeaderPath;
 
-  /// An Objective-C pch to import and make implicitly visible.
+  /// A C pch to import and make implicitly visible.
   std::string ImplicitObjCPCHPath;
+
+  /// Whether the imported C header or precompiled header is considered
+  /// an internal import (vs. the default, a public import).
+  bool ImportHeaderAsInternal = false;
 
   /// The map of aliases and real names of imported or referenced modules.
   llvm::StringMap<std::string> ModuleAliasMap;
@@ -293,11 +297,6 @@ public:
   ///
   /// \see ModuleDecl::isImplicitDynamicEnabled
   bool EnableImplicitDynamic = false;
-
-  /// Enables the "fully resilient" resilience strategy.
-  ///
-  /// \see ResilienceStrategy::Resilient
-  bool EnableLibraryEvolution = false;
 
   /// If set, this module is part of a mixed Objective-C/Swift framework, and
   /// the Objective-C half should implicitly be visible to the Swift sources.

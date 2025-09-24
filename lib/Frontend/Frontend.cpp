@@ -197,7 +197,8 @@ SerializationOptions CompilerInvocation::computeSerializationOptions(
   serializationOpts.DocOutputPath = outs.ModuleDocOutputPath;
   serializationOpts.SourceInfoOutputPath = outs.ModuleSourceInfoOutputPath;
   serializationOpts.GroupInfoPath = opts.GroupInfoPath.c_str();
-  if (opts.ModuleHasBridgingHeader && !outs.ModuleOutputPath.empty())
+  if (opts.ModuleHasBridgingHeader && !outs.ModuleOutputPath.empty() &&
+      !opts.ImportHeaderAsInternal)
     serializationOpts.SerializeBridgingHeader = true;
   // For batch mode, emit empty header path as placeholder.
   if (serializationOpts.SerializeBridgingHeader &&
@@ -812,10 +813,7 @@ bool CompilerInstance::setUpModuleLoaders() {
   }
 
   if (hasSourceImport()) {
-    bool enableLibraryEvolution =
-      Invocation.getFrontendOptions().EnableLibraryEvolution;
     Context->addModuleLoader(SourceLoader::create(*Context,
-                                                  enableLibraryEvolution,
                                                   getDependencyTracker()));
   }
 
@@ -1172,7 +1170,7 @@ bool CompilerInvocation::shouldImportCxx() const {
   if (getFrontendOptions().ModuleName == CXX_MODULE_NAME)
     return false;
   // Cxx cannot be imported when Library evolution is enabled
-  if (getFrontendOptions().EnableLibraryEvolution)
+  if (getLangOptions().hasFeature(Feature::LibraryEvolution))
     return false;
   // Implicit import of Cxx is disabled
   if (getLangOptions().DisableImplicitCxxModuleImport)
@@ -1506,7 +1504,7 @@ ModuleDecl *CompilerInstance::getMainModule() const {
       MainModule->setPublicModuleName(getASTContext().getIdentifier(
           Invocation.getFrontendOptions().PublicModuleName));
     }
-    if (Invocation.getFrontendOptions().EnableLibraryEvolution)
+    if (Invocation.getLangOptions().hasFeature(Feature::LibraryEvolution))
       MainModule->setResilienceStrategy(ResilienceStrategy::Resilient);
     if (Invocation.getLangOptions().isSwiftVersionAtLeast(6))
       MainModule->setIsConcurrencyChecked(true);

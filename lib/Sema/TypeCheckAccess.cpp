@@ -454,12 +454,16 @@ static void noteLimitingImport(const Decl *userDecl, ASTContext &ctx,
     if (userDecl)
       userDecl->diagnose(diag::decl_import_via_local, complainDecl,
                          limitImport->accessLevel,
-                         limitImport->module.importedModule);
+                         limitImport->module.importedModule,
+                         limitImport->module.importedModule
+                           ->isClangHeaderImportModule());
 
     if (limitImport->importLoc.isValid())
       ctx.Diags.diagnose(limitImport->importLoc, diag::decl_import_via_here,
                          complainDecl, limitImport->accessLevel,
-                         limitImport->module.importedModule);
+                         limitImport->module.importedModule,
+                         limitImport->module.importedModule
+                           ->isClangHeaderImportModule());
   } else if (limitImport->importLoc.isValid()) {
     ctx.Diags.diagnose(limitImport->importLoc, diag::module_imported_here,
                        limitImport->module.importedModule,
@@ -2163,8 +2167,11 @@ swift::getDisallowedOriginKind(const Decl *decl,
   // See \c diagnoseValueDeclRefExportability.
   auto importSource = decl->getImportAccessFrom(where.getDeclContext());
   if (importSource.has_value() &&
-      importSource->accessLevel < AccessLevel::Public)
-    return DisallowedOriginKind::NonPublicImport;
+      importSource->accessLevel < AccessLevel::Public) {
+    return importSource->module.importedModule->isClangHeaderImportModule()
+      ? DisallowedOriginKind::InternalBridgingHeaderImport
+      : DisallowedOriginKind::NonPublicImport;
+  }
 
   return DisallowedOriginKind::None;
 }
@@ -2274,12 +2281,45 @@ public:
   void checkAvailabilityDomains(const Decl *D) {
     D = D->getAbstractSyntaxDeclForAttributes();
 
+    auto &ctx = D->getASTContext();
     auto where = Where.withReason(ExportabilityReason::AvailableAttribute);
     for (auto attr : D->getSemanticAvailableAttrs()) {
-      if (auto *domainDecl = attr.getDomain().getDecl()) {
+      auto domain = attr.getDomain();
+      if (auto *domainDecl = domain.getDecl()) {
         diagnoseDeclAvailability(domainDecl,
                                  attr.getParsedAttr()->getDomainLoc(), nullptr,
                                  where, std::nullopt);
+
+        if (!attr.isVersionSpecific()) {
+          // Check whether the availability domain is permanently enabled. If it
+          // is, suggest modifying or removing the attribute.
+          if (domain.isPermanentlyAlwaysEnabled()) {
+            auto parsedAttr = attr.getParsedAttr();
+            switch (parsedAttr->getKind()) {
+            case AvailableAttr::Kind::Default:
+              // This introduction constraint has no effect since it will never
+              // restrict use of the declaration. Provide a fix-it remove the
+              // attribute.
+              diagnoseAndRemoveAttr(
+                  D, attr.getParsedAttr(),
+                  diag::attr_availability_has_no_effect_domain_always_available,
+                  parsedAttr, domain);
+              break;
+            case AvailableAttr::Kind::Deprecated:
+            case AvailableAttr::Kind::NoAsync:
+            case AvailableAttr::Kind::Unavailable:
+              // Any other kind of constraint always constrains use of the
+              // declaration, so provide a fix-it to specify `*` instead of the
+              // custom domain.
+              ctx.Diags
+                  .diagnose(parsedAttr->getDomainLoc(),
+                            diag::attr_availability_domain_always_available,
+                            domain)
+                  .fixItReplace(parsedAttr->getDomainLoc(), "*");
+              break;
+            }
+          }
+        }
       }
     }
   }
@@ -2690,6 +2730,11 @@ void swift::recordRequiredImportAccessLevelForDecl(
 
   auto definingModule = decl->getModuleContext();
   if (definingModule == dc->getParentModule())
+    return;
+
+  // Egregious hack: if the declaration is for a C++ namespace, assume it's
+  // accessible.
+  if (isa_and_nonnull<clang::NamespaceDecl>(decl->getClangDecl()))
     return;
 
   sf->registerRequiredAccessLevelForModule(definingModule, accessLevel);
