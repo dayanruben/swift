@@ -513,7 +513,7 @@ void BindingSet::inferTransitiveBindings() {
           auto bindingTy = binding.BindingType->lookThroughAllOptionalTypes();
 
           Type inferredRootTy;
-          if (isKnownKeyPathType(bindingTy)) {
+          if (bindingTy->isKnownKeyPathType()) {
             // AnyKeyPath doesn't have a root type.
             if (bindingTy->isAnyKeyPath())
               continue;
@@ -721,13 +721,15 @@ bool BindingSet::finalize(bool transitive) {
       if (isValid && !capability)
         return false;
 
+      bool isContextualTypeReadOnly = false;
       // If the key path is sufficiently resolved we can add inferred binding
       // to the set.
       SmallSetVector<PotentialBinding, 4> updatedBindings;
       for (const auto &binding : Bindings) {
         auto bindingTy = binding.BindingType->lookThroughAllOptionalTypes();
 
-        assert(isKnownKeyPathType(bindingTy) || bindingTy->is<FunctionType>());
+        assert(bindingTy->isKnownKeyPathType() ||
+               bindingTy->is<FunctionType>());
 
         // Functions don't have capability so we can simply add them.
         if (auto *fnType = bindingTy->getAs<FunctionType>()) {
@@ -740,19 +742,30 @@ bool BindingSet::finalize(bool transitive) {
           }
 
           updatedBindings.insert(binding.withType(fnType));
+          isContextualTypeReadOnly = true;
+        } else if (!(bindingTy->isWritableKeyPath() ||
+                     bindingTy->isReferenceWritableKeyPath())) {
+          isContextualTypeReadOnly = true;
         }
       }
 
       // Note that even though key path literal maybe be invalid it's
       // still the best course of action to use contextual function type
       // bindings because they allow to propagate type information from
-      // the key path into the context, so key path bindings are addded
+      // the key path into the context, so key path bindings are added
       // only if there is absolutely no other choice.
       if (updatedBindings.empty()) {
         auto rootTy = CS.getKeyPathRootType(keyPath);
 
         // A valid key path literal.
         if (capability) {
+          // Capability inference always results in a maximum mutability
+          // but if context is read-only it can be downgraded to avoid
+          // conversions.
+          if (isContextualTypeReadOnly)
+            capability =
+                std::make_pair(KeyPathMutability::ReadOnly, capability->second);
+
           // Note that the binding is formed using root & value
           // type variables produced during constraint generation
           // because at this point root is already known (otherwise
@@ -1694,7 +1707,7 @@ PotentialBindings::inferFromRelational(ConstraintSystem &CS,
       if (type->isExistentialType()) {
         auto layout = type->getExistentialLayout();
         if (auto superclass = layout.explicitSuperclass) {
-          if (isKnownKeyPathType(superclass)) {
+          if (superclass->isKnownKeyPathType()) {
             type = superclass;
             objectTy = superclass;
           }
@@ -1702,7 +1715,7 @@ PotentialBindings::inferFromRelational(ConstraintSystem &CS,
       }
     }
 
-    if (!(isKnownKeyPathType(objectTy) || objectTy->is<AnyFunctionType>()))
+    if (!(objectTy->isKnownKeyPathType() || objectTy->is<AnyFunctionType>()))
       return std::nullopt;
   }
 
