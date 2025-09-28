@@ -181,7 +181,6 @@ add_link_options($<$<PLATFORM_ID:Android,Linux>:LINKER:-z,defs>)
 add_compile_options(
   $<$<COMPILE_LANGUAGE:Swift>:-explicit-module-build>
   "$<$<COMPILE_LANGUAGE:Swift>:-nostdlibimport>"
-  "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-swift-version 5>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-library-level api>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-runtime-compatibility-version none>"
   "$<$<COMPILE_LANGUAGE:Swift>:-disable-autolinking-runtime-compatibility-dynamic-replacements>"
@@ -194,7 +193,6 @@ add_compile_options(
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -disable-implicit-string-processing-module-import>"
   "$<$<COMPILE_LANGUAGE:Swift>:-no-link-objc-runtime>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -enforce-exclusivity=unchecked>"
-  "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -enable-ossa-modules>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -empty-abi-descriptor>"
   "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -target-min-inlining-version -Xfrontend min>"
   "$<$<AND:$<NOT:$<BOOL:${SwiftCore_ENABLE_OBJC_INTEROP}>>,$<COMPILE_LANGUAGE:Swift>>:SHELL:-Xfrontend -disable-objc-interop>"
