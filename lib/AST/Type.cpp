@@ -237,7 +237,6 @@ bool CanType::isReferenceTypeImpl(CanType type, const GenericSignatureImpl *sig,
   // Nothing else is statically just a class reference.
   case TypeKind::SILBlockStorage:
   case TypeKind::Error:
-  case TypeKind::Unresolved:
   case TypeKind::BuiltinInteger:
   case TypeKind::BuiltinIntegerLiteral:
   case TypeKind::BuiltinFloat:
@@ -761,7 +760,6 @@ bool TypeBase::hasTypeRepr() const {
   return !Type(const_cast<TypeBase *>(this)).findIf([](Type subTy) -> bool {
     switch (subTy->getKind()) {
     case TypeKind::Error:
-    case TypeKind::Unresolved:
     case TypeKind::TypeVariable:
       return true;
 
@@ -1768,7 +1766,6 @@ CanType TypeBase::computeCanonicalType() {
 #define TYPE(id, parent)
 #include "swift/AST/TypeNodes.def"
   case TypeKind::Error:
-  case TypeKind::Unresolved:
   case TypeKind::TypeVariable:
   case TypeKind::Placeholder:
   case TypeKind::BuiltinTuple:
@@ -2318,10 +2315,9 @@ bool TypeBase::mayBeCallable(DeclContext *dc) {
     return true;
 
   // Unresolved types that could potentially be callable.
-  if (isPlaceholder() || is<UnresolvedType>() ||
-      isTypeParameter() || isTypeVariableOrMember()) {
+  if (isPlaceholder() || isTypeParameter() || isTypeVariableOrMember())
     return true;
-  }
+
   // Callable nominal types.
   if (isCallAsFunctionType(dc) || hasDynamicCallableAttribute())
     return true;
@@ -3651,7 +3647,7 @@ bool TypeBase::matchesFunctionType(Type other, TypeMatchOptions matchMode,
 /// return the field index, otherwise return -1.
 int TupleType::getNamedElementId(Identifier I) const {
   for (unsigned i = 0, e = Bits.TupleType.Count; i != e; ++i) {
-    if (getTrailingObjects<TupleTypeElt>()[i].getName() == I)
+    if (getTrailingObjects()[i].getName() == I)
       return i;
   }
 
@@ -3987,7 +3983,7 @@ ParameterizedProtocolType::ParameterizedProtocolType(
   assert(args.size() > 0);
   Bits.ParameterizedProtocolType.ArgCount = args.size();
   for (unsigned i : indices(args))
-    getTrailingObjects<Type>()[i] = args[i];
+    getTrailingObjects()[i] = args[i];
 }
 
 void ParameterizedProtocolType::Profile(llvm::FoldingSetNodeID &ID,
@@ -4568,7 +4564,6 @@ ReferenceCounting TypeBase::getReferenceCounting() {
   case TypeKind::SILFunction:
   case TypeKind::SILBlockStorage:
   case TypeKind::Error:
-  case TypeKind::Unresolved:
   case TypeKind::BuiltinInteger:
   case TypeKind::BuiltinIntegerLiteral:
   case TypeKind::BuiltinFloat:

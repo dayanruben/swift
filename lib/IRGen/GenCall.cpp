@@ -317,7 +317,7 @@ static void addIndirectValueParameterAttributes(IRGenModule &IGM,
   // Bitwise takable value types are guaranteed not to capture
   // a pointer into itself.
   if (!addressable && ti.isBitwiseTakable(ResilienceExpansion::Maximal))
-    b.addAttribute(llvm::Attribute::NoCapture);
+    b.addCapturesAttr(llvm::CaptureInfo::none());
   // The parameter must reference dereferenceable memory of the type.
   addDereferenceableAttributeToBuilder(IGM, b, ti);
 
@@ -330,7 +330,7 @@ static void addPackParameterAttributes(IRGenModule &IGM,
                                        unsigned argIndex) {
   llvm::AttrBuilder b(IGM.getLLVMContext());
   // Pack parameter pointers can't alias.
-  // Note: they are not marked `nocapture` as one
+  // Note: they are not marked `captures(none)` as one
   // pack parameter could be a value type (e.g. a C++ type)
   // that captures its own pointer in itself.
   b.addAttribute(llvm::Attribute::NoAlias);
@@ -357,7 +357,7 @@ static void addInoutParameterAttributes(IRGenModule &IGM, SILType paramSILType,
   // Bitwise takable value types are guaranteed not to capture
   // a pointer into itself.
   if (!addressable && ti.isBitwiseTakable(ResilienceExpansion::Maximal))
-    b.addAttribute(llvm::Attribute::NoCapture);
+    b.addCapturesAttr(llvm::CaptureInfo::none());
   // The inout must reference dereferenceable memory of the type.
   addDereferenceableAttributeToBuilder(IGM, b, ti);
 
@@ -411,7 +411,7 @@ static void addIndirectResultAttributes(IRGenModule &IGM,
   // Bitwise takable value types are guaranteed not to capture
   // a pointer into itself.
   if (typeInfo.isBitwiseTakable(ResilienceExpansion::Maximal))
-    b.addAttribute(llvm::Attribute::NoCapture);
+    b.addCapturesAttr(llvm::CaptureInfo::none());
   if (allowSRet) {
     assert(storageType);
     b.addStructRetAttr(storageType);
@@ -530,7 +530,7 @@ void IRGenModule::addSwiftErrorAttributes(llvm::AttributeList &attrs,
   // The error result should not be aliased, captured, or pointed at invalid
   // addresses regardless.
   b.addAttribute(llvm::Attribute::NoAlias);
-  b.addAttribute(llvm::Attribute::NoCapture);
+  b.addCapturesAttr(llvm::CaptureInfo::none());
   b.addDereferenceableAttr(getPointerSize().getValue());
 
   attrs = attrs.addParamAttributes(this->getLLVMContext(), argIndex, b);
@@ -590,6 +590,10 @@ namespace {
     /// Expand the components of the continuation entrypoint of the
     /// function type.
     void expandCoroutineContinuationType();
+
+    /// Initializes the result type for functions with @guaranteed_addr return
+    /// convention.
+    void expandGuaranteedAddressResult();
 
     // Expand the components for the async continuation entrypoint of the
     // function type (the function to be called on returning).
@@ -693,6 +697,10 @@ void SignatureExpansion::expandResult(
   }
 
   auto fnConv = getSILFuncConventions();
+
+  if (fnConv.hasGuaranteedAddressResult()) {
+    return expandGuaranteedAddressResult();
+  }
 
   // Disable the use of sret if we have multiple indirect results.
   if (fnConv.getNumIndirectSILResults() > 1)
@@ -909,6 +917,11 @@ void SignatureExpansion::expandCoroutineContinuationParameters() {
     // Whether this is an unwind resumption.
     ParamIRTypes.push_back(IGM.Int1Ty);
   }
+}
+
+void SignatureExpansion::expandGuaranteedAddressResult() {
+  CanUseSRet = false;
+  ResultIRType = IGM.PtrTy;
 }
 
 void SignatureExpansion::addAsyncParameters() {
@@ -1211,6 +1224,8 @@ namespace {
       }
 
       case clang::Type::ArrayParameter:
+      case clang::Type::HLSLAttributedResource:
+      case clang::Type::HLSLInlineSpirv:
         llvm_unreachable("HLSL type in ABI lowering");
 
 
@@ -1319,7 +1334,7 @@ namespace {
 
       // We should never see ARM SVE types at all.
 #define SVE_TYPE(Name, Id, ...) case clang::BuiltinType::Id:
-#include "clang/Basic/AArch64SVEACLETypes.def"
+#include "clang/Basic/AArch64ACLETypes.def"
         llvm_unreachable("ARM SVE type in ABI lowering");
 
       // We should never see PPC MMA types at all.
@@ -1340,6 +1355,11 @@ namespace {
 #define AMDGPU_TYPE(Name, Id, ...) case clang::BuiltinType::Id:
 #include "clang/Basic/AMDGPUTypes.def"
         llvm_unreachable("AMDGPU type in ABI lowering");
+
+      // We should never see HLSL intangible types at all.
+#define HLSL_INTANGIBLE_TYPE(Name, Id, ...) case clang::BuiltinType::Id:
+#include "clang/Basic/HLSLIntangibleTypes.def"
+        llvm_unreachable("HLSL intangible type in ABI lowering");
 
       // Handle all the integer types as opaque values.
 #define BUILTIN_TYPE(Id, SingletonId)
@@ -1682,6 +1702,9 @@ void SignatureExpansion::expandExternalSignatureTypes() {
                                     paramTI.getStorageType(), paramTI);
         break;
       }
+      case clang::ParameterABI::HLSLOut:
+      case clang::ParameterABI::HLSLInOut:
+        llvm_unreachable("not implemented");
       }
 
       // If the coercion type is a struct which can be flattened, we need to
@@ -2846,7 +2869,9 @@ public:
         }
       }
       Args[--LastArgWritten] = errorResultSlot.getAddress();
-      addParamAttribute(LastArgWritten, llvm::Attribute::NoCapture);
+      addParamAttribute(LastArgWritten, llvm::Attribute::getWithCaptureInfo(
+                                            IGF.IGM.getLLVMContext(),
+                                            llvm::CaptureInfo::none()));
       IGF.IGM.addSwiftErrorAttributes(CurCallee.getMutableAttributes(),
                                       LastArgWritten);
 
@@ -3933,6 +3958,11 @@ void CallEmission::emitYieldsToExplosion(Explosion &out) {
   }
 }
 
+void CallEmission::emitGuaranteedAddressToExplosion(Explosion &out) {
+  auto call = emitCallSite();
+  out.add(call);
+}
+
 /// Emit the result of this call to an explosion.
 void CallEmission::emitToExplosion(Explosion &out, bool isOutlined) {
   assert(state == State::Emitting);
@@ -3948,6 +3978,14 @@ void CallEmission::emitToExplosion(Explosion &out, bool isOutlined) {
 
   SILFunctionConventions fnConv(getCallee().getSubstFunctionType(),
                                 IGF.getSILModule());
+
+  if (fnConv.hasGuaranteedAddressResult()) {
+    assert(LastArgWritten == 0 &&
+           "@guaranteed_addr along with indirect result?");
+    emitGuaranteedAddressToExplosion(out);
+    return;
+  }
+
   SILType substResultType =
       fnConv.getSILResultType(IGF.IGM.getMaximalTypeExpansionContext());
 
@@ -5555,14 +5593,20 @@ void CallEmission::setArgs(Explosion &adjusted, bool isOutlined,
   }
 }
 
-void CallEmission::addFnAttribute(llvm::Attribute::AttrKind attr) {
+void CallEmission::addFnAttribute(llvm::Attribute::AttrKind kind) {
   assert(state == State::Emitting);
   auto &attrs = CurCallee.getMutableAttributes();
-  attrs = attrs.addFnAttribute(IGF.IGM.getLLVMContext(), attr);
+  attrs = attrs.addFnAttribute(IGF.IGM.getLLVMContext(), kind);
 }
 
 void CallEmission::addParamAttribute(unsigned paramIndex,
-                                     llvm::Attribute::AttrKind attr) {
+                                     llvm::Attribute::AttrKind kind) {
+  addParamAttribute(paramIndex,
+                    llvm::Attribute::get(IGF.IGM.getLLVMContext(), kind));
+}
+
+void CallEmission::addParamAttribute(unsigned paramIndex,
+                                     llvm::Attribute attr) {
   assert(state == State::Emitting);
   auto &attrs = CurCallee.getMutableAttributes();
   attrs = attrs.addParamAttribute(IGF.IGM.getLLVMContext(), paramIndex, attr);
@@ -6999,6 +7043,16 @@ void irgen::emitYieldOnceCoroutineResult(IRGenFunction &IGF, Explosion &result,
     coroEndCall->setArgOperand(2, resultToken);
     Builder.SetInsertPoint(returnBB);
   }
+}
+
+void irgen::emitGuaranteedAddressResult(IRGenFunction &IGF, Explosion &result,
+                                        SILType funcResultType,
+                                        SILType returnResultType) {
+  assert(funcResultType == returnResultType);
+  assert(funcResultType.isAddress());
+  auto &Builder = IGF.Builder;
+  Builder.CreateRet(result.claimNext());
+  assert(result.empty());
 }
 
 FunctionPointer
