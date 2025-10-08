@@ -2588,6 +2588,7 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   if (Args.hasArg(OPT_verify_apply_fixes))
     Opts.VerifyMode = DiagnosticOptions::VerifyAndApplyFixes;
   Opts.VerifyIgnoreUnknown |= Args.hasArg(OPT_verify_ignore_unknown);
+  Opts.VerifyIgnoreUnrelated |= Args.hasArg(OPT_verify_ignore_unrelated);
   Opts.SkipDiagnosticPasses |= Args.hasArg(OPT_disable_diagnostic_passes);
   Opts.ShowDiagnosticsAfterFatalError |=
     Args.hasArg(OPT_show_diagnostics_after_fatal);
@@ -2652,6 +2653,7 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   }
 
   Opts.SuppressWarnings |= Args.hasArg(OPT_suppress_warnings);
+  Opts.SuppressNotes |= Args.hasArg(OPT_suppress_notes);
   Opts.SuppressRemarks |= Args.hasArg(OPT_suppress_remarks);
   for (const Arg *arg : Args.filtered(OPT_warning_treating_Group)) {
     Opts.WarningsAsErrorsRules.push_back([&] {
@@ -2731,6 +2733,9 @@ static void configureDiagnosticEngine(
   }
   if (Options.SuppressWarnings) {
     Diagnostics.setSuppressWarnings(true);
+  }
+  if (Options.SuppressNotes) {
+    Diagnostics.setSuppressNotes(true);
   }
   if (Options.SuppressRemarks) {
     Diagnostics.setSuppressRemarks(true);
@@ -3225,9 +3230,6 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
                    Opts.OSSAVerifyComplete);
 
   Opts.NoAllocations = Args.hasArg(OPT_no_allocations);
-
-  Opts.EnableExperimentalSwiftBasedClosureSpecialization =
-      Args.hasArg(OPT_enable_experimental_swift_based_closure_specialization);
 
   // If these optimizations are enabled never preserve functions for the
   // debugger.
