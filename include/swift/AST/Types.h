@@ -407,7 +407,7 @@ class alignas(1 << TypeAlignInBits) TypeBase
   }
 
 protected:
-  enum { NumAFTExtInfoBits = 15 };
+  enum { NumAFTExtInfoBits = 16 };
   enum { NumSILExtInfoBits = 14 };
 
   // clang-format off
@@ -444,8 +444,7 @@ protected:
     HasExtInfo : 1,
     HasClangTypeInfo : 1,
     HasThrownError : 1,
-    HasLifetimeDependencies : 1,
-    NumParams : 15
+    HasLifetimeDependencies : 1
   );
 
   SWIFT_INLINE_BITFIELD_FULL(ArchetypeType, TypeBase, 1+1+16,
@@ -850,12 +849,11 @@ public:
   /// type variables referenced by this type.
   void getTypeVariables(SmallPtrSetImpl<TypeVariableType *> &typeVariables);
 
-private:
+public:
   /// If the receiver is a `DependentMemberType`, returns its root. Otherwise,
   /// returns the receiver.
   Type getDependentMemberRoot();
 
-public:
   /// Determine whether this type is a type parameter, which is either a
   /// GenericTypeParamType or a DependentMemberType.
   ///
@@ -3353,7 +3351,8 @@ END_CAN_TYPE_WRAPPER(DynamicSelfType, Type)
 /// represented at the binary level as a single function pointer.
 class AnyFunctionType : public TypeBase {
   const Type Output;
-  
+  uint16_t NumParams;
+
 public:
   using Representation = FunctionTypeRepresentation;
 
@@ -3614,8 +3613,8 @@ protected:
       Bits.AnyFunctionType.HasThrownError = false;
       Bits.AnyFunctionType.HasLifetimeDependencies = false;
     }
-    Bits.AnyFunctionType.NumParams = NumParams;
-    assert(Bits.AnyFunctionType.NumParams == NumParams && "Params dropped!");
+    this->NumParams = NumParams;
+    assert(this->NumParams == NumParams && "Params dropped!");
     
     if (Info && CONDITIONAL_ASSERT_enabled()) {
       unsigned maxLifetimeTarget = NumParams + 1;
@@ -3653,7 +3652,7 @@ public:
 
   Type getResult() const { return Output; }
   ArrayRef<Param> getParams() const;
-  unsigned getNumParams() const { return Bits.AnyFunctionType.NumParams; }
+  unsigned getNumParams() const { return NumParams; }
 
   GenericSignature getOptGenericSignature() const;
   
