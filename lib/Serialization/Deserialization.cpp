@@ -7076,6 +7076,7 @@ getActualResultConvention(uint8_t raw) {
   CASE(Pack)
   CASE(GuaranteedAddress)
   CASE(Guaranteed)
+  CASE(Inout)
 #undef CASE
   }
   return std::nullopt;
@@ -9145,7 +9146,7 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
 
     // Determine whether we need to enter the actor isolation of the witness.
     std::optional<ActorIsolation> enterIsolation;
-    if (*rawIDIter++) {
+    if (*rawIDIter++ && witness) {
       enterIsolation = getActorIsolation(witness);
     }
 
