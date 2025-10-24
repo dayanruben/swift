@@ -1131,6 +1131,7 @@ function Get-Dependencies {
       Write-Host " $Description"
     }
 
+    $Stopwatch = [Diagnostics.Stopwatch]::StartNew()
     Write-Host "[$([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))] Get-Dependencies ..." -ForegroundColor Cyan
     $ProgressPreference = "SilentlyContinue"
 
@@ -1141,7 +1142,7 @@ function Get-Dependencies {
         return
       }
 
-      Write-Output "$Destination not found. Downloading ..."
+      # Write-Output "$Destination not found. Downloading ..."
       if ($ToBatch) {
         Write-Output "md `"$(Split-Path -Path $Destination -Parent)`""
         Write-Output "curl.exe -sL $URL -o $Destination"
@@ -1174,7 +1175,7 @@ function Get-Dependencies {
           $ExtractedLastWriteTime = (Get-Item $Destination).LastWriteTime
           # Compare the last write times
           if ($ZipLastWriteTime -le $ExtractedLastWriteTime) {
-              Write-Output "'$ZipFileName' is already extracted and up to date."
+              # Write-Output "'$ZipFileName' is already extracted and up to date."
               return
           }
       }
@@ -1251,6 +1252,77 @@ function Get-Dependencies {
       Write-Success "syft $SyftVersion"
     }
 
+    function Get-KnownPython([string] $ArchName) {
+      if (-not $KnownPythons.ContainsKey($PythonVersion)) {
+        throw "Unknown python version: $PythonVersion"
+      }
+      return $KnownPythons[$PythonVersion].$ArchName
+    }
+
+    function Install-Python([string] $ArchName) {
+      $Python = Get-KnownPython $ArchName
+      DownloadAndVerify $Python.URL "$BinaryCache\Python$ArchName-$PythonVersion.zip" $Python.SHA256
+      if (-not $ToBatch) {
+        Expand-ZipFile Python$ArchName-$PythonVersion.zip "$BinaryCache" Python$ArchName-$PythonVersion
+        Write-Success "$ArchName Python $PythonVersion"
+      }
+    }
+
+    function Install-PIPIfNeeded {
+      try {
+        Invoke-Program -Silent "$(Get-PythonExecutable)" -m pip
+      } catch {
+        Invoke-Program -OutNull "$(Get-PythonExecutable)" '-I' -m ensurepip -U --default-pip
+      } finally {
+        Write-Success "pip"
+      }
+    }
+
+    function Test-PythonModuleInstalled([string] $ModuleName) {
+      try {
+        Invoke-Program -Silent "$(Get-PythonExecutable)" -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$ModuleName') else 1)"
+        return $true
+      } catch {
+        return $false
+      }
+    }
+
+    function Install-PythonModule([string] $ModuleName) {
+      if (Test-PythonModuleInstalled $ModuleName) {
+        # Write-Output "$ModuleName already installed."
+        return
+      }
+
+      $TempRequirementsTxt = New-TemporaryFile
+
+      $Module = $PythonModules[$ModuleName]
+      "$ModuleName==$($Module.Version) --hash=`"sha256:$($Module.SHA256)`"" | Out-File -FilePath $TempRequirementsTxt -Append -Encoding utf8
+      foreach ($Dependency in $Module.Dependencies) {
+        $Module = $PythonModules[$Dependency]
+        "$Dependency==$($Dependency.Version) --hash=`"sha256:$($Module.SHA256)`"" | Out-File -FilePath $TempRequirementsTxt -Append -Encoding utf8
+      }
+
+      Invoke-Program -OutNull "$(Get-PythonExecutable)" '-I' -m pip install -r $TempRequirementsTxt --require-hashes --no-binary==:all: --disable-pip-version-check
+
+      Write-Success "$ModuleName"
+    }
+
+    function Install-PythonModules {
+      Install-PIPIfNeeded
+      Install-PythonModule "packaging"  # For building LLVM 18+
+      Install-PythonModule "setuptools" # Required for SWIG support
+      if ($Test -contains "lldb") {
+        Install-PythonModule "psutil"   # Required for testing LLDB
+      }
+    }
+
+    # Ensure Python modules that are required as host build tools
+    Install-Python $HostArchName
+    if ($IsCrossCompiling) {
+      Install-Python $BuildArchName
+    }
+    Install-PythonModules
+
     if ($SkipBuild -and $SkipPackaging) { return }
 
     DownloadAndVerify $WiX.URL "$BinaryCache\WiX-$($WiX.Version).zip" $WiX.SHA256
@@ -1286,78 +1358,6 @@ function Get-Dependencies {
     New-Item -ItemType Directory -ErrorAction Ignore $BinaryCache\toolchains | Out-Null
     Extract-Toolchain "$PinnedToolchain.exe" $BinaryCache $PinnedToolchain.TrimStart("swift-").TrimEnd("-a-windows10")
     Write-Success "Swift Toolchain $PinnedVersion"
-
-    function Get-KnownPython([string] $ArchName) {
-      if (-not $KnownPythons.ContainsKey($PythonVersion)) {
-        throw "Unknown python version: $PythonVersion"
-      }
-      return $KnownPythons[$PythonVersion].$ArchName
-    }
-
-    function Install-Python([string] $ArchName) {
-      $Python = Get-KnownPython $ArchName
-      DownloadAndVerify $Python.URL "$BinaryCache\Python$ArchName-$PythonVersion.zip" $Python.SHA256
-      if (-not $ToBatch) {
-        Expand-ZipFile Python$ArchName-$PythonVersion.zip "$BinaryCache" Python$ArchName-$PythonVersion
-        Write-Success "$ArchName Python $PythonVersion"
-      }
-    }
-
-    function Install-PIPIfNeeded() {
-      try {
-        Invoke-Program -Silent "$(Get-PythonExecutable)" -m pip
-      } catch {
-        # Write-Output "Installing pip ..."
-        Invoke-Program -OutNull "$(Get-PythonExecutable)" '-I' -m ensurepip -U --default-pip
-      } finally {
-        # Write-Output "pip installed."
-        Write-Success "pip"
-      }
-    }
-
-    function Test-PythonModuleInstalled([string] $ModuleName) {
-      try {
-        Invoke-Program -Silent "$(Get-PythonExecutable)" -c "import $ModuleName"
-        return $true;
-      } catch {
-        return $false;
-      }
-    }
-
-    function Install-PythonModule([string] $ModuleName) {
-      if (Test-PythonModuleInstalled $ModuleName) {
-        # Write-Output "$ModuleName already installed."
-        return;
-      }
-      $TempRequirementsTxt = New-TemporaryFile
-      $Module = $PythonModules[$ModuleName]
-      $Dependencies = $Module["Dependencies"]
-      Write-Output "$ModuleName==$($Module.Version) --hash=`"sha256:$($Module.SHA256)`"" >> $TempRequirementsTxt
-      for ($i = 0; $i -lt $Dependencies.Length; $i++) {
-        $Dependency = $PythonModules[$Dependencies[$i]]
-        Write-Output "$($Dependencies[$i])==$($Dependency.Version) --hash=`"sha256:$($Dependency.SHA256)`"" >> $TempRequirementsTxt
-      }
-      Invoke-Program -OutNull "$(Get-PythonExecutable)" '-I' -m pip install -r $TempRequirementsTxt --require-hashes --no-binary==:all: --disable-pip-version-check
-      # Write-Output "$ModuleName installed."
-      Write-Success $ModuleName
-    }
-
-    function Install-PythonModules() {
-      Install-PIPIfNeeded
-      Install-PythonModule "packaging" # For building LLVM 18+
-      Install-PythonModule "setuptools" # Required for SWIG support
-      if ($Test -contains "lldb") {
-        Install-PythonModule "psutil" # Required for testing LLDB
-      }
-    }
-
-    Install-Python $HostArchName
-    if ($IsCrossCompiling) {
-      Install-Python $BuildArchName
-    }
-
-    # Ensure Python modules that are required as host build tools
-    Install-PythonModules
 
     if ($Android) {
       $NDK = Get-AndroidNDK
