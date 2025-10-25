@@ -261,7 +261,6 @@ static std::optional<PGOOptions> buildIRUseOptions(const IRGenOptions &Opts,
       /*CSProfileGenFile=*/"",
       /*ProfileRemappingFile=*/"",
       /*MemoryProfile=*/"",
-      /*FS=*/FS,
       /*Action=*/PGOOptions::IRUse,
       /*CSPGOAction=*/IsCS ? PGOOptions::CSIRUse : PGOOptions::NoCSAction,
       /*ColdType=*/PGOOptions::ColdFuncOpt::Default,
@@ -277,7 +276,6 @@ static void populatePGOOptions(std::optional<PGOOptions> &Out,
       /*CSProfileGenFile=*/ "",
       /*ProfileRemappingFile=*/ "",
       /*MemoryProfile=*/ "",
-      /*FS=*/ llvm::vfs::getRealFileSystem(), // TODO: is this fine?
       /*Action=*/ PGOOptions::SampleUse,
       /*CSPGOAction=*/ PGOOptions::NoCSAction,
       /*ColdType=*/ PGOOptions::ColdFuncOpt::Default,
@@ -293,7 +291,6 @@ static void populatePGOOptions(std::optional<PGOOptions> &Out,
         /*CSProfileGenFile=*/Opts.InstrProfileOutput,
         /*ProfileRemappingFile=*/"",
         /*MemoryProfile=*/"",
-        /*FS=*/llvm::vfs::getRealFileSystem(),
         /*Action=*/hasUse ? PGOOptions::IRUse : PGOOptions::NoAction,
         /*CSPGOAction=*/PGOOptions::CSIRInstr,
         /*ColdType=*/PGOOptions::ColdFuncOpt::Default,
@@ -307,7 +304,6 @@ static void populatePGOOptions(std::optional<PGOOptions> &Out,
         /*CSProfileGenFile=*/"",
         /*ProfileRemappingFile=*/"",
         /*MemoryProfile=*/"",
-        /*FS=*/llvm::vfs::getRealFileSystem(),
         /*Action=*/PGOOptions::IRInstr,
         /*CSPGOAction=*/PGOOptions::NoCSAction,
         /*ColdType=*/PGOOptions::ColdFuncOpt::Default,
@@ -326,7 +322,6 @@ static void populatePGOOptions(std::optional<PGOOptions> &Out,
         /*CSProfileGenFile=*/ "",
         /*ProfileRemappingFile=*/ "",
         /*MemoryProfile=*/ "",
-        /*FS=*/ nullptr,
         /*Action=*/ PGOOptions::NoAction,
         /*CSPGOAction=*/ PGOOptions::NoCSAction,
         /*ColdType=*/ PGOOptions::ColdFuncOpt::Default,
@@ -1098,6 +1093,14 @@ static void setPointerAuthOptions(PointerAuthOptions &opts,
   opts.CoroDeallocationFunction = PointerAuthSchema(
       codeKey, /*address*/ false, Discrimination::Constant,
       SpecialPointerAuthDiscriminators::CoroDeallocationFunction);
+
+  opts.CoroAllocationFunction = PointerAuthSchema(
+      codeKey, /*address*/ false, Discrimination::Constant,
+      SpecialPointerAuthDiscriminators::CoroFrameAllocationFunction);
+
+  opts.CoroDeallocationFunction = PointerAuthSchema(
+      codeKey, /*address*/ false, Discrimination::Constant,
+      SpecialPointerAuthDiscriminators::CoroFrameDeallocationFunction);
 }
 
 std::unique_ptr<llvm::TargetMachine>

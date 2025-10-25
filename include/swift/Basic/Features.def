@@ -323,9 +323,6 @@ EXPERIMENTAL_FEATURE(FullTypedThrows, false)
 EXPERIMENTAL_FEATURE(SameElementRequirements, false)
 EXPERIMENTAL_FEATURE(KeyPathWithMethodMembers, false)
 
-// Whether to enable @_used and @_section attributes
-EXPERIMENTAL_FEATURE(SymbolLinkageMarkers, true)
-
 // Whether to emit an Embedded Swift module with "deferred" code generation,
 // meaning that the only code that will be emitted into the object file is
 // code that was marked as "never emit into client". For everything else,
@@ -498,10 +495,9 @@ EXPERIMENTAL_FEATURE(AssumeResilientCxxTypes, true)
 /// Import inherited non-public members when importing C++ classes.
 EXPERIMENTAL_FEATURE(ImportNonPublicCxxMembers, true)
 
-/// Emit a warning when a C++ API returns a SWIFT_SHARED_REFERENCE type
-/// without being explicitly annotated with either SWIFT_RETURNS_RETAINED
-/// or SWIFT_RETURNS_UNRETAINED.
-EXPERIMENTAL_FEATURE(WarnUnannotatedReturnOfCxxFrt, true)
+/// Suppress the synthesis of static factory methods for C++ foreign reference
+/// types and importing them as Swift initializers.
+EXPERIMENTAL_FEATURE(SuppressCXXForeignReferenceTypeInitializers, true)
 
 /// modify/read single-yield coroutines
 SUPPRESSIBLE_EXPERIMENTAL_FEATURE(CoroutineAccessors, true)
