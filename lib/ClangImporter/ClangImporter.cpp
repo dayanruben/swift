@@ -2559,6 +2559,14 @@ PlatformAvailability::PlatformAvailability(const LangOptions &langOpts)
   case PlatformKind::visionOSApplicationExtension:
     break;
 
+  case PlatformKind::DriverKit:
+    deprecatedAsUnavailableMessage = "";
+    break;
+
+  case PlatformKind::Swift:
+  case PlatformKind::anyAppleOS:
+    llvm_unreachable("Unexpected platform");
+
   case PlatformKind::FreeBSD:
     deprecatedAsUnavailableMessage = "";
     break;
@@ -2613,6 +2621,13 @@ bool PlatformAvailability::isPlatformRelevant(StringRef name) const {
   case PlatformKind::visionOSApplicationExtension:
     return name == "xros" || name == "xros_app_extension" ||
            name == "visionos" || name == "visionos_app_extension";
+
+  case PlatformKind::DriverKit:
+    return name == "driverkit";
+
+  case PlatformKind::Swift:
+  case PlatformKind::anyAppleOS:
+    break; // Unexpected
 
   case PlatformKind::FreeBSD:
     return name == "freebsd";
@@ -2690,6 +2705,15 @@ bool PlatformAvailability::treatDeprecatedAsUnavailable(
   case PlatformKind::visionOSApplicationExtension:
     // No deprecation filter on xrOS
     return false;
+
+  case PlatformKind::DriverKit:
+    // No deprecation filter on DriverKit
+    // FIXME: [availability] This should probably have a value.
+    return false;
+
+  case PlatformKind::Swift:
+  case PlatformKind::anyAppleOS:
+    break; // Unexpected
 
   case PlatformKind::FreeBSD:
     // No deprecation filter on FreeBSD
@@ -8125,9 +8149,10 @@ importer::getValueDeclsForName(NominalTypeDecl *decl, StringRef name) {
     // There is no Clang module for this declaration, so perform lookup from
     // the main module. This will find declarations from the bridging header.
     namelookup::lookupInModule(
-        ctx.MainModule, ctx.getIdentifier(name), results,
-        NLKind::UnqualifiedLookup, namelookup::ResolutionKind::Overloadable,
-        ctx.MainModule, SourceLoc(), NL_UnqualifiedDefault);
+        ctx.MainModule, ctx.getIdentifier(name), /*hasModuleSelector=*/false,
+        results, NLKind::UnqualifiedLookup,
+        namelookup::ResolutionKind::Overloadable, ctx.MainModule, SourceLoc(),
+        NL_UnqualifiedDefault);
 
     // Filter out any declarations that didn't come from Clang.
     auto newEnd =
@@ -8789,11 +8814,13 @@ CustomRefCountingOperationResult CustomRefCountingOperation::evaluate(
 
 /// Check whether the given Clang type involves an unsafe type.
 static bool hasUnsafeType(Evaluator &evaluator, clang::QualType clangType) {
-
-  auto safety =
-      evaluateOrDefault(evaluator, ClangTypeExplicitSafety({clangType}),
-                        ExplicitSafety::Unspecified);
-  return safety == ExplicitSafety::Unsafe;
+  auto req = ClangTypeExplicitSafety({clangType});
+  if (evaluator.hasActiveRequest(req))
+    // If there is a cycle in a type, assume ExplicitSafety is Unspecified,
+    // i.e., not unsafe:
+    return false;
+  return evaluateOrDefault(evaluator, req, ExplicitSafety::Unspecified) ==
+         ExplicitSafety::Unsafe;
 }
 
 ExplicitSafety
