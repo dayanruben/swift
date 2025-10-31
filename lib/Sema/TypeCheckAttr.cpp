@@ -1841,9 +1841,6 @@ visitObjCImplementationAttr(ObjCImplementationAttr *attr) {
     }
   }
   else if (auto AFD = dyn_cast<AbstractFunctionDecl>(D)) {
-    if (!hasObjCImplementationFeature(D, attr, Feature::CImplementation))
-      return;
-
     if (!attr->CategoryName.empty()) {
       auto diagnostic =
           diagnose(attr->getLocation(),
@@ -2485,12 +2482,6 @@ void AttributeChecker::visitCDeclAttr(CDeclAttr *attr) {
   // Reject using both @c and @objc on the same decl.
   if (D->getAttrs().getAttribute<ObjCAttr>()) {
     diagnose(attr->getLocation(), diag::cdecl_incompatible_with_objc, D);
-  }
-
-  // @c needs to be enabled via a feature flag.
-  if (!attr->Underscored &&
-      !Ctx.LangOpts.hasFeature(Feature::CDecl)) {
-    diagnose(attr->getLocation(), diag::cdecl_feature_required);
   }
 }
 
@@ -7987,6 +7978,14 @@ void AttributeChecker::visitNonisolatedAttr(NonisolatedAttr *attr) {
         }
       }
     }
+  }
+
+  // `nonisolated` on an actor declaration is contradictory.
+  if (auto *classDecl = dyn_cast<ClassDecl>(D);
+      classDecl && classDecl->isExplicitActor()) {
+    diagnoseAndRemoveAttr(attr, diag::invalid_decl_modifier, attr)
+        .fixItRemove(attr->getRange());
+    return;
   }
 
   if (auto VD = dyn_cast<ValueDecl>(D)) {
