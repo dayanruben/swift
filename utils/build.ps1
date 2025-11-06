@@ -120,7 +120,7 @@ Skip building the MSI installers and packaging. Useful for development builds.
 
 .PARAMETER Test
 An array of names of projects to run tests for. Use '*' to run all tests.
-Available tests: lld, lldb, swift, dispatch, foundation, xctest, swift-format, sourcekit-lsp
+Available tests: lld, lldb, lldb-swift, swift, dispatch, foundation, xctest, swift-format, sourcekit-lsp
 
 .PARAMETER IncludeDS2
 Include the ds2 remote debug server in the SDK.
@@ -262,7 +262,7 @@ if ($Test.Length -eq 1) { $Test = $Test[0].Split(",") }
 
 if ($Test -contains "*") {
   # Explicitly don't include llbuild yet since tests are known to fail on Windows
-  $Test = @("lld", "lldb", "swift", "dispatch", "foundation", "xctest", "swift-format", "sourcekit-lsp")
+  $Test = @("lld", "lldb", "lldb-swift", "swift", "dispatch", "foundation", "xctest", "swift-format", "sourcekit-lsp")
 }
 
 if ($UseHostToolchain -is [string]) {
@@ -859,6 +859,7 @@ enum Project {
   Certificates
   System
   Subprocess
+  ToolsProtocols
   Build
   PackageManager
   PackageManagerRuntime
@@ -1319,7 +1320,7 @@ function Get-Dependencies {
       Install-PIPIfNeeded
       Install-PythonModule "packaging"  # For building LLVM 18+
       Install-PythonModule "setuptools" # Required for SWIG support
-      if ($Test -contains "lldb") {
+      if ($Test -contains "lldb" -or $Test -contains "lldb-swift") {
         Install-PythonModule "psutil"   # Required for testing LLDB
       }
     }
@@ -1353,7 +1354,7 @@ function Get-Dependencies {
 
     DownloadAndVerify $PinnedBuild "$BinaryCache\$PinnedToolchain.exe" $PinnedSHA256
 
-    if ($Test -contains "lldb") {
+    if ($Test -contains "lldb" -or $Test -contains "lldb-swift") {
       # The make tool isn't part of MSYS
       $GnuWin32MakeURL = "https://downloads.sourceforge.net/project/ezwinports/make-4.4.1-without-guile-w32-bin.zip"
       $GnuWin32MakeHash = "fb66a02b530f7466f6222ce53c0b602c5288e601547a034e4156a512dd895ee7"
@@ -2309,7 +2310,7 @@ function Build-Compilers([Hashtable] $Platform, [string] $Variant) {
   Write-PList -Settings $Settings -Path "$($Platform.ToolchainInstallRoot)\ToolchainInfo.plist"
 }
 
-function Test-Compilers([Hashtable] $Platform, [string] $Variant, [switch] $TestClang, [switch] $TestLLD, [switch] $TestLLDB, [switch] $TestLLVM, [switch] $TestSwift) {
+function Test-Compilers([Hashtable] $Platform, [string] $Variant, [switch] $TestClang, [switch] $TestLLD, [switch] $TestLLDB, [switch] $TestLLDBSwift, [switch] $TestLLVM, [switch] $TestSwift) {
   Invoke-IsolatingEnvVars {
     $env:Path = "$(Get-CMarkBinaryCache $Platform)\src;$(Get-ProjectBinaryCache $BuildPlatform Compilers)\tools\swift\libdispatch-windows-$($Platform.Architecture.LLVMName)-prefix\bin;$(Get-ProjectBinaryCache $BuildPlatform Compilers)\bin;$env:Path;$VSInstallRoot\DIA SDK\bin\$($HostPlatform.Architecture.VSName);$UnixToolsBinDir"
     $TestingDefines = Get-CompilersDefines $Platform $Variant -Test
@@ -2317,9 +2318,9 @@ function Test-Compilers([Hashtable] $Platform, [string] $Variant, [switch] $Test
     if ($TestClang) { $Targets += @("check-clang") }
     if ($TestLLD) { $Targets += @("check-lld") }
     if ($TestSwift) { $Targets += @("check-swift", "SwiftCompilerPlugin") }
-    if ($TestLLDB) {
-      $Targets += @("check-lldb")
-
+    if ($TestLLDB) { $Targets += @("check-lldb") }
+    if ($TestLLDBSwift) { $Targets += @("check-lldb-swift") }
+    if ($TestLLDB -or $TestLLDBSwift) {
       # Override test filter for known issues in downstream LLDB
       Load-LitTestOverrides ([IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, "..", "..", "llvm-project", "lldb", "test", "windows-swift-llvm-lit-test-overrides.txt")))
 
@@ -3476,6 +3477,19 @@ function Build-Subprocess([Hashtable] $Platform) {
     }
 }
 
+function Build-ToolsProtocols([Hashtable] $Platform) {
+  Build-CMakeProject `
+    -Src $SourceCache\swift-tools-protocols `
+    -Bin (Get-ProjectBinaryCache $Platform ToolsProtocols) `
+    -InstallTo "$($Platform.ToolchainInstallRoot)\usr" `
+    -Platform $Platform `
+    -UseBuiltCompilers C,CXX,Swift `
+    -SwiftSDK (Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK) `
+    -Defines @{
+      BUILD_SHARED_LIBS = "YES";
+    }
+}
+
 function Build-Build([Hashtable] $Platform) {
   # Use lld to workaround the ARM64 LNK1322 issue: https://github.com/swiftlang/swift/issues/79740
   # FIXME(hjyamauchi) Have a real fix
@@ -3496,6 +3510,7 @@ function Build-Build([Hashtable] $Platform) {
       SwiftDriver_DIR = (Get-ProjectCMakeModules $Platform Driver);
       SwiftSystem_DIR = (Get-ProjectCMakeModules $Platform System);
       TSC_DIR = (Get-ProjectCMakeModules $Platform ToolsSupportCore);
+      SwiftToolsProtocols_DIR = (Get-ProjectCMakeModules $Platform ToolsProtocols);
       SQLite3_INCLUDE_DIR = "$SourceCache\swift-toolchain-sqlite\Sources\CSQLite\include";
       SQLite3_LIBRARY = "$(Get-ProjectBinaryCache $Platform SQLite)\SQLite3.lib";
     } + $ArchSpecificOptions)
@@ -3689,6 +3704,7 @@ function Build-PackageManager([Hashtable] $Platform) {
       ArgumentParser_DIR = (Get-ProjectCMakeModules $Platform ArgumentParser);
       SwiftDriver_DIR = (Get-ProjectCMakeModules $Platform Driver);
       SwiftBuild_DIR = (Get-ProjectCMakeModules $Platform Build);
+      SwiftToolsProtocols_DIR = (Get-ProjectCMakeModules $Platform ToolsProtocols);
       SwiftCrypto_DIR = (Get-ProjectCMakeModules $Platform Crypto);
       SwiftCollections_DIR = (Get-ProjectCMakeModules $Platform Collections);
       SwiftASN1_DIR = (Get-ProjectCMakeModules $Platform ASN1);
@@ -3842,6 +3858,7 @@ function Build-SourceKitLSP([Hashtable] $Platform) {
       SwiftPM_DIR = (Get-ProjectCMakeModules $Platform PackageManager);
       LMDB_DIR = (Get-ProjectCMakeModules $Platform LMDB);
       IndexStoreDB_DIR = (Get-ProjectCMakeModules $Platform IndexStoreDB);
+      SwiftToolsProtocols_DIR = (Get-ProjectCMakeModules $Platform ToolsProtocols);
     }
 }
 
@@ -3900,6 +3917,10 @@ function Test-SourceKitLSP {
     "-Xlinker", "$(Get-ProjectBinaryCache $BuildPlatform IndexStoreDB)\Sources\IndexStoreDB_Index\Index.lib",
     "-Xlinker", "$(Get-ProjectBinaryCache $BuildPlatform IndexStoreDB)\Sources\IndexStoreDB_LLVMSupport\LLVMSupport.lib",
     "-Xlinker", "$(Get-ProjectBinaryCache $BuildPlatform IndexStoreDB)\Sources\IndexStoreDB_Support\Support.lib",
+    # swift-tools-protocols
+    "-Xswiftc", "-I$(Get-ProjectBinaryCache $BuildPlatform ToolsProtocols)\swift",
+    "-Xswiftc", "-I$SourceCache\swift-tools-protocols\Sources\ToolsProtocolsCAtomics\include",
+    "-Xlinker", "-L$(Get-ProjectBinaryCache $BuildPlatform ToolsProtocols)\lib",
     # LMDB
     "-Xlinker", "$(Get-ProjectBinaryCache $BuildPlatform LMDB)\lib\CLMDB.lib",
     # sourcekit-lsp
@@ -4386,6 +4407,7 @@ if (-not $SkipBuild) {
   Invoke-BuildStep Build-Certificates $HostPlatform
   Invoke-BuildStep Build-System $HostPlatform
   Invoke-BuildStep Build-Subprocess $HostPlatform
+  Invoke-BuildStep Build-ToolsProtocols $HostPlatform
   Invoke-BuildStep Build-Build $HostPlatform
   Invoke-BuildStep Build-PackageManager $HostPlatform
   Invoke-BuildStep Build-Markdown $HostPlatform
@@ -4424,12 +4446,13 @@ if ($Stage) {
 }
 
 if (-not $IsCrossCompiling) {
-  $CompilersTests = @("clang", "lld", "lldb", "llvm", "swift")
+  $CompilersTests = @("clang", "lld", "lldb", "lldb-swift", "llvm", "swift")
   if ($Test | Where-Object { $CompilersTests -contains $_ }) {
     $Tests = @{
       "-TestClang" = $Test -contains "clang";
       "-TestLLD" = $Test -contains "lld";
       "-TestLLDB" = $Test -contains "lldb";
+      "-TestLLDBSwift" = $Test -contains "lldb-swift";
       "-TestLLVM" = $Test -contains "llvm";
       "-TestSwift" = $Test -contains "swift";
     }
