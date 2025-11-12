@@ -4345,6 +4345,7 @@ private:
     auto openedElementEnv = expansionExpr->getGenericEnvironment();
     SGF.emitDynamicPackLoop(expansionExpr, formalPackType,
                             packComponentIndex, openedElementEnv,
+                            []() -> SILBasicBlock * { return nullptr; },
                             [&](SILValue indexWithinComponent,
                                 SILValue packExpansionIndex,
                                 SILValue packIndex) {
@@ -6919,6 +6920,7 @@ RValue SILGenFunction::emitApplyAllocatingInitializer(SILLocation loc,
                                                       PreparedArguments &&args,
                                                       Type overriddenSelfType,
                                                       SGFContext C) {
+  ASSERT(init);
   ConstructorDecl *ctor = cast<ConstructorDecl>(init.getDecl());
 
   // Form the reference to the allocating initializer.
