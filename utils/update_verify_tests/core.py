@@ -51,7 +51,7 @@ class Line:
         res = self.content.replace("{{DIAG}}", self.diag.render())
         if not res.strip():
             return ""
-        return res
+        return res.rstrip() + "\n"
 
 
 class Diag:
@@ -185,7 +185,7 @@ class ExpansionDiagClose:
 
 
 expected_diag_re = re.compile(
-    r"//(\s*)expected-([a-zA-Z-]*)(note|warning|error)(-re)?(@[+-]?\d+)?(:\d+)?(\s*)(\d+)?\{\{(.*)\}\}"
+    r"//(\s*)expected-([a-zA-Z-]*)(note|warning|error|remark)(-re)?(@[+-]?\d+)?(:\d+)?(\s*)(\d+)?\{\{(.*)\}\}"
 )
 expected_expansion_diag_re = re.compile(
     r"//(\s*)expected-([a-zA-Z-]*)(expansion)(-re)?(@[+-]?\d+)(:\d+)(\s*)(\d+)?\{\{(.*)"
@@ -398,7 +398,7 @@ def remove_dead_diags(lines):
             remove_line(line, lines)
         else:
             assert line.diag.is_from_source_file
-            for other_diag in line.targeting_diags:
+            for other_diag in line.diag.target.targeting_diags:
                 if (
                     other_diag.is_from_source_file
                     or other_diag.count == 0
@@ -409,6 +409,7 @@ def remove_dead_diags(lines):
                     continue
                 line.diag.take(other_diag)
                 remove_line(other_diag.line, lines)
+                break
 
 
 def fold_expansions(lines):
@@ -570,13 +571,13 @@ def update_test_files(errors, prefix):
         try:
             update_test_file(filename, diag_errors, prefix, updated_test_files)
         except KnownException as e:
-            return f"Error in update-verify-tests while updating {filename}: {e}"
+            return (
+                f"Error in update-verify-tests while updating {filename}: {e}",
+                None,
+            )
     updated_files = list(updated_test_files)
     assert updated_files
-    if len(updated_files) == 1:
-        return f"updated file {updated_files[0]}"
-    updated_files_s = "\n\t".join(updated_files)
-    return "updated files:\n\t{updated_files_s}"
+    return (None, updated_files)
 
 
 """
@@ -786,8 +787,8 @@ def check_expectations(tool_output, prefix):
             top_level.extend(curr)
 
     except KnownException as e:
-        return (1, f"Error in update-verify-tests while parsing tool output: {e}")
+        return (f"Error in update-verify-tests while parsing tool output: {e}", None)
     if top_level:
-        return (0, update_test_files(top_level, prefix))
+        return update_test_files(top_level, prefix)
     else:
-        return (1, "no mismatching diagnostics found")
+        return ("no mismatching diagnostics found", None)
