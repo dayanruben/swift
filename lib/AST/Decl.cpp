@@ -5536,8 +5536,18 @@ static bool checkAccess(const DeclContext *useDC, const ValueDecl *VD,
     return srcPkg && usePkg && usePkg->isSamePackageAs(srcPkg);
   }
   case AccessLevel::Public:
-  case AccessLevel::Open:
+  case AccessLevel::Open: {
+    if (VD->getASTContext().LangOpts.hasFeature(
+            Feature::EnforceSPIOperatorGroup) &&
+        VD->isOperator() && VD->isSPI()) {
+      const DeclContext *useFile = useDC->getModuleScopeContext();
+      if (useFile->getParentModule() == sourceDC->getParentModule())
+        return true;
+      auto *useSF = dyn_cast<SourceFile>(useFile);
+      return !useSF || useSF->isImportedAsSPI(VD);
+    }
     return true;
+  }
   }
   llvm_unreachable("bad access level");
 }
@@ -8037,7 +8047,7 @@ VarDecl::VarDecl(DeclKind kind, bool isStatic, VarDecl::Introducer introducer,
 }
 
 Type VarDecl::getTypeInContext() const {
-  return getDeclContext()->mapTypeIntoContext(getInterfaceType());
+  return getDeclContext()->mapTypeIntoEnvironment(getInterfaceType());
 }
 
 /// Translate an "is mutable" bit into a StorageMutability value.
@@ -8911,7 +8921,7 @@ Type VarDecl::getPropertyWrapperInitValueInterfaceType() const {
 
   Type valueInterfaceTy = initInfo.getWrappedValuePlaceholder()->getType();
   if (valueInterfaceTy->hasPrimaryArchetype())
-    valueInterfaceTy = valueInterfaceTy->mapTypeOutOfContext();
+    valueInterfaceTy = valueInterfaceTy->mapTypeOutOfEnvironment();
 
   return valueInterfaceTy;
 }
@@ -9221,7 +9231,7 @@ void ParamDecl::setDefaultArgumentKind(DefaultArgumentKind K) {
 
 /// Retrieve the type of 'self' for the given context.
 Type DeclContext::getSelfTypeInContext() const {
-  return mapTypeIntoContext(getSelfInterfaceType());
+  return mapTypeIntoEnvironment(getSelfInterfaceType());
 }
 
 TupleType *BuiltinTupleDecl::getTupleSelfType(const ExtensionDecl *owner) const {
@@ -13047,7 +13057,7 @@ std::optional<Type>
 CatchNode::getThrownErrorTypeInContext(ASTContext &ctx) const {
   if (auto func = dyn_cast<AbstractFunctionDecl *>()) {
     if (auto thrownError = func->getEffectiveThrownErrorType())
-      return func->mapTypeIntoContext(*thrownError);
+      return func->mapTypeIntoEnvironment(*thrownError);
 
     return std::nullopt;
   }

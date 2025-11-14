@@ -551,9 +551,6 @@ private:
   /// Clang arguments used to create the Clang invocation.
   std::vector<std::string> ClangArgs;
 
-  /// Clang diagnostic options used to create the Clang invocation.
-  std::unique_ptr<clang::DiagnosticOptions> DiagnosticOptions;
-
   /// Mapping from Clang swift_attr attribute text to the Swift source file(s)
   /// that contain that attribute text.
   ///
@@ -1831,6 +1828,7 @@ public:
   void addOptionSetTypealiases(NominalTypeDecl *nominal);
 
   void swiftify(AbstractFunctionDecl *MappedDecl);
+  void swiftifyProtocol(NominalTypeDecl *MappedDecl);
 
   /// Find the lookup table that corresponds to the given Clang module.
   ///

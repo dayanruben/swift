@@ -632,7 +632,7 @@ synthesizeErrorDomainGetterBody(AbstractFunctionDecl *afd, void *context) {
   DeclRefExpr *domainDeclRef = new (ctx)
       DeclRefExpr(ConcreteDeclRef(swiftValueDecl), {}, isImplicit);
   domainDeclRef->setType(
-    getterDecl->mapTypeIntoContext(swiftValueDecl->getInterfaceType()));
+    getterDecl->mapTypeIntoEnvironment(swiftValueDecl->getInterfaceType()));
 
   auto *ret = ReturnStmt::createImplicit(ctx, domainDeclRef);
   return { BraceStmt::create(ctx, SourceLoc(), {ret}, SourceLoc(), isImplicit),
@@ -5846,6 +5846,8 @@ namespace {
       result->setInherited(Impl.SwiftContext.AllocateCopy(inheritedTypes));
 
       result->setMemberLoader(&Impl, 0);
+
+      Impl.swiftifyProtocol(result);
 
       return result;
     }
