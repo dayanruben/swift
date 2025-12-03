@@ -5493,12 +5493,18 @@ ClangTypeEscapability::evaluate(Evaluator &evaluator,
 
   // Escapability inference rules:
   // - array and vector types have the same escapability as their element type
-  // - pointer and reference types are currently imported as escapable
+  // - pointer and reference types are currently imported as unknown
   // (importing them as non-escapable broke backward compatibility)
   // - a record type is escapable or non-escapable if it is explicitly annotated
   // as such
   // - a record type is escapable if it is annotated with SWIFT_ESCAPABLE_IF()
   // and none of the annotation arguments are non-escapable
+  // - an aggregate or non-cxx record is escapable if none of their fields or
+  // bases are non-escapable (as long as they have a definition)
+  //   * we only infer escapability for simple types, with no user-declared
+  //   constructors, virtual bases or virtual member functions
+  //   * for more complex CxxRecordDecls, we rely solely on escapability
+  //   annotations
   // - in all other cases, the record has unknown escapability (e.g. no
   // escapability annotations, malformed escapability annotations)
 
@@ -5554,14 +5560,8 @@ ClangTypeEscapability::evaluate(Evaluator &evaluator,
 
         continue;
       }
-      // The `annotationOnly` flag used to control which types we infered
-      // escapability for. Currently, this flag is always set to true, meaning
-      // that any type without an annotation (CxxRecordDecls, aggregates, decls
-      // lacking definition, etc.) will raise `hasUnknown`.
-      if (desc.annotationOnly) {
-        hasUnknown = true;
-        continue;
-      }
+      // Only try to infer escapability if the record doesn't have any
+      // escapability annotations
       auto cxxRecordDecl = dyn_cast<clang::CXXRecordDecl>(recordDecl);
       if (recordDecl->getDefinition() &&
           (!cxxRecordDecl || cxxRecordDecl->isAggregate())) {
@@ -5571,7 +5571,11 @@ ClangTypeEscapability::evaluate(Evaluator &evaluator,
         }
         for (auto field : recordDecl->fields())
           maybePushToStack(field->getType()->getUnqualifiedDesugaredType());
-        continue;
+      } else {
+        // We only infer escapability for simple types, such as aggregates and
+        // RecordDecls that are not CxxRecordDecls. For more complex
+        // CxxRecordDecls, we rely solely on escapability annotations.
+        hasUnknown = true;
       }
     } else if (type->isArrayType()) {
       auto elemTy = cast<clang::ArrayType>(type)
@@ -5582,10 +5586,9 @@ ClangTypeEscapability::evaluate(Evaluator &evaluator,
       maybePushToStack(vecTy->getElementType()->getUnqualifiedDesugaredType());
     } else if (type->isAnyPointerType() || type->isBlockPointerType() ||
                type->isMemberPointerType() || type->isReferenceType()) {
-      if (desc.annotationOnly)
-        hasUnknown = true;
-      else
-        return CxxEscapability::NonEscapable;
+      // pointer and reference types are currently imported as unknown
+      // (importing them as non-escapable broke backward compatibility)
+      hasUnknown = true;
     }
   }
   return hasUnknown ? CxxEscapability::Unknown : CxxEscapability::Escapable;
@@ -8342,17 +8345,16 @@ bool importer::isViewType(const clang::CXXRecordDecl *decl) {
   return !hasOwnedValueAttr(decl) && hasPointerInSubobjects(decl);
 }
 
-static bool hasCopyTypeOperations(const clang::CXXRecordDecl *decl) {
-  if (decl->hasSimpleCopyConstructor())
-    return true;
-
-  return llvm::any_of(decl->ctors(), [](clang::CXXConstructorDecl *ctor) {
-    return ctor->isCopyConstructor() && !ctor->isDeleted() &&
-           !ctor->isIneligibleOrNotSelected() &&
-           // FIXME: Support default arguments (rdar://142414553)
-           ctor->getNumParams() == 1 &&
-           ctor->getAccess() == clang::AccessSpecifier::AS_public;
-  });
+const clang::CXXConstructorDecl *
+importer::findCopyConstructor(const clang::CXXRecordDecl *decl) {
+  for (auto ctor : decl->ctors()) {
+    if (ctor->isCopyConstructor() &&
+        // FIXME: Support default arguments (rdar://142414553)
+        ctor->getNumParams() == 1 && ctor->getAccess() == clang::AS_public &&
+        !ctor->isDeleted() && !ctor->isIneligibleOrNotSelected())
+      return ctor;
+  }
+  return nullptr;
 }
 
 static bool hasMoveTypeOperations(const clang::CXXRecordDecl *decl) {
@@ -8520,8 +8522,8 @@ CxxValueSemantics::evaluate(Evaluator &evaluator,
   while (!stack.empty()) {
     const clang::RecordDecl *recordDecl = stack.back();
     stack.pop_back();
-
-    if (!hasNonCopyableAttr(recordDecl)) {
+    bool isExplicitlyNonCopyable = hasNonCopyableAttr(recordDecl);
+    if (!isExplicitlyNonCopyable) {
       auto injectedStlAnnotation =
           recordDecl->isInStdNamespace()
               ? STLConditionalParams.find(recordDecl->getName())
@@ -8548,13 +8550,28 @@ CxxValueSemantics::evaluate(Evaluator &evaluator,
 
     const auto cxxRecordDecl = dyn_cast<clang::CXXRecordDecl>(recordDecl);
     if (!cxxRecordDecl || !recordDecl->isCompleteDefinition()) {
-      if (hasNonCopyableAttr(recordDecl))
+      if (isExplicitlyNonCopyable)
         return CxxValueSemanticsKind::MoveOnly;
       continue;
     }
 
-    bool isCopyable = !hasNonCopyableAttr(cxxRecordDecl) &&
-                      hasCopyTypeOperations(cxxRecordDecl);
+    bool isCopyable = !isExplicitlyNonCopyable;
+    if (!isExplicitlyNonCopyable) {
+      auto copyCtor = findCopyConstructor(cxxRecordDecl);
+      isCopyable = copyCtor || cxxRecordDecl->needsImplicitCopyConstructor();
+      if ((copyCtor && copyCtor->isDefaulted()) ||
+          cxxRecordDecl->needsImplicitCopyConstructor()) {
+        // If the copy constructor is implicit/defaulted, we ask Clang to
+        // generate its definition. The implicitly-defined copy constructor
+        // performs full member-wise copy. Thus, if any member of this type is
+        // ~Copyable, the type should also be ~Copyable.
+        for (auto field : cxxRecordDecl->fields())
+          maybePushToStack(field->getType()->getUnqualifiedDesugaredType());
+        for (auto base : cxxRecordDecl->bases())
+          maybePushToStack(base.getType()->getUnqualifiedDesugaredType());
+      }
+    }
+
     bool isMovable = hasMoveTypeOperations(cxxRecordDecl);
 
     if (!hasDestroyTypeOperations(cxxRecordDecl) ||
@@ -8568,7 +8585,7 @@ CxxValueSemantics::evaluate(Evaluator &evaluator,
       continue;
     }
 
-    if (hasNonCopyableAttr(cxxRecordDecl) && isMovable)
+    if (isExplicitlyNonCopyable && isMovable)
       return CxxValueSemanticsKind::MoveOnly;
 
     if (isCopyable)
