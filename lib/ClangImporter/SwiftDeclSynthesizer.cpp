@@ -24,8 +24,16 @@
 #include "swift/AST/Stmt.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/Basic/Assertions.h"
+#include "swift/Basic/SourceLoc.h"
 #include "swift/ClangImporter/ClangImporterRequests.h"
+#include "clang/AST/DeclCXX.h"
+#include "clang/AST/DeclarationName.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/Mangle.h"
+#include "clang/AST/Stmt.h"
+#include "clang/AST/Type.h"
+#include "clang/Basic/SourceLocation.h"
 #include "clang/Sema/DelayedDiagnostic.h"
 
 using namespace swift;
@@ -749,6 +757,53 @@ ConstructorDecl *SwiftDeclSynthesizer::createRawValueBridgingConstructor(
   return init;
 }
 
+static std::pair<BraceStmt *, bool>
+synthesizeAsReferenceBody(AbstractFunctionDecl *afd, void *context) {
+  auto getterDecl = cast<AccessorDecl>(afd);
+  auto getterImpl = static_cast<FuncDecl *>(context);
+
+  ASTContext &ctx = getterDecl->getASTContext();
+
+  auto selfArg = createSelfArg(getterDecl);
+  auto *getterImplCallExpr =
+      createAccessorImplCallExpr(getterImpl, selfArg, {});
+
+  auto *returnStmt = ReturnStmt::createImplicit(ctx, getterImplCallExpr);
+
+  auto body = BraceStmt::create(ctx, SourceLoc(), {returnStmt}, SourceLoc(),
+                                /*implicit*/ true);
+  return {body, /*isTypeChecked*/ true};
+}
+
+VarDecl *SwiftDeclSynthesizer::createSmartPtrBridgingProperty(
+    FuncDecl *bridgingFunction) {
+  auto smartPtrType = bridgingFunction->getDeclContext();
+  auto referenceType = bridgingFunction->getResultInterfaceType();
+  auto result = new (ImporterImpl.SwiftContext) VarDecl(
+      /*isStatic*/ false, VarDecl::Introducer::Var,
+      bridgingFunction->getStartLoc(),
+      ImporterImpl.SwiftContext.getIdentifier("asReference"), smartPtrType);
+  result->setInterfaceType(referenceType);
+  result->copyFormalAccessFrom(bridgingFunction);
+
+  AccessorDecl *getterDecl = AccessorDecl::create(
+      ImporterImpl.SwiftContext, bridgingFunction->getLoc(),
+      bridgingFunction->getLoc(), AccessorKind::Get, result,
+      /*async*/ false, SourceLoc(),
+      /*throws*/ false, SourceLoc(), /*ThrownType=*/TypeLoc(),
+      ParameterList::createEmpty(ImporterImpl.SwiftContext), referenceType,
+      smartPtrType);
+  getterDecl->copyFormalAccessFrom(bridgingFunction);
+  getterDecl->setImplicit();
+  getterDecl->setIsDynamic(false);
+  getterDecl->setIsTransparent(true);
+  getterDecl->setBodySynthesizer(synthesizeAsReferenceBody, bridgingFunction);
+  getterDecl->setSelfAccessKind(SelfAccessKind::NonMutating);
+  result->setIsGetterMutating(false);
+  ImporterImpl.makeComputed(result, getterDecl, nullptr);
+  return result;
+}
+
 void SwiftDeclSynthesizer::makeStructRawValuedWithBridge(
     StructDecl *structDecl, Type storedUnderlyingType, Type bridgedType,
     ArrayRef<KnownProtocolKind> synthesizedProtocolAttrs,
@@ -1240,7 +1295,49 @@ SwiftDeclSynthesizer::makeIndirectFieldAccessors(
 
 // MARK: Enum RawValue initializers
 
+/// Clone a literal expression for use in pattern matching.
+/// Based on cloneRawLiteralExpr from DerivedConformanceRawRepresentable.cpp
+static LiteralExpr *cloneRawLiteralExpr(ASTContext &C, LiteralExpr *expr) {
+  LiteralExpr *clone;
+  if (auto intLit = dyn_cast<IntegerLiteralExpr>(expr)) {
+    clone = new (C) IntegerLiteralExpr(intLit->getDigitsText(), expr->getLoc(),
+                                       /*implicit*/ true);
+    if (intLit->isNegative())
+      cast<IntegerLiteralExpr>(clone)->setNegative(expr->getLoc());
+  } else if (isa<NilLiteralExpr>(expr)) {
+    clone = new (C) NilLiteralExpr(expr->getLoc());
+  } else if (auto stringLit = dyn_cast<StringLiteralExpr>(expr)) {
+    clone = new (C) StringLiteralExpr(stringLit->getValue(), expr->getLoc());
+  } else if (auto floatLit = dyn_cast<FloatLiteralExpr>(expr)) {
+    clone = new (C) FloatLiteralExpr(floatLit->getDigitsText(), expr->getLoc(),
+                                     /*implicit*/ true);
+    if (floatLit->isNegative())
+      cast<FloatLiteralExpr>(clone)->setNegative(expr->getLoc());
+  } else {
+    llvm_unreachable("invalid raw literal expr");
+  }
+  clone->setImplicit();
+  return clone;
+}
+
 /// Synthesize the body of \c init?(rawValue:RawType) for an imported enum.
+///
+/// For non-frozen (open) enums, this generates:
+///   init?(rawValue: RawType) {
+///     self = Builtin.reinterpretCast(rawValue)
+///   }
+/// This allows arbitrary raw values for C compatibility.
+///
+/// For frozen (closed) enums, this generates:
+///   init?(rawValue: RawType) {
+///     switch rawValue {
+///     case <value1>, <value2>, ...:
+///       self = Builtin.reinterpretCast(rawValue)
+///     default:
+///       return nil
+///     }
+///   }
+/// This ensures that only declared raw values are accepted.
 static std::pair<BraceStmt *, bool>
 synthesizeEnumRawValueConstructorBody(AbstractFunctionDecl *afd,
                                       void *context) {
@@ -1283,10 +1380,70 @@ synthesizeEnumRawValueConstructorBody(AbstractFunctionDecl *afd,
                                      /*implicit*/ true);
   assign->setType(TupleType::getEmpty(ctx));
 
+  // Check if the enum is frozen (closed). If so, we need to validate
+  // that the raw value is one of the declared cases.
+  bool isFrozen = enumDecl->getAttrs().hasAttribute<FrozenAttr>();
+
+  if (isFrozen) {
+    // For frozen enums, generate a switch statement to validate the raw value.
+
+    // Collect all case labels for valid enum values
+    SmallVector<CaseLabelItem, 8> validCaseLabels;
+    for (auto *elt : enumDecl->getAllElements()) {
+      // Get the raw value literal for this element
+      auto rawValueExpr = elt->getStructuralRawValueExpr();
+      if (!rawValueExpr)
+        continue;
+
+      // Clone the raw value expression for pattern matching
+      auto *litExpr = cloneRawLiteralExpr(ctx, cast<LiteralExpr>(rawValueExpr));
+      auto *litPat = ExprPattern::createImplicit(ctx, litExpr, ctorDecl);
+
+      // Add to the list of valid case labels
+      validCaseLabels.push_back(CaseLabelItem(litPat));
+    }
+
+    // Create a single case statement with all valid raw values
+    // All valid values perform the same action: reinterpret cast
+    auto *caseBody = BraceStmt::create(ctx, SourceLoc(), {assign},
+                                       SourceLoc(), /*implicit*/ true);
+    auto *validCase = CaseStmt::createImplicit(ctx, CaseParentKind::Switch,
+                                               validCaseLabels, caseBody);
+
+    // Create default case that returns nil
+    auto *defaultPattern = AnyPattern::createImplicit(ctx);
+    auto defaultLabelItem = CaseLabelItem(defaultPattern);
+
+    auto *failStmt = new (ctx) FailStmt(SourceLoc(), SourceLoc(), /*implicit*/ true);
+    auto *defaultBody = BraceStmt::create(ctx, SourceLoc(), {failStmt},
+                                          SourceLoc(), /*implicit*/ true);
+
+    auto *defaultCase = CaseStmt::createImplicit(ctx, CaseParentKind::Switch,
+                                                 {defaultLabelItem}, defaultBody);
+
+    // Create the switch statement
+    auto *switchParamRef = new (ctx) DeclRefExpr(param, DeclNameLoc(),
+                                                  /*implicit*/ true);
+    switchParamRef->setType(param->getTypeInContext());
+
+    auto *switchStmt = SwitchStmt::create(LabeledStmtInfo(), SourceLoc(),
+                                          switchParamRef, SourceLoc(),
+                                          {validCase, defaultCase}, SourceLoc(), SourceLoc(), ctx);
+
+    auto body = BraceStmt::create(ctx, SourceLoc(), {switchStmt}, SourceLoc(),
+                                  /*implicit*/ true);
+    // Return isTypeChecked=false because the switch statement contains patterns
+    // and expressions that need type inference and semantic analysis.
+    return {body, /*isTypeChecked=*/false};
+  }
+
+  // For non-frozen enums, use the simple reinterpret cast approach
   auto *ret = ReturnStmt::createImplicit(ctx, /*expr*/ nullptr);
 
   auto body = BraceStmt::create(ctx, SourceLoc(), {assign, ret}, SourceLoc(),
                                 /*implicit*/ true);
+  // Return isTypeChecked=true because all types are explicitly set
+  // and no type inference is needed.
   return {body, /*isTypeChecked=*/true};
 }
 
