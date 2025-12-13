@@ -217,6 +217,32 @@ inferNameAndRootHelper(SILValue value) {
   return VariableNameInferrer::inferNameAndRoot(value);
 }
 
+/// Sometimes we use a store_borrow + temporary to materialize a borrowed value
+/// to be passed to another function. We want to emit the error on the function
+/// itself, not the store_borrow so we get the best location. We only do this if
+/// we can prove that we have a store_borrow to an alloc_stack, the store_borrow
+/// is the only thing stored into the alloc_stack, and except for the
+/// store_borrow, the alloc_stack has a single non_destroy user, a function we
+/// are calling.
+static Operand *
+findClosureUseThroughStoreBorrowTemporary(StoreBorrowInst *sbi) {
+  auto *asi = dyn_cast<AllocStackInst>(sbi->getDest());
+  if (!asi)
+    return {};
+  Operand *resultUse = nullptr;
+  for (auto *use : asi->getUses()) {
+    if (use == &sbi->getAllOperands()[StoreBorrowInst::Dest])
+      continue;
+    if (isa<EndBorrowInst>(use->getUser()))
+      continue;
+    auto fas = FullApplySite::isa(use->getUser());
+    if (!fas)
+      return {};
+    resultUse = use;
+  }
+  return resultUse;
+}
+
 /// Find a use corresponding to the potentially recursive capture of \p
 /// initialOperand that would be appropriate for diagnostics.
 ///
@@ -261,9 +287,15 @@ findClosureUse(Operand *initialOperand) {
     if (isIncidentalUse(user) && !isa<IgnoredUseInst>(user))
       continue;
 
+    // Ignore some instructions we do not care about.
+    if (isa<DestroyValueInst, EndBorrowInst, EndAccessInst, DeallocStackInst>(
+            user))
+      continue;
+
     // Look through some insts we do not care about.
     if (isa<CopyValueInst, BeginBorrowInst, ProjectBoxInst, BeginAccessInst>(
             user) ||
+        isa<MarkUnresolvedNonCopyableValueInst>(user) ||
         isMoveOnlyWrapperUse(user) ||
         // We want to treat move_value [var_decl] as a real use since we are
         // assigning to a var.
@@ -305,6 +337,17 @@ findClosureUse(Operand *initialOperand) {
           }
           continue;
         }
+      }
+    }
+
+    // If we have a store_borrow, see if we are using it to just marshal a use
+    // to a full apply site.
+    if (auto *sbi = dyn_cast<StoreBorrowInst>(op->getUser());
+        sbi && op == &sbi->getAllOperands()[StoreBorrowInst::Src]) {
+      if (auto *use = findClosureUseThroughStoreBorrowTemporary(sbi)) {
+        if (visitedOperand.insert(use).second)
+          worklist.emplace_back(use, fArg);
+        continue;
       }
     }
 
@@ -894,7 +937,6 @@ public:
                                   ApplyIsolationCrossing isolationCrossing) {
     // Emit the short error.
     diagnoseError(loc, diag::regionbasedisolation_named_send_yields_race, name)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     // Then emit the note with greater context.
@@ -928,7 +970,6 @@ public:
                                   const ValueDecl *callee) {
     // Emit the short error.
     diagnoseError(loc, diag::regionbasedisolation_named_send_yields_race, name)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     // Then emit the note with greater context.
@@ -953,7 +994,6 @@ public:
                                                  Identifier name) {
     // Emit the short error.
     diagnoseError(loc, diag::regionbasedisolation_named_send_yields_race, name)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     diagnoseNote(
@@ -965,7 +1005,6 @@ public:
                                   ApplyIsolationCrossing isolationCrossing) {
     diagnoseError(loc, diag::regionbasedisolation_type_send_yields_race,
                   inferredType)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     auto calleeIsolationStr =
@@ -989,14 +1028,12 @@ public:
   void emitNamedUseofStronglySentValue(SILLocation loc, Identifier name) {
     // Emit the short error.
     diagnoseError(loc, diag::regionbasedisolation_named_send_yields_race, name)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     // Then emit the note with greater context.
     diagnoseNote(
         loc, diag::regionbasedisolation_named_value_used_after_explicit_sending,
-        name)
-        .highlight(loc.getSourceRange());
+        name);
 
     // Finally the require points.
     emitRequireInstDiagnostics();
@@ -1005,7 +1042,6 @@ public:
   void emitTypedUseOfStronglySentValue(SILLocation loc, Type inferredType) {
     diagnoseError(loc, diag::regionbasedisolation_type_send_yields_race,
                   inferredType)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
     if (auto callee = getSendingCallee()) {
       diagnoseNote(loc,
@@ -1024,7 +1060,6 @@ public:
       ApplyIsolationCrossing isolationCrossing) {
     // Emit the short error.
     diagnoseError(loc, diag::regionbasedisolation_named_send_yields_race, name)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     auto descriptiveKindStr =
@@ -1039,8 +1074,7 @@ public:
     diagnoseNote(loc,
                  diag::regionbasedisolation_named_isolated_closure_yields_race,
                  isDisconnected, descriptiveKindStr, name, calleeIsolationStr,
-                 callerIsolationStr)
-        .highlight(loc.getSourceRange());
+                 callerIsolationStr);
     emitRequireInstDiagnostics();
   }
 
@@ -1049,7 +1083,6 @@ public:
       ApplyIsolationCrossing isolationCrossing) {
     diagnoseError(loc, diag::regionbasedisolation_type_send_yields_race,
                   inferredType)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     auto calleeIsolationStr =
@@ -1125,14 +1158,12 @@ private:
       auto require = requireInsts.pop_back_val();
       switch (require.getKind()) {
       case RequireInst::UseAfterSend:
-        diagnoseNote(*require, diag::regionbasedisolation_maybe_race)
-            .highlight(require->getLoc().getSourceRange());
+        diagnoseNote(*require, diag::regionbasedisolation_maybe_race);
         continue;
       case RequireInst::InOutReinitializationNeeded:
         diagnoseNote(
             *require,
-            diag::regionbasedisolation_inout_sending_must_be_reinitialized)
-            .highlight(require->getLoc().getSourceRange());
+            diag::regionbasedisolation_inout_sending_must_be_reinitialized);
         continue;
       }
       llvm_unreachable("Covered switch isn't covered?!");
@@ -1598,7 +1629,6 @@ public:
                        ApplyIsolationCrossing crossing) {
     diagnoseError(loc, diag::regionbasedisolation_type_send_yields_race,
                   inferredType)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     auto descriptiveKindStr =
@@ -1635,15 +1665,13 @@ public:
     diagnoseNote(loc,
                  diag::regionbasedisolation_named_isolated_closure_yields_race,
                  isDisconnected, descriptiveKindStr, name, calleeIsolationStr,
-                 callerIsolationStr)
-        .highlight(loc.getSourceRange());
+                 callerIsolationStr);
   }
 
   void emitTypedSendingNeverSendableToSendingParam(SILLocation loc,
                                                    Type inferredType) {
     diagnoseError(loc, diag::regionbasedisolation_type_send_yields_race,
                   inferredType)
-        .highlight(loc.getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
 
     auto descriptiveKindStr =
@@ -1742,7 +1770,6 @@ public:
       diagnoseError(loc,
                     diag::regionbasedisolation_typed_tns_passed_sending_closure,
                     descriptiveKindStr)
-          .highlight(loc.getSourceRange())
           .limitBehaviorIf(behaviorLimit);
     };
 
@@ -1798,7 +1825,6 @@ public:
 
   void emitNamedOnlyError(SILLocation loc, Identifier name) {
     diagnoseError(loc, diag::regionbasedisolation_named_send_yields_race, name)
-        .highlight(getOperand()->getUser()->getLoc().getSourceRange())
         .limitBehaviorIf(getBehaviorLimit());
   }
 

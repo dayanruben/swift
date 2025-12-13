@@ -7407,6 +7407,9 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
   // Notable exceptions here are: `Any` which doesn't require wrapping and
   // would be handled by an existential promotion in cases where it's allowed,
   // and `Optional<T>` which would be handled by optional injection.
+  //
+  // `LValueType`s are also ignored at this stage to avoid accidentally wrapping them. If they
+  //  are valid wrapping targets, they will be tuple-wrapped after the lvalue is converted.
   if (isTupleWithUnresolvedPackExpansion(origType1) ||
       isTupleWithUnresolvedPackExpansion(origType2)) {
     auto isTypeVariableWrappedInOptional = [](Type type) {
@@ -7417,6 +7420,7 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
     };
     if (isa<TupleType>(desugar1) != isa<TupleType>(desugar2) &&
         !isa<InOutType>(desugar1) && !isa<InOutType>(desugar2) &&
+        !isa<LValueType>(desugar1) && !isa<LValueType>(desugar2) &&
         !isTypeVariableWrappedInOptional(desugar1) &&
         !isTypeVariableWrappedInOptional(desugar2) &&
         !desugar1->isAny() &&
@@ -9253,6 +9257,9 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
           req->is<LocatorPathElt::TypeParameterRequirement>()) {
         auto *memberLoc = getConstraintLocator(anchor, path.front());
 
+        if (hasFixFor(memberLoc))
+          return SolutionKind::Solved;
+
         auto signature = path[path.size() - 2]
                              .castTo<LocatorPathElt::OpenedGeneric>()
                              .getSignature();
@@ -10673,7 +10680,6 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
             candidate,
             MemberLookupResult::UR_InvalidStaticMemberOnProtocolMetatype);
       }
-
       return;
     } else {
       if (!hasStaticMembers) {
@@ -11621,8 +11627,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
                                                  alreadyDiagnosed, locator);
 
       auto instanceTy = baseObjTy->getMetatypeInstanceType();
-
-      auto impact = 4;
+      auto impact = 2;
       // Impact is higher if the base type is any function type
       // because function types can't have any members other than self
       if (instanceTy->is<AnyFunctionType>()) {
@@ -11650,10 +11655,10 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
           }
         }
 
-        // Increasing the impact for missing member in any argument position so
-        // it doesn't affect situations where there are another fixes involved.
+        // Increasing the impact for missing member in any argument position
+        // which may be less likely than other potential mistakes
         if (getArgumentLocator(anchorExpr))
-          impact += 5;
+          impact += 1;
       }
 
       if (recordFix(fix, impact))
