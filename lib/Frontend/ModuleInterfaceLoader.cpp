@@ -1304,6 +1304,10 @@ ModuleInterfaceLoaderOptions::ModuleInterfaceLoaderOptions(
   }
 }
 
+ModuleInterfaceLoaderOptions &ModuleInterfaceLoader::getOptions() {
+  return InterfaceChecker.Opts;
+}
+
 bool ModuleInterfaceLoader::isCached(StringRef DepPath) {
   return InterfaceChecker.isCached(DepPath);
 }
@@ -2364,7 +2368,6 @@ std::error_code ExplicitSwiftModuleLoader::findModuleFilesInDirectory(
     std::unique_ptr<llvm::MemoryBuffer> *ModuleSourceInfoBuffer,
     bool IsCanImportLookup, bool IsFramework,
     bool IsTestableDependencyLookup) {
-  llvm_unreachable("Not supported in the Explicit Swift Module Loader.");
   return std::make_error_code(std::errc::not_supported);
 }
 
@@ -2712,7 +2715,6 @@ std::error_code ExplicitCASModuleLoader::findModuleFilesInDirectory(
     std::unique_ptr<llvm::MemoryBuffer> *ModuleSourceInfoBuffer,
     bool IsCanImportLookup, bool IsFramework,
     bool IsTestableDependencyLookup) {
-  llvm_unreachable("Not supported in the Explicit Swift Module Loader.");
   return std::make_error_code(std::errc::not_supported);
 }
 
@@ -2763,6 +2765,22 @@ void ExplicitCASModuleLoader::collectVisibleTopLevelModuleNames(
   for (auto &entry : Impl.ExplicitModuleMap) {
     names.push_back(Ctx.getIdentifier(entry.getKey()));
   }
+}
+
+void ExplicitCASModuleLoader::addExplicitModulePath(StringRef name,
+                                                    std::string path) {
+  // This is used by LLDB to discover the paths to dependencies of binary Swift
+  // modules. Only do this if path exists in CAS, since there are use-cases
+  // where a binary Swift module produced on a different machine is provided and
+  // replacements for its dependencies are provided via the explicit module map.
+  auto ID = Impl.CAS.parseID(path);
+  if (!ID)
+    return llvm::consumeError(ID.takeError());
+  if (!Impl.CAS.getReference(*ID))
+    return;
+
+  ExplicitSwiftModuleInputInfo entry(path, {}, {}, {});
+  Impl.ExplicitModuleMap.try_emplace(name, std::move(entry));
 }
 
 std::unique_ptr<ExplicitCASModuleLoader> ExplicitCASModuleLoader::create(
