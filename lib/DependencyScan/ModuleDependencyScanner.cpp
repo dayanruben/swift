@@ -195,16 +195,15 @@ static std::vector<std::string> inputSpecificClangScannerCommand(
 
 static llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>
 getClangScanningFS(std::shared_ptr<llvm::cas::ObjectStore> cas,
-                   ASTContext &ctx, llvm::StringSaver &saver) {
-  auto *importer = static_cast<ClangImporter *>(ctx.getClangModuleLoader());
-  // Dependency scanner needs to create its own file system per worker.
-  auto fs = ClangImporter::computeClangImporterFileSystem(
-      ctx, importer->getClangFileMapping(),
-      llvm::vfs::createPhysicalFileSystem(), true, &saver);
+                   ASTContext &ctx) {
+  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> baseFileSystem =
+      llvm::vfs::createPhysicalFileSystem();
+  ClangInvocationFileMapping fileMapping =
+    applyClangInvocationMapping(ctx, nullptr, baseFileSystem, false);
 
   if (cas)
-    return llvm::cas::createCASProvidingFileSystem(cas, fs);
-  return fs;
+    return llvm::cas::createCASProvidingFileSystem(cas, baseFileSystem);
+  return baseFileSystem;
 }
 
 ModuleDependencyScanningWorker::ModuleDependencyScanningWorker(
@@ -218,10 +217,8 @@ ModuleDependencyScanningWorker::ModuleDependencyScanningWorker(
     llvm::PrefixMapper *Mapper)
     : workerCompilerInvocation(
           std::make_unique<CompilerInvocation>(ScanCompilerInvocation)),
-      clangScanningTool(
-          *globalScanningService.ClangScanningService,
-          getClangScanningFS(CAS, ScanASTContext,
-                             globalScanningService.getStringSaver())),
+      clangScanningTool(*globalScanningService.ClangScanningService,
+                        getClangScanningFS(CAS, ScanASTContext)),
       CAS(CAS), ActionCache(ActionCache),
       diagnosticReporter(DiagnosticReporter) {
   // Instantiate a worker-specific diagnostic engine and copy over
@@ -1843,8 +1840,9 @@ llvm::Error ModuleDependencyScanner::performBridgingHeaderChaining(
   auto FS = ScanASTContext.SourceMgr.getFileSystem();
 
   auto chainBridgingHeader = [&](StringRef moduleName, StringRef headerPath,
-                                 StringRef binaryModulePath) -> llvm::Error {
-    if (useImportHeader) {
+                                 StringRef binaryModulePath,
+                                 bool useHeader) -> llvm::Error {
+    if (useHeader) {
       if (auto buffer = FS->getBufferForFile(headerPath)) {
         outOS << "#include \"" << headerPath << "\"\n";
         return llvm::Error::success();
@@ -1885,9 +1883,9 @@ llvm::Error ModuleDependencyScanner::performBridgingHeaderChaining(
       if (binaryMod->headerImport.empty())
         continue;
 
-      if (auto E =
-              chainBridgingHeader(moduleID.ModuleName, binaryMod->headerImport,
-                                  binaryMod->compiledModulePath))
+      if (auto E = chainBridgingHeader(
+              moduleID.ModuleName, binaryMod->headerImport,
+              binaryMod->compiledModulePath, useImportHeader))
         return E;
     }
   }
@@ -1917,7 +1915,8 @@ llvm::Error ModuleDependencyScanner::performBridgingHeaderChaining(
     if (mainModule->textualModuleDetails.bridgingHeaderFile) {
       if (auto E = chainBridgingHeader(
               rootModuleID.ModuleName,
-              *mainModule->textualModuleDetails.bridgingHeaderFile, ""))
+              *mainModule->textualModuleDetails.bridgingHeaderFile, "",
+              /*useHeader=*/true))
         return E;
     }
 
@@ -2100,16 +2099,10 @@ ModuleDependencyInfo ModuleDependencyScanner::bridgeClangModuleDependency(
   invocation.getMutCASOpts() = clang::CASOptions();
   invocation.getMutFrontendOpts().CASIncludeTreeID.clear();
 
+  // FIXME: workaround for rdar://105684525: find the -ivfsoverlay option
+  // from clang scanner and pass to swift.
   if (!ScanASTContext.CASOpts.EnableCaching) {
     auto &overlayFiles = invocation.getMutHeaderSearchOpts().VFSOverlayFiles;
-
-    // clang system overlay file is a virtual file that is not an actual file.
-    auto clangSystemOverlayFile =
-        ClangImporter::getClangSystemOverlayFile(ScanASTContext.SearchPathOpts);
-    llvm::erase(overlayFiles, clangSystemOverlayFile);
-
-    // FIXME: workaround for rdar://105684525: find the -ivfsoverlay option
-    // from clang scanner and pass to swift.
     for (auto overlay : overlayFiles) {
       swiftArgs.push_back("-vfsoverlay");
       swiftArgs.push_back(overlay);

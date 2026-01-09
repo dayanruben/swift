@@ -1899,10 +1899,19 @@ SubscriptDecl *SwiftDeclSynthesizer::makeSubscript(FuncDecl *getter,
   DeclName name(ctx, DeclBaseName::createSubscript(), bodyParams);
   auto dc = getterImpl->getDeclContext();
 
-  SubscriptDecl *subscript = SubscriptDecl::createImported(
-      ctx, name, getterImpl->getLoc(), bodyParams, getterImpl->getLoc(),
-      elementTy, dc, getterImpl->getGenericParams(),
-      getterImpl->getClangNode());
+  SubscriptDecl *subscript;
+  if (auto ClangN = getterImpl->getClangNode()) {
+    subscript = SubscriptDecl::createImported(
+        ctx, name, getterImpl->getLoc(), bodyParams, getterImpl->getLoc(),
+        elementTy, dc, getterImpl->getGenericParams(), ClangN);
+  } else {
+    // getterImpl may lack an associated ClangNode if it is synthesized,
+    // e.g., if it is a cloned from a base class member due to inheritance.
+    subscript = SubscriptDecl::create(
+        ctx, name, SourceLoc(), StaticSpellingKind::None, getterImpl->getLoc(),
+        bodyParams, getterImpl->getLoc(), elementTy, dc,
+        getterImpl->getGenericParams());
+  }
   subscript->copyFormalAccessFrom(getterImpl);
 
   bool useAddress = rawElementTy->getAnyPointerElementType() &&
@@ -2797,7 +2806,6 @@ SwiftDeclSynthesizer::makeDefaultArgument(const clang::ParmVarDecl *param,
   assert(param->hasDefaultArg() && "must have a C++ default argument");
 
   ASTContext &ctx = ImporterImpl.SwiftContext;
-  clang::ASTContext &clangCtx = param->getASTContext();
   auto clangFunc =
       cast<clang::FunctionDecl>(param->getParentFunctionOrMethod());
   if (isa<clang::CXXConstructorDecl>(clangFunc))
@@ -2807,10 +2815,8 @@ SwiftDeclSynthesizer::makeDefaultArgument(const clang::ParmVarDecl *param,
 
   std::string s;
   llvm::raw_string_ostream os(s);
-  std::unique_ptr<clang::ItaniumMangleContext> mangler{
-      clang::ItaniumMangleContext::create(clangCtx, clangCtx.getDiagnostics())};
   os << "__defaultArg_" << param->getFunctionScopeIndex() << "_";
-  ImporterImpl.getMangledName(mangler.get(), clangFunc, os);
+  ImporterImpl.getItaniumMangledName(clangFunc, os);
 
   // Synthesize `func __defaultArg_XYZ() -> ParamTy { ... }`.
   DeclName funcName(ctx, DeclBaseName(ctx.getIdentifier(s)),
