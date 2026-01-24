@@ -2239,14 +2239,6 @@ static bool ParseClangImporterArgs(ClangImporterOptions &Opts, ArgList &Args,
     Opts.BridgingHeaderIsInternal = importAsInternal;
   }
 
-  // Until we have some checking in place, internal bridging headers are a
-  // bit unsafe without library evolution.
-  if (Opts.BridgingHeaderIsInternal &&
-      !LangOpts.hasFeature(Feature::LibraryEvolution)) {
-    Diags.diagnose(SourceLoc(),
-                   diag::internal_bridging_header_without_library_evolution);
-  }
-
   Opts.DisableSwiftBridgeAttr |= Args.hasArg(OPT_disable_swift_bridge_attr);
 
   Opts.DisableOverlayModules |= Args.hasArg(OPT_emit_imported_modules);
@@ -3345,22 +3337,21 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
 
   if (const Arg *A = Args.getLastArg(options::OPT_enforce_exclusivity_EQ)) {
     parseExclusivityEnforcementOptions(A, Opts, Diags);
+
+    // In the short term, we ignore -enforce-exclusivity=checked unless
+    // in Embedded Swift unless EmbeddedDynamicExclusivity is also enabled.
+    if (LangOpts.hasFeature(Feature::Embedded) &&
+        Opts.EnforceExclusivityDynamic &&
+        !LangOpts.hasFeature(Feature::EmbeddedDynamicExclusivity)) {
+      Diags.diagnose(SourceLoc(), diag::embedded_dynamic_exclusivity_staging);
+      Opts.EnforceExclusivityDynamic = false;
+    }
   } else if (!Opts.RemoveRuntimeAsserts &&
              LangOpts.hasFeature(Feature::Embedded)) {
     // Embedded Swift defaults to -enforce-exclusivity=unchecked for now.
     Opts.EnforceExclusivityStatic = true;
     Opts.EnforceExclusivityDynamic = false;
   }
-
-  Opts.OSSACompleteLifetimes =
-      Args.hasFlag(OPT_enable_ossa_complete_lifetimes,
-                   OPT_disable_ossa_complete_lifetimes,
-                   Opts.OSSACompleteLifetimes);
-
-  Opts.OSSAVerifyComplete =
-      Args.hasFlag(OPT_enable_ossa_verify_complete,
-                   OPT_disable_ossa_verify_complete,
-                   Opts.OSSAVerifyComplete);
 
   Opts.NoAllocations = Args.hasArg(OPT_no_allocations);
 

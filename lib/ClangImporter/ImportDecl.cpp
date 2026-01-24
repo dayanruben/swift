@@ -2442,7 +2442,7 @@ namespace {
       // FIXME: Import anonymous union fields and support field access when
       // it is nested in a struct.
       for (auto m : decl->decls()) {
-        if (isa<clang::AccessSpecDecl>(m)) {
+        if (isa<clang::AccessSpecDecl, clang::StaticAssertDecl>(m)) {
           // The presence of AccessSpecDecls themselves does not influence
           // whether we can generate a member-wise initializer.
           continue;
@@ -9200,7 +9200,9 @@ ClangImporter::Implementation::importSwiftAttrAttributes(Decl *MappedDecl) {
   // can see if we should synthesize a Sendable conformance.
   if (auto nominal = dyn_cast<NominalTypeDecl>(MappedDecl)) {
     auto sendability = nominal->getAttrs().getEffectiveSendableAttr();
-    if (isa_and_nonnull<SendableAttr>(sendability)) {
+    if (auto *sendable = dyn_cast_or_null<SendableAttr>(sendability)) {
+      // Remove the original `Sendable` attribute we are about to replace.
+      nominal->getAttrs().removeAttribute(sendable);
       addSynthesizedProtocolAttrs(nominal, {KnownProtocolKind::Sendable},
                                   /*isUnchecked=*/true);
     }
