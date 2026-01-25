@@ -1989,10 +1989,6 @@ struct MemberLookupResult {
   /// This is a list of viable candidates that were matched.
   ///
   SmallVector<OverloadChoice, 4> ViableCandidates;
-  
-  /// If there is a favored candidate in the viable list, this indicates its
-  /// index.
-  unsigned FavoredChoice = ~0U;
 
   /// The number of optional unwraps that were applied implicitly in the
   /// lookup, for contexts where that is permitted.
@@ -2072,10 +2068,6 @@ struct MemberLookupResult {
   void addUnviable(OverloadChoice candidate, UnviableReason reason) {
     UnviableCandidates.push_back(candidate);
     UnviableReasons.push_back(reason);
-  }
-
-  std::optional<unsigned> getFavoredIndex() const {
-    return (FavoredChoice == ~0U) ? std::optional<unsigned>() : FavoredChoice;
   }
 };
 
@@ -3514,7 +3506,8 @@ public:
   /// Add the appropriate constraint for a contextual conversion.
   void addContextualConversionConstraint(Expr *expr, Type conversionType,
                                          ContextualTypePurpose purpose,
-                                         ConstraintLocator *locator);
+                                         ConstraintLocator *locator,
+                                         bool shouldOpenOpaqueType = true);
 
   /// Convenience function to pass an \c ArrayRef to \c addJoinConstraint
   Type addJoinConstraint(ConstraintLocator *locator,
@@ -3677,26 +3670,6 @@ public:
                                    useDC, functionRefInfo,
                                    getConstraintLocator(locator)));
       }
-      break;
-    }
-  }
-
-  /// Add a value witness constraint to the constraint system.
-  void addValueWitnessConstraint(
-      Type baseTy, ValueDecl *requirement, Type memberTy, DeclContext *useDC,
-      FunctionRefInfo functionRefInfo, ConstraintLocatorBuilder locator) {
-    assert(baseTy);
-    assert(memberTy);
-    assert(requirement);
-    assert(useDC);
-    switch (simplifyValueWitnessConstraint(
-        ConstraintKind::ValueWitness, baseTy, requirement, memberTy, useDC,
-        functionRefInfo, TMF_GenerateConstraints, locator)) {
-    case SolutionKind::Unsolved:
-      llvm_unreachable("Unsolved result when generating constraints!");
-
-    case SolutionKind::Solved:
-    case SolutionKind::Error:
       break;
     }
   }
@@ -4425,8 +4398,7 @@ public:
   /// Add a new overload set to the list of unresolved overload
   /// sets.
   void addOverloadSet(Type boundType, ArrayRef<OverloadChoice> choices,
-                      DeclContext *useDC, ConstraintLocator *locator,
-                      std::optional<unsigned> favoredIndex = std::nullopt);
+                      DeclContext *useDC, ConstraintLocator *locator);
 
   void addOverloadSet(ArrayRef<Constraint *> choices,
                       ConstraintLocator *locator);
@@ -4527,9 +4499,6 @@ public:
   ///
   /// \param locator The locator to use when generating constraints.
   ///
-  /// \param favoredIndex If there is a "favored" or preferred choice
-  /// this is its index in the set of choices.
-  ///
   /// \param requiresFix Determines whether choices require a fix to
   /// be included in the result. If the fix couldn't be provided by
   /// `getFix` for any given choice, such choice would be filtered out.
@@ -4541,7 +4510,6 @@ public:
       SmallVectorImpl<Constraint *> &constraints, Type type,
       ArrayRef<OverloadChoice> choices, DeclContext *useDC,
       ConstraintLocator *locator,
-      std::optional<unsigned> favoredIndex = std::nullopt,
       bool requiresFix = false,
       llvm::function_ref<ConstraintFix *(unsigned, const OverloadChoice &)>
           getFix = [](unsigned, const OverloadChoice &) { return nullptr; });
@@ -4940,11 +4908,17 @@ private:
       ArrayRef<OverloadChoice> outerAlternatives, TypeMatchOptions flags,
       ConstraintLocatorBuilder locator);
 
-  /// Attempt to simplify the given value witness constraint.
-  SolutionKind simplifyValueWitnessConstraint(
-      ConstraintKind kind, Type baseType, ValueDecl *member, Type memberType,
-      DeclContext *useDC, FunctionRefInfo functionRefInfo,
-      TypeMatchOptions flags, ConstraintLocatorBuilder locator);
+  /// Lookup a dependent member, returning a null Type and recording a fix on
+  /// failure.
+  Type lookupDependentMember(Type base, AssociatedTypeDecl *assocTy,
+                             bool openExistential,
+                             ConstraintLocatorBuilder locator);
+
+  /// Attempt to simplify the ForEachElement constraint.
+  SolutionKind
+  simplifyForEachElementConstraint(Type first, Type second,
+                                   TypeMatchOptions flags,
+                                   ConstraintLocatorBuilder locator);
 
   /// Attempt to simplify the optional object constraint.
   SolutionKind simplifyOptionalObjectConstraint(

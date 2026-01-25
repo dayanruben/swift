@@ -3245,6 +3245,11 @@ done:
 
 Expr *SILGenFunction::findStorageReferenceExprForMoveOnly(Expr *argExpr,
                                            StorageReferenceOperationKind kind) {
+  if (auto *OV = dyn_cast<OpaqueValueExpr>(argExpr)) {
+    if (auto *underlying = OpaqueExprs.lookup(OV))
+      argExpr = underlying;
+  }
+
   ForceValueExpr *forceUnwrap = nullptr;
   // Check for a force unwrap. This might show up inside or outside of the
   // load.
@@ -5474,14 +5479,14 @@ ManagedValue CallEmission::applyBorrowMutateAccessor() {
   }
 
   auto value = SGF.applyBorrowMutateAccessor(
-      uncurriedLoc.value(), fnValue, canUnwind, callee.getSubstitutions(),
+      uncurriedLoc.value(), fnValue, callee.getSubstitutions(),
       uncurriedArgs, calleeTypeInfo.substFnType, options);
 
   return value;
 }
 
 ManagedValue SILGenFunction::applyBorrowMutateAccessor(
-    SILLocation loc, ManagedValue fn, bool canUnwind, SubstitutionMap subs,
+    SILLocation loc, ManagedValue fn, SubstitutionMap subs,
     ArrayRef<ManagedValue> args, CanSILFunctionType substFnType,
     ApplyOptions options) {
   // Emit the call.
@@ -7869,12 +7874,13 @@ bool SILGenFunction::canUnwindAccessorDeclRef(SILDeclRef accessorRef) {
   auto kind = accessor->getAccessorKind();
   ASSERT(isYieldingAccessor(kind) && "only yielding accessors can unwind");
   if (!requiresFeatureCoroutineAccessors(kind)) {
-    // _read and _modify can unwind
+    // Legacy _read and _modify can unwind, skipping
+    // the second half of the coroutine
     return true;
   }
-  // Coroutine accessors can only unwind with the experimental feature.
-  return getASTContext().LangOpts.hasFeature(
-      Feature::CoroutineAccessorsUnwindOnCallerError);
+  // `yielding borrow` and `yielding mutate` coroutines
+  // never unwind; they always run to completion
+  return false;
 }
 
 CleanupHandle
@@ -8047,6 +8053,9 @@ ManagedValue SILGenFunction::emitReadAsyncLetBinding(SILLocation loc,
       return visit(P->getSubPattern());
     }
     void visitBindingPattern(BindingPattern *P) {
+      return visit(P->getSubPattern());
+    }
+    void visitOpaquePattern(OpaquePattern *P) {
       return visit(P->getSubPattern());
     }
     void visitTuplePattern(TuplePattern *P) {
