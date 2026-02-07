@@ -972,6 +972,24 @@ public:
       OptionalEvaluations.pop_back();
     }
 
+    // Register the OVEs in a collection upcast.
+    bool shouldVerify(CollectionUpcastConversionExpr *expr) {
+      if (!shouldVerify(cast<Expr>(expr)))
+        return false;
+
+      if (auto keyConversion = expr->getKeyConversion())
+        OpaqueValues[keyConversion.OrigValue] = 0;
+      if (auto valueConversion = expr->getValueConversion())
+        OpaqueValues[valueConversion.OrigValue] = 0;
+      return true;
+    }
+    void cleanup(CollectionUpcastConversionExpr *expr) {
+      if (auto keyConversion = expr->getKeyConversion())
+        OpaqueValues.erase(keyConversion.OrigValue);
+      if (auto valueConversion = expr->getValueConversion())
+        OpaqueValues.erase(valueConversion.OrigValue);
+    }
+
     /// Canonicalize the given DeclContext pointer, in terms of
     /// producing something that can be looked up in
     /// ClosureDiscriminators.
@@ -1889,7 +1907,7 @@ public:
         //        currently visiting arguments of an apply when we
         //        find these conversions.
         if (auto *upcast = dyn_cast<CollectionUpcastConversionExpr>(subExpr)) {
-          subExpr = upcast->getValueConversion();
+          subExpr = upcast->getValueConversion().Conversion;
           continue;
         }
 
@@ -2898,17 +2916,27 @@ public:
         DeclContext *conformingDC = conformance->getDeclContext();
 
         ProtocolDecl *derived = dyn_cast<ProtocolDecl>(decl);
-        if (!derived) {
-          auto *ext = cast<ExtensionDecl>(decl);
-          derived = ext->getExtendedProtocolDecl();
-          ASSERT(derived);
-          conformingDC = ext;
-        }
 
         auto malformedHeader = [&]() {
           Out << "Reparented conformance 'some " << derived->getName().str()
               << "' : " << base->getName().str() << " is malformed.\n";
         };
+
+        if (!derived) {
+          derived = conformingDC->getExtendedProtocolDecl();
+          // Extensions have the same set of conformances as the protocol,
+          // so there's no need to verify the conformance for its extensions.
+          // We'll just ensure it's an extension of the expected protocol.
+          auto *ext = cast<ExtensionDecl>(decl);
+          if (ext->getExtendedProtocolDecl() != derived) {
+            malformedHeader();
+            Out << "An extension of a different protocol at: \n";
+            ext->printContext(Out);
+            Out << "was associated with this conformance!\n";
+            abort();
+          }
+          return; // All good!
+        }
 
         if (!isa<ExtensionDecl>(conformingDC)) {
           malformedHeader();
@@ -2918,16 +2946,6 @@ public:
         }
 
         auto *ext = cast<ExtensionDecl>(conformingDC);
-
-        if (normal->getDeclContext() != conformingDC) {
-          malformedHeader();
-          Out << "Owning and conformance context are mismatched.\n";
-          Out << "Owning context:\n";
-          conformingDC->printContext(Out);
-          Out << "Conformance context:\n";
-          normal->getDeclContext()->printContext(Out);
-          abort();
-        }
 
         if (!ext->isInSameDefiningModule(
                 /*RespectOriginallyDefinedIn*/ false)) {
@@ -2961,8 +2979,6 @@ public:
           derived->printContext(Out);
           abort();
         }
-
-        return; // All good!
       }
 
       // Translate the owning declaration into a DeclContext.
@@ -2977,7 +2993,7 @@ public:
       }
 
       auto proto = conformance->getProtocol();
-      if (normal->getDeclContext() != conformingDC) {
+      if (normal->getDeclContext() != conformingDC && !normal->isReparented()) {
         Out << "AST verification error: conformance of "
             << nominal->getName().str() << " to protocol "
             << proto->getName().str() << " is in the wrong context.\n"

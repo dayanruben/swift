@@ -1298,8 +1298,7 @@ public:
   /// \param locator Locator used to describe the location of this expression.
   ///
   /// \returns the coerced expression, which will have type \c ToType.
-  Expr *coerceToType(Expr *expr, Type toType, ConstraintLocator *locator,
-                     DeclContext &dc);
+  Expr *coerceToType(Expr *expr, Type toType, ConstraintLocator *locator);
 
   /// Compute the set of substitutions for a generic signature opened at the
   /// given locator.
@@ -2050,12 +2049,6 @@ public:
   /// ad-hoc distributed `SerializationRequirement` conformances).
   llvm::DenseMap<ConstraintLocator *, ProtocolDecl *>
       SynthesizedConformances;
-
-  /// A mapping between an input expr and a custom simulated initial depth for
-  /// the constraint system's depth map.
-  /// FIXME: This only exists for a narrow compatibility hack and should be
-  /// removed.
-  llvm::DenseMap<Expr *, unsigned> InputExprSimulatedDepths;
 
 private:
   /// Describes the current solver state.
@@ -4444,8 +4437,7 @@ private:
   /// failure.
   Type lookupDependentMember(Type base, AssociatedTypeDecl *assocTy,
                              bool openExistential,
-                             ConstraintLocatorBuilder locator,
-                             ProtocolConformanceRef *conformanceOut = nullptr);
+                             ConstraintLocatorBuilder locator);
 
   /// Attempt to simplify the ForEachElement constraint.
   SolutionKind
