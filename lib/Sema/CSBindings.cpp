@@ -1712,6 +1712,10 @@ bool swift::constraints::inference::checkTypeOfBinding(
 }
 
 bool BindingSet::isDelayedByDisjunction() const {
+  if (!TypeVar->getImpl().canBindToLValue())
+    return false;
+
+  // Result type of subscript could be l-value so we can't bind it early.
   if (TypeVar->getImpl().isSubscriptResultType())
     return true;
 
@@ -1727,7 +1731,6 @@ bool BindingSet::favoredOverDisjunction(Constraint *disjunction) const {
     return false;
 
   if (!CS.shouldAttemptFixes()) {
-    // Result type of subscript could be l-value so we can't bind it early.
     if (!isDelayedByDisjunction()) {
       if (getNumExactBindings() > 0)
         return true;
