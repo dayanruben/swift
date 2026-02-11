@@ -2748,6 +2748,17 @@ void BindingSet::dump(llvm::raw_ostream &out, unsigned indent) const {
   std::vector<std::string> attributes;
   if (isDirectHole())
     attributes.push_back("hole");
+  switch (getLValueState()) {
+  case KnownLValueKind::Unknown:
+    attributes.push_back("maybe_lvalue");
+    break;
+  case KnownLValueKind::LValue:
+    attributes.push_back("definitely_lvalue");
+    break;
+  case KnownLValueKind::RValue:
+    break;
+  }
+
   if (isPotentiallyIncomplete())
     attributes.push_back("potentially_incomplete");
   if (isDelayed())
