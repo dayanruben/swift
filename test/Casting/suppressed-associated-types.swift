@@ -8,6 +8,9 @@
 // REQUIRES: swift_feature_SuppressedAssociatedTypesWithDefaults
 // REQUIRES: swift_feature_SuppressedAssociatedTypes
 
+// UNSUPPORTED: use_os_stdlib
+// UNSUPPORTED: back_deployment_runtime
+
 protocol BothC {
     func bothC()
 }
