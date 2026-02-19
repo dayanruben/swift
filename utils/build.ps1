@@ -2328,7 +2328,8 @@ function Test-Compilers([Hashtable] $Platform, [string] $Variant, [switch] $Test
         # Check for required Python modules in CMake
         LLDB_ENFORCE_STRICT_TEST_REQUIREMENTS = "YES";
         # No watchpoint support on windows: https://github.com/llvm/llvm-project/issues/24820
-        LLDB_TEST_USER_ARGS = "--skip-category=watchpoint";
+        LLDB_TEST_USER_ARGS = "--skip-category=watchpoint;--sysroot=$(Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK)";
+        LLDB_TEST_SWIFT_DRIVER_EXTRA_FLAGS = "-sdk $(Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK)"
         # gtest sharding breaks llvm-lit's --xfail and LIT_XFAIL inputs: https://github.com/llvm/llvm-project/issues/102264
         LLVM_LIT_ARGS = "-v --no-gtest-sharding --time-tests";
         # LLDB Unit tests link against this library
@@ -2873,6 +2874,8 @@ function Build-ExperimentalRuntime([Hashtable] $Platform, [switch] $Static = $fa
         dispatch_DIR = (Get-ProjectCMakeModules $Platform CDispatch);
 
         # FIXME(compnerd) remove this once the default option is flipped to `ON`.
+        SwiftCore_ENABLE_BACKTRACING = "YES";
+        # FIXME(compnerd) remove this once the default option is flipped to `ON`.
         SwiftCore_ENABLE_CONCURRENCY = "YES";
         # FIXME(compnerd) remove this once the default option is flipped to `ON`.
         SwiftCore_ENABLE_REMOTE_MIRROR = "YES";
@@ -3045,6 +3048,8 @@ function Build-ExperimentalRuntime([Hashtable] $Platform, [switch] $Static = $fa
         # FIXME(compnerd) this currently causes a build failure on Windows, but
         # this should be enabled when building the dynamic runtime.
         SwiftRuntime_ENABLE_LIBRARY_EVOLUTION = "NO";
+
+        SwiftRuntime_ENABLE_BACKTRACING = "YES";
       }
   }
 }
