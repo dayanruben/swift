@@ -1379,7 +1379,7 @@ const BindingSet *ConstraintSystem::determineBestBindings() {
 
       const auto &bindings = node.getBindingSet();
 
-      if (isDebugMode() && bindings.hasViableBindings()) {
+      if (bindings.hasViableBindings()) {
         if (first) {
           llvm::errs().indent(solverState->getCurrentIndent())
               << "(Potential Binding(s)\n";
@@ -1389,11 +1389,11 @@ const BindingSet *ConstraintSystem::determineBestBindings() {
         bindings.dump(log, solverState->getCurrentIndent() + 2);
         log << "\n";
       }
+    }
 
-      if (!first) {
-        auto &log = llvm::errs().indent(solverState->getCurrentIndent());
-        log << ")\n";
-      }
+    if (!first) {
+      auto &log = llvm::errs().indent(solverState->getCurrentIndent());
+      log << ")\n";
     }
   }
 
