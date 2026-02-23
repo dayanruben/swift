@@ -342,7 +342,7 @@ swift::checkGlobalActorAttributes(SourceLoc loc, ArrayRef<CustomAttr *> attrs) {
           nominal->getName());
 
       ctx.Diags.diagnose(attr->getLocation(), diag::multiple_global_actors_note,
-                         nominal->getName());
+                         nominal);
 
       continue;
     }
