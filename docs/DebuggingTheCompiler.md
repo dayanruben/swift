@@ -7,8 +7,8 @@ This document contains some useful information for debugging:
 * Intermediate output of the Swift Compiler.
 * Swift applications at runtime.
 
-Please feel free to add any useful tips that one finds to this document for the
-benefit of all Swift developers.
+This is a living guide maintained by Swift compiler contributors. Contributions
+and corrections are welcome.
 
 **Table of Contents**
 
@@ -97,9 +97,8 @@ swiftc -emit-silgen -O file.swift
 swiftc -emit-sil -Onone file.swift
 ```
 
-  Well, this is not quite true, because the compiler is running some passes
-  for -Onone after the mandatory passes, too. But for most purposes you will
-  get what you want to see.
+  Note: With `-Onone`, a small number of post-mandatory passes still run, but
+  the output is generally sufficient for inspecting the mandatory SIL pipeline.
 
 * **Performance SIL passes** To print the SIL after the complete SIL
    optimization pipeline:
@@ -221,7 +220,7 @@ Type variables:
 (integer_literal_expr type='Int' location=test.swift:3:1 range=[test.swift:3:1 - line:3:1] value=0 builtin_initializer=Swift.(file).Int.init(_builtinIntegerLiteral:) initializer=**NULL**)
 ```
 
-When using swift LLDB REPL, one can dump the same output for each
+When using the Swift REPL (`swift repl`), one can dump the same output for each
 expression as one evaluates the expression by enabling constraints debugging by
 passing the flag `-Xfrontend -debug-constraints`:
 
@@ -938,7 +937,7 @@ format expected by the compiler crashes and undefined behavior may result.
 
 ### Create Ubuntu Container 
 
-1. Use an x86 machine. The following instructions currently don’t work on arm64. It might be easy to adjust them or not, I have not tried
+1. Use an x86 machine. The following instructions currently don’t work on arm64. It might be easy to adjust them or not; this has not been tested.
 2. Clone (or pull) swift-docker: https://github.com/swiftlang/swift-docker
 3. Build the Ubuntu 22.04 container: `cd swift-ci/master/ubuntu/22.04; docker build .`
 4. `docker run -it --cpus <CPUs> --memory <Memory> -v ~/<path to your local sources>:/src-on-host:cached --name lsan-reproducer --cap-add=SYS_PTRACE --security-opt seccomp=unconfined <hash that docker build outputs> bash`
@@ -950,7 +949,7 @@ format expected by the compiler crashes and undefined behavior may result.
 
 1. `utils/build-script --preset buildbot_incremental_linux,lsan,tools=RDA,stdlib=DA,test=no`
 2. This should reproduce the LSAN failure
-3. Now, disassemble the failing CMake invocation to a swiftc invocation. Setting one environment variable and could then copy the swiftc invocation may be necessary (but this might change as the build changes)
+3. Now, disassemble the failing CMake invocation to a swiftc invocation. Setting one environment variable and then copying the swiftc invocation may be necessary (but this might change as the build changes)
 
 ```
 export LD_LIBRARY_PATH=/opt/swift/5.8.1/usr/lib/swift/linux
@@ -959,7 +958,7 @@ export LD_LIBRARY_PATH=/opt/swift/5.8.1/usr/lib/swift/linux
 
 ### Symbolicating the LSAN report
 
-For reasons that are not clear to me, LSAN does not symbolicate the report. To get the functions at the reported offsets, perform the following steps (there might be easier steps, please update this document if you know any).
+By default, LSAN does not symbolicate the report. To get the functions at the reported offsets, perform the following steps (there might be easier steps; please update this document if you know any).
 
 1. Run the swiftc invocation that fails and copy the leak report to somewhere. The leak report should look like the following.
 ```
