@@ -3,6 +3,7 @@
 // REQUIRES: executable_test
 // REQUIRES: synchronization
 // REQUIRES: swift_feature_Lifetimes
+// REQUIRES: swift_feature_BorrowInout
 
 import Builtin
 import Synchronization
