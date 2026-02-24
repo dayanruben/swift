@@ -340,9 +340,9 @@ SIL passes. More information is available in
 [Compiler Performance](CompilerPerformance.md) for the unified statistics, and
 [Optimizer Counter Analysis](OptimizerCountersAnalysis.md) for pass counters.
 
-## Debugging and Profiling on SIL level
+## Debugging and Profiling on SIL Level
 
-### SIL source level profiling
+### SIL Source Level Profiling
 
 The compiler provides a way to debug and profile on SIL level. To enable SIL
 debugging add the front-end option -sil-based-debuginfo together with -g.
@@ -582,10 +582,10 @@ to define custom commands using just other lldb commands. For example,
 Similar to SIL, one can configure LLVM to dump the llvm-ir at various points in
 the pipeline. Here is a quick summary of the various options:
 
-* ``-Xllvm -print-before=$PASS_ID``: Print the LLVM IR before a specified LLVM pass runs.
-* ``-Xllvm -print-before-all``: Print the LLVM IR before each pass runs.
-* ``-Xllvm -print-after-all``: Print the LLVM IR after each pass runs.
-* ``-Xllvm -filter-print-funcs=$FUNC_NAME_1,$FUNC_NAME_2,...,$FUNC_NAME_N``:
+* `-Xllvm -print-before=$PASS_ID`: Print the LLVM IR before a specified LLVM pass runs.
+* `-Xllvm -print-before-all`: Print the LLVM IR before each pass runs.
+* `-Xllvm -print-after-all`: Print the LLVM IR after each pass runs.
+* `-Xllvm -filter-print-funcs=$FUNC_NAME_1,$FUNC_NAME_2,...,$FUNC_NAME_N`:
   When printing IR for functions for print-[before|after]-all options, Only
   print the IR for functions whose name is in this comma separated list.
 
@@ -888,7 +888,7 @@ format expected by the compiler crashes and undefined behavior may result.
 5. Copy the sources to inside the Docker container: `cp -r /src-on-host/* ~`
     - We need to do this because the build needs a case-sensitive file system and your host machine probably has a case-insensitive file system
 
-Build inside the Container
+### Build inside the Container
 
 1. `utils/build-script --preset buildbot_incremental_linux,lsan,tools=RDA,stdlib=DA,test=no`
 2. This should reproduce the LSAN failure
