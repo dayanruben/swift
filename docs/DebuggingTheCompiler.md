@@ -50,7 +50,7 @@ benefit of all Swift developers.
 - [Debugging Swift Executables](#debugging-swift-executables)
     - [Debugging Swift Testing Executables with LLDB](#debugging-swift-testing-executables-with-lldb)
     - [Determining the mangled name of a function in LLDB](#determining-the-mangled-name-of-a-function-in-lldb)
-    - [Manually symbolication using LLDB](#manually-symbolication-using-lldb)
+    - [Manual symbolication using LLDB](#manual-symbolication-using-lldb)
     - [Viewing allocation history, references, and page-level info](#viewing-allocation-history-references-and-page-level-info)
     - [Printing memory contents](#printing-memory-contents)
     - [Windows Error Codes](#windows-error-codes)
@@ -244,7 +244,7 @@ file.swift:18:22: note: through reference here
 20 | 
 ```
 
-To determine the actual circular request that is occuring, one can pass in the
+To determine the actual circular request that is occurring, one can pass in the
 flag `-debug-cycles` to the compiler which will cause the compiler to dump out
 the linear chain of requests that led to the cycle.
 
@@ -476,7 +476,7 @@ breakpoint/crash/assert) you can list the current breakpoints:
 
 which will then show you the number of times that each breakpoint was hit. In
 this case, we know that `GlobalARCOpts::run` was hit 85 times. So, now
-we know to ignore swift_getGenericMetadata 84 times, i.e.:
+we know to ignore `GlobalARCOpts::run` 84 times, i.e.:
 
     (lldb) br set -i 84 -n GlobalARCOpts::run
 
@@ -886,13 +886,13 @@ format expected by the compiler crashes and undefined behavior may result.
 4. `docker run -it --cpus <CPUs> --memory <Memory> -v ~/<path to your local sources>:/src-on-host:cached --name lsan-reproducer --cap-add=SYS_PTRACE --security-opt seccomp=unconfined <hash that docker build outputs> bash`
     - The `-cap-add` and `-security-opt` arguments are needed to run LLDB inside the Docker container
 5. Copy the sources to inside the Docker container: `cp -r /src-on-host/* ~`
-    - We need to to this because the build needs a case-sensitive file system and your host machine probably has a case-insensitive file system
+    - We need to do this because the build needs a case-sensitive file system and your host machine probably has a case-insensitive file system
 
 Build inside the Container
 
 1. `utils/build-script --preset buildbot_incremental_linux,lsan,tools=RDA,stdlib=DA,test=no`
 2. This should reproduce the LSAN failure
-3. Now, disassemble the failing CMake invocation to a swiftc invocation. I needed to set one environment variable and could the copy the swiftc invocation (but this might change as the build changes)
+3. Now, disassemble the failing CMake invocation to a swiftc invocation. Setting one environment variable and could then copy the swiftc invocation may be necessary (but this might change as the build changes)
 
 ```
 export LD_LIBRARY_PATH=/opt/swift/5.8.1/usr/lib/swift/linux
@@ -924,7 +924,7 @@ For example, this might output
 [  2] 9EA8014C-F020-21A2-9E57-AA3E0512E9BB-6E30541D 0x00007ffff7dd3000 /lib/x86_64-linux-gnu/ld-2.27.so
 ```
 The loaded offset is `0x0000555555554000`
-5. For the frame that you want to symbolicate,, add the offset you computed above to the stack frame in the LSAN report, eg. to symbolicate frame 1 `0x555555554000 + 0x292d81c = 0x555557E8181C`
+5. For the frame that you want to symbolicate, add the offset you computed above to the stack frame in the LSAN report, eg. to symbolicate frame 1 `0x555555554000 + 0x292d81c = 0x555557E8181C`
 6. Look up the address using `image lookup -a <address you computed>`. This should output something like
 
 ```
@@ -933,7 +933,7 @@ The loaded offset is `0x0000555555554000`
       Summary: swiftc`registerFunctionTest(BridgedStringRef, void*) + 28 at SILBridging.cpp:148:3
 ```
 
-7. Hoorray, you know which function is leaking.
+7. Hooray, you know which function is leaking.
 
 ### Making Local Changes Inside the Container
 
@@ -950,7 +950,7 @@ $ apt install vim
 In order to determine which swiftinterface files or modules a compiler is
 loading, one can pass in the `-Rmodule-loading` flag to the compiler. This will
 cause the compiler to emit diagnostics that show where it is loading modules
-from. E.x.:
+from. e.g.:
 
 ```
 <unknown>:0: remark: 'Swift' has a required transitive dependency on 'SwiftShims'
@@ -1124,7 +1124,7 @@ function in the current frame:
     Module: file = "/Volumes/Files/work/solon/build/build-swift/validation-test-macosx-x86_64/stdlib/Output/CollectionType.swift.gyb.tmp/CollectionType3", arch = "x86_64"
     Symbol: id = {0x0000008c}, range = [0x0000000100004db0-0x00000001000056f0), name="ext.CollectionType3.CollectionType3.MutableCollectionType2<A where A: CollectionType3.MutableCollectionType2>.(subscript.materializeForSet : (Swift.Range<A.Index>) -> Swift.MutableSlice<A>).(closure #1)", mangled="_TFFeRq_15CollectionType322MutableCollectionType2_S_S0_m9subscriptFGVs5Rangeqq_s16MutableIndexable5Index_GVs12MutableSliceq__U_FTBpRBBRQPS0_MS4__T_"
 
-## Manually symbolication using LLDB
+## Manual symbolication using LLDB
 
 One can perform manual symbolication of a crash log or an executable using LLDB
 without running the actual executable. For a detailed guide on how to do this,
@@ -1215,7 +1215,7 @@ The following specifiers are available:
 
 ## Windows Error Codes
 
-When debugging programs on Windows, sometimes one will run into an error message with a mysterious error code. E.x.:
+When debugging programs on Windows, sometimes one will run into an error message with a mysterious error code. e.g.:
 
 ```
 note: command had no output on stdout or stderr
@@ -1246,7 +1246,7 @@ Some relevant Microsoft documentation:
 
 ## Debugging Simulator Apps
 
-Sometimes one has to debug apps compiled for one of the simulators (e.x.: iOS
+Sometimes one has to debug apps compiled for one of the simulators (e.g.: iOS
 simulator). To manipulate the simulator from the command line, one uses the tool
 called `simctl`. This lets one perform actions such as installing apps,
 uninstalling apps, and of course launching apps. To pass through environment
@@ -1332,7 +1332,7 @@ logging, and only then run the bad expression.
 
 ## Multiple Logs at a Time
 
-Note, you can also turn on more than one log at a time as well, e.x.:
+Note, you can also turn on more than one log at a time as well, e.g.:
 
     (lldb) log enable -f /tmp/lldb-types-log.txt lldb types expression
 
