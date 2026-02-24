@@ -337,10 +337,10 @@ func check(it: ProtectedIteratorBase) {
 }
 
 func check(it: HasInheritedProtectedCopyConstructor) {
-  checkInput(it)                // expected-error {{requires}} // FIXME
+  checkInput(it)
   checkRandomAccess(it)         // expected-error {{requires}}
   checkContiguous(it)           // expected-error {{requires}}
-  checkMutableInput(it)         // expected-error {{requires}} // FIXME
+  checkMutableInput(it)
   checkMutableRandomAccess(it)  // expected-error {{requires}}
   checkMutableContiguous(it)    // expected-error {{requires}}
 }
