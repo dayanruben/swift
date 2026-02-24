@@ -50,6 +50,7 @@
 #include "swift/AST/ResilienceExpansion.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/Stmt.h"
+#include "swift/AST/StorageImpl.h"
 #include "swift/AST/SwiftNameTranslation.h"
 #include "swift/AST/TypeCheckRequests.h"
 #include "swift/AST/TypeLoc.h"
@@ -7054,6 +7055,20 @@ ArtificialMainKind Decl::getArtificialMainKind() const {
   if (isa<FuncDecl>(this))
     return ArtificialMainKind::TypeMain;
   llvm_unreachable("type has no @Main attr?!");
+}
+
+bool Decl::canSupportBorrowAccessors() const {
+  if (isa<StructDecl>(this)) {
+    return true;
+  }
+  if (auto *extension = dyn_cast<ExtensionDecl>(this)) {
+    auto *extendedNominal = extension->getExtendedNominal();
+    if (extendedNominal && isa<StructDecl>(extendedNominal)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 static bool isOverridingDecl(const ValueDecl *Derived,
