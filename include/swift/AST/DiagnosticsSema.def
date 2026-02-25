@@ -5531,7 +5531,8 @@ ERROR(tuple_pattern_label_mismatch,none,
 ERROR(enum_element_pattern_member_not_found,none,
       "enum case %0 not found in type %1", (DeclNameRef, Type))
 ERROR(optional_element_pattern_not_valid_type,none,
-      "'?' pattern cannot match values of type %0", (Type))
+      "optional pattern '?' cannot match value of non-optional type %0",
+      (Type))
 ERROR(condition_optional_element_pattern_not_valid_type,none,
       "initializer for conditional binding must have Optional type, not %0",
       (Type))
