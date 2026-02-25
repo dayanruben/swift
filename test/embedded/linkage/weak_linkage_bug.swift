@@ -23,6 +23,7 @@
 // REQUIRES: executable_test
 // REQUIRES: swift_feature_Embedded
 // REQUIRES: swift_feature_EmbeddedExistentials
+// REQUIRES: swift_feature_CoroutineAccessors
 
 // CHECK: MyClass.foo
 
