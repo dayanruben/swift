@@ -41,7 +41,7 @@ FormalLinkage swift::getDeclLinkage(const ValueDecl *D) {
           !D->getObjCImplementationDecl())
     return FormalLinkage::PublicNonUnique;
 
-  if (D->getASTContext().LangOpts.hasFeature(Feature::Embedded))
+  if (SILDeclRef::declHasNonUniqueDefinition(D))
     return FormalLinkage::PublicUnique;
 
   switch (D->getEffectiveAccess()) {
