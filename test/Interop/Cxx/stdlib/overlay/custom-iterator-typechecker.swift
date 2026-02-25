@@ -344,3 +344,155 @@ func check(it: HasInheritedProtectedCopyConstructor) {
   checkMutableRandomAccess(it)  // expected-error {{requires}}
   checkMutableContiguous(it)    // expected-error {{requires}}
 }
+
+func check(it: TaglessNewPtr) {
+  checkInput(it)                // expected-error {{requires}}
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)         // expected-error {{requires}}
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+func check(it: InputCategoryNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+func check(it: ForwardCategoryNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+func check(it: RandomAccessCategoryNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+#if CPP20
+
+func check(it: ContiguousCategoryNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)
+}
+
+func check(it: InputConceptNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-cpp20-error {{requires}}
+  checkContiguous(it)           // expected-cpp20-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-cpp20-error {{requires}}
+  checkMutableContiguous(it)    // expected-cpp20-error {{requires}}
+}
+
+func check(it: ForwardConceptNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-cpp20-error {{requires}}
+  checkContiguous(it)           // expected-cpp20-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-cpp20-error {{requires}}
+  checkMutableContiguous(it)    // expected-cpp20-error {{requires}}
+}
+
+func check(it: RandomAccessConceptNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)           // expected-cpp20-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)    // expected-cpp20-error {{requires}}
+}
+
+func check(it: ContiguousConceptNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)
+}
+
+func check(it: InvalidContiguousCategoryNewPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)           // expected-cpp20-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)    // expected-cpp20-error {{requires}}
+}
+
+#endif // CPP20
+
+func check(it: BasicLegacyPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+func check(it: NotALegacyPtr) {
+  checkInput(it)                // expected-error {{requires}}
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)         // expected-error {{requires}}
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+func check(it: InputCategoryLegacyPtr) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+#if CPP20
+
+func check(it: InputConceptLegacyPtr) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-cpp20-error {{requires}}
+  checkContiguous(it)           // expected-cpp20-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-cpp20-error {{requires}}
+  checkMutableContiguous(it)    // expected-cpp20-error {{requires}}
+}
+
+func check(it: ContiguousConceptLegacyPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)
+}
+
+func check(it: InputCategoryContiguousConceptLegacyPtr) {
+  checkInput(it)
+  checkRandomAccess(it)
+  checkContiguous(it)
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)
+  checkMutableContiguous(it)
+}
+
+#endif // CPP20

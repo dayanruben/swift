@@ -533,6 +533,31 @@ CxxIteratorInfoRequest::evaluate(Evaluator &evaluator,
                                  CxxRecordDeclDescriptor desc) const {
   auto *decl = desc.decl;
   auto &sema = desc.sema;
+  auto &ctx = decl->getASTContext();
+
+  // Look for a non-primary specialization of std::iterator_traits<decl>.
+  //
+  // If one exists, use its iterator tag, but don't try to instantiate
+  // a specialization if there isn't already one.
+  if (auto *stdNS = sema.getStdNamespace()) {
+    auto iteratorTraitsId =
+        ctx.DeclarationNames.getIdentifier(&ctx.Idents.get("iterator_traits"));
+    if (auto *iterator_traits = stdNS->lookup(iteratorTraitsId)
+                                    .find_first<clang::ClassTemplateDecl>()) {
+      void *insertPos = nullptr; // unused
+      if (auto *traitSpecialization = iterator_traits->findSpecialization(
+              {clang::TemplateArgument(ctx.getTypeDeclType(decl))}, insertPos);
+          traitSpecialization && traitSpecialization->hasDefinition()) {
+        if (traitSpecialization->isExplicitSpecialization()) {
+          // Determine info from definition of iterator_traits specialization,
+          // but only if it is a non-primary specialization.
+          //
+          // N.B. decl is ITER_TRAITS from [iterator.concepts.general]
+          decl = traitSpecialization->getDefinition();
+        }
+      }
+    }
+  }
 
   if (sema.getLangOpts().CPlusPlus20) {
     // Only look for iterator_concept if we are using C++20 or above.
