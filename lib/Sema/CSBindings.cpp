@@ -1933,7 +1933,8 @@ bool BindingSet::favoredOverConjunction(Constraint *conjunction) const {
       auto *closureType = CS.getType(closure)->castTo<TypeVariableType>();
       return llvm::any_of(
           conjunction->getTypeVariables(), [&](TypeVariableType *typeVar) {
-            return !(typeVar == closureType || CS.getFixedType(typeVar));
+            return (typeVar != closureType &&
+                    CS.simplifyType(typeVar)->hasTypeVariable());
           });
     }
   }
