@@ -5,6 +5,8 @@
 
 // REQUIRES: swift_feature_CoroutineAccessors
 
+// REQUIRES: OS_FAMILY=darwin || OS=linux-gnu
+
 // Simple struct available before CoroutineAccessors feature is present:
 
 // We have to emit a `_modify` to support old clients, and
