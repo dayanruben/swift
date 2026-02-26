@@ -2,7 +2,7 @@
 
 // REQUIRES: VENDOR=apple
 
-@available(macOS 15.4, *)
+@available(SwiftStdlib 6.1, *)
 actor Bar<T> {
   isolated deinit {}
 }
