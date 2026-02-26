@@ -2,6 +2,11 @@
 
 // REQUIRES: VENDOR=apple
 
+@available(macOS 15.4, *)
+actor Bar<T> {
+  isolated deinit {}
+}
+
 @MainActor
 final class Foo<T> {
   isolated deinit {}
