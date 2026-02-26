@@ -1,0 +1,15 @@
+// RUN: %empty-directory(%t)
+// RUN: split-file %s %t
+
+// RUN: %update-generated-tests %t/test.txt
+// RUN: %diff %t/test.txt %t/test.expected
+
+//--- test.txt
+// Leave this comment
+// GENERATED-BY: echo hello
+placeholder
+
+//--- test.expected
+// Leave this comment
+// GENERATED-BY: echo hello
+hello

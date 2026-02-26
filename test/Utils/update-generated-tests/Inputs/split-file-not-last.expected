@@ -1,0 +1,5 @@
+//--- a.txt
+// GENERATED-BY: echo hello
+hello
+//--- b.txt
+unchanged
