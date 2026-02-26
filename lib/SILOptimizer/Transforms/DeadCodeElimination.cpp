@@ -17,7 +17,6 @@
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SIL/MemAccessUtils.h"
 #include "swift/SIL/NodeBits.h"
-#include "swift/SIL/OSSACompleteLifetime.h"
 #include "swift/SIL/OwnershipUtils.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBasicBlock.h"
@@ -66,28 +65,6 @@ static bool seemsUseful(SILInstruction *I) {
 
   if (llvm::any_of(I->getResults(),
                    [](auto result) { return result->isLexical(); })) {
-    return true;
-  }
-
-  // Instructions which end the lifetimes of values which escape can only be
-  // deleted if compensating lifetime ends are added.  Compensating lifetime
-  // ends are added by OSSACompleteLifetime when the def block of the value
-  // is different from the parent block of the instruction.  But
-  // OSSACompleteLifetime requires that liveness be complete--that there are no
-  // pointer escapes.  So we can't delete instructions which end the lifetime
-  // of values which escape to a pointer and whose parent blocks are different.
-  if (llvm::any_of(I->getAllOperands(), [I](Operand &operand) {
-        if (!operand.isLifetimeEnding())
-          return false;
-        auto value = operand.get();
-        if (isa<SILUndef>(value))
-          return false;
-        auto *insertionPoint = value->getDefiningInsertionPoint();
-        ASSERT(insertionPoint);
-        if (insertionPoint->getParent() == I->getParent())
-          return false;
-        return findPointerEscape(value);
-      })) {
     return true;
   }
 
