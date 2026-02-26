@@ -1392,6 +1392,19 @@ template <> struct std::iterator_traits<InvalidContiguousCategoryNewPtr> : NewPt
 };
 #endif // __cplusplus >= 202002L
 
+using IteratorTagOfMemberTypedef = NewPtr<__LINE__>;
+template <> struct std::iterator_traits<IteratorTagOfMemberTypedef> : NewPtrTraits {
+  using the_category = std::input_iterator_tag;
+  using iterator_category = the_category;
+};
+
+using non_member_input_iterator_tag = std::input_iterator_tag;
+using IteratorTagOfNonMemberTypedef = NewPtr<__LINE__>;
+template <> struct std::iterator_traits<IteratorTagOfNonMemberTypedef> : NewPtrTraits {
+  using iterator_category = non_member_input_iterator_tag;
+};
+
+
 // A simple wrapper around a char * with all the operator members required of
 // a full-strength iterator, plus a std::random_access_iterator_tag.
 //

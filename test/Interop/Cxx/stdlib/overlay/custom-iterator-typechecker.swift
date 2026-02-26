@@ -439,6 +439,24 @@ func check(it: InvalidContiguousCategoryNewPtr) {
 
 #endif // CPP20
 
+func check(it: IteratorTagOfMemberTypedef) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
+func check(it: IteratorTagOfNonMemberTypedef) {
+  checkInput(it)
+  checkRandomAccess(it)         // expected-error {{requires}}
+  checkContiguous(it)           // expected-error {{requires}}
+  checkMutableInput(it)
+  checkMutableRandomAccess(it)  // expected-error {{requires}}
+  checkMutableContiguous(it)    // expected-error {{requires}}
+}
+
 func check(it: BasicLegacyPtr) {
   checkInput(it)
   checkRandomAccess(it)
