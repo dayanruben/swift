@@ -3640,6 +3640,7 @@ function Build-LLBuild([Hashtable] $Platform) {
     -SwiftSDK (Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK) `
     -Defines @{
       BUILD_SHARED_LIBS = "YES";
+      BUILD_TESTING = "NO";
       LLBUILD_SUPPORT_BINDINGS = "Swift";
       SQLite3_INCLUDE_DIR = "$SourceCache\swift-toolchain-sqlite\Sources\CSQLite\include";
       SQLite3_LIBRARY = "$(Get-ProjectBinaryCache $Platform SQLite)\SQLite3.lib";
