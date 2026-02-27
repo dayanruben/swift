@@ -480,13 +480,15 @@ static bool swiftifyImpl(ClangImporter::Implementation &Self,
                          const T *ClangDecl) {
   DLOG_SCOPE("Checking '" << *ClangDecl << "' for bounds and lifetime info\n");
 
-  if (ClangDecl->hasAttrs())
-    for (auto attr : ClangDecl->getAttrs())
-      if (auto swiftAttr = dyn_cast<clang::SwiftAttrAttr>(attr))
-        if (swiftAttr->getAttribute() == "no_safe_wrapper") {
-          DLOG("skipping function with no_safe_wrapper\n");
-          return false;
-        }
+  if (ClangDecl->hasAttrs()) {
+    for (auto *attr : ClangDecl->getAttrs()) {
+      if (auto *swiftAttr = dyn_cast<clang::SwiftAttrAttr>(attr);
+          swiftAttr && swiftAttr->getAttribute() == "no_safe_wrapper") {
+        DLOG("skipping function with no_safe_wrapper\n");
+        return false;
+      }
+    }
+  }
 
   // FIXME: for private macro generated functions we do not serialize the
   // SILFunction's body anywhere triggering assertions.
