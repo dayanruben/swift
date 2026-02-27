@@ -8,6 +8,8 @@ struct Foo {
   func nonMutating() -> Int
 
   mutating func mutatingMethod(x: Int)
+
+  func unsafeMethod(p: UnsafeMutablePointer<Int>)
 }
 
 //--- out.swift.expected
@@ -19,4 +21,7 @@ func call_nonMutating(_ self: Foo) -> Int {
 }
 func call_mutatingMethod(_ self: inout Foo, x: Int) {
   return self.mutatingMethod(x: x)
+}
+func call_unsafeMethod(_ self: inout Foo, p: UnsafeMutablePointer<Int>) {
+  return unsafe self.unsafeMethod(p: p)
 }

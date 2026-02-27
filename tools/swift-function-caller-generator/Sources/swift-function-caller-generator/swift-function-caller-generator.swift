@@ -144,8 +144,11 @@ class TypeAliasReplacer: SyntaxRewriter {
 
 func createBody(_ f: FunctionDeclSyntax, selfParam: TokenSyntax?) -> CodeBlockSyntax {
   var call = createCall(f)
+  let unsafeKw = hasUnsafeType(f) ? "unsafe " : ""
   if let selfParam {
-    call = "\(selfParam).\(call)"
+    call = "\(raw: unsafeKw)\(selfParam).\(call)"
+  } else {
+    call = "\(raw: unsafeKw)\(call)"
   }
   return
     """
@@ -177,8 +180,7 @@ func createCall(_ f: FunctionDeclSyntax) -> ExprSyntax {
     return LabeledExprSyntax(
       label: label?.withoutBackticks, colon: colon, expression: arg, trailingComma: comma)
   }
-  let unsafeKw = hasUnsafeType(f) ? "unsafe " : ""
-  return ExprSyntax("\(raw: unsafeKw)\(f.name)(\(LabeledExprListSyntax(labeledArgs)))")
+  return ExprSyntax("\(f.name)(\(LabeledExprListSyntax(labeledArgs)))")
 }
 
 func hasUnsafeType(_ f: FunctionDeclSyntax) -> Bool {
