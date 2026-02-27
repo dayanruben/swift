@@ -14,7 +14,7 @@ struct Foo {
 import Test
 
 
-func call_nonMutating(_ self: Foo, ) -> Int {
+func call_nonMutating(_ self: Foo) -> Int {
   return self.nonMutating()
 }
 func call_mutatingMethod(_ self: inout Foo, x: Int) {

@@ -228,7 +228,8 @@ func addSelfParam(
   isMutating: Bool = false
 ) -> FunctionParameterListSyntax {
   let typeStr = isMutating ? "inout \(type.trimmed)" : "\(type.trimmed)"
-  return [FunctionParameterSyntax("_ \(name): \(raw: typeStr), ")] + params
+  let comma = params.isEmpty ? "" : ", "
+  return [FunctionParameterSyntax("_ \(name): \(raw: typeStr)\(raw: comma)")] + params
 }
 
 func getParentType(_ node: some SyntaxProtocol) -> TokenSyntax? {
