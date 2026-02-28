@@ -2518,7 +2518,8 @@ function Build-Brotli([Hashtable] $Platform) {
     -Src $SourceCache\brotli `
     -Bin "$(Get-ProjectBinaryCache $Platform brotli)" `
     -Platform $Platform `
-    -UseMSVCCompilers C `
+    -UseMSVCCompilers $(if ($UseHostToolchain) { @("C") } else { @("") }) `
+    -UsePinnedCompilers $(if ($UseHostToolchain) { @("") } else { @("C") }) `
     -BuildTargets default `
     -Defines @{
       BUILD_SHARED_LIBS = "NO";
