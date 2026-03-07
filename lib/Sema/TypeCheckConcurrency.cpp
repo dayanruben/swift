@@ -6309,16 +6309,6 @@ static InferredActorIsolation computeActorIsolation(Evaluator &evaluator,
       };
   }
 
-  // If this declaration is lazy storage, it has the same isolation as the
-  // original variable. Use the evaluator to cache and avoid running
-  // addAttributesForActorIsolation on the original variable a second time,
-  // duplicating attributes.
-  if (auto var = dyn_cast<VarDecl>(value))
-    if (var->isLazyStorageProperty())
-      if (auto originalVar = var->getOriginalVarForBackingStorage())
-        return evaluateOrDefault(evaluator, ActorIsolationRequest{originalVar},
-                                 InferredActorIsolation::forUnspecified());
-
   auto isolationFromAttr = getIsolationFromAttributes(value);
   ASTContext &ctx = value->getASTContext();
 
@@ -6470,6 +6460,17 @@ static InferredActorIsolation computeActorIsolation(Evaluator &evaluator,
   // non-accessor functions.
   if (auto accessor = dyn_cast<AccessorDecl>(value)) {
     return getInferredActorIsolation(accessor->getStorage());
+  }
+
+  // If this is a lazy storage property, use the actor isolation of its original
+  // variable, but ensure the actor attributes get attached to the storage.
+  if (auto var = dyn_cast<VarDecl>(value)) {
+    if (var->isLazyStorageProperty()) {
+      if (auto originalVar = var->getOriginalVarForBackingStorage()) {
+        auto inferred = getInferredActorIsolation(originalVar);
+        return {inferredIsolation(inferred.isolation), inferred.source};
+      }
+    }
   }
 
   // If this is a local function, inherit the actor isolation from its
@@ -6831,9 +6832,61 @@ DefaultInitializerIsolation::evaluate(Evaluator &evaluator,
     if (enclosingIsolation != requiredIsolation) {
       bool preconcurrency =
           !isa<ParamDecl>(var) || requiredIsolation.preconcurrency();
-      var->diagnose(diag::isolated_default_argument_context, requiredIsolation,
-                    enclosingIsolation)
+      // If both are actor isolation, it's unhelpful to print 'actor-isolated'
+      // twice. Check if that's the case and we have the actor instances needed
+      // to say something more specific.
+      if (!(requiredIsolation.getKind() == ActorIsolation::ActorInstance &&
+            enclosingIsolation.getKind() == ActorIsolation::ActorInstance &&
+            requiredIsolation.getActor() && enclosingIsolation.getActor())) {
+        var->diagnose(diag::isolated_default_argument_context,
+                      requiredIsolation, enclosingIsolation)
+            .warnUntilLanguageModeIf(preconcurrency, LanguageMode::v6);
+        return ActorIsolation::forUnspecified();
+      }
+
+      // Tailor a precise diagnostic to surface the mismatch in the actors, or
+      // that each instance of an actor type is isolated, and that these are
+      // potentially different instances. This won't occur for global actors,
+      // since they share an isolation domain.
+
+      auto requiredActor = requiredIsolation.getActor();
+      auto enclosingActor = enclosingIsolation.getActor();
+
+      if (requiredActor != enclosingActor) {
+        var->diagnose(diag::different_actor_isolated_default_argument_context,
+                      var, enclosingActor->getName())
+            .warnUntilLanguageModeIf(preconcurrency, LanguageMode::v6);
+        var->diagnose(diag::note_expected_same_actor_default_argument, var,
+                      requiredActor->getName(), enclosingActor->getName());
+        return ActorIsolation::forUnspecified();
+      }
+
+      var->diagnose(diag::same_actor_isolated_default_argument_context,
+                    requiredActor->getName())
           .warnUntilLanguageModeIf(preconcurrency, LanguageMode::v6);
+
+      auto enclosingActorInstance = enclosingIsolation.getActorInstance();
+      if (!enclosingActorInstance)
+        return ActorIsolation::forUnspecified();
+
+      // Note the name of the actor instance the default should be isolated
+      // to. Usually this is 'self'.
+      ASTContext &ctx = var->getASTContext();
+      ctx.Diags
+          .diagnose(initExpr->getLoc(),
+                    diag::same_actor_isolated_default_argument_context_note,
+                    enclosingActorInstance->getName())
+          .highlight(initExpr->getSourceRange());
+
+      if (enclosingActorInstance->isActorSelf())
+        return ActorIsolation::forUnspecified();
+
+      // If it's not actor self, like an isolated param, note where it is
+      // specified.
+      ctx.Diags.diagnose(
+          enclosingActorInstance->getLoc(),
+          diag::same_actor_isolated_default_argument_context_specified_here,
+          enclosingActorInstance->getName());
       return ActorIsolation::forUnspecified();
     }
   }
