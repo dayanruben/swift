@@ -270,13 +270,13 @@ if ($UseHostToolchain -is [string]) {
 
 $DefaultPinned = @{
   AMD64 = @{
-    PinnedBuild = "https://download.swift.org/development/windows10/swift-DEVELOPMENT-SNAPSHOT-2026-03-01-a/swift-DEVELOPMENT-SNAPSHOT-2026-03-01-a-windows10.exe";
-    PinnedSHA256 = "CB7ACEECED999125C4EA08393729F184AB1F83FB208D23B0B82D951C4664D9E5";
+    PinnedBuild = "https://download.swift.org/development/windows10/swift-DEVELOPMENT-SNAPSHOT-2026-03-16-a/swift-DEVELOPMENT-SNAPSHOT-2026-03-16-a-windows10.exe";
+    PinnedSHA256 = "34C90B5535A2D137C874A12D591201D2C3E324FB437CE51B6D057B8A8BA2CC4E";
     PinnedVersion = "0.0.0";
   };
   ARM64 = @{
-    PinnedBuild = "https://download.swift.org/development/windows10-arm64/swift-DEVELOPMENT-SNAPSHOT-2026-03-01-a/swift-DEVELOPMENT-SNAPSHOT-2026-03-01-a-windows10-arm64.exe"
-    PinnedSHA256 = "F15BBC6163FD5E275A3D21A371CD5FE95D12F1552F5B73E0D7F6880C150F3D8E";
+    PinnedBuild = "https://download.swift.org/development/windows10-arm64/swift-DEVELOPMENT-SNAPSHOT-2026-03-16-a/swift-DEVELOPMENT-SNAPSHOT-2026-03-16-a-windows10-arm64.exe"
+    PinnedSHA256 = "A60198647128269812AA00179801725BBD58D714AE52F2D19E7D0133DC035BF2";
     PinnedVersion = "0.0.0";
   };
 }
@@ -2261,7 +2261,7 @@ function Test-Compilers([Hashtable] $Platform, [string] $Variant, [switch] $Test
         LLDB_ENFORCE_STRICT_TEST_REQUIREMENTS = "YES";
         # No watchpoint support on windows: https://github.com/llvm/llvm-project/issues/24820
         LLDB_TEST_USER_ARGS = "--skip-category=watchpoint;--sysroot=$(Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK)";
-        LLDB_TEST_SWIFT_DRIVER_EXTRA_FLAGS = "-sdk $(Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK)"
+        LLDB_TEST_SWIFT_DRIVER_EXTRA_FLAGS = "-sdk '$(Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK)'"
         # gtest sharding breaks llvm-lit's --xfail and LIT_XFAIL inputs: https://github.com/llvm/llvm-project/issues/102264
         LLVM_LIT_ARGS = "-v --no-gtest-sharding --time-tests";
         # LLDB Unit tests link against this library
@@ -2272,6 +2272,12 @@ function Test-Compilers([Hashtable] $Platform, [string] $Variant, [switch] $Test
     if (-not $Targets) {
       Write-Warning "Test-Compilers invoked without specifying test target(s)."
     }
+
+    # TODO(roman-bcny): Workaround for https://github.com/swiftlang/swift/issues/87970
+    # Stdlib DLLs must be fully linked before swift-frontend compilations
+    # that load them, otherwise the linker races with memory-mapped DLLs
+    # causing LNK1104. Separate ninja invocations enforce ordering.
+    $Targets = @("swift-test-stdlib") + $Targets
 
     Build-CMakeProject `
       -Src $SourceCache\llvm-project\llvm `
@@ -3045,14 +3051,6 @@ function Write-SDKSettings([OS] $OS, [string] $Identifier = $OS.ToString()) {
 
 function Build-Dispatch([Hashtable] $Platform) {
   $SwiftSDK = Get-SwiftSDK -OS $Platform.OS -Identifier $Platform.DefaultSDK
-  $PlatformDefines = @{}
-
-  if ($Platform.OS -eq [OS]::Android) {
-    $PlatformDefines += @{
-      BUILD_TESTING = "NO";
-    }
-  }
-
   Build-CMakeProject `
     -Src $SourceCache\swift-corelibs-libdispatch `
     -Bin (Get-ProjectBinaryCache $Platform Dispatch) `
@@ -3060,10 +3058,11 @@ function Build-Dispatch([Hashtable] $Platform) {
     -Platform $Platform `
     -UseBuiltCompilers C,CXX,Swift `
     -SwiftSDK $SwiftSDK `
-    -Defines ($PlatformDefines + @{
+    -Defines @{
+      BUILD_TESTING = "NO";
       ENABLE_SWIFT = "YES";
       dispatch_INSTALL_ARCH_SUBDIR = "YES";
-    })
+    }
 }
 
 function Test-Dispatch {
@@ -3078,6 +3077,7 @@ function Test-Dispatch {
       -SwiftSDK (Get-SwiftSDK -OS $BuildPlatform.OS -Identifier $BuildPlatform.DefaultSDK) `
       -BuildTargets default,ExperimentalTest `
       -Defines @{
+        BUILD_TESTING = "YES";
         ENABLE_SWIFT = "YES";
       }
   }
@@ -3358,14 +3358,6 @@ function Build-ExperimentalSDK([Hashtable] $Platform) {
 
   $SDKROOT = Get-SwiftSDK -OS $Platform.OS -Identifier "$($Platform.OS)Experimental"
 
-  $PlatformDefines = @{}
-
-  if ($Platform.OS -eq [OS]::Android) {
-    $PlatformDefines += @{
-      BUILD_TESTING = "NO";
-    }
-  }
-
   if ($Platform.LinkModes.Contains("dynamic")) {
     Record-OperationTime $Platform "Build-ExperimentalDynamicDispatch" {
       Build-CMakeProject `
@@ -3375,13 +3367,14 @@ function Build-ExperimentalSDK([Hashtable] $Platform) {
         -Platform $Platform `
         -UseBuiltCompilers C,CXX,Swift `
         -SwiftSDK "${SDKROOT}" `
-        -Defines ($PlatformDefines + @{
+        -Defines @{
+          BUILD_TESTING = "NO";
           BUILD_SHARED_LIBS = "YES";
           CMAKE_FIND_PACKAGE_PREFER_CONFIG = "YES";
           CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
 
           ENABLE_SWIFT = "YES";
-        })
+        }
     }
 
     Record-OperationTime $Platform "Build-ExperimentalDynamicFoundation" {
@@ -3427,13 +3420,14 @@ function Build-ExperimentalSDK([Hashtable] $Platform) {
         -Platform $Platform `
         -UseBuiltCompilers C,CXX,Swift `
         -SwiftSDK "${SDKROOT}" `
-        -Defines ($PlatformDefines + @{
+        -Defines @{
+          BUILD_TESTING = "NO";
           BUILD_SHARED_LIBS = "NO";
           CMAKE_Swift_FLAGS = @("-static-stdlib", "-Xfrontend", "-use-static-resource-dir");
           CMAKE_STATIC_LIBRARY_PREFIX_Swift = "lib";
 
           ENABLE_SWIFT = "YES";
-        })
+        }
     }
 
     Record-OperationTime $Platform "Build-ExperimentalStaticFoundation" {
