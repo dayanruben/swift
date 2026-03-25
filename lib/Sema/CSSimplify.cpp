@@ -42,6 +42,7 @@
 #include "swift/Sema/ConstraintSystem.h"
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/Sema/PreparedOverload.h"
+#include "swift/Sema/Score.h"
 #include "swift/Sema/Subtyping.h"
 #include "swift/Sema/TypeVariableType.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -2830,6 +2831,16 @@ matchFunctionThrowing(ConstraintSystem &cs,
   if (!thrownError1 || !thrownError2)
     return cs.getTypeMatchSuccess();
 
+  // An attempt to erase typed throws into `throws` requires a function
+  // conversion and a heap allocation for the error type, so if there is an
+  // overload that takes typed throws it should be preferred.
+  if (func1->getThrownError() && !func2->getThrownError() &&
+      thrownError2->isErrorExistentialType()) {
+    cs.increaseScore(
+        SK_FunctionConversion,
+        locator.withPathElement(LocatorPathElt::ThrownErrorType()));
+  }
+
   switch (compareThrownErrorsForSubtyping(thrownError1, thrownError2, cs.DC)) {
   case ThrownErrorSubtyping::DropsThrows: {
     // We need to drop 'throws' to make this work.
@@ -3123,6 +3134,41 @@ ConstraintSystem::matchFunctionIsolations(FunctionType *func1,
   llvm_unreachable("bad kind");
 }
 
+bool ConstraintSystem::matchFunctionLifetimes(
+    const LifetimeDependentInterface &from,
+    const LifetimeDependentInterface &to, ConstraintLocatorBuilder locator) {
+
+  // A function with a lifetime dependency in a generic context is equivalent to
+  // one without that lifetime dependency when the substituted type is
+  // Escapable.
+  //
+  // There is also a subtype relationship from less-constrained to
+  // more-constrained lifetime dependencies (see
+  // LifetimeDependentInterface::canConvertTo).
+  if (!from.canConvertTo(to)) {
+    auto escapable = getASTContext()
+                         .getProtocol(KnownProtocolKind::Escapable)
+                         ->getDeclaredType();
+
+    for (auto &fromDep : from.getLifetimeDependencies()) {
+      // If a dependency is present for the same target in both types, then
+      // the dependency must match.
+      if (to.hasTarget(fromDep.getTargetIndex())) {
+        if (!from.canConvertTargetTo(fromDep, to))
+          return false;
+        continue;
+      }
+
+      // If the dependency is absent from the destination type, constrain the
+      // corresponding parameter or result in the source type to be Escapable.
+      addConstraint(ConstraintKind::ConformsTo,
+                    from.getSourceOrTargetType(fromDep.getTargetIndex()),
+                    escapable, locator);
+    }
+  }
+  return true;
+}
+
 ConstraintSystem::TypeMatchResult
 ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
                                      ConstraintKind kind, TypeMatchOptions flags,
@@ -3198,45 +3244,8 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
   if (!matchFunctionIsolations(func1, func2, kind, flags, locator))
     return getTypeMatchFailure(locator);
 
-  // A function with a lifetime dependency in a generic context is equivalent to
-  // one without that lifetime dependency when the substituted type is
-  // Escapable.
-  //
-  // TODO: There should also be a subtype relationship from less-constrained to
-  // more-constrained lifetime dependencies.
-  if (func1->getLifetimeDependencies() != func2->getLifetimeDependencies()) {
-    auto escapable = getASTContext().getProtocol(KnownProtocolKind::Escapable)
-      ->getDeclaredType();
-
-    for (auto &fromDep : func1->getLifetimeDependencies()) {
-      auto toDep = func2->getLifetimeDependenceFor(fromDep.getTargetIndex());
-      if (toDep) {
-        // If a dependency is present for the same target in both types, then
-        // the dependency must match.
-        if (fromDep != *toDep) {
-          return getTypeMatchFailure(locator);
-        }
-        
-        continue;
-      }
-      
-      // If the dependency is absent from the destination type, constrain the
-      // corresponding parameter or result in the source type to be Escapable.
-      if (fromDep.getTargetIndex() == func1->getParams().size()) {
-        // Result dependency.
-        addConstraint(ConstraintKind::ConformsTo,
-                      func1->getResult(),
-                      escapable,
-                      locator);
-      } else {
-        // Parameter dependency.
-        addConstraint(ConstraintKind::ConformsTo,
-                    func1->getParams()[fromDep.getTargetIndex()].getPlainType(),
-                    escapable,
-                    locator);
-      }
-    }
-  }
+  if (!matchFunctionLifetimes(func1, func2, locator))
+    return getTypeMatchFailure(locator);
 
   // To contextual type increase the score to avoid ambiguity when solver can
   // find more than one viable binding different only in representation e.g.
@@ -12381,23 +12390,6 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
       } else if (contextualFnType->isSendable()) {
         closureExtInfo = closureExtInfo.withSendable();
       }
-    }
-
-    auto inferredThrownErrorType =
-        inferredClosureType->getEffectiveThrownErrorTypeOrNever();
-    // In a typed throws context a throwing closure (as determined from the
-    // body or an explicit type) assumes an error type of the context if it's
-    // fully resolved. Do nothing if closure is either non-throwing
-    // or has an explicit typed throws annotation.
-    if (inferredThrownErrorType->isErrorExistentialType()) {
-      auto errorTy = contextualFnType->getEffectiveThrownErrorTypeOrNever();
-      // Don't propagate if the contextual error type:
-      //   - requires inference;
-      //   - is `Never` which means the contextu is non-throwing;
-      //   - is `any Error` which already matches the inferred type of the closure.
-      if (!(errorTy->hasTypeVariable() || errorTy->isNever() ||
-            errorTy->isErrorExistentialType()))
-        closureExtInfo = closureExtInfo.withThrows(/*throws=*/true, errorTy);
     }
   }
 
