@@ -2238,12 +2238,6 @@ ERROR(expose_move_only_to_cxx,none,
       "noncopyable %kind0 can not yet be represented in C++", (ValueDecl *))
 ERROR(expose_macro_to_cxx,none,
       "Swift macro can not yet be represented in C++", (ValueDecl *))
-GROUPED_WARNING(warn_unannotated_cxx_func_returning_frt, ForeignReferenceType, none,
-        "cannot infer ownership of foreign reference value returned by %0",
-        (const ValueDecl *))
-NOTE(note_unannotated_cxx_func_returning_frt, none,
-        "annotate %0 with either SWIFT_RETURNS_RETAINED or SWIFT_RETURNS_UNRETAINED",
-        (const ValueDecl *))
 ERROR(unexposed_other_decl_in_cxx,none,
       "%kind0 is not yet exposed to C++", (ValueDecl *))
 ERROR(unsupported_other_decl_in_cxx,none,
@@ -8996,6 +8990,10 @@ GROUPED_WARNING(isolated_conformance_will_become_nonisolated,IsolatedConformance
 GROUPED_ERROR(isolated_conformance_to_sendable_metatype,IsolatedConformances,none,
     "cannot form %0 conformance of %1 to SendableMetatype-inheriting %kind2",
     (ActorIsolation, Type, const ValueDecl *))
+GROUPED_ERROR(isolated_conformance_may_cross_isolation,IsolatedConformances,none,
+    "conformance of %select{underlying type of 'some %1'|%0}0 to protocol "
+    "'%1' may be isolated and cannot be passed to %2 context",
+    (Identifier, StringRef, ActorIsolation))
 
 //===----------------------------------------------------------------------===//
 // MARK: @_inheritActorContext
