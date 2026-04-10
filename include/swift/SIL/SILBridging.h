@@ -740,7 +740,6 @@ struct BridgedInstruction {
   bool mayAccessPointer() const;
   bool mayLoadWeakOrUnowned() const;
   bool maySynchronize() const;
-  bool mayBeDeinitBarrierNotConsideringSideEffects() const;
   BRIDGED_INLINE bool shouldBeForwarding() const;
   BRIDGED_INLINE bool isIdenticalTo(BridgedInstruction inst) const;
 
@@ -1280,8 +1279,8 @@ struct BridgedBuilder{
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction
   createAllocStack(BridgedType type, bool hasDynamicLifetime, bool isLexical, bool isFromVarDecl, bool wasMoved) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createAllocPack(BridgedType type) const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createAllocPackMetadata() const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createAllocPackMetadata(BridgedType type) const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createAllocPackMetadata(bool isNested) const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createAllocPackMetadata(BridgedType type, bool isNested) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createAllocVector(BridgedValue capacity,
                                                                           BridgedType type) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createDeallocStack(BridgedValue operand) const;
