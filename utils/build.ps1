@@ -3363,6 +3363,16 @@ function Write-PlatformInfoPlist([OS] $OS) {
   Write-PList -Settings $Settings -Path "$(Get-PlatformRoot $OS)\Info.plist"
 }
 
+function Get-SelectedSDKBuilds() {
+  return $KnownPlatforms.Values | Where-Object {
+    switch ($_.OS) {
+      Windows { $Windows }
+      Android { $Android }
+      default { $false }
+    }
+  }
+}
+
 # Copies files installed by CMake from the arch-specific platform root,
 # where they follow the layout expected by the installer,
 # to the final platform root, following the installer layout.
@@ -4281,13 +4291,7 @@ if ($Clean) {
   Remove-Item -Force -Recurse -Path "$BinaryCache\5" -ErrorAction Ignore
   Remove-Item -Force -Recurse -Path (Get-InstallDir $HostPlatform) -ErrorAction Ignore
 
-  $KnownPlatforms.Values | Where-Object {
-    switch ($_.OS) {
-      Windows { $Windows }
-      Android { $Android }
-      default { $false }
-    }
-  } | ForEach-Object {
+  Get-SelectedSDKBuilds | ForEach-Object {
     Remove-Item -Force -Recurse -Path (Get-ProjectBinaryCache $_ ClangBuiltins) -ErrorAction Ignore
     Remove-Item -Force -Recurse -Path (Get-ProjectBinaryCache $_ ClangRuntime) -ErrorAction Ignore
   }
@@ -4312,13 +4316,7 @@ if (-not $SkipBuild) {
   Invoke-BuildStep Build-XML2 $HostPlatform
   Invoke-BuildStep Build-CDispatch $HostPlatform
   Invoke-BuildStep Build-Compilers $HostPlatform -Variant "Asserts"
-  $KnownPlatforms.Values | Where-Object {
-    switch ($_.OS) {
-      Windows { $Windows }
-      Android { $Android }
-      default { $false }
-    }
-  } | ForEach-Object {
+  Get-SelectedSDKBuilds | ForEach-Object {
     Invoke-BuildStep Build-CompilerRuntime $_
   }
 
