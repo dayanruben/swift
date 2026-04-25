@@ -161,7 +161,7 @@ void CompilerInvocation::setDefaultBlocklistsIfNecessary() {
     for (llvm::sys::fs::directory_iterator F(blocklistDir, EC), FE;
          F != FE; F.increment(EC)) {
       StringRef ext = llvm::sys::path::extension(F->path());
-      if (ext == "yml" || ext == "yaml") {
+      if (ext.ends_with(".yml") || ext.ends_with(".yaml")) {
         LangOpts.BlocklistConfigFilePaths.push_back(F->path());
       }
     }
@@ -1363,11 +1363,11 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   if (ParseEnabledFeatureArgs(Opts, Args, Diags, FrontendOpts))
     HadError = true;
 
-  // Do not allow both versions of SuppressedAssociatedTypes at the same time.
-  // Pick the version with defaults if both are specified.
+  // SuppressedAssociatedTypesWithDefaults is now always-on by default.
+  // If the old prototype version of the feature has been requested, honor it.
   if (Opts.hasFeature(SuppressedAssociatedTypes) &&
       Opts.hasFeature(SuppressedAssociatedTypesWithDefaults)) {
-    Opts.disableFeature(SuppressedAssociatedTypes);
+    Opts.disableFeature(SuppressedAssociatedTypesWithDefaults);
   }
 
   Opts.EnableAppExtensionLibraryRestrictions |= Args.hasArg(OPT_enable_app_extension_library);
