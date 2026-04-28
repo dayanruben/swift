@@ -747,24 +747,12 @@ function Get-PythonExecutable {
   return [IO.Path]::Combine((Get-PythonPath $BuildPlatform), "tools", "python.exe")
 }
 
-function Get-PythonScriptsPath {
-  return [IO.Path]::Combine((Get-PythonPath $BuildPlatform), "tools", "Scripts")
-}
-
 function Get-EmbeddedPythonInstallDir() {
   return [IO.Path]::Combine("$ImageRoot\", "Program Files", "Swift", "Python-$PythonVersion")
 }
 
 function Get-Syft {
   return $KnownSyft[$SyftVersion][$BuildArchName]
-}
-
-function Get-SyftPath([Hashtable] $Platform) {
-  return [IO.Path]::Combine("$BinaryCache\", "syft-$SyftVersion")
-}
-
-function Get-SyftExecutable {
-  return [IO.Path]::Combine((Get-SyftPath $BuildPlatform), "syft.exe")
 }
 
 function Get-InstallDir([Hashtable] $Platform) {
@@ -968,6 +956,13 @@ function Move-Directory($Src, $Dst) {
   Move-Item -Path $Src -Destination $Destination -Force | Out-Null
 }
 
+function ConvertTo-ThickLayout([Hashtable] $Platform, [string] $Resources, [string[]] $Filter) {
+  Get-ChildItem "${Resources}\*" -File -Include ${Filter} -ErrorAction Ignore | ForEach-Object {
+    Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
+    Move-Item $_.FullName "$Resources\$($Platform.Architecture.LLVMName)\" | Out-Null
+  }
+}
+
 function Invoke-Program() {
   [CmdletBinding(PositionalBinding = $false)]
   param
@@ -1066,10 +1061,6 @@ function Invoke-VsDevShell([Hashtable] $Platform) {
   }
 }
 
-function Get-PythonLibName() {
-  return "python{0}{1}" -f ([System.Version]$PythonVersion).Major, ([System.Version]$PythonVersion).Minor
-}
-
 function Get-Dependencies {
   Record-OperationTime $BuildPlatform "Get-Dependencies" {
     function Write-Success([string] $Description) {
@@ -1103,7 +1094,6 @@ function Get-Dependencies {
       param
       (
           [string]$ZipFileName,
-          [string]$BinaryCache,
           [string]$ExtractPath,
           [bool]$CreateExtractPath = $true
       )
@@ -1129,37 +1119,10 @@ function Get-Dependencies {
       Expand-Archive -Path $Source -DestinationPath $Destination -Force
     }
 
-    function Expand-TapeArchive {
-      param
-      (
-          [string]$SourceName,
-          [string]$BinaryCache,
-          [string]$DestinationName
-      )
-      $Source = Join-Path -Path $BinaryCache -ChildPath $SourceName
-      $Destination = Join-Path -Path $BinaryCache -ChildPath $DestinationName
-
-      # Check if the extracted directory already exists and is up to date.
-      if (Test-Path $Destination) {
-          $TarLastWriteTime = (Get-Item $Source).LastWriteTime
-          $ExtractedLastWriteTime = (Get-Item $Destination).LastWriteTime
-          # Compare the last write times
-          if ($TarLastWriteTime -le $ExtractedLastWriteTime) {
-              # Write-Output "'$SourceName' is already extracted and up to date."
-              return
-          }
-      }
-
-      # Write-Output "Extracting '$Source' ..."
-      New-Item -ItemType Directory -ErrorAction Ignore -Path $Destination | Out-Null
-      tar -xvf $Source -C $Destination | Out-Null
-    }
-
     function Extract-Toolchain {
       param
       (
           [string]$InstallerExeName,
-          [string]$BinaryCache,
           [string]$ToolchainName
       )
 
@@ -1191,7 +1154,7 @@ function Get-Dependencies {
     if ($IncludeSBoM) {
       $syft = Get-Syft
       DownloadAndVerify $syft.URL "$BinaryCache\syft-$SyftVersion.zip" $syft.SHA256
-      Expand-ZipFile syft-$SyftVersion.zip $BinaryCache syft-$SyftVersion
+      Expand-ZipFile syft-$SyftVersion.zip -ExtractPath syft-$SyftVersion
       Write-Success "syft $SyftVersion"
     }
 
@@ -1207,7 +1170,7 @@ function Get-Dependencies {
       $Python = Get-KnownPython $ArchName $EmbeddedPython
       $FileName = $(if ($EmbeddedPython) { "EmbeddedPython$ArchName-$PythonVersion" } else { "Python$ArchName-$PythonVersion" })
       DownloadAndVerify $Python.URL "$BinaryCache\$FileName.zip" $Python.SHA256
-      Expand-ZipFile "$FileName.zip" "$BinaryCache" "$FileName"
+      Expand-ZipFile "$FileName.zip" -ExtractPath "$FileName"
       Write-Success "$ArchName Python $PythonVersion"
     }
 
@@ -1271,7 +1234,7 @@ function Get-Dependencies {
     if ($SkipBuild -and $SkipPackaging) { return }
 
     DownloadAndVerify $WiX.URL "$BinaryCache\WiX-$($WiX.Version).zip" $WiX.SHA256
-    Expand-ZipFile WiX-$($WiX.Version).zip $BinaryCache WiX-$($WiX.Version)
+    Expand-ZipFile WiX-$($WiX.Version).zip -ExtractPath WiX-$($WiX.Version)
     Write-Success "WiX $($WiX.Version)"
 
     if ($SkipBuild) { return }
@@ -1283,19 +1246,19 @@ function Get-Dependencies {
       $GnuWin32MakeURL = "https://downloads.sourceforge.net/project/ezwinports/make-4.4.1-without-guile-w32-bin.zip"
       $GnuWin32MakeHash = "fb66a02b530f7466f6222ce53c0b602c5288e601547a034e4156a512dd895ee7"
       DownloadAndVerify $GnuWin32MakeURL "$BinaryCache\GnuWin32Make-4.4.1.zip" $GnuWin32MakeHash
-      Expand-ZipFile GnuWin32Make-4.4.1.zip $BinaryCache GnuWin32Make-4.4.1
+      Expand-ZipFile GnuWin32Make-4.4.1.zip -ExtractPath GnuWin32Make-4.4.1
       Write-Success "GNUWin32 make 4.4.1"
     }
 
     # TODO(compnerd) stamp/validate that we need to re-extract
     New-Item -ItemType Directory -ErrorAction Ignore $BinaryCache\toolchains | Out-Null
-    Extract-Toolchain "$PinnedToolchain.exe" $BinaryCache $ToolchainVersionIdentifier
+    Extract-Toolchain "$PinnedToolchain.exe" -ToolchainName $ToolchainVersionIdentifier
     Write-Success "Swift Toolchain $PinnedVersion"
 
     if ($Android) {
       $NDK = Get-AndroidNDK
       DownloadAndVerify $NDK.URL "$BinaryCache\android-ndk-$AndroidNDKVersion-windows.zip" $NDK.SHA256
-      Expand-ZipFile -ZipFileName "android-ndk-$AndroidNDKVersion-windows.zip" -BinaryCache $BinaryCache -ExtractPath "android-ndk-$AndroidNDKVersion" -CreateExtractPath $false
+      Expand-ZipFile "android-ndk-$AndroidNDKVersion-windows.zip" -ExtractPath "android-ndk-$AndroidNDKVersion" -CreateExtractPath $false
       Write-Success "Android NDK $AndroidNDKVersion"
     }
 
@@ -1305,7 +1268,7 @@ function Get-Dependencies {
       $WinFlexBisonHash = "8D324B62BE33604B2C45AD1DD34AB93D722534448F55A16CA7292DE32B6AC135"
       DownloadAndVerify $WinFlexBisonURL "$BinaryCache\win_flex_bison-$WinFlexBisonVersion.zip" $WinFlexBisonHash
 
-      Expand-ZipFile -ZipFileName "win_flex_bison-$WinFlexBisonVersion.zip" -BinaryCache $BinaryCache -ExtractPath "win_flex_bison"
+      Expand-ZipFile "win_flex_bison-$WinFlexBisonVersion.zip" -BinaryCache $BinaryCache -ExtractPath "win_flex_bison"
       Write-Success "flex/bison $WinFlexBisonVersion"
     }
 
@@ -2177,7 +2140,7 @@ function Build-CDispatch([Hashtable] $Platform, [switch] $Static = $false) {
 function Get-CompilersDefines([Hashtable] $Platform, [string] $Variant, [switch] $Test) {
   $BuildTools = [IO.Path]::Combine((Get-ProjectBinaryCache $BuildPlatform BuildTools), "bin")
   $PythonRoot = [IO.Path]::Combine((Get-PythonPath $Platform), "tools")
-  $PythonLibName = Get-PythonLibName
+  $PythonLibName = "python{0}{1}" -f ([System.Version]$PythonVersion).Major, ([System.Version]$PythonVersion).Minor
 
   $TestDefines = if ($Test) {
     @{
@@ -3399,6 +3362,16 @@ function Write-PlatformInfoPlist([OS] $OS) {
   Write-PList -Settings $Settings -Path "$(Get-PlatformRoot $OS)\Info.plist"
 }
 
+function Get-SelectedSDKBuilds() {
+  return $KnownPlatforms.Values | Where-Object {
+    switch ($_.OS) {
+      Windows { $Windows }
+      Android { $Android }
+      default { $false }
+    }
+  }
+}
+
 # Copies files installed by CMake from the arch-specific platform root,
 # where they follow the layout expected by the installer,
 # to the final platform root, following the installer layout.
@@ -3435,6 +3408,16 @@ function Build-SDK([Hashtable] $Platform) {
   Invoke-BuildStep Build-Runtime $Platform
   Invoke-BuildStep Build-Dispatch $Platform
   Invoke-BuildStep Build-Foundation $Platform
+}
+
+function Build-SDKDependencies([Hashtable[]] $ArchitectureSlices) {
+  foreach ($Slice in $ArchitectureSlices) {
+    if ($IncludeDS2) { Invoke-BuildStep Build-DS2 $Slice }
+    Invoke-BuildStep Build-ZLib $Slice
+    Invoke-BuildStep Build-Brotli $Slice
+    Invoke-BuildStep Build-XML2 $Slice
+    Invoke-BuildStep Build-CURL $Slice
+  }
 }
 
 function Build-ExperimentalSDK([Hashtable] $Platform) {
@@ -4307,13 +4290,7 @@ if ($Clean) {
   Remove-Item -Force -Recurse -Path "$BinaryCache\5" -ErrorAction Ignore
   Remove-Item -Force -Recurse -Path (Get-InstallDir $HostPlatform) -ErrorAction Ignore
 
-  $KnownPlatforms.Values | Where-Object {
-    switch ($_.OS) {
-      Windows { $Windows }
-      Android { $Android }
-      default { $false }
-    }
-  } | ForEach-Object {
+  Get-SelectedSDKBuilds | ForEach-Object {
     Remove-Item -Force -Recurse -Path (Get-ProjectBinaryCache $_ ClangBuiltins) -ErrorAction Ignore
     Remove-Item -Force -Recurse -Path (Get-ProjectBinaryCache $_ ClangRuntime) -ErrorAction Ignore
   }
@@ -4338,13 +4315,7 @@ if (-not $SkipBuild) {
   Invoke-BuildStep Build-XML2 $HostPlatform
   Invoke-BuildStep Build-CDispatch $HostPlatform
   Invoke-BuildStep Build-Compilers $HostPlatform -Variant "Asserts"
-  $KnownPlatforms.Values | Where-Object {
-    switch ($_.OS) {
-      Windows { $Windows }
-      Android { $Android }
-      default { $false }
-    }
-  } | ForEach-Object {
+  Get-SelectedSDKBuilds | ForEach-Object {
     Invoke-BuildStep Build-CompilerRuntime $_
   }
 
@@ -4372,16 +4343,7 @@ if (-not $SkipBuild) {
     }
 
   if ($Windows) {
-    foreach ($Build in $WindowsSDKBuilds) {
-      if ($IncludeDS2) {
-        Invoke-BuildStep Build-DS2 $Build
-      }
-
-      Invoke-BuildStep Build-ZLib $Build
-      Invoke-BuildStep Build-Brotli $Build
-      Invoke-BuildStep Build-XML2 $Build
-      Invoke-BuildStep Build-CURL $Build
-    }
+    Build-SDKDependencies $WindowsSDKBuilds
 
     foreach ($SDK in $WindowsSDKVersions) {
       switch ($SDK) {
@@ -4390,10 +4352,7 @@ if (-not $SkipBuild) {
           foreach ($Build in $WindowsSDKBuilds) {
             Invoke-BuildStep Build-SDK $Build
 
-            Get-ChildItem "${SDKROOT}\usr\lib\swift\windows" -Filter "*.lib" -File -ErrorAction Ignore | ForEach-Object {
-              Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
-              Move-Item $_.FullName "${SDKROOT}\usr\lib\swift\windows\$($Build.Architecture.LLVMName)\" | Out-Null
-            }
+            ConvertTo-ThickLayout -Platform $Build -Resources "${SDKROOT}\usr\lib\swift\windows" -Filter @("*.lib")
 
             # FIXME(compnerd) how do we select which SDK is meant to be re-distributed?
             Copy-Directory "${SDKROOT}\usr\bin" "$([IO.Path]::Combine((Get-InstallDir $Build), "Runtimes", $ProductVersion, "usr"))"
@@ -4409,15 +4368,8 @@ if (-not $SkipBuild) {
           foreach ($Build in $WindowsSDKBuilds) {
             Invoke-BuildStep Build-ExperimentalSDK $Build
 
-            Get-ChildItem -ErrorAction Ignore "${SDKROOT}\usr\lib\swift\windows" -Filter "*.lib" -File | ForEach-Object {
-              Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
-              Move-Item $_.FullName "${SDKROOT}\usr\lib\swift\windows\$($Build.Architecture.LLVMName)\" | Out-Null
-            }
-
-            Get-ChildItem -ErrorAction Ignore "${SDKROOT}\usr\lib\swift_static\windows" -Filter "*.lib" -File | ForEach-Object {
-              Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
-              Move-Item $_.FullName "${SDKROOT}\usr\lib\swift_static\windows\$($Build.Architecture.LLVMName)\" | Out-Null
-            }
+            ConvertTo-ThickLayout -Platform $Build -Resources "${SDKROOT}\usr\lib\swift\windows" -Filter @("*.lib")
+            ConvertTo-ThickLayout -Platform $Build -Resources "${SDKROOT}\usr\lib\swift_static\windows" -Filter @("*.lib")
 
             # FIXME(compnerd) how do we select which SDK is meant to be re-distributed?
             Copy-Directory "${SDKROOT}\usr\bin" "$([IO.Path]::Combine((Get-InstallDir $Build), "Runtimes", "$ProductVersion.experimental", "usr"))"
@@ -4453,16 +4405,7 @@ if (-not $SkipBuild) {
   }
 
   if ($Android) {
-    foreach ($Build in $AndroidSDKBuilds) {
-      if ($IncludeDS2) {
-        Invoke-BuildStep Build-DS2 $Build
-      }
-
-      Invoke-BuildStep Build-ZLib $Build
-      Invoke-BuildStep Build-Brotli $Build
-      Invoke-BuildStep Build-XML2 $Build
-      Invoke-BuildStep Build-CURL $Build
-    }
+    Build-SDKDependencies $AndroidSDKBuilds
 
     foreach ($SDK in $AndroidSDKVersions) {
       switch ($SDK) {
@@ -4471,10 +4414,7 @@ if (-not $SkipBuild) {
           foreach ($Build in $AndroidSDKBuilds) {
             Invoke-BuildStep Build-SDK $Build
 
-            Get-ChildItem "${SDKROOT}\usr\lib\swift\android" -File | Where-Object { $_.Name -match ".a$|.so$" } | ForEach-Object {
-              Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
-              Move-Item $_.FullName "${SDKROOT}\usr\lib\swift\android\$($Build.Architecture.LLVMName)\" | Out-Null
-            }
+            ConvertTo-ThickLayout -Platform $Build -Resources "${SDKROOT}\usr\lib\swift\android" -Filter @(".a", ".so")
           }
 
           Install-SDK $AndroidSDKBuilds
@@ -4486,15 +4426,8 @@ if (-not $SkipBuild) {
           foreach ($Build in $AndroidSDKBuilds) {
             Invoke-BuildStep Build-ExperimentalSDK $Build
 
-            Get-ChildItem "${SDKROOT}\usr\lib\swift\android" -File | Where-Object { $_.Name -match ".a$|.so$" } | ForEach-Object {
-              Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
-              Move-Item $_.FullName "${SDKROOT}\usr\lib\swift\android\$($Build.Architecture.LLVMName)\" | Out-Null
-            }
-
-            Get-ChildItem -ErrorAction Ignore "${SDKROOT}\usr\lib\swift_static\android" -File | Where-Object { $_.Name -match ".a$|.so$" } | ForEach-Object {
-              Write-Host -BackgroundColor DarkRed -ForegroundColor White "$($_.FullName) is not nested in an architecture directory"
-              Move-Item $_.FullName "${SDKROOT}\usr\lib\swift_static\android\$($Build.Architecture.LLVMName)\" | Out-Null
-            }
+            ConvertTo-ThickLayout -Platform $Build -Resources "${SDKROOT}\usr\lib\swift\android" -Filter @(".a", ".so")
+            ConvertTo-ThickLayout -Platform $Build -Resources "${SDKROOT}\usr\lib\swift_static\android"  -Filter @(".a", ".so")
           }
 
           Install-SDK $AndroidSDKBuilds -Identifiers AndroidExperimental
