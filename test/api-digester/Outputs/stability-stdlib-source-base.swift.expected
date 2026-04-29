@@ -80,7 +80,6 @@ Func Sequence.min(by:) is now without rethrows
 Func Sequence.reduce(into:_:) has generic signature change from <Self, Result where Self : Swift.Sequence> to <Self, Result, E where Self : Swift.Sequence, E : Swift.Error>
 Func Sequence.reduce(into:_:) has parameter 1 type change from (inout Result, Self.Element) throws -> () to (inout Result, Self.Element) throws(E) -> ()
 Func Sequence.reduce(into:_:) is now without rethrows
-Func Sequence.reduce(_:_:) has generic signature change from <Self, Result where Self : Swift.Sequence> to <Self, Result, E where Self : Swift.Sequence, E : Swift.Error>
 Func Sequence.reduce(_:_:) is now without rethrows
 Func Sequence.starts(with:by:) has generic signature change from <Self, PossiblePrefix where Self : Swift.Sequence, PossiblePrefix : Swift.Sequence> to <Self, PossiblePrefix, E where Self : Swift.Sequence, PossiblePrefix : Swift.Sequence, E : Swift.Error>
 Func Sequence.starts(with:by:) is now without rethrows
@@ -162,7 +161,6 @@ Protocol FixedWidthInteger has added inherited protocol Copyable
 Protocol FixedWidthInteger has added inherited protocol Escapable
 Protocol FloatingPoint has added inherited protocol Copyable
 Protocol FloatingPoint has added inherited protocol Escapable
-Protocol Hashable has added inherited protocol Escapable
 Protocol Identifiable has added inherited protocol Copyable
 Protocol Identifiable has added inherited protocol Escapable
 Protocol IteratorProtocol has added inherited protocol Copyable
@@ -459,9 +457,13 @@ Func Comparable.>=(_:_:) has generic signature change from <Self where Self : Sw
 Func Comparable.>=(_:_:) has parameter 0 changing from Default to Shared
 Func Comparable.>=(_:_:) has parameter 1 changing from Default to Shared
 
-// Hashable: ~Copyable
-Protocol Hashable has generic signature change from <Self : Swift.Equatable> to <Self : Swift.Equatable, Self : ~Copyable>
-Accessor Hashable.hashValue.Get() has generic signature change from <Self where Self : Swift.Hashable> to <Self where Self : Swift.Hashable, Self : ~Copyable>
-Func Hashable.hash(into:) has generic signature change from <Self where Self : Swift.Hashable> to <Self where Self : Swift.Hashable, Self : ~Copyable>
-Func Hasher.combine(_:) has generic signature change from <H where H : Swift.Hashable> to <H where H : Swift.Hashable, H : ~Copyable>
+// Hashable: ~Copyable & Escapable
+Protocol Hashable has generic signature change from <Self : Swift.Equatable> to <Self : Swift.Equatable, Self : ~Copyable, Self : ~Escapable>
+Accessor Hashable.hashValue.Get() has generic signature change from <Self where Self : Swift.Hashable> to <Self where Self : Swift.Hashable, Self : ~Copyable, Self : ~Escapable>
+Func Hashable.hash(into:) has generic signature change from <Self where Self : Swift.Hashable> to <Self where Self : Swift.Hashable, Self : ~Copyable, Self : ~Escapable>
+Func Hasher.combine(_:) has generic signature change from <H where H : Swift.Hashable> to <H where H : Swift.Hashable, H : ~Copyable, H : ~Escapable>
 Func Hasher.combine(_:) has parameter 0 changing from Default to Shared
+
+Func Sequence.reduce(_:_:) has generic signature change from <Self, Result where Self : Swift.Sequence> to <Self, Result, E where Self : Swift.Sequence, E : Swift.Error, Result : ~Copyable>
+Func Sequence.reduce(_:_:) has parameter 0 changing from Default to Owned
+

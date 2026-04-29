@@ -2058,7 +2058,8 @@ RequirementCheck WitnessChecker::checkWitness(ValueDecl *requirement,
   }
 
   // Check whether the witness has been imported appropriately.
-  if (shouldDiagnoseMissingImportForMember(match.Witness, DC))
+  if (requirement != match.Witness &&
+      shouldDiagnoseMissingImportForMember(match.Witness, DC))
     return CheckKind::RequiresMissingImport;
 
   return CheckKind::Success;
@@ -6999,7 +7000,7 @@ void TypeChecker::checkConformancesInContext(IterableDeclContext *idc) {
         continue;
 
       // Only nonisolated conformances can be affected.
-      if (!conformance->getIsolation().isNonisolated())
+      if (!conformance->getIsolation().isNonisolatedOrConcurrent())
         continue;
 
       auto nameLoc = normal->getProtocolNameLoc();

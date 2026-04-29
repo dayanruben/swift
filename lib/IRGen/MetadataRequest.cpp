@@ -1451,7 +1451,7 @@ getFunctionTypeFlags(CanFunctionType type) {
   if (isolation.isErased())
     extFlags = extFlags.withIsolatedAny();
 
-  if (isolation.isNonIsolatedCaller())
+  if (isolation.isNonisolatedNonsending())
     extFlags = extFlags.withNonIsolatedCaller();
 
   auto flags = FunctionTypeFlags()
@@ -2037,6 +2037,10 @@ namespace {
       if (auto metatype = tryGetLocal(type, request))
         return metatype;
 
+      if (IGF.IGM.isEmbeddedWithExistentials()) {
+        return MetadataResponse::forComplete(IGF.IGM.getAddrOfTypeMetadata(type));
+      }
+
       auto instMetadata =
         IGF.emitAbstractTypeMetadataRef(type.getInstanceType());
 
@@ -2123,6 +2127,11 @@ namespace {
     }
 
     llvm::Value *emitExistentialTypeMetadata(CanExistentialType type) {
+      if (IGF.IGM.Context.LangOpts.hasFeature(Feature::Embedded)) {
+        llvm::Constant *result = IGF.IGM.getAddrOfTypeMetadata(type);
+        return result;
+      }
+
       auto layout = type.getExistentialLayout();
 
       if (!layout.getParameterizedProtocols().empty()) {
