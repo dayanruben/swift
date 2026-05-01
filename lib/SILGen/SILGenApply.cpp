@@ -5518,9 +5518,6 @@ ManagedValue CallEmission::applyBorrowMutateAccessor() {
   // Get the callee type information.
   auto calleeTypeInfo = callee.getTypeInfo(SGF);
 
-  std::optional<ManagedValue> self;
-  auto fnValue = callee.getFnValue(SGF, self);
-
   // Evaluate the arguments.
   SmallVector<ManagedValue, 4> uncurriedArgs;
   std::optional<SILLocation> uncurriedLoc;
@@ -5530,6 +5527,12 @@ ManagedValue CallEmission::applyBorrowMutateAccessor() {
       uncurriedArgs, uncurriedLoc);
 
   auto selfArgMV = uncurriedArgs.back();
+
+  std::optional<ManagedValue> self;
+  if (callee.requiresSelfValueForDispatch()) {
+    self = selfArgMV;
+  }
+  auto fnValue = callee.getFnValue(SGF, self);
 
   // Strip the unnecessary copy_value + mark_unresolved_non_copyable_value +
   // begin_borrow instructions added for move-only self argument.
@@ -7465,6 +7468,17 @@ ArgumentSource AccessorBaseArgPreparer::prepareAccessorAddressBaseArg() {
     if (selfParam.isConsumedInCaller() || base.getType().isAddressOnly(SGF.F)) {
       // The load can only be a take if the base is a +1 rvalue.
       auto shouldTake = IsTake_t(base.hasCleanup());
+      
+      // If the base is move only and a +0 value, then the copy we're about to emit is invalid
+      // and will later be diagnosed by the move checker. We'll mark the base as unresolved
+      // to give the move checker a chance to salvage things if it can eliminate the copy.
+      if (selfParam.isConsumedInCaller() && !shouldTake && base.getType().isMoveOnly() &&
+          !isa<MarkUnresolvedNonCopyableValueInst>(base.getValue())) {
+          auto marked = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+              loc, base.getValue(),
+              MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
+          base = ManagedValue::forBorrowedAddressRValue(marked);
+      }
 
       auto isGuaranteed = selfParam.isGuaranteedInCaller();
 
