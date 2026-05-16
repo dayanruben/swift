@@ -5691,6 +5691,9 @@ NOTE(because_rethrows_default_argument_throws,none,
 NOTE(because_rethrows_conformance_throws,none,
      "call is to 'rethrows' function, but a conformance has a throwing witness", ())
 
+ERROR(for_throw_without_try,none,
+      "for-in loop can throw, but is not marked with 'try'", ())
+
 ERROR(throwing_call_in_nonthrowing_autoclosure,none,
       "%0 can throw, but it is executed in a non-throwing "
       "autoclosure",(StringRef))
@@ -5754,7 +5757,7 @@ NOTE(note_error_to_optional,none,
 NOTE(note_disable_error_propagation,none,
       "did you mean to disable error propagation?", ())
 
-WARNING(no_throw_in_try,none,
+GROUPED_WARNING(no_throw_in_try,UnnecessaryEffectMarker,none,
         "no calls to throwing functions occur within 'try' expression", ())
 
 WARNING(no_throw_in_do_with_catch,none,
@@ -5781,7 +5784,7 @@ NOTE(async_call_without_await_in_autoclosure,none,
 NOTE(async_call_without_await_in_async_let,none,
       "call is 'async' in an 'async let' initializer", ())
 
-WARNING(no_async_in_await,none,
+GROUPED_WARNING(no_async_in_await,UnnecessaryEffectMarker,none,
         "no 'async' operations occur within 'await' expression", ())
 ERROR(async_in_nonasync_function,none,
       "%select{'async'|'async' call|'await'|'async let'|'async' property access|'async' subscript access}0 in "
@@ -8872,9 +8875,9 @@ GROUPED_WARNING(unsafe_without_unsafe,StrictMemorySafety,none,
       "expression uses unsafe constructs but is not marked with 'unsafe'", ())
 GROUPED_WARNING(for_unsafe_without_unsafe,StrictMemorySafety,none,
       "for-in loop uses unsafe constructs but is not marked with 'unsafe'", ())
-WARNING(no_unsafe_in_unsafe,none,
+GROUPED_WARNING(no_unsafe_in_unsafe,UnnecessaryEffectMarker,none,
         "no unsafe operations occur within 'unsafe' expression", ())
-WARNING(no_unsafe_in_unsafe_for,none,
+GROUPED_WARNING(no_unsafe_in_unsafe_for,UnnecessaryEffectMarker,none,
         "no unsafe operations occur within 'unsafe' for-in loop", ())
 NOTE(make_subclass_unsafe,none,
      "make class %0 '@unsafe' to allow unsafe overrides of safe superclass "
