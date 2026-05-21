@@ -1629,10 +1629,7 @@ public:
         }
         case SILDIExprElement::ConstIntKind: {
           uint64_t V = *Arg.getAsConstInt();
-          if (Op == SILDIExprOperator::ConstSInt)
-            *this << static_cast<int64_t>(V);
-          else
-            *this << V;
+          *this << V;
           break;
         }
         case SILDIExprElement::TypeKind: {
@@ -4027,6 +4024,21 @@ void SILGlobalVariable::print(llvm::raw_ostream &OS, bool Verbose) const {
 
   if (markedAsUsed())
     OS << "[used] ";
+
+  if (auto cgModel = codeGenerationModel()) {
+    switch (*cgModel) {
+    case CodeGenerationModel::Interface:
+      OS << "[export_interface] ";
+      break;
+
+    case CodeGenerationModel::Implementation:
+      OS << "[export_implementation] ";
+      break;
+
+    case CodeGenerationModel::Inlinable:
+      break;
+    }
+  }
 
   if (!asmName().empty())
     OS << "[asmname \"" << asmName() << "\"] ";

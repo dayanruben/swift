@@ -1086,9 +1086,16 @@ private:
 
     bool IsTypeOriginallyDefinedIn = containsOriginallyDefinedIn(DbgTy.getType());
     bool IsCxxType = containsCxxType(DbgTy.getType());
+    // TODO: ASTDemangler drops LifetimeDependenceInfo (see ASTDemangler.cpp's
+    // "Handle LifetimeDependenceInfo here" TODO); until that TODO is closed,
+    // types containing function types with lifetime dependencies cannot
+    // round-trip. This exclusion is intentionally transitive.
+    bool ContainsLifetimeDependencies =
+        containsFunctionTypeWithLifetimeDependencies(DbgTy.getType());
     // There's no way to round trip when respecting @_originallyDefinedIn for a type.
     // TODO(https://github.com/apple/swift/issues/57699): We currently cannot round trip some C++ types.
-    if (!Opts.DisableRoundTripDebugTypes && !IsTypeOriginallyDefinedIn && !IsCxxType) {
+    if (!Opts.DisableRoundTripDebugTypes && !IsTypeOriginallyDefinedIn &&
+        !IsCxxType && !ContainsLifetimeDependencies) {
       // Make sure we can reconstruct mangled types for the debugger.
       auto &Ctx = Ty->getASTContext();
       Type Reconstructed = Demangle::getTypeForMangling(Ctx, SugaredName, Sig);
@@ -2682,6 +2689,23 @@ private:
     });
   }
 
+  /// Returns true if the type contains a function type with lifetime
+  /// dependencies. ASTDemangler drops LifetimeDependenceInfo (see the
+  /// "Handle LifetimeDependenceInfo here" TODO in ASTDemangler.cpp), so
+  /// such types cannot round-trip through the demangler. Covers both
+  /// inferred and explicit dependencies via hasLifetimeDependencies(),
+  /// and both AST-level (AnyFunctionType) and SIL-level (SILFunctionType)
+  /// function type hierarchies.
+  bool containsFunctionTypeWithLifetimeDependencies(Type T) {
+    return T.findIf([](Type t) -> bool {
+      if (auto *fn = t->getAs<AnyFunctionType>())
+        return fn->hasLifetimeDependencies();
+      if (auto *silFn = t->getAs<SILFunctionType>())
+        return silFn->hasLifetimeDependencies();
+      return false;
+    });
+  }
+
   /// Returns the decl of the type's parent chain annotated by
   /// @_originallyDefinedIn. Returns null if no type is annotated.
   NominalTypeDecl *getDeclAnnotatedByOriginallyDefinedIn(DebugTypeInfo DbgTy) {
@@ -3701,20 +3725,6 @@ bool IRGenDebugInfoImpl::buildDebugInfoExpression(
     case SILDIExprOperator::Dereference:
       Operands.push_back(llvm::dwarf::DW_OP_deref);
       break;
-    case SILDIExprOperator::Plus:
-      Operands.push_back(llvm::dwarf::DW_OP_plus);
-      break;
-    case SILDIExprOperator::Minus:
-      Operands.push_back(llvm::dwarf::DW_OP_minus);
-      break;
-    case SILDIExprOperator::ConstUInt:
-      Operands.push_back(llvm::dwarf::DW_OP_constu);
-      Operands.push_back(*ExprOperand[1].getAsConstInt());
-      break;
-    case SILDIExprOperator::ConstSInt:
-      Operands.push_back(llvm::dwarf::DW_OP_consts);
-      Operands.push_back(*ExprOperand[1].getAsConstInt());
-      break;
     case SILDIExprOperator::INVALID:
       return false;
     }
@@ -4037,16 +4047,6 @@ void IRGenDebugInfoImpl::emitDbgIntrinsic(
   // /always/ emit an llvm.dbg.value of undef.
   // If we have undef, always emit a llvm.dbg.value in the current position.
   if (isa<llvm::UndefValue>(Storage)) {
-    if (Expr->getNumElements() &&
-        (Expr->getElement(0) == llvm::dwarf::DW_OP_consts
-         || Expr->getElement(0) == llvm::dwarf::DW_OP_constu)) {
-      /// Convert `undef, expr op_consts:N:...` to `N, expr ...`
-      Storage = llvm::ConstantInt::get(
-          llvm::IntegerType::getInt64Ty(Builder.getContext()),
-          Expr->getElement(1));
-      Expr = llvm::DIExpression::get(Builder.getContext(),
-                                     Expr->getElements().drop_front(2));
-    }
     DBuilder.insertDbgValueIntrinsic(Storage, Var, Expr, DL, ParentBlock);
     return;
   }
