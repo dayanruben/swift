@@ -1683,6 +1683,10 @@ public:
     return Descriptor->getTypeContextDescriptorFlags().class_isActor();
   }
 
+  size_t metadataSize(RemoteAddress MetadataAddress) {
+    return this->readMetadataAndSize(MetadataAddress).second;
+  }
+
   /// Iterate the protocol conformance cache tree rooted at NodePtr, calling
   /// Call with the type and protocol in each node.
   void iterateConformanceTree(
@@ -2469,6 +2473,10 @@ private:
       // substitutions.
       bool Progress = false;
       for (auto Source : Info.MetadataSources) {
+        // If either component of the source is NULL, something went wrong.
+        if (!Source.first || !Source.second)
+          return nullptr;
+
         // Don't read a source more than once.
         if (Done.count(Source))
           continue;
@@ -2547,6 +2555,9 @@ private:
   std::optional<RemoteAddress>
   readMetadataSource(RemoteAddress Context, const MetadataSource *MS,
                      const RecordTypeInfoBuilder &Builder) {
+    if (!MS)
+      return std::nullopt;
+
     switch (MS->getKind()) {
     case MetadataSourceKind::ClosureBinding: {
       unsigned Index = cast<ClosureBindingMetadataSource>(MS)->getIndex();

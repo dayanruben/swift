@@ -959,6 +959,8 @@ Added: _$ss13_SwiftifyInfoO11nonescapingyABs01_A4ExprO_tcABmFWC
 Added: _$ss13_SwiftifyInfoO7endedByyABs01_A4ExprO_SitcABmFWC
 Added: _$ss13_SwiftifyInfoO7sizedByyABs01_A4ExprO_SStcABmFWC
 Added: _$ss13_SwiftifyInfoO9countedByyABs01_A4ExprO_SStcABmFWC
+Added: _$ss13_SwiftifyInfoO13sizedByOrNullyABs01_A4ExprO_SStcABmFWC
+Added: _$ss13_SwiftifyInfoO15countedByOrNullyABs01_A4ExprO_SStcABmFWC
 Added: _$ss13_SwiftifyInfoO18lifetimeDependenceyABs01_A4ExprO_AEs01_D4TypeOtcABmFWC
 Added: _$ss13_SwiftifyInfoOMa
 Added: _$ss13_SwiftifyInfoOMn
@@ -1258,7 +1260,7 @@ Added: __ZN5swift26getResilientMetadataBoundsEPKNS_21TargetClassDescriptorINS_9I
 // Ref
 Added: _$ss3RefVMa
 Added: _$ss3RefVMn
-Added: _$ss3RefVsRi_zRi0_zrlE7builtinxBWvg
+Added: _$ss3RefVsRi_zrlE7builtinxBWvg
 
 // MutableRef
 Added: _$ss10MutableRefVMa
