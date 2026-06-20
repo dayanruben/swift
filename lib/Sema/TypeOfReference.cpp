@@ -2270,12 +2270,10 @@ Type ConstraintSystem::getEffectiveOverloadType(ConstraintLocator *locator,
     } else if (isa<AbstractFunctionDecl>(decl) || isa<EnumElementDecl>(decl)) {
       if (decl->isInstanceMember()) {
         auto baseTy = overload.getBaseType();
-        if (!baseTy)
-          return Type();
 
-        baseTy = baseTy->getRValueType();
-        if (!baseTy->getAnyNominal() && !baseTy->is<ExistentialType>() &&
-            !baseTy->is<OpaqueTypeArchetypeType>())
+        // Unapplied instance member references are not supported here
+        // for now.
+        if (!baseTy || baseTy->getRValueType()->is<AnyMetatypeType>())
           return Type();
       }
 
@@ -2478,7 +2476,8 @@ void ConstraintSystem::bindOverloadType(const SelectedOverload &overload,
       }();
       if (lookupDepth > ctx.TypeCheckerOpts.DynamicMemberLookupDepthLimit) {
         (void)recordFix(TooManyDynamicMemberLookups::create(
-            *this, DeclNameRef(choice.getName()), locator));
+                            *this, DeclNameRef(choice.getName()), locator),
+                        FixImpact::InvalidReference);
         recordTypeVariablesAsHoles(memberTy);
       } else {
         addValueMemberConstraint(

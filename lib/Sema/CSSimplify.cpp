@@ -7793,28 +7793,18 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
         // Look through all value-to-optional promotions to allow
         // conversions like Double -> CGFloat?? and vice versa.
         // T -> Optional<T>
-        if (location.endsWith<LocatorPathElt::OptionalInjection>()) {
+        if (location.endsWith<LocatorPathElt::OptionalInjection>() ||
+            location.endsWith<LocatorPathElt::GenericArgument>()) {
           SmallVector<LocatorPathElt, 4> path;
           auto anchor = location.getLocatorParts(path);
 
-          // An attempt at Double/CGFloat conversion through
-          // optional chaining. This is not supported at the
-          // moment because solution application doesn't know
-          // how to map Double to/from CGFloat through optionals.
-          if (isExpr<OptionalEvaluationExpr>(anchor)) {
-            if (!shouldAttemptFixes())
-              return getTypeMatchFailure(locator);
-
-            conversionsOrFixes.push_back(ContextualMismatch::create(
-                *this, nominal1, nominal2, getConstraintLocator(locator)));
-            break;
-          }
-
-          // Drop all of the applied `value-to-optional` promotions.
+          // Drop all of the applied `value-to-optional` and
+          // `optional-to-optional` conversions.
           path.erase(llvm::remove_if(
                          path,
                          [](const LocatorPathElt &elt) {
-                           return elt.is<LocatorPathElt::OptionalInjection>();
+                           return elt.is<LocatorPathElt::OptionalInjection>() ||
+                                  elt.is<LocatorPathElt::GenericArgument>();
                          }),
                      path.end());
 
@@ -9406,7 +9396,9 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
           auto *fix = AllowInvalidStaticMemberRefOnProtocolMetatype::create(
               *this, memberLoc);
 
-          return recordFix(fix) ? SolutionKind::Error : SolutionKind::Solved;
+          return recordFix(fix, FixImpact::InvalidReference)
+                     ? SolutionKind::Error
+                     : SolutionKind::Solved;
         }
       }
 
@@ -9972,7 +9964,7 @@ ConstraintSystem::lookupDependentMember(Type base, AssociatedTypeDecl *assocTy,
     // If the type witness is invalid we'll have emitted an error, record a
     // fix to ensure the solution is marked invalid.
     auto *loc = getConstraintLocator(locator);
-    recordFix(IgnoreInvalidASTNode::create(*this, loc));
+    recordFix(IgnoreInvalidASTNode::create(*this, loc), FixImpact::InvalidAST);
     return Type();
   }
 
@@ -11909,7 +11901,8 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
           solveWithNewBaseOrName(baseTy, DeclNameRef::createSubscript());
       // Looks like it was indeed meant to be a subscript operator.
       if (result == SolutionKind::Solved)
-        return recordFix(UseSubscriptOperator::create(*this, locator))
+        return recordFix(UseSubscriptOperator::create(*this, locator),
+                         FixImpact::InvalidReference)
                    ? SolutionKind::Error
                    : SolutionKind::Solved;
     }
@@ -12634,7 +12627,8 @@ ConstraintSystem::simplifyDynamicTypeOfConstraint(
     recordAnyTypeVarAsPotentialHole(type2);
 
     recordFix(IgnoreNonMetatypeDynamicType::create(
-        *this, type2, type1, getConstraintLocator(locator)));
+                  *this, type2, type1, getConstraintLocator(locator)),
+              FixImpact::TypeMismatch);
     return SolutionKind::Solved;
   }
 
@@ -13935,7 +13929,7 @@ ConstraintSystem::simplifyDynamicCallableApplicableFnConstraint(
         *this, desugar2, memberName, /*alreadyDiagnosed=*/false,
         getConstraintLocator(loc, ConstraintLocator::DynamicCallable));
 
-    if (recordFix(fix))
+    if (recordFix(fix, FixImpact::InvalidReference))
       return SolutionKind::Error;
 
     recordPotentialHole(tv);
@@ -15105,14 +15099,19 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
     auto impact =
         restriction == ConversionRestrictionKind::CGFloatToDouble ? 2 : 10;
 
+    // Slightly disfavor such conversions inside optionals and collections.
+    SmallVector<LocatorPathElt> originalPath;
+    auto anchor = locator.getLocatorParts(originalPath);
+
+    SourceRange range;
+    ArrayRef<LocatorPathElt> path(originalPath);
+    simplifyLocator(anchor, path, range);
+
+    if (!path.empty() && path.back().is<LocatorPathElt::GenericArgument>()) {
+      impact += 11;
+    }
+
     if (restriction == ConversionRestrictionKind::DoubleToCGFloat) {
-      SmallVector<LocatorPathElt> originalPath;
-      auto anchor = locator.getLocatorParts(originalPath);
-
-      SourceRange range;
-      ArrayRef<LocatorPathElt> path(originalPath);
-      simplifyLocator(anchor, path, range);
-
       if (path.empty() || llvm::all_of(path, [](const LocatorPathElt &elt) {
             return elt.is<LocatorPathElt::OptionalInjection>();
           })) {
