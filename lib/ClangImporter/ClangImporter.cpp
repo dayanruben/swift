@@ -1410,6 +1410,10 @@ std::unique_ptr<clang::CompilerInvocation> ClangImporter::createClangInvocation(
     CI = clang::createInvocation(invocationArgs, std::move(CIOpts));
     if (!CI)
       return nullptr;
+
+    // CodeGenOpts.Argv0 is a raw const char* into driverArgs[0]; re-anchor it
+    // to clangPath, which outlives the invocation.
+    CI->getCodeGenOpts().Argv0 = ctx.ClangImporterOpts.clangPath.c_str();
   }
 
   // FIXME: clang fails to generate a module if there is a `-fmodule-map-file`
@@ -8750,6 +8754,73 @@ SourceLoc swift::extractNearestSourceLoc(ClangDeclExplicitSafetyDescriptor desc)
   return SourceLoc();
 }
 
+RetainReleaseOperationKind importer::checkRetainReleaseOperationValidity(
+    const ClassDecl *classDecl, ValueDecl *operation,
+    CustomRefCountingOperationKind operationKind) {
+  auto operationFn = dyn_cast<FuncDecl>(operation);
+  if (!operationFn)
+    return RetainReleaseOperationKind::notAfunction;
+
+  if (operationFn->isStatic())
+    return RetainReleaseOperationKind::notAnInstanceFunction;
+
+  if (operationFn->isInstanceMember()) {
+    if (operationFn->getParameters()->size() != 0)
+      return RetainReleaseOperationKind::invalidParameters;
+  } else {
+    if (operationFn->getParameters()->size() != 1)
+      return RetainReleaseOperationKind::invalidParameters;
+  }
+
+  Type paramType;
+  NominalTypeDecl *paramDecl = nullptr;
+  if (!operationFn->isInstanceMember()) {
+    paramType = operationFn->getParameters()
+                    ->get(0)
+                    ->getInterfaceType()
+                    ->lookThroughSingleOptionalType();
+
+    paramDecl = paramType->getAnyNominal();
+  } else {
+    paramDecl = cast<NominalTypeDecl>(operationFn->getParent());
+    paramType = paramDecl->getDeclaredInterfaceType();
+  }
+
+  // The return type should be void (for release functions), or void
+  // or the parameter type (for retain functions).
+  auto resultInterfaceType = operationFn->getResultInterfaceType();
+  if (!resultInterfaceType->isVoid() && !resultInterfaceType->isUInt() &&
+      !resultInterfaceType->isUInt8() && !resultInterfaceType->isUInt16() &&
+      !resultInterfaceType->isUInt32() && !resultInterfaceType->isUInt64() &&
+      !resultInterfaceType->isInt() && !resultInterfaceType->isInt8() &&
+      !resultInterfaceType->isInt16() && !resultInterfaceType->isInt32() &&
+      !resultInterfaceType->isInt64()) {
+    if (operationKind == CustomRefCountingOperationKind::release ||
+        !resultInterfaceType->lookThroughSingleOptionalType()->isEqual(
+            paramType))
+      return RetainReleaseOperationKind::invalidReturnType;
+  }
+
+  // The parameter of the retain/release function should be pointer to the
+  // same FRT or a base FRT.
+  if (paramDecl != classDecl) {
+    if (auto cxxDecl =
+            dyn_cast<clang::CXXRecordDecl>(classDecl->getClangDecl())) {
+      if (const clang::Decl *paramClangDecl = paramDecl->getClangDecl()) {
+        if (const auto *paramTypeDecl =
+                dyn_cast<clang::CXXRecordDecl>(paramClangDecl)) {
+          if (cxxDecl->isDerivedFrom(paramTypeDecl)) {
+            return RetainReleaseOperationKind::valid;
+          }
+        }
+      }
+    }
+    return RetainReleaseOperationKind::invalidParameters;
+  }
+
+  return RetainReleaseOperationKind::valid;
+}
+
 CustomRefCountingOperationResult CustomRefCountingOperation::evaluate(
     Evaluator &evaluator, CustomRefCountingOperationDescriptor desc) const {
   auto swiftDecl = desc.decl;
@@ -8785,11 +8856,25 @@ CustomRefCountingOperationResult CustomRefCountingOperation::evaluate(
     return {CustomRefCountingOperationResult::immortal, nullptr, name};
 
   auto results = getValueDeclsForName(const_cast<ClassDecl *>(swiftDecl), name);
-  if (results.size() == 1)
-    return {CustomRefCountingOperationResult::foundOperation, results.front(),
-            name};
 
-  if (results.empty())
+  TinyPtrVector<ValueDecl *> validResults;
+  if (results.size() > 1) {
+    // If we have ambiguous retain/release operations, try to disambiguate.
+    for (auto *candidate : results) {
+      if (importer::checkRetainReleaseOperationValidity(swiftDecl, candidate,
+                                                        operation) ==
+          RetainReleaseOperationKind::valid)
+        validResults.push_back(candidate);
+    }
+  } else if (results.size() == 1) {
+    validResults.push_back(results.front());
+  }
+
+  if (validResults.size() == 1)
+    return {CustomRefCountingOperationResult::foundOperation,
+            validResults.front(), name};
+
+  if (validResults.empty())
     return {CustomRefCountingOperationResult::notFound, nullptr, name};
 
   return {CustomRefCountingOperationResult::tooManyFound, nullptr, name};
