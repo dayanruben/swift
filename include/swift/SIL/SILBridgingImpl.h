@@ -628,6 +628,8 @@ BridgedOperand::OperandOwnership BridgedOperand::getOperandOwnership() const {
     return OperandOwnership::InstantaneousUse;
   case swift::OperandOwnership::UnownedInstantaneousUse:
     return OperandOwnership::UnownedInstantaneousUse;
+  case swift::OperandOwnership::DebugUse:
+    return OperandOwnership::DebugUse;
   case swift::OperandOwnership::ForwardingUnowned:
     return OperandOwnership::ForwardingUnowned;
   case swift::OperandOwnership::PointerEscape:
@@ -943,6 +945,10 @@ BridgedFunction::ThunkKind BridgedFunction::isThunk() const {
 
 void BridgedFunction::setThunk(ThunkKind kind) const {
   getFunction()->setThunk((swift::IsThunk_t)kind);
+}
+
+bool BridgedFunction::isWithoutActuallyEscapingThunk() const {
+  return getFunction()->isWithoutActuallyEscapingThunk();
 }
 
 BridgedFunction::SerializedKind BridgedFunction::getSerializedKind() const {
