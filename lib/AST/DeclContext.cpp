@@ -15,7 +15,6 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/AccessScope.h"
 #include "swift/AST/AvailabilityContext.h"
-#include "swift/AST/AvailabilityRestriction.h"
 #include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/DeclExportabilityVisitor.h"
 #include "swift/AST/DiagnosticsSema.h"
@@ -90,6 +89,12 @@ ProtocolDecl *DeclContext::getExtendedProtocolDecl() const {
     if (auto ED = dyn_cast<ExtensionDecl>(decl))
       return dyn_cast_or_null<ProtocolDecl>(ED->getExtendedNominal());
   return nullptr;
+}
+
+bool DeclContext::isMetatypeExtension() const {
+  if (auto *ED = dyn_cast<ExtensionDecl>(this))
+    return ED->isMetatypeExtension();
+  return false;
 }
 
 VarDecl *DeclContext::getNonLocalVarDecl() const {
@@ -1833,6 +1838,5 @@ bool DeclContext::isAlwaysAvailableConformanceContext() const {
   // target.
   auto &ctx = getASTContext();
   auto deploymentTarget = AvailabilityContext::forDeploymentTarget(ctx);
-  auto restrictions = getAvailabilityRestrictionsForDecl(ext, deploymentTarget);
-  return !restrictions.getPrimaryRestriction();
+  return !deploymentTarget.restrictionForDecl(ext);
 }
