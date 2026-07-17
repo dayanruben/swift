@@ -1593,6 +1593,16 @@ namespace {
           if (auto newtype = importSwiftNewtype(Decl, newtypeAttr, DC, Name))
             return newtype;
 
+      // In C++ interop, a {CF,NS}_OPTIONS type is a Swift-unavailable typedef
+      // paired with an anonymous flag_enum. When another typedef refers to
+      // such a type, map it to the option set struct so the resulting
+      // typealias points at the option set rather than resolving to the
+      // underlying integer type.
+      if (!SwiftType)
+        if (auto optionSetEnum = importer::findOptionSetEnum(
+                desugarIfElaborated(Decl->getUnderlyingType()), Impl))
+          SwiftType = optionSetEnum.getType();
+
       if (!SwiftType) {
         // Note that the code below checks to see if the typedef allows
         // bridging, i.e. if the imported typealias should name a bridged type
@@ -6510,9 +6520,15 @@ namespace {
       // different (usually in something like nullability), but for Swift it's
       // an AST invariant that's assumed and asserted elsewhere. If the type is
       // different, just drop the setter, and leave the property as get-only.
+      //
+      // Compare through any reference-storage wrapper: applyPropertyOwnership()
+      // above may have rewritten the original property's type into a
+      // WeakStorageType/UnmanagedStorageType for weak/assign ownership, while
+      // the setter parameter is always the plain referent type.
       assert(setter->getParameters()->size() == 1);
       const ParamDecl *param = setter->getParameters()->get(0);
-      if (!param->getInterfaceType()->isEqual(original->getInterfaceType()))
+      if (!param->getInterfaceType()->isEqual(
+              original->getInterfaceType()->getReferenceStorageReferent()))
         return;
 
       original->setComputedSetter(setter);

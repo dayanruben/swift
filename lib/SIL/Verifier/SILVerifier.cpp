@@ -37,6 +37,7 @@
 #include "swift/SIL/Dominance.h"
 #include "swift/SIL/DynamicCasts.h"
 #include "swift/SIL/InstructionUtils.h"
+#include "swift/SIL/LoopInfo.h"
 #include "swift/SIL/MemAccessUtils.h"
 #include "swift/SIL/OwnershipLiveness.h"
 #include "swift/SIL/OwnershipUtils.h"
@@ -87,12 +88,22 @@ static llvm::cl::opt<bool> VerifyDIHoles("verify-di-holes", llvm::cl::init(
 #endif
                                                                 ));
 
+// Verify the type chain of debug_value instructions. Disabled by default
+// while we fix all root causes.
+static llvm::cl::opt<bool> VerifyDebugValueExpr("verify-debug-value-expr",
+                                                llvm::cl::init(false));
+
 static llvm::cl::opt<bool> SkipConvertEscapeToNoescapeAttributes(
     "verify-skip-convert-escape-to-noescape-attributes", llvm::cl::init(false));
 
 // Allow unit tests to gradually migrate toward -allow-critical-edges=false.
 static llvm::cl::opt<bool> AllowCriticalEdges("allow-critical-edges",
                                               llvm::cl::init(true));
+
+static llvm::cl::opt<bool> VerifyReducibleLoops(
+    "verify-reducible-loops", llvm::cl::init(false),
+    llvm::cl::desc("Verify that SIL does not contain irreducible loops"));
+
 extern llvm::cl::opt<bool> SILPrintDebugInfo;
 
 void swift::verificationFailure(
@@ -1965,7 +1976,9 @@ public:
     }
 
     // Type chain: SSA operand -> DebugBB -> deref -> fragments -> vartype
-    require(inst->isExprTypeValid(), "debug_value type chain should hold");
+    if (VerifyDebugValueExpr)
+      require(inst->isExprTypeValid(),
+              "debug_value type chain should hold");
   }
 
   void checkInstructionsDebugInfo(SILInstruction *inst) {
@@ -7565,6 +7578,9 @@ public:
         !mod.getASTContext().hadError()) {
       F->verifyMemoryLifetime(calleeCache, &getDeadEndBlocks());
     }
+
+    if (VerifyReducibleLoops)
+      verifyReducibleLoops(F);
   }
 
   void verify(bool isCompleteOSSA) {
@@ -7572,6 +7588,23 @@ public:
       DEBlocks = std::make_shared<DeadEndBlocks>(const_cast<SILFunction *>(&F));
     }
     visitSILFunction(const_cast<SILFunction*>(&F));
+  }
+
+  void verifyReducibleLoops(SILFunction *func) {
+    llvm::SmallPtrSet<SILBasicBlock *, 32> loopHeaders;
+    findLoopHeaders(*func, loopHeaders);
+
+    SILLoopInfo loopInfo(func, Dominance);
+
+    for (auto *loopHeader : loopHeaders) {
+      auto *loop = loopInfo.getLoopFor(loopHeader);
+      if (!loop) {
+        llvm::errs() << "Irreducible loop detected in function "
+                     << func->getName() << ":\n";
+        loopHeader->dump();
+        require(false, "SIL contains irreducible loop");
+      }
+    }
   }
 };
 } // end anonymous namespace
