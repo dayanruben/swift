@@ -930,7 +930,6 @@ struct BridgedInstruction {
   BRIDGED_INLINE bool MarkUnresolvedNonCopyableValue_isStrict() const;
   BRIDGED_INLINE void RefCountingInst_setIsAtomic(bool isAtomic) const;
   BRIDGED_INLINE bool RefCountingInst_getIsAtomic() const;
-  BRIDGED_INLINE SwiftInt CondBranchInst_getNumTrueArgs() const;
   BRIDGED_INLINE void AllocRefInstBase_setIsStackAllocatable() const;
   BRIDGED_INLINE bool AllocRefInst_isBare() const;
   BRIDGED_INLINE void AllocRefInst_setIsBare() const;
@@ -1645,15 +1644,6 @@ struct BridgedContext {
   static BRIDGED_INLINE void moveInstructionBefore(BridgedInstruction inst, BridgedInstruction beforeInst);
   static BRIDGED_INLINE void copyInstructionBefore(BridgedInstruction inst, BridgedInstruction beforeInst);
   static BRIDGED_INLINE void salvageDebugInfo(BridgedInstruction inst);
-
-    // SSAUpdater
-
-  BRIDGED_INLINE void SSAUpdater_initialize(BridgedType type, BridgedValue::Ownership ownership) const;
-  BRIDGED_INLINE void SSAUpdater_addAvailableValue(BridgedBasicBlock block, BridgedValue value) const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedValue SSAUpdater_getValueAtEndOfBlock(BridgedBasicBlock block) const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedValue SSAUpdater_getValueInMiddleOfBlock(BridgedBasicBlock block) const;
-  BRIDGED_INLINE SwiftInt SSAUpdater_getNumInsertedPhis() const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedValue SSAUpdater_getInsertedPhi(SwiftInt idx) const;
 
   // Sets
 
