@@ -505,6 +505,19 @@ void DebugValueInst::prependDeref() {
   load->setOperand(newArg);
 }
 
+void DebugValueInst::convertDerefToLoad() {
+  ASSERT(hasDeref() && "Must have deref to convert");
+  ASSERT(ReconstructionBlock && "Must have reconstruction block");
+  auto *ret = cast<ReturnInst>(ReconstructionBlock->getTerminator());
+  ASSERT(ret->getOperand()->getType().isLoadableOrOpaque(*getFunction()) &&
+         "Cannot insert load for address-only type");
+  SILBuilder builder(ret);
+  auto *load = builder.createLoad(getLoc(), ret->getOperand(),
+                                  LoadOwnershipQualifier::Unqualified);
+  ret->setOperand(load);
+  sharedUInt8().DebugValueInst.prependDeref = false;
+}
+
 void DebugValueInst::stripDeref() {
   // If we have an undef, nothing to do.
   if (isa<SILUndef>(getOperand()))
@@ -602,6 +615,14 @@ void DebugValueInst::killOperand(SILType operandType) {
   }
 
   SILType origType = operandType ? operandType : getOperand()->getType();
+
+  // Non-undef debug_values on alloc_box are allowed and fixed by IRGen to
+  // refer to the project_box. Undef debug_values, however, should always
+  // have the type of the variable.
+  if (!operandType)
+    if (auto *abi = dyn_cast<AllocBoxInst>(getOperand()))
+      origType = abi->getAddressType().getObjectType();
+
   bool addressOnly = !origType.isLoadableOrOpaque(*getFunction());
 
   // For address-only types, keep the address type and prependDeref flag.
