@@ -2247,6 +2247,26 @@ DirectLookupRequest::evaluate(Evaluator &evaluator,
   if (!Table.isLazilyComplete(name.getBaseName())) {
     DeclBaseName baseName(name.getBaseName());
 
+    // A `@com` type synthesizes its identity member (a class's `CLSID`, or a
+    // protocol's `IID`, in a metatype extension) the first time the table is
+    // built for that name; covers a name lookup racing member synthesis.
+    // Only for a source-file type: an imported one already carries the
+    // deserialized member, and triggering synthesis (which name-looks-up the
+    // member) would re-enter this very lookup.
+    if (ctx.LangOpts.EnableCOMInterop) {
+      if (auto *PD = dyn_cast<ProtocolDecl>(decl)) {
+        if (baseName == ctx.Id_IID && PD->getAttrs().hasAttribute<COMAttr>() &&
+            PD->getDeclContext()->getParentSourceFile())
+          evaluateOrDefault(ctx.evaluator, SynthesizeCOMInterfaceIDRequest{PD},
+                            nullptr);
+      } else if (auto *CD = dyn_cast<ClassDecl>(decl)) {
+        if (baseName == ctx.Id_CLSID && CD->getAttrs().hasAttribute<COMAttr>() &&
+            CD->getDeclContext()->getParentSourceFile())
+          evaluateOrDefault(ctx.evaluator,
+                            SynthesizeCOMImplementationIDRequest{CD}, nullptr);
+      }
+    }
+
     if (isa_and_nonnull<clang::NamespaceDecl>(decl->getClangDecl())) {
       auto allFound = evaluateOrDefault(
           ctx.evaluator, CXXNamespaceMemberLookup({cast<EnumDecl>(decl), name}),
@@ -2476,9 +2496,7 @@ static bool isAcceptableLookupResult(const DeclContext *dc, NLOptions options,
   // Filter out designated initializers, if requested.
   if (onlyCompleteObjectInits) {
     if (auto ctor = dyn_cast<ConstructorDecl>(decl)) {
-      // getSelfClassDecl() (not isa<ClassDecl>) so a non-inheritable init in a
-      // class extension (e.g. an imported ObjC category factory) is filtered too.
-      if (ctor->getDeclContext()->getSelfClassDecl() && !ctor->isInheritable())
+      if (isa<ClassDecl>(ctor->getDeclContext()) && !ctor->isInheritable())
         return false;
     } else {
       return false;
