@@ -1641,9 +1641,9 @@ static void emitIndirectResultParameters(SILGenFunction &SGF,
 
   // And the abstraction pattern may force an indirect return even if the
   // concrete type wouldn't normally be returned indirectly.
-  if (!SILModuleConventions::isReturnedIndirectlyInSIL(resultConvType,
-                                                       SGF.SGM.M)) {
-    if (!SILModuleConventions(SGF.SGM.M).useLoweredAddresses()
+  if (!SILAddressConventions::isReturnedIndirectlyInSIL(resultConvType,
+                                                       SGF.F)) {
+    if (SGF.SGM.M.usesOpaqueValues()
         || origResultType.getResultConvention(SGF.SGM.Types) != AbstractionPattern::Indirect)
       return;
   }
@@ -1678,9 +1678,9 @@ static void emitIndirectErrorParameter(SILGenFunction &SGF,
 
   // And the abstraction pattern may force an indirect return even if the
   // concrete type wouldn't normally be returned indirectly.
-  if (!SILModuleConventions::isThrownIndirectlyInSIL(errorConvType,
-                                                     SGF.SGM.M)) {
-    if (!SILModuleConventions(SGF.SGM.M).useLoweredAddresses()
+  if (!SILAddressConventions::isThrownIndirectlyInSIL(errorConvType,
+                                                     SGF.F)) {
+    if (SGF.SGM.M.usesOpaqueValues()
         || origErrorType.getErrorConvention(SGF.SGM.Types)
             != AbstractionPattern::Indirect)
       return;
@@ -1768,8 +1768,18 @@ uint16_t SILGenFunction::emitBasicProlog(
                        std::move(scopedDependencyParams))
       .emitParams(origClosureType, paramList, selfParam);
 
-  // Record the ArgNo of the artificial $error inout argument. 
-  if (errorType && !(*errorType)->isNever() && IndirectErrorResult == nullptr) {
+  // Record the ArgNo of the artificial $error inout argument.
+  //
+  // The abstraction pattern's `errorType` can describe a throwing closure
+  // while the emitted SIL function is non-throwing — this happens when a
+  // non-throwing literal is stored into a `throws(E)` position and the
+  // outer conversion adds the error result externally. The indirect error
+  // parameter emission above already guards on the lowered SIL function's
+  // conventions; do the same for the `$error` debug placeholder, which
+  // must only appear in a function whose SIL type has an error result
+  // (SIL verifier enforces this invariant).
+  if (errorType && !(*errorType)->isNever() && IndirectErrorResult == nullptr &&
+      F.getLoweredFunctionType()->hasErrorResult()) {
     CanType errorTypeInContext =
       DC->mapTypeIntoEnvironment(*errorType)->getCanonicalType();
     auto loweredErrorTy = getLoweredType(*origErrorType, errorTypeInContext);
