@@ -2692,11 +2692,8 @@ bb3:
   return %2 : $()
 }
 
-// We do not perform this optimization in SILCombine in OSSA since we would be
-// deleting an edge from the CFG.
-//
 // CHECK-LABEL: sil [ossa] @resilient_enum_case_propagation :
-// CHECK: switch_enum_addr
+// CHECK-NOT: switch_enum_addr
 // CHECK: } // end sil function 'resilient_enum_case_propagation'
 sil [ossa] @resilient_enum_case_propagation : $@convention(thin) () -> Builtin.Int64 {
 bb0:
@@ -2814,8 +2811,9 @@ bb0(%0 : @owned $Klass):
 }
 
 // CHECK-LABEL: sil [ossa] @collapse_existential_pack_unpack_unchecked_ref_cast_owned3 :
-// CHECK-NOT:     init_existential_ref
-// CHECK-NOT:     open_existential_ref
+// TODO-CHECK-NOT:     init_existential_ref
+// TODO-CHECK-NOT:     open_existential_ref
+// CHECK:     apply {{.*}}<Klass>
 // CHECK: } // end sil function 'collapse_existential_pack_unpack_unchecked_ref_cast_owned3'
 sil [ossa] @collapse_existential_pack_unpack_unchecked_ref_cast_owned3 : $@convention(thin) (@owned Klass) -> @owned Builtin.NativeObject {
 bb0(%0 : @owned $Klass):

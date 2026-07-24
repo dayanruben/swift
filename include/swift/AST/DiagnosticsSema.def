@@ -150,6 +150,10 @@ ERROR(could_not_use_instance_member_on_type,none,
       "%select{| of type %2}3 cannot be used on"
       "%select{| instance of nested}3 type %0",
       (Type, DeclNameRef, Type, bool))
+ERROR(metatype_extension_member_on_conforming_type,none,
+      "metatype extension member %1 cannot be used on conforming type %0; "
+      "it is only available on the protocol metatype",
+      (Type, const ValueDecl *))
 GROUPED_ERROR(could_not_use_member_on_existential,ExistentialMemberAccess,none,
       "member %1 cannot be used on value of type %0; consider using a"
       " generic constraint instead",
@@ -328,6 +332,8 @@ ERROR(cannot_convert_initializer_value_anyobject,none,
       "value of type %0 expected to be instance of class or "
       "class-constrained type",
       (Type, Type))
+ERROR(cannot_convert_noncopyable_value_to_anyobject,none,
+      "value of noncopyable type %0 cannot be converted to %1", (Type, Type))
 ERROR(cannot_convert_initializer_value_nil,none,
       "'nil' cannot initialize specified type %0", (Type))
 
@@ -5318,6 +5324,10 @@ ERROR(passing_noattrfunc_to_attrfunc,none,
       "passing %select{non-escaping|non-Sendable}0 parameter %1 to function "
       "expecting %select{an '@escaping'|a '@Sendable'}0 closure",
       (unsigned, Identifier))
+NOTE(candidate_expects_escaping_argument,none,
+     "candidate expects %select{an '@escaping'|a '@Sendable'}0 closure for "
+     "parameter #%1, but argument %2 is %select{non-escaping|non-Sendable}0",
+     (unsigned, unsigned, StringRef))
 ERROR(converting_noescape_param_to_generic_type,none,
       "converting non-escaping parameter %0 to generic parameter %1 may allow it to escape",
       (Identifier, Type))
