@@ -1,9 +1,8 @@
 
 // RUN: rm -rf %t
 // RUN: split-file %s %t
-// RUN: %target-swift-frontend -typecheck -verify -Xcc -iapinotes-modules -Xcc %swift_src_root/stdlib/public/Cxx/std -Xcc -std=c++20 -I %t/Inputs  %t/test.swift -strict-memory-safety -enable-experimental-feature LifetimeDependence -cxx-interoperability-mode=default -diagnostic-style llvm -plugin-path %swift-plugin-dir -verify-additional-file %t/Inputs/nonescapable.h 2>&1
+// RUN: %target-swift-frontend -typecheck -verify -Xcc -iapinotes-modules -Xcc %swift_src_root/stdlib/public/Cxx/std -Xcc -std=c++20 -I %t%{fs-sep}Inputs  %t%{fs-sep}test.swift -strict-memory-safety -enable-experimental-feature LifetimeDependence -cxx-interoperability-mode=default -diagnostic-style llvm -plugin-path %swift-plugin-dir -verify-additional-file %t%{fs-sep}Inputs%{fs-sep}nonescapable.h 2>&1
 
-// REQUIRES: objc_interop
 // REQUIRES: swift_feature_LifetimeDependence
 // REQUIRES: std_span
 
@@ -87,6 +86,11 @@ private:
 
 View returnsViewLifetimebound(const Owner &o [[clang::lifetimebound]]);
 
+// A lifetime dependency whose target is Escapable is dropped, so the annotation
+// is not enforced: import the function as unsafe.
+// expected-warning@+1{{the returned type 'Owner' is annotated as escapable; it cannot have lifetime dependencies}}
+Owner returnsOwnerLifetimebound(const View &v [[clang::lifetimebound]]);
+
 __attribute__((swift_attr("@lifetime(borrow o)")))
 // expected-warning@+1{{the returned type 'View' is annotated as non-escapable; its lifetime dependencies must be annotated}}
 View returnsViewHandWrittenLifetime(const Owner &o);
@@ -167,8 +171,10 @@ struct SWIFT_SAFE WrapsUnannotatedMember {
 //--- test.swift
 
 import Test
-import CoreFoundation
 import CxxStdlib
+#if canImport(CoreFoundation)
+import CoreFoundation
+#endif
 
 func useUnsafeParam(x: Unannotated) {
   // expected-warning@+1{{expression uses unsafe constructs but is not marked with 'unsafe'}}
@@ -191,9 +197,11 @@ func useSafeParams(x: Owner, y: View, z: SafeEscapableAggregate, c: MyContainer)
     let _ = c.__beginUnsafe() // expected-note{{reference to unsafe instance method '__beginUnsafe()'}}
 }
 
+#if canImport(CoreFoundation)
 func useCfType(x: CFArray) {
   _ = x
 }
+#endif
 
 func useString(x: std.string) {
   _ = x
@@ -262,6 +270,11 @@ func useAnnotatedLifetimeDependency(o: Owner) {
     let _ = returnsViewLifetimebound(o)
     let _ = returnsViewHandWrittenLifetime(o)
     let _ = returnsViewAuditedSafe(o)
+}
+
+func useEscapableLifetimeDependency(v: View) {
+    // expected-warning@+1{{expression uses unsafe constructs but is not marked with 'unsafe'}}
+    let _ = returnsOwnerLifetimebound(v) // expected-note{{reference to unsafe global function 'returnsOwnerLifetimebound'}}
 }
 
 @available(SwiftStdlib 5.8, *)
