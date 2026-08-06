@@ -290,6 +290,17 @@ public:
   void emitPackCountParameter(IRGenFunction &IGF, llvm::Value *Metadata,
                               SILDebugVariable VarInfo);
 
+  void emitExistentialPayloadType(swift::Type Ty) {
+    if (Opts.DebugInfoLevel <= IRGenDebugInfoLevel::ASTTypes)
+      return;
+    if (!Ty || Ty->hasTypeParameter() || Ty->hasArchetype())
+      return;
+
+    auto DbgTy = DebugTypeInfo::getFromTypeInfo(
+        Ty, IGM.getTypeInfoForUnlowered(Ty), IGM);
+    anchorType(getOrCreateType(DbgTy));
+  }
+
   /// Return flags which enable debug info emission for call sites, provided
   /// that it is supported and enabled.
   llvm::DINode::DIFlags getCallSiteRelatedAttrs() const;
@@ -1198,6 +1209,15 @@ private:
 
   unsigned getByteSize() { return CI.getTargetInfo().getCharWidth(); }
 
+  /// The alignment to record in the debug info for \p DbgTy, in bits, or 0 to
+  /// record none. The DWARF emitter checks for a 0 and omits DW_AT_alignment 
+  /// in that case.
+  unsigned getAlignInBits(DebugTypeInfo DbgTy) {
+    if (Opts.DebugInfoLevel <= IRGenDebugInfoLevel::ASTTypes)
+      return 0;
+    return DbgTy.getAlignInBits(getByteSize());
+  }
+
   llvm::DICompositeType *createStructType(
       NominalOrBoundGenericNominalType *Type, NominalTypeDecl *Decl,
       llvm::DIScope *Scope, llvm::DIFile *File, unsigned Line,
@@ -1218,8 +1238,7 @@ private:
                     IGM.getSILTypes().getAbstractionPattern(VD), memberTy),
                 IGM)) {
           MemberTypes.emplace_back(VD->getName().str(),
-                                   getByteSize() *
-                                       DbgTy->getAlignment().getValue(),
+                                   getAlignInBits(*DbgTy),
                                    getOrCreateType(*DbgTy));
           anchorTypeAliasesIn(memberTy);
         } else {
@@ -1279,7 +1298,7 @@ private:
                 IGM.getSILTypes().getAbstractionPattern(VD), memberTy),
             IGM);
         MemberTypes.emplace_back(VD->getName().str(),
-                                 getByteSize() * DbgTy.getAlignment().getValue(),
+                                 getAlignInBits(DbgTy),
                                  getOrCreateType(DbgTy));
         anchorTypeAliasesIn(memberTy);
       }
@@ -1531,8 +1550,7 @@ private:
             wrapInReferenceTypeIfIndirect(PayloadDITy, ElemDecl, Decl);
 
         MemberTypes.emplace_back(ElemDecl->getBaseIdentifier().str(),
-                                 getByteSize() *
-                                     ElemDbgTy->getAlignment().getValue(),
+                                 getAlignInBits(*ElemDbgTy),
                                  TrackingDIType(PayloadDITy));
         anchorTypeAliasesIn(PayloadTy);
       } else {
@@ -1593,8 +1611,7 @@ private:
             wrapInReferenceTypeIfIndirect(PayloadDITy, ElemDecl, Decl);
 
         MemberTypes.emplace_back(ElemDecl->getBaseIdentifier().str(),
-                                 getByteSize() *
-                                     ElemDbgTy->getAlignment().getValue(),
+                                 getAlignInBits(*ElemDbgTy),
                                  TrackingDIType(PayloadDITy));
         anchorTypeAliasesIn(PayloadTy);
       } else {
@@ -1636,9 +1653,9 @@ private:
   }
 
   llvm::DIType *getOrCreateDesugaredType(Type Ty, DebugTypeInfo DbgTy) {
-    DebugTypeInfo BlandDbgTy(
-        Ty, DbgTy.getAlignment(), DbgTy.hasDefaultAlignment(), false,
-        DbgTy.isFixedBuffer(), DbgTy.getNumExtraInhabitants());
+    DebugTypeInfo BlandDbgTy(Ty, DbgTy.getAlignment(), false,
+                             DbgTy.isFixedBuffer(),
+                             DbgTy.getNumExtraInhabitants());
     return getOrCreateType(BlandDbgTy);
   }
 
@@ -1875,8 +1892,7 @@ private:
           AbstractionPattern(genericSig, ElemTy->getCanonicalType()), ElemTy);
       auto DbgTy =
             DebugTypeInfo::getFromTypeInfo(ElemTy, elemTI, IGM);
-      MemberTypes.emplace_back("",
-                               getByteSize() * DbgTy.getAlignment().getValue(),
+      MemberTypes.emplace_back("", getAlignInBits(DbgTy),
                                getOrCreateType(DbgTy));
     }
     SmallVector<llvm::Metadata *, 16> Members;
@@ -1956,16 +1972,13 @@ private:
     // in the LLVM IR. For all types that are boxed in a struct, we are
     // emitting the storage size of the struct, but it may be necessary
     // to emit the (target!) size of the underlying basic type.
-    uint64_t SizeOfByte = CI.getTargetInfo().getCharWidth();
     std::optional<CompletedDebugTypeInfo> CompletedDbgTy = completeType(DbgTy);
     std::optional<uint64_t> SizeInBitsOrNull;
     if (CompletedDbgTy)
       SizeInBitsOrNull = CompletedDbgTy->getSizeInBits();
 
     uint64_t SizeInBits = SizeInBitsOrNull.value_or(0);
-    unsigned AlignInBits = DbgTy.hasDefaultAlignment()
-                               ? 0
-                               : DbgTy.getAlignment().getValue() * SizeOfByte;
+    unsigned AlignInBits = getAlignInBits(DbgTy);
     unsigned Encoding = 0;
     uint32_t NumExtraInhabitants = DbgTy.getNumExtraInhabitants().value_or(0);
 
@@ -2239,16 +2252,25 @@ private:
 
       llvm::DINodeArray Annotations = nullptr;
       if (auto *PD = dyn_cast_or_null<ProtocolDecl>(Decl)) {
-        if (PD->isMarkerProtocol()) {
+        SmallVector<llvm::Metadata *, 2> Annots;
+        auto addFlag = [&](StringRef Name) {
           llvm::Metadata *Ops[2] = {
-              llvm::MDString::get(IGM.getLLVMContext(),
-                                  StringRef("swift.MarkerProtocol")),
+              llvm::MDString::get(IGM.getLLVMContext(), Name),
               llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                   llvm::Type::getInt1Ty(IGM.getLLVMContext()), true))};
-          SmallVector<llvm::Metadata *, 1> Annots = {
-              llvm::MDNode::get(IGM.getLLVMContext(), Ops)};
+          Annots.push_back(llvm::MDNode::get(IGM.getLLVMContext(), Ops));
+        };
+
+        if (PD->isMarkerProtocol())
+          addFlag("swift.MarkerProtocol");
+
+        if (PD->isObjC())
+          addFlag("swift.ObjCProtocol");
+        else if (PD->requiresClass())
+          addFlag("swift.ClassConstrainedProtocol");
+
+        if (!Annots.empty())
           Annotations = DBuilder.getOrCreateArray(Annots);
-        }
       }
 
       return createOpaqueStruct(Scope, Decl ? Decl->getNameStr() : MangledName,
@@ -2475,10 +2497,10 @@ private:
 
       // For TypeAlias types, the DeclContext for the aliased type is
       // in the decl of the alias type.
-      DebugTypeInfo AliasedDbgTy(
-          AliasedTy, DbgTy.getAlignment(), DbgTy.hasDefaultAlignment(),
-          /* IsMetadataType = */ false, DbgTy.isFixedBuffer(),
-          DbgTy.getNumExtraInhabitants());
+      DebugTypeInfo AliasedDbgTy(AliasedTy, DbgTy.getAlignment(),
+                                 /* IsMetadataType = */ false,
+                                 DbgTy.isFixedBuffer(),
+                                 DbgTy.getNumExtraInhabitants());
       auto *TypeDef = DBuilder.createTypedef(getOrCreateType(AliasedDbgTy),
                                              MangledName, L.File, 0, Scope);
       // Bound generic types don't reference their type parameters in ASTTypes
@@ -4487,6 +4509,10 @@ void IRGenDebugInfo::emitPackCountParameter(IRGenFunction &IGF,
                                             SILDebugVariable VarInfo) {
   static_cast<IRGenDebugInfoImpl *>(this)->emitPackCountParameter(IGF, Metadata,
                                                                   VarInfo);
+}
+
+void IRGenDebugInfo::emitExistentialPayloadType(swift::Type Ty) {
+  static_cast<IRGenDebugInfoImpl *>(this)->emitExistentialPayloadType(Ty);
 }
 
 llvm::DIBuilder &IRGenDebugInfo::getBuilder() {
