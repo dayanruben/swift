@@ -3408,6 +3408,15 @@ public:
   /// Is this declaration 'final'?
   bool isFinal() const;
 
+  /// True if this declaration should have a non-unique definition based on
+  /// the Embedded Swift linkage model (i.e. its type metadata / code may be
+  /// emitted redundantly in every module that references it, rather than
+  /// having a single unique definition). Returns false outside Embedded Swift.
+  ///
+  /// This is the AST-level source of truth consulted by
+  /// `SILDeclRef::declHasNonUniqueDefinition`.
+  bool hasNonUniqueDefinition() const;
+
   /// Is this declaration marked with 'dynamic'?
   bool isDynamic() const;
 
@@ -8590,6 +8599,20 @@ public:
   /// vtable.
   bool needsNewVTableEntry() const;
 
+  /// Whether this is a generic method of a class that Embedded Swift must
+  /// dispatch statically, because it cannot be given a vtable entry.
+  ///
+  /// Embedded Swift has no unspecialized generic code, so a generic method
+  /// cannot appear in a vtable: there is no single implementation to put there.
+  /// Rather than reject such methods outright, they are dispatched statically
+  /// and kept out of the vtable entirely. The type checker makes that sound by
+  /// rejecting the two ways a static dispatch could be wrong -- an `open`
+  /// generic method, which a subclass in another module could override, and an
+  /// `override` of a generic method within this module.
+  ///
+  /// Returns false outside of Embedded Swift.
+  bool mustBeStaticallyDispatchedInEmbedded() const;
+
   /// True if the decl is a method which introduces a new witness table entry.
   bool requiresNewWitnessTableEntry() const {
     return getOverriddenDecls().empty();
@@ -9529,6 +9552,10 @@ public:
   bool isRequired() const {
     return getAttrs().hasAttribute<RequiredAttr>();
   }
+
+  /// Retrieve the initializer kind if it has been computed, \c nullopt
+  /// otherwise. Should only be used by the ASTDumper.
+  std::optional<CtorInitializerKind> getCachedInitKind() const;
 
   /// Determine the kind of initializer this is.
   CtorInitializerKind getInitKind() const;
