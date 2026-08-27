@@ -180,6 +180,7 @@ UNINTERESTING_FEATURE(ImportMacroAliases)
 UNINTERESTING_FEATURE(NoExplicitNonIsolated)
 UNINTERESTING_FEATURE(EmbeddedDynamicExclusivity)
 UNINTERESTING_FEATURE(TypedAllocation)
+UNINTERESTING_FEATURE(BuiltinAllocRawTyped)
 UNINTERESTING_FEATURE(MutateAndConsumeInDeinit)
 
 static bool usesFeatureUnderscoreOwned(Decl *D) {
@@ -492,6 +493,7 @@ UNINTERESTING_FEATURE(ForeignReferenceTypeInheritance)
 UNINTERESTING_FEATURE(CxxImplementation)
 UNINTERESTING_FEATURE(CoroutineAccessorsUnwindOnCallerError)
 UNINTERESTING_FEATURE(AllowRuntimeSymbolDeclarations)
+UNINTERESTING_FEATURE(DistributedActorResignRemoteID)
 
 static bool usesFeatureCoroutineAccessors(Decl *decl) {
   auto accessorDeclUsesFeatureCoroutineAccessors = [](AccessorDecl *accessor) {
