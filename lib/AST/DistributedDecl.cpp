@@ -203,6 +203,10 @@ Type swift::getDistributedActorSystemType(NominalTypeDecl *actor) {
   // Dig out the actor system type.
   Type selfType = actor->getSelfInterfaceType();
   auto conformance = lookupConformance(selfType, DA);
+
+  if (!conformance || conformance.isInvalid())
+    return ErrorType::get(C);
+
   return conformance.getTypeWitnessByName(C.Id_ActorSystem);
 }
 
@@ -465,6 +469,9 @@ Type swift::getAssociatedTypeOfDistributedSystemOfActor(
   auto sig = actorOrExtension->getGenericSignatureOfContext();
 
   auto *actorType = actorOrExtension->getSelfNominalTypeDecl();
+  if (!actorType)
+    return ErrorType::get(ctx);
+
   if (isa<ProtocolDecl>(actorType))
     return memberTy->getReducedType(sig);
 
