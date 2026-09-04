@@ -1608,6 +1608,8 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableModuleRecoveryRemarks = Args.hasArg(OPT_remark_module_recovery);
   Opts.EnableModuleSerializationRemarks =
       Args.hasArg(OPT_remark_module_serialization);
+  Opts.EnableHiddenTypeLayoutSerializationRemarks =
+      Args.hasArg(OPT_remark_hidden_type_layout_serialization);
   Opts.EnableModuleApiImportRemarks = Args.hasArg(OPT_remark_module_api_import);
   Opts.EnableMacroLoadingRemarks = Args.hasArg(OPT_remark_macro_loading);
   Opts.EnableIndexingSystemModuleRemarks = Args.hasArg(OPT_remark_indexing_system_module);
@@ -4356,6 +4358,8 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
 
   Opts.UseCASBackend |= Args.hasArg(OPT_cas_backend);
   Opts.EmitCASIDFile |= Args.hasArg(OPT_cas_emit_casid_file);
+  Opts.PrintLLVMBackendDiagnostics |=
+      Args.hasArg(OPT_print_llvm_backend_diagnostics);
 
   if (CASOpts.WriteOutputHashXAttr && Opts.UseCASBackend) {
     Diags.diagnose(SourceLoc(), diag::error_option_incompatible,
