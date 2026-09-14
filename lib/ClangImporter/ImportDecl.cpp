@@ -2579,18 +2579,15 @@ namespace {
 
           // If this is an inherited foreign reference type, check if it has a
           // suitable superclass.
-          if (Impl.SwiftContext.LangOpts.hasFeature(
-                  Feature::ForeignReferenceTypeInheritance)) {
-            if (auto primaryBase = frtInfo.getPrimarySuperclass()) {
-              if (auto baseDecl = cast_or_null<ClassDecl>(
-                      Impl.importDecl(primaryBase, getVersion()))) {
-                auto classResult = cast<ClassDecl>(result);
-                Type superclassType = baseDecl->getDeclaredInterfaceType();
-                classResult->setSuperclass(superclassType);
-                classResult->setInherited(
-                    Impl.SwiftContext.AllocateCopy(ArrayRef<InheritedEntry>{
-                        TypeLoc::withoutLoc(superclassType)}));
-              }
+          if (auto primaryBase = frtInfo.getPrimarySuperclass()) {
+            if (auto baseDecl = cast_or_null<ClassDecl>(
+                    Impl.importDecl(primaryBase, getVersion()))) {
+              auto classResult = cast<ClassDecl>(result);
+              Type superclassType = baseDecl->getDeclaredInterfaceType();
+              classResult->setSuperclass(superclassType);
+              classResult->setInherited(
+                  Impl.SwiftContext.AllocateCopy(ArrayRef<InheritedEntry>{
+                      TypeLoc::withoutLoc(superclassType)}));
             }
           }
         }
@@ -3046,7 +3043,8 @@ namespace {
           Impl.diagnose(HeaderLoc(ann.second),
                         diag::private_fileid_attr_format_invalid,
                         decl->getName());
-          Impl.diagnose({}, diag::private_fileid_attr_format_specification);
+          Impl.diagnose(HeaderLoc(ann.second),
+                        diag::private_fileid_attr_format_specification);
 
           if (ann.first.count('/') > 1) {
             // Try to construct a suggestion from predictable mistakes.
@@ -3063,7 +3061,8 @@ namespace {
               suggestion.append(".swift");
 
             if (SourceFile::FileIDStr::parse(suggestion))
-              Impl.diagnose({}, diag::private_fileid_attr_format_suggestion,
+              Impl.diagnose(HeaderLoc(ann.second),
+                            diag::private_fileid_attr_format_suggestion,
                             suggestion);
           }
         }
@@ -11110,13 +11109,10 @@ void ClangRecordMemberLoader::load(const clang::RecordDecl *clangRecord,
   if ((cxxRecord = dyn_cast<clang::CXXRecordDecl>(clangRecord)) &&
       cxxRecord->isCompleteDefinition()) {
     const clang::RecordDecl *superclassClangDecl = nullptr;
-    if (Impl.SwiftContext.LangOpts.hasFeature(
-            Feature::ForeignReferenceTypeInheritance)) {
-      auto derivedInfo =
-          evaluateOrDefault(Impl.SwiftContext.evaluator,
-                            ForeignReferenceTypeInfoRequest({cxxRecord}), {});
-      superclassClangDecl = derivedInfo.getPrimarySuperclass();
-    }
+    auto derivedInfo =
+        evaluateOrDefault(Impl.SwiftContext.evaluator,
+                          ForeignReferenceTypeInfoRequest({cxxRecord}), {});
+    superclassClangDecl = derivedInfo.getPrimarySuperclass();
 
     for (auto base : cxxRecord->bases()) {
       if (skipIfNonPublic && base.getAccessSpecifier() != clang::AS_public)
