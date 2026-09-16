@@ -17,8 +17,6 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/Basic/AssertImplements.h"
 #include "swift/Basic/Assertions.h"
-#include "swift/Basic/Unicode.h"
-#include "swift/Basic/type_traits.h"
 #include "swift/SIL/ApplySite.h"
 #include "swift/SIL/DynamicCasts.h"
 #include "swift/SIL/InstWrappers.h"
@@ -34,7 +32,6 @@
 #include "swift/SIL/StackAllocation.h"
 #include "swift/SIL/Test.h"
 #include "llvm/ADT/APInt.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 using namespace swift;
 using namespace Lowering;
@@ -2112,6 +2109,14 @@ PartialApplyInst::visitOnStackLifetimeEnds(
         liveness.updateForUse(use->getUser(), /*lifetimeEnding=*/true);
         continue;
       }
+
+      // A `@called(once)` closure's context is consumed directly by the
+      // `apply`/`try_apply` its passed to.
+      if (isCalledOnce() && isa<ApplyInst, TryApplyInst>(use->getUser())) {
+        liveness.updateForUse(use->getUser(), /*lifetimeEnding=*/true);
+        continue;
+      }
+
       auto forward = ForwardingOperand(use);
       if (!forward) {
         // There shouldn't be any non-forwarding consumptions of a nonescaping
@@ -2150,11 +2155,24 @@ PartialApplyInst::visitOnStackLifetimeEnds(
   liveness.computeBoundary(boundary);
 
   for (auto *inst : boundary.lastUsers) {
-    // Only destroy_values were added to liveness, so only destroy_values can be
-    // the last users.
-    auto *dvi = cast<DestroyValueInst>(inst);
-    auto keepGoing = func(&dvi->getOperandRef());
-    if (!keepGoing) {
+    Operand *consumingOperand = nullptr;
+    // Non-`@called(once)` values end their lifetime only at `destroy_value`.
+    if (auto *dvi = dyn_cast<DestroyValueInst>(inst)) {
+      consumingOperand = &dvi->getOperandRef();
+    } else if (isCalledOnce()) {
+      // `@called(once)` is consumed by an apply, look up the operand where
+      // it appears.
+      for (auto &operand : inst->getAllOperands()) {
+        if (operand.isConsuming() && lookThroughOwnershipAndForwardingInsts(
+                                         operand.get()) == SILValue(this)) {
+          consumingOperand = &operand;
+          break;
+        }
+      }
+    }
+
+    ASSERT(consumingOperand && "found no consuming operand?!");
+    if (!func(consumingOperand)) {
       return false;
     }
   }

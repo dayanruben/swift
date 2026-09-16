@@ -1326,29 +1326,11 @@ importer::shouldRenameCXXMethodAsUnsafe(const clang::CXXMethodDecl *method,
   return safe();
 }
 
-/// Whether the C++ standard library overlay in stdlib/public/Cxx already
-/// provides a safe Swift API named after \p method:
-///
-/// - 'basic_string::append' vs 'std.string.append(_:)', which differs only in
-///   its result type and so ambiguates every discarded-result call;
-/// - 'set::insert' etc. vs 'CxxUniqueSet.insert(_:)', a protocol extension
-///   member that a concrete C++ 'insert' would shadow outright;
-/// - 'optional::value' vs the 'CxxOptional.value' property.
-static bool overlayProvidesSafeWrapperNamed(const clang::CXXMethodDecl *method) {
-  if (!method->getParent()->isInStdNamespace() || !method->getIdentifier())
-    return false;
-
-  return llvm::StringSwitch<bool>(method->getName())
-      .Cases({"append", "insert", "value"}, true)
-      .Default(false);
-}
-
 bool importer::keepsNameWhenImportedAsUnsafe(const clang::CXXMethodDecl *method,
                                              ASTContext &ctx) {
   return ctx.LangOpts.hasFeature(
              Feature::ImportUnsafeCxxMethodsAsAlwaysUnsafe) &&
-         shouldRenameCXXMethodAsUnsafe(method, ctx) &&
-         !overlayProvidesSafeWrapperNamed(method);
+         shouldRenameCXXMethodAsUnsafe(method, ctx);
 }
 
 /// Whether a note at \p loc would land in a system header. Such a note names
@@ -1389,24 +1371,6 @@ diagnoseUnsafetyReason(ClangImporter::Implementation &Impl, HeaderLoc loc,
                          culprit);
   case importer::CxxUnsafetyReason::IndirectView:
     return note(diag::cxx_unsafe_indirect_view);
-
-  case importer::CxxUnsafetyReason::InferredResultDependence:
-    return note(diag::cxx_unsafe_inferred_result_dependence);
-  case importer::CxxUnsafetyReason::UnannotatedNonEscapableParam:
-    return note(diag::cxx_unsafe_unannotated_nonescapable_param,
-                         named, culprit);
-
-  case importer::CxxUnsafetyReason::SkippedLifetimeEscapableResult:
-    return note(diag::cxx_unsafe_skipped_lifetime_escapable_result);
-  case importer::CxxUnsafetyReason::SkippedLifetimeImportedAsClass:
-    return note(diag::cxx_unsafe_skipped_lifetime_imported_as_class, named,
-                culprit);
-  case importer::CxxUnsafetyReason::SkippedLifetimeRValueReference:
-    return note(diag::cxx_unsafe_skipped_lifetime_rvalue_reference, named,
-                culprit);
-  case importer::CxxUnsafetyReason::SkippedLifetimeNoBorrowableStorage:
-    return note(diag::cxx_unsafe_skipped_lifetime_no_borrowable_storage, named,
-                culprit);
   }
   llvm_unreachable("covered switch");
 }
@@ -1464,8 +1428,8 @@ void ClangImporter::diagnoseCxxUnsafetyReason(const ValueDecl *decl, Type type,
     // decision later.
     auto recorded = Impl.LifetimeUnsafetyReasons.find(decl);
     if (recorded != Impl.LifetimeUnsafetyReasons.end()) {
-      diagnoseUnsafetyReason(Impl, HeaderLoc(clangDecl->getLocation(), useLoc),
-                             recorded->second);
+      Impl.diagnose(HeaderLoc(clangDecl->getLocation(), useLoc),
+                    recorded->second);
       return;
     }
 

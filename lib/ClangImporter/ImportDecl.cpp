@@ -83,7 +83,6 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Lookup.h"
-#include "clang/Sema/SemaDiagnostic.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallBitVector.h"
@@ -92,7 +91,6 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -4309,13 +4307,18 @@ namespace {
           !isa<clang::CXXMethodDecl, clang::ObjCMethodDecl>(decl))
         return;
 
-      // Which lifetime annotation Swift could not represent, and on what. The
-      // first one found is the one reported.
-      std::optional<importer::CxxUnsafetyExplanation> skippedLifetime;
-      auto skipLifetime = [&](importer::CxxUnsafetyReason reason,
-                              const clang::NamedDecl *culprit) {
+      // The note for a lifetime annotation Swift could not represent. The first
+      // one found is the one reported.
+      std::optional<Diagnostic> skippedLifetime;
+      auto skipLifetime = [&](Diagnostic note) {
         if (!skippedLifetime)
-          skippedLifetime = importer::CxxUnsafetyExplanation{reason, culprit};
+          skippedLifetime = note;
+      };
+      // A skipped annotation sits either on a parameter or on 'self', which has
+      // no declaration to name.
+      auto onAnnotated = [](auto id, const clang::NamedDecl *param) {
+        return Diagnostic(id, param != nullptr,
+                          param ? param->getName() : StringRef());
       };
       auto isEscapable = [this](clang::QualType ty) {
         return evaluateOrDefault(
@@ -4362,8 +4365,7 @@ namespace {
           // Swift drops lifetime dependencies on Escapable targets, so this
           // annotation is not enforced. Import the API as @unsafe.
           skipLifetime(
-              importer::CxxUnsafetyReason::SkippedLifetimeEscapableResult,
-              nullptr);
+              Diagnostic(diag::cxx_unsafe_skipped_lifetime_escapable_result));
           Impl.addImportDiagnostic(
               decl,
               Diagnostic(diag::return_escapable_with_lifetimebound,
@@ -4393,9 +4395,8 @@ namespace {
         const clang::NamedDecl *annotated =
             forSelf ? nullptr : decl->getParamDecl(idx);
         if (importedAsClass(ty, forSelf))
-          skipLifetime(
-              importer::CxxUnsafetyReason::SkippedLifetimeImportedAsClass,
-              annotated);
+          skipLifetime(onAnnotated(
+              diag::cxx_unsafe_skipped_lifetime_imported_as_class, annotated));
         paramHasAnnotation[idx] = true;
         // 'self' and lvalue references borrow the referent's storage.
         if (forSelf || ty->isLValueReferenceType())
@@ -4405,9 +4406,8 @@ namespace {
         // dependency on it, nor can the result inherit its lifetime as if it
         // were passed by value. Import the API as @unsafe.
         else if (ty->isRValueReferenceType())
-          skipLifetime(
-              importer::CxxUnsafetyReason::SkippedLifetimeRValueReference,
-              annotated);
+          skipLifetime(onAnnotated(
+              diag::cxx_unsafe_skipped_lifetime_rvalue_reference, annotated));
         // A non-escapable passed by value: the result inherits its lifetime.
         else if (!isEscapable(ty))
           inheritLifetimeParamIndicesForReturn[idx] = true;
@@ -4415,9 +4415,9 @@ namespace {
         // borrowable storage, so we cannot form a scoped lifetime dependency.
         // Import the API as @unsafe.
         else
-          skipLifetime(
-              importer::CxxUnsafetyReason::SkippedLifetimeNoBorrowableStorage,
-              annotated);
+          skipLifetime(onAnnotated(
+              diag::cxx_unsafe_skipped_lifetime_no_borrowable_storage,
+              annotated));
       };
       auto processLifetimeCaptureBy =
           [&](const clang::LifetimeCaptureByAttr *attr, unsigned idx,
@@ -4551,10 +4551,9 @@ namespace {
 
       if (skippedLifetime || resultDependenceIsInferred) {
         result->addAttribute(new (ASTContext) UnsafeAttr(/*implicit=*/true));
-        Impl.LifetimeUnsafetyReasons[result] =
-            skippedLifetime.value_or(importer::CxxUnsafetyExplanation{
-                importer::CxxUnsafetyReason::InferredResultDependence,
-                nullptr});
+        Impl.LifetimeUnsafetyReasons.insert(
+            {result, skippedLifetime.value_or(Diagnostic(
+                         diag::cxx_unsafe_inferred_result_dependence))});
       } else {
         for (auto [idx, param] : llvm::enumerate(decl->parameters())) {
           if (isEscapable(param->getType()))
@@ -4564,9 +4563,9 @@ namespace {
           // We have a nonescapable parameter that does not have its lifetime
           // annotated nor is it marked noescape.
           result->addAttribute(new (ASTContext) UnsafeAttr(/*implicit=*/true));
-          Impl.LifetimeUnsafetyReasons[result] = {
-              importer::CxxUnsafetyReason::UnannotatedNonEscapableParam,
-              param};
+          Impl.LifetimeUnsafetyReasons.insert(
+              {result, Diagnostic(diag::cxx_unsafe_unannotated_nonescapable_param,
+                                  /*named=*/true, param->getName())});
           break;
         }
       }
@@ -4623,15 +4622,27 @@ namespace {
     /// Matching is on the stub name rather than the C++ base name because
     /// '__beginMutatingUnsafe' derives from the imported name 'beginMutating',
     /// not from 'begin'.
-    static bool overlayStillSpellsUnsafeStub(DeclBaseName stubName) {
+    static bool overlayStillSpellsUnsafeStub(DeclBaseName stubName,
+                                             const clang::CXXMethodDecl *decl) {
       if (stubName.isSpecial())
         return false;
-      return llvm::StringSwitch<bool>(stubName.getIdentifier().str())
-          .Cases({"__beginUnsafe", "__endUnsafe", "__beginMutatingUnsafe",
-                  "__endMutatingUnsafe", "__findUnsafe", "__findMutatingUnsafe",
-                  "__eraseUnsafe", "__dataUnsafe"},
-                 true)
-          .Default(false);
+      auto name = stubName.getIdentifier().str();
+      // Spelled in protocol requirements, so they can be witnessed by any
+      // conforming type.
+      if (llvm::StringSwitch<bool>(name)
+              .Cases({"__beginUnsafe", "__endUnsafe", "__beginMutatingUnsafe",
+                      "__endMutatingUnsafe", "__findUnsafe",
+                      "__findMutatingUnsafe", "__eraseUnsafe", "__dataUnsafe"},
+                     true)
+              .Default(false))
+        return true;
+      // Spelled by the overlay only for standard library types
+      // ('CxxSet.insert(_:)', 'std.string.append(_:)'), so a user type's stub
+      // is still deprecated.
+      return decl->getParent()->isInStdNamespace() &&
+             llvm::StringSwitch<bool>(name)
+                 .Cases({"__insertUnsafe", "__appendUnsafe"}, true)
+                 .Default(false);
     }
 
     /// Apply the __Unsafe-method rename to \a imported, imported from \a decl.
@@ -4689,6 +4700,14 @@ namespace {
         return;
       }
 
+      // Keeping the original name collides with the same-named safe wrapper
+      // that callers are encouraged to hand-write around the '__<name>Unsafe'
+      // spelling (the C++ standard library overlay does this for, e.g.,
+      // 'CxxSet.insert(_:)'). Disfavor the unsafe import so such a wrapper
+      // wins overload resolution instead of becoming ambiguous with it.
+      swiftDecl->addAttribute(new (Impl.SwiftContext)
+                                  DisfavoredOverloadAttr(/*Implicit=*/true));
+
       // Keep the original name, and import the method a second time under the
       // renamed spelling as a migration stub.
       //
@@ -4724,7 +4743,7 @@ namespace {
 
       // A method that C++ already deprecates keeps that deprecation; Clang's
       // message wins at the use site either way.
-      if (!overlayStillSpellsUnsafeStub(unsafeName.getBaseName()) &&
+      if (!overlayStillSpellsUnsafeStub(unsafeName.getBaseName(), clangDecl) &&
           !clangDecl->isDeprecated()) {
         ImportedName primaryName = importedName;
         primaryName.setDeclName(currentName);
@@ -10491,6 +10510,11 @@ Decl *ClangImporter::Implementation::importDeclAndCacheImpl(
     bool SuperfluousTypedefsAreTransparent, bool UseCanonicalDecl) {
   if (!ClangDecl)
     return nullptr;
+
+  if (UseCanonicalDecl)
+    if (auto *fn = dyn_cast<clang::FunctionDecl>(ClangDecl))
+      if (fn->getFirstDecl() != fn->getMostRecentDecl())
+        ClangDecl = mostRefinedFunctionRedecl(fn);
 
   FrontendStatsTracer StatsTracer(SwiftContext.Stats,
                                   "import-clang-decl", ClangDecl);

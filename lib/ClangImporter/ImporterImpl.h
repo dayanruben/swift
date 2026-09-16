@@ -33,7 +33,6 @@
 #include "swift/AST/Type.h"
 #include "swift/Basic/FileTypes.h"
 #include "swift/Basic/SourceLoc.h"
-#include "swift/Basic/StringExtras.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangImporterRequests.h"
 #include "swift/ClangImporter/ClangModule.h"
@@ -668,8 +667,7 @@ public:
   /// skipped, which parameters were annotated) that cannot be re-derived from
   /// the Clang declaration alone. Recording keeps the reason and the verdict on
   /// the same code path, as elsewhere.
-  llvm::DenseMap<const Decl *, importer::CxxUnsafetyExplanation>
-      LifetimeUnsafetyReasons;
+  llvm::DenseMap<const Decl *, Diagnostic> LifetimeUnsafetyReasons;
 
   // Caches used by ObjCInterfaceAndImplementationRequest.
   llvm::DenseMap<Decl *, Decl *> ImplementationsByInterface;

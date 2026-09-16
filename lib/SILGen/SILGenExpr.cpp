@@ -36,7 +36,6 @@
 #include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/ExtInfo.h"
-#include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/InFlightSubstitution.h"
 #include "swift/AST/KnownProtocols.h"
@@ -48,7 +47,6 @@
 #include "swift/Basic/Assertions.h"
 #include "swift/Basic/Defer.h"
 #include "swift/Basic/SourceManager.h"
-#include "swift/Basic/type_traits.h"
 #include "swift/SIL/AbstractionPattern.h"
 #include "swift/SIL/Consumption.h"
 #include "swift/SIL/DynamicCasts.h"
@@ -59,7 +57,6 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ConvertUTF.h"
-#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -2209,7 +2206,15 @@ RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
     if (srcType->getRepresentation() == FunctionTypeRepresentation::Swift
         && srcType->withExtInfo(destType->getExtInfo())->isEqual(destType)) {
       auto value = SGF.emitRValueAsSingleValue(e->getSubExpr());
-      auto expectedTy = SGF.getLoweredType(destType);
+      auto expectedTy = SGF.getLoweredType(destType).castTo<SILFunctionType>();
+
+      // Sendable doesn't matter for this conversion.
+      if (auto *conv = dyn_cast<ConvertFunctionInst>(value.getValue())) {
+        if (conv->onlyConvertsSendable())
+          value =
+              ManagedValue::forObjectRValueWithoutOwnership(conv->getOperand());
+      }
+
       if (auto thinToThick =
             dyn_cast<ThinToThickFunctionInst>(value.getValue())) {
         value = ManagedValue::forObjectRValueWithoutOwnership(
@@ -2219,8 +2224,10 @@ RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
                          "nontrivial thin function reference");
         value = SGF.emitUndef(expectedTy);
       }
-      
-      if (value.getType() != expectedTy) {
+
+      auto valueTy = value.getType().castTo<SILFunctionType>();
+      // Besides conversion, a declaration can have an explicit `@Sendable`.
+      if (valueTy->withSendable(false) != expectedTy->withSendable(false)) {
         SGF.SGM.diagnose(e->getLoc(), diag::not_implemented,
                          "nontrivial thin function reference");
         value = SGF.emitUndef(expectedTy);
