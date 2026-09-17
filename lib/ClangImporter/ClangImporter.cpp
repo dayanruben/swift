@@ -6976,6 +6976,53 @@ static void lookupRelatedFuncs(AbstractFunctionDecl *func,
   }
 }
 
+/// Whether \p a and \p b have the same parameter types, ignoring `self` and
+/// the result type. Overloads are distinguished by their parameter types, so
+/// this is what identifies which member of an imported overload set an
+/// `@implementation` function implements.
+static bool haveSameParameterTypes(const ValueDecl *a, const ValueDecl *b) {
+  auto paramsOf =
+      [](const ValueDecl *decl) -> ArrayRef<AnyFunctionType::Param> {
+    Type type = decl->getInterfaceType();
+    if (const auto *fn = dyn_cast<AbstractFunctionDecl>(decl))
+      if (fn->hasImplicitSelfDecl())
+        type = fn->getMethodInterfaceType();
+    if (const auto *fnType = type->getAs<AnyFunctionType>())
+      return fnType->getParams();
+    return {};
+  };
+
+  auto paramsA = paramsOf(a), paramsB = paramsOf(b);
+  if (paramsA.size() != paramsB.size())
+    return false;
+  for (auto i : indices(paramsA)) {
+    // Compare canonical types, on the same `getOldType()`s, exactly what
+    // `ObjCImplementationChecker` does.
+    if (paramsA[i].getOldType()->getCanonicalType() !=
+        paramsB[i].getOldType()->getCanonicalType())
+      return false;
+  }
+  return true;
+}
+
+/// Select, among the imported \p candidates sharing \p func's foreign name,
+/// the one(s) \p func implements. Parameter types pick the overload; several
+/// overloads may import with the same Swift signature, and that ambiguity is
+/// left to the attribute checker.
+static TinyPtrVector<Decl *>
+selectImplementedOverloads(const AbstractFunctionDecl *func,
+                           const TinyPtrVector<Decl *> &candidates) {
+  if (candidates.size() <= 1)
+    return candidates;
+
+  TinyPtrVector<Decl *> selected;
+  for (Decl *candidate : candidates)
+    if (haveSameParameterTypes(func, cast<ValueDecl>(candidate)))
+      selected.push_back(candidate);
+
+  return selected;
+}
+
 static ObjCInterfaceAndImplementation
 findFunctionInterfaceAndImplementation(AbstractFunctionDecl *func) {
   if (!func)
@@ -6997,44 +7044,56 @@ findFunctionInterfaceAndImplementation(AbstractFunctionDecl *func) {
   llvm::SmallSetVector<ValueDecl *, 4> results;
   lookupRelatedFuncs(func, results);
 
-  // Classify the `results` as either the interface or an implementation.
-  // (Multiple implementations are invalid but utterable.)
-  Decl *interface = nullptr;
+  // Classify the `results` as either interface candidates (imported
+  // declarations) or implementations. (Multiple implementations are invalid
+  // but utterable.)
+  TinyPtrVector<Decl *> candidates;
   TinyPtrVector<Decl *> impls;
 
-  for (ValueDecl *result : results) {
-    AbstractFunctionDecl *resultFunc = nullptr;
+  auto asFunc = [&](Decl *result) -> AbstractFunctionDecl * {
     if (accessorKind) {
       if (auto resultStorage = dyn_cast<AbstractStorageDecl>(result))
-        resultFunc = resultStorage->getAccessor(*accessorKind);
+        return resultStorage->getAccessor(*accessorKind);
+      return nullptr;
     }
-    else
-      resultFunc = dyn_cast<AbstractFunctionDecl>(result);
+    return dyn_cast<AbstractFunctionDecl>(result);
+  };
 
+  for (ValueDecl *result : results) {
+    AbstractFunctionDecl *resultFunc = asFunc(result);
     if (!resultFunc)
       continue;
 
     if (resultFunc->getCDeclName() != clangName)
       continue;
 
-    if (resultFunc->hasClangNode()) {
-      if (interface) {
-        // This clang name is overloaded. That should only happen with C++
-        // functions/methods, which aren't currently supported.
-        return {};
-      }
-      interface = result;
-    } else if (resultFunc->isObjCImplementation()) {
+    if (resultFunc->hasClangNode())
+      candidates.push_back(result);
+    else if (resultFunc->isObjCImplementation())
       impls.push_back(result);
-    }
   }
+
+  // Pick the interface.
+  TinyPtrVector<Decl *> interfaces =
+      selectImplementedOverloads(func, candidates);
+  if (interfaces.empty())
+    return {};
+
+  // Implementations of other overloads are unrelated to this one; drop them so
+  // they are not reported as duplicate implementations.
+  llvm::erase_if(impls, [&](Decl *impl) {
+    return !llvm::equal(selectImplementedOverloads(asFunc(impl), candidates),
+                        interfaces);
+  });
 
   // If we found enough decls to construct a result, `func` should be among them
   // somewhere.
-  assert(interface == nullptr || impls.empty() ||
-         interface == func || llvm::is_contained(impls, func));
+  assert(interfaces.empty() || impls.empty() ||
+         llvm::is_contained(interfaces, func) ||
+         llvm::is_contained(impls, func));
 
-  return constructResult({ interface }, impls, interface,
+  return constructResult(interfaces, impls,
+                         interfaces.empty() ? nullptr : interfaces.front(),
                          /*categoryName=*/Identifier());
 }
 
@@ -7543,6 +7602,61 @@ swift::getModuleCachePathFromClang(const clang::CompilerInstance &Clang) {
   return llvm::sys::path::parent_path(SpecificModuleCachePath).str();
 }
 
+/// Diagnose replacing a template type parameter that carries a nullability
+/// specifier (`T _Nullable`) by an optional type. Swift would see two levels
+/// of optionality, but the instantiated C++ signature is a single nullable
+/// pointer, so the imported specialization would not match. Returns true if
+/// diagnosed.
+static bool diagnoseOptionalReplacementOfNullableTemplateParam(
+    ClangImporter::Implementation &impl,
+    const clang::FunctionTemplateDecl *func, const SubstitutionMap subst,
+    llvm::function_ref<std::string()> getFuncName) {
+  for (const auto *param : *func->getTemplateParameters()) {
+    const auto *typeParam = dyn_cast<clang::TemplateTypeParmDecl>(param);
+    if (!typeParam ||
+        typeParam->getIndex() >= subst.getReplacementTypes().size())
+      continue;
+
+    Type replacement = subst.getReplacementTypes()[typeParam->getIndex()];
+    if (!replacement->getOptionalObjectType()) {
+      // Only optional types are relevant.
+      continue;
+    }
+
+    auto isAnnotatedUse = [typeParam](clang::QualType type) {
+      const auto *attributed =
+          dyn_cast<clang::AttributedType>(desugarIfElaborated(type));
+      if (!attributed || !attributed->getImmediateNullability())
+        return false;
+      return attributed->getModifiedType()->getCanonicalTypeInternal() ==
+             typeParam->getTypeForDecl()->getCanonicalTypeInternal();
+    };
+    const auto *pattern = func->getTemplatedDecl();
+    if (!isAnnotatedUse(pattern->getReturnType()) &&
+        llvm::all_of(pattern->parameters(),
+                     [&](const clang::ParmVarDecl *parmDecl) {
+                       return !isAnnotatedUse(parmDecl->getType());
+                     })) {
+      // None of the type parameters are annotated.
+      continue;
+    }
+
+    std::string reason;
+    llvm::raw_string_ostream reasonStream(reason);
+    reasonStream << "optional type '" << replacement
+                 << "' cannot replace template parameter '"
+                 << typeParam->getDeclName()
+                 << "', which is declared with a nullability specifier";
+    // TODO: Use the location of the apply here.
+    impl.diagnose(HeaderLoc(func->getBeginLoc()),
+                  diag::unable_to_substitute_cxx_function_template,
+                  getFuncName(), reason);
+    return true;
+  }
+
+  return false;
+}
+
 clang::FunctionDecl *ClangImporter::instantiateCXXFunctionTemplate(
     ASTContext &ctx, clang::FunctionTemplateDecl *func, SubstitutionMap subst) {
   auto getFuncName = [&]() -> std::string {
@@ -7572,6 +7686,10 @@ clang::FunctionDecl *ClangImporter::instantiateCXXFunctionTemplate(
       return nullptr;
     }
   }
+
+  if (diagnoseOptionalReplacementOfNullableTemplateParam(Impl, func, subst,
+                                                         getFuncName))
+    return nullptr;
 
   SmallVector<clang::TemplateArgument, 4> templateSubst;
   std::unique_ptr<TemplateInstantiationError> error =
