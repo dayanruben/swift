@@ -2127,16 +2127,6 @@ ResultTypeRequest::evaluate(Evaluator &evaluator, ValueDecl *decl) const {
         clangFn, decl->getDeclContext());
     if (returnType)
       return *returnType;
-    // Mark the imported Swift function as unavailable.
-    // That will ensure that the function will not be
-    // usable from Swift, even though it is imported.
-    if (!decl->isUnavailable()) {
-      StringRef unavailabilityMsgRef = "return type is unavailable in Swift";
-      auto ua = AvailableAttr::createUniversallyUnavailable(
-          ctx, unavailabilityMsgRef);
-      decl->addAttribute(ua);
-    }
-
     return ctx.getNeverType();
   }
 
@@ -2489,12 +2479,21 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
   case DeclKind::Module:
   case DeclKind::OpaqueType:
   case DeclKind::MacroExpansion:
-  case DeclKind::Using:
+  case DeclKind::FileDefault:
     llvm_unreachable("should not get here");
     return Type();
 
-  case DeclKind::HiddenTypeLayoutInfo:
-    llvm_unreachable("hidden layout declaration types are not implemented yet");
+  case DeclKind::HiddenTypeLayoutInfo: {
+    auto *hiddenDecl = cast<HiddenTypeLayoutInfoDecl>(D);
+    CanType parent;
+    if (auto *parentDecl = hiddenDecl->ParentDecl)
+      parent = parentDecl->getDeclaredInterfaceType()->getCanonicalType();
+
+    auto hiddenType = HiddenType::get(
+        Context, hiddenDecl->MangledName, hiddenDecl->getModuleContext(),
+        hiddenDecl, parent);
+    return MetatypeType::get(hiddenType, Context);
+  }
 
   case DeclKind::GenericTypeParam: {
     auto *paramDecl = cast<GenericTypeParamDecl>(D);

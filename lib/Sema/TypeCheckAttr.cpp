@@ -1766,6 +1766,18 @@ static SourceRange getArgListRange(ASTContext &Ctx, DeclAttribute *attr) {
   return SourceRange();
 }
 
+/// Whether \p D is a `@cxx` instance method of an imported C++ foreign
+/// reference type.
+static bool isCxxForeignReferenceInstanceMethod(const Decl *D) {
+  if (!D->getAttrs().hasAttribute<CxxDeclAttr>(/*AllowInvalid=*/true))
+    return false;
+  const auto *FD = dyn_cast<FuncDecl>(D);
+  if (!FD || FD->isStatic())
+    return false;
+  const auto *classDecl = FD->getDeclContext()->getSelfClassDecl();
+  return classDecl && classDecl->isForeignReferenceType();
+}
+
 void AttributeChecker::
 visitObjCImplementationAttr(ObjCImplementationAttr *attr) {
   // If `D` is ABI-only, let ABIDeclChecker diagnose the bad attribute.
@@ -1912,7 +1924,7 @@ visitObjCImplementationAttr(ObjCImplementationAttr *attr) {
         if (FD && !cxxAttr->isInvalid())
           evaluateOrDefault(Ctx.evaluator,
                             TypeCheckForeignFunctionRequest{FD, cxxAttr}, {});
-        if (cxxAttr->isInvalid())
+        if (cxxAttr->isInvalid() || isCxxForeignReferenceInstanceMethod(AFD))
           return;
       }
 
@@ -2523,11 +2535,18 @@ void AttributeChecker::visitCxxDeclAttr(CxxDeclAttr *attr) {
              attr->getAttrName());
 
   // @cxx may appear on a global function or on a function declared in a Swift
-  // extension of an imported C++ namespace.
+  // extension of an imported C++ namespace or C++ record.
   auto *dc = D->getDeclContext();
-  if (dc->isTypeContext() && !importer::isClangNamespace(dc))
-    diagnose(attr->getLocation(), diag::cxx_not_global_or_namespace_member,
+  if (dc->isTypeContext() && !importer::isClangNamespace(dc) &&
+      !importer::isClangCxxRecord(dc))
+    diagnose(attr->getLocation(), diag::cxx_invalid_context, attr);
+
+  // TODO: Instance methods of foreign reference types are not supported yet.
+  if (isCxxForeignReferenceInstanceMethod(D)) {
+    diagnose(attr->getLocation(), diag::cxx_foreign_reference_instance_method,
              attr);
+    attr->setInvalid();
+  }
 
   // Reject using both @cxx and @objc on the same decl.
   if (D->getAttrs().getAttribute<ObjCAttr>())
@@ -9657,13 +9676,13 @@ FileDefaults FileDefaultsRequest::evaluate(Evaluator &evaluator,
   FileDefaults result;
 
   for (auto item : file->getTopLevelItems()) {
-    auto *UD = dyn_cast_or_null<UsingDecl>(item.dyn_cast<Decl *>());
-    if (!UD)
+    auto *FDD = dyn_cast_or_null<FileDefaultDecl>(item.dyn_cast<Decl *>());
+    if (!FDD)
       continue;
 
     // Generally there will only be one attribute, but @available is allowed and
     // can produce multiple.
-    for (auto *attr : UD->getSpecifiedAttributes()) {
+    for (auto *attr : FDD->getSpecifiedAttributes()) {
       if (isa<DiagnoseAttr>(attr)) {
         // `@diagnose` is handled via the swift-syntax region tree.
         continue;
@@ -9679,11 +9698,11 @@ FileDefaults FileDefaultsRequest::evaluate(Evaluator &evaluator,
 
       auto setDefaultIsolation = [&](DefaultIsolation isolation) {
         if (result.isolation) {
-          UD->diagnose(diag::invalid_redecl_of_file_isolation);
+          FDD->diagnose(diag::invalid_redecl_of_file_isolation);
           result.isolation.value().source->diagnose(
               diag::invalid_redecl_of_file_isolation_prev);
         } else {
-          result.isolation = {isolation, UD};
+          result.isolation = {isolation, FDD};
         }
       };
 
@@ -9697,7 +9716,7 @@ FileDefaults FileDefaultsRequest::evaluate(Evaluator &evaluator,
       if (auto *custom = dyn_cast<CustomAttr>(attr)) {
         auto type = evaluateOrDefault(
             ctx.evaluator,
-            CustomAttrTypeRequest{custom, UD->getDeclContext(),
+            CustomAttrTypeRequest{custom, FDD->getDeclContext(),
                                   CustomAttrTypeKind::GlobalActor},
             Type());
         if (type) {
@@ -9705,7 +9724,7 @@ FileDefaults FileDefaultsRequest::evaluate(Evaluator &evaluator,
             // CustomAttrTypeRequest already produced an error. Instead of
             // piling on, we can attach a note.
             ctx.Diags.diagnose(attr->getLocation(),
-                               diag::using_decl_invalid_attribute_note);
+                               diag::file_default_invalid_attribute_note);
             continue;
           }
 
@@ -9732,9 +9751,9 @@ FileDefaults FileDefaultsRequest::evaluate(Evaluator &evaluator,
       }
 
       ctx.Diags.diagnose(attr->getLocation(),
-                         diag::using_decl_invalid_attribute, attr);
+                         diag::file_default_invalid_attribute, attr);
       ctx.Diags.diagnose(attr->getLocation(),
-                         diag::using_decl_invalid_attribute_note);
+                         diag::file_default_invalid_attribute_note);
       if (invalidNominal)
         invalidNominal->diagnose(diag::decl_declared_here, invalidNominal);
       // Some invalid attributes like @backDeployed can expand to multiple
