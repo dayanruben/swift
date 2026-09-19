@@ -168,9 +168,6 @@ bool TypeBase::isSendableExistential() {
   if (auto existential = constraint->getAs<ExistentialType>())
     constraint = existential->getConstraintType();
 
-  if (!constraint->isConstraintType())
-    return false;
-
   return constraint->getKnownProtocol() == KnownProtocolKind::Sendable;
 }
 
@@ -587,6 +584,15 @@ bool ExistentialLayout::needsExtendedShape(
   // Would any inverses in this layout would be considered by the mangler?
   allowedInverses.intersect(inverses);
   return !allowedInverses.empty();
+}
+
+bool TypeBase::isCOMExistentialType() {
+  return getCanonicalType().isCOMExistentialType();
+}
+
+bool CanType::isCOMExistentialTypeImpl(CanType type) {
+  return type.isExistentialType() &&
+         type.getExistentialLayout().getCOMInterface();
 }
 
 bool TypeBase::isObjCExistentialType() {
@@ -3255,8 +3261,7 @@ bool TypeBase::hasCCompatibleForeignReferenceRepresentation() {
   if (auto existential = type->getAs<ExistentialType>())
     type = existential->getConstraintType();
 
-  return type->isExistentialType() &&
-         type->getExistentialLayout().getCOMInterface();
+  return type->isCOMExistentialType();
 }
 
 bool TypeBase::isBridgeableObjectType() {
