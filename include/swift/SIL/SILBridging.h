@@ -622,6 +622,8 @@ struct BridgedFunction {
   BRIDGED_INLINE void setIsSerialized(bool isSerialized) const;
   BRIDGED_INLINE bool conformanceMatchesActorIsolation(BridgedConformance conformance) const;
   BRIDGED_INLINE bool isSpecialization() const;
+  BRIDGED_INLINE bool hasOwnershipForTrivialValues() const;
+  BRIDGED_INLINE void setOwnershipForTrivialValues(bool hotv) const;
   bool isTrapNoReturn() const;
   bool isConvertPointerToPointerArgument() const;
   bool isAddressor() const;
@@ -820,10 +822,14 @@ struct BridgedInstruction {
     SwiftInt numFunctions;
   };
 
+  // Values must match swift::CastConsumptionKind; asserted in
+  // CheckedCastAddrBranch_getConsumptionKind(). BorrowAlways (3) is
+  // omitted because checked_cast_addr_br cannot have it.
   enum class CastConsumptionKind {
-    TakeAlways,
-    TakeOnSuccess,
-    CopyOnSuccess
+    TakeAlways = 0,
+    TakeOnSuccess = 1,
+    CopyOnSuccess = 2,
+    TestOnly = 4
   };
 
   struct CheckedCastInstOptions {
@@ -842,6 +848,8 @@ struct BridgedInstruction {
   BRIDGED_INLINE uint64_t PointerToAddressInst_getAlignment() const;
   BRIDGED_INLINE void PointerToAddressInst_setAlignment(uint64_t alignment) const;
   BRIDGED_INLINE bool AddressToPointerInst_needsStackProtection() const;
+  BRIDGED_INLINE bool RawPointerToRefInst_isImmortal() const;
+  BRIDGED_INLINE void RawPointerToRefInst_setIsImmortal(bool isImmortal) const;
   BRIDGED_INLINE bool IndexAddrInst_needsStackProtection() const;
   BRIDGED_INLINE bool IndexAddrInst_isProjection() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedConformanceArray AllocExistentialBoxInst_getConformances() const;
@@ -942,6 +950,7 @@ struct BridgedInstruction {
   BRIDGED_INLINE SwiftInt SwitchEnumAddrInst_getUniqueCaseForDefault() const;
   BRIDGED_INLINE OptionalBridgedBasicBlock SwitchEnumAddrInst_getSuccessorForDefault() const;
   BRIDGED_INLINE SwiftInt StoreInst_getStoreOwnership() const;
+  BRIDGED_INLINE void StoreInst_setStoreOwnership(SwiftInt rawOwnership) const;
   BRIDGED_INLINE SwiftInt AssignInst_getAssignOwnership() const;
   BRIDGED_INLINE MarkDependenceKind MarkDependenceInst_dependenceKind() const;
   BRIDGED_INLINE void MarkDependenceInstruction_resolveToNonEscaping() const;
@@ -989,6 +998,7 @@ struct BridgedInstruction {
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType UnconditionalCheckedCast_getTargetFormalType() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE CheckedCastInstOptions
       UnconditionalCheckedCast_getCheckedCastOptions() const;
+  BRIDGED_INLINE bool UnconditionalCheckedCastAddr_isCopy() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType UnconditionalCheckedCastAddr_getSourceFormalType() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType UnconditionalCheckedCastAddr_getTargetFormalType() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE CheckedCastInstOptions
@@ -1000,6 +1010,7 @@ struct BridgedInstruction {
       CheckedCastBranch_getCheckedCastOptions() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType CheckedCastAddrBranch_getSourceFormalType() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType CheckedCastAddrBranch_getTargetFormalType() const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedType CheckedCastAddrBranch_getTargetLoweredType() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedBasicBlock CheckedCastAddrBranch_getSuccessBlock() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedBasicBlock CheckedCastAddrBranch_getFailureBlock() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE CheckedCastInstOptions
@@ -1385,14 +1396,15 @@ struct BridgedBuilder{
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createUpcast(BridgedValue op, BridgedType type) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createCheckedCastAddrBranch(
       BridgedValue source, BridgedCanType sourceFormalType,
-      BridgedValue destination, BridgedCanType targetFormalType,
+      OptionalBridgedValue destination, BridgedCanType targetFormalType,
       BridgedInstruction::CheckedCastInstOptions options,
       BridgedInstruction::CastConsumptionKind consumptionKind,
       BridgedBasicBlock successBlock, BridgedBasicBlock failureBlock) const;
-  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createUnconditionalCheckedCastAddr(
-        BridgedInstruction::CheckedCastInstOptions options,
-        BridgedValue source, BridgedCanType sourceFormalType,
-        BridgedValue destination, BridgedCanType targetFormalType) const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction
+  createUnconditionalCheckedCastAddr(
+      BridgedInstruction::CheckedCastInstOptions options, BridgedValue source,
+      BridgedCanType sourceFormalType, BridgedValue destination,
+      BridgedCanType targetFormalType, bool isCopy) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createUncheckedOwnershipConversion(
         BridgedValue op, BridgedValue::Ownership ownership) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createLoad(BridgedValue op, SwiftInt ownership) const;
