@@ -239,6 +239,7 @@ OPERAND_OWNERSHIP(InstantaneousUse, ClassifyBridgeObject)
 OPERAND_OWNERSHIP(InstantaneousUse, UnownedCopyValue)
 OPERAND_OWNERSHIP(InstantaneousUse, WeakCopyValue)
 OPERAND_OWNERSHIP(InstantaneousUse, ExtendLifetime)
+OPERAND_OWNERSHIP(InstantaneousUse, Diagnose)
 OPERAND_OWNERSHIP(InstantaneousUse, MergeIsolationRegion)
 #define REF_STORAGE(Name, ...)                                                 \
   OPERAND_OWNERSHIP(InstantaneousUse, StrongCopy##Name##Value)
@@ -658,6 +659,15 @@ OperandOwnershipClassifier::visitPartialApplyInst(PartialApplyInst *i) {
     // address checker and/or exclusivity checker rather than by value ownership.
     if (operandTy.isAddress()) {
       return OperandOwnership::TrivialUse;
+    }
+
+    if (i->isCalledOnce()) {
+      auto argConv = ApplySite(i).getArgumentConvention(op);
+      // Borrowed non-Copyable captures aren't owned by the closure.
+      if (operandTy.isMoveOnly() && !argConv.isOwnedConventionInCaller())
+        return OperandOwnership::Borrow;
+      // ... the rest of the operands are consumed.
+      return OperandOwnership::ForwardingConsume;
     }
 
     return OperandOwnership::Borrow;

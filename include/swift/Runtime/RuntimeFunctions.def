@@ -615,7 +615,7 @@ FUNCTION(ErrorStrongRelease, Swift, swift_errorRelease,
            RETURNS(UnknownPrefix##RefCountedPtrTy), \
            ARGS(Name##ReferencePtrTy), \
            ATTRS(NoUnwind, WillReturn), \
-           EFFECT(RuntimeEffect::NoEffect), \
+           EFFECT(RuntimeEffect::RefCounting), \
            UNKNOWN_MEMEFFECTS) \
   /* void *swift_##SymName##Take(Name##Reference *object); */ \
   FUNCTION(Nativeness##Name##TakeStrong, Swift, swift_##SymName##TakeStrong, \
@@ -623,7 +623,7 @@ FUNCTION(ErrorStrongRelease, Swift, swift_errorRelease,
            RETURNS(UnknownPrefix##RefCountedPtrTy), \
            ARGS(Name##ReferencePtrTy), \
            ATTRS(NoUnwind, WillReturn), \
-           EFFECT(RuntimeEffect::NoEffect), \
+           EFFECT(RuntimeEffect::RefCounting, RuntimeEffect::Deallocating), \
            UNKNOWN_MEMEFFECTS) \
   /* Name##Reference *swift_##SymName##CopyInit(Name##Reference *dest, Name##Reference *src); */ \
   FUNCTION(Nativeness##Name##CopyInit, Swift, swift_##SymName##CopyInit, \
@@ -1789,6 +1789,14 @@ FUNCTION(GetDynamicType, Swift, swift_getDynamicType, C_CC, AlwaysAvailable,
          ATTRS(NoUnwind, WillReturn),
          EFFECT(RuntimeEffect::MetaData),
          MEMEFFECTS(ReadOnly))
+
+// Metadata *swift_getCOMDynamicType(void *interface, Metadata *staticType);
+FUNCTION(GetCOMDynamicType, Swift, swift_getCOMDynamicType, C_CC, AlwaysAvailable,
+         RETURNS(TypeMetadataPtrTy),
+         ARGS(Int8PtrTy, TypeMetadataPtrTy),
+         ATTRS(NoUnwind),
+         EFFECT(RuntimeEffect::Casting),
+         UNKNOWN_MEMEFFECTS)
 
 // void *swift_dynamicCastClass(void*, void*);
 FUNCTION(DynamicCastClass, Swift, swift_dynamicCastClass, C_CC, AlwaysAvailable,
@@ -3360,7 +3368,7 @@ FUNCTION(MemsetS, c, memset_s, C_CC, AlwaysAvailable,
 //                                              Metadata *referent);
 FUNCTION(GetBorrowTypeMetadata,
          Swift, swift_getBorrowTypeMetadata,
-         SwiftCC, AlwaysAvailable,
+         SwiftCC, BorrowingAvailability,
          RETURNS(TypeMetadataResponseTy),
          ARGS(SizeTy, TypeMetadataPtrTy),
          ATTRS(NoUnwind, WillReturn),
@@ -3371,7 +3379,7 @@ FUNCTION(GetBorrowTypeMetadata,
 //                       OpaqueValue *srcReferent);
 FUNCTION(InitBorrow,
          Swift, swift_initBorrow,
-         C_CC, AlwaysAvailable,
+         C_CC, BorrowingAvailability,
          RETURNS(VoidTy),
          ARGS(TypeMetadataPtrTy, OpaquePtrTy, OpaquePtrTy),
          ATTRS(NoUnwind),
@@ -3382,7 +3390,7 @@ FUNCTION(InitBorrow,
 //                                            const OpaqueValue *borrow);
 FUNCTION(DereferenceBorrow,
          Swift, swift_dereferenceBorrow,
-         C_CC, AlwaysAvailable,
+         C_CC, BorrowingAvailability,
          RETURNS(OpaquePtrTy),
          ARGS(TypeMetadataPtrTy, OpaquePtrTy),
          ATTRS(NoUnwind, WillReturn),

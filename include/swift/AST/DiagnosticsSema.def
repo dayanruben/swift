@@ -2301,6 +2301,10 @@ ERROR(cxx_mutating_mismatch,none,
       "%kind0 should%select{|| not}1 be 'mutating' to match "
       "%select{non-'const' ||'const' }1%kindonly2 declared by the header",
       (ValueDecl *, unsigned, const ValueDecl *))
+ERROR(cxx_param_ownership_unsupported,none,
+      "%kindonly0 cannot be marked '@cxx' because parameter %1 of non-trivial "
+      "C++ class type is '%select{borrowing|consuming}2'",
+      (const AbstractFunctionDecl *, const ParamDecl *, unsigned))
 ERROR(cxx_references_unsupported,none,
       "%kind0 cannot implement C++ function '%1' because reference "
       "parameters and return types are not yet supported",
@@ -9325,7 +9329,7 @@ ERROR(inline_array_type_backwards,none,
 //===----------------------------------------------------------------------===//
 
 GROUPED_ERROR(weak_unowned_in_embedded_swift, EmbeddedRestrictions, none,
-              "attribute %0 cannot be used in Embedded Swift",
+              "attribute %0 in Embedded Swift requires a 64-bit target",
               (ReferenceOwnership))
 
 GROUPED_WARNING(generic_nonfinal_in_embedded_swift, EmbeddedRestrictions,

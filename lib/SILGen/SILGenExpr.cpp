@@ -24,6 +24,7 @@
 #include "SILGenDynamicCast.h"
 #include "SILGenFunctionBuilder.h"
 #include "Scope.h"
+#include "StorageRefResult.h"
 #include "SwitchEnumBuilder.h"
 #include "Varargs.h"
 #include "swift/AST/ASTContext.h"
@@ -405,21 +406,42 @@ ManagedValue SILGenFunction::emitManagedBufferWithCleanup(SILValue v,
 void SILGenFunction::emitExprInto(Expr *E, Initialization *I,
                                   std::optional<SILLocation> L) {
   SILLocation loc = L ? *L : E;
+
+  // A borrow binding must not copy its initializer, so it is handled ahead of
+  // the lvalue copy below.
+  if (I->isBorrow()) {
+    // The initializer of an implicit binding in a desugared for-each loop is an
+    // opaque placeholder for an expression of the original loop; borrow the
+    // expression it stands for.
+    Expr *initExpr = E;
+    if (auto *opaque = dyn_cast<OpaqueValueExpr>(initExpr)) {
+      if (auto *underlying = OpaqueExprs.lookup(opaque))
+        initExpr = underlying;
+    }
+
+    FormalEvaluationScope writeback(*this);
+    if (StorageRefResult::findStorageReferenceExprForBorrow(SGM.M, initExpr)) {
+      auto lv = emitLValue(initExpr, SGFAccessKind::BorrowedObjectRead);
+      ManagedValue MV = emitBorrowedLValue(initExpr, std::move(lv));
+      I->copyOrInitValueInto(*this, loc, std::move(MV), /*isInit*/ true);
+    } else {
+      // The initializer doesn't refer to storage, so there is nothing to borrow
+      // in place; materialize the value and borrow that.
+      ManagedValue MV = emitRValueAsSingleValue(initExpr);
+      if (MV.hasCleanup())
+        MV = MV.formalAccessBorrow(*this, loc);
+      I->copyOrInitValueInto(*this, loc, std::move(MV), /*isInit*/ true);
+    }
+    std::move(writeback).deferPop();
+    return;
+  }
+
   // Handle the special case of copying an lvalue.
   if (auto load = dyn_cast<LoadExpr>(E)) {
     FormalEvaluationScope writeback(*this);
     auto lv = emitLValue(load->getSubExpr(),
                          SGFAccessKind::BorrowedAddressRead);
     emitCopyLValueInto(loc, std::move(lv), I);
-    return;
-  }
-
-  if (I->isBorrow()) {
-    FormalEvaluationScope writeback(*this);
-    auto lv = emitLValue(E, SGFAccessKind::BorrowedObjectRead);
-    ManagedValue MV = emitBorrowedLValue(E, std::move(lv));
-    I->copyOrInitValueInto(*this, loc, std::move(MV), /*isInit*/ true);
-    std::move(writeback).deferPop();
     return;
   }
 
@@ -7432,6 +7454,64 @@ RValue RValueEmitter::visitErrorExpr(ErrorExpr *E, SGFContext C) {
 }
 
 RValue RValueEmitter::visitConsumeExpr(ConsumeExpr *E, SGFContext C) {
+  if (SGF.getASTContext().SILOpts.EnableLifetimeResolution) {
+    auto *subExpr = E->getSubExpr();
+    auto subASTType = subExpr->getType()->getCanonicalType();
+    auto subType = SGF.getLoweredType(subASTType);
+
+    ManagedValue mv;
+    std::optional<FormalEvaluationScope> writeback;
+
+    // Ignore the load and pretend we applied the consume to the LValue.
+    if (auto *li = dyn_cast<LoadExpr>(subExpr)) {
+      writeback.emplace(SGF);
+      auto consumingAccess = subType.isAddress()
+                                 ? SGFAccessKind::OwnedAddressConsume
+                                 : SGFAccessKind::OwnedObjectConsume;
+      LValue lv = SGF.emitLValue(li->getSubExpr(), consumingAccess);
+      mv = SGF.emitConsumedLValue(E, std::move(lv));
+    } else {
+      mv = SGF.emitRValue(subExpr, SGFContext())
+          .getAsSingleValue(SGF, subExpr);
+    }
+
+    // Now, consume `mv` whether it is an object or address.
+
+    if (mv.getType().isAddress()) {
+      if (mv.getType().getObjectType().isLoadableOrOpaque(SGF.F)) {
+        // load [take] the value out of the address and return it.
+        ManagedValue value =
+          SGF.B.createLoadTake(E, mv);
+        return RValue(SGF, {value}, subType.getASTType());
+      }
+
+      // Emit a copy_addr [take] into a temporary location.
+      // This deinitializes the address, which is the goal here.
+      // TODO: is it fine to ignore the SGFContext?
+      TemporaryInitializationPtr optTemp;
+      optTemp = SGF.emitTemporary(E, SGF.getTypeLowering(subType));
+      SILValue dest = optTemp->getAddressForInPlaceInitialization(SGF, E);
+      SGF.B.createCopyAddr(E, mv.getValue(), dest, IsTake, IsInitialization);
+      optTemp->finishInitialization(SGF);
+      return RValue(SGF, {optTemp->getManagedAddress()}, subType.getASTType());
+    }
+
+    if (mv.getType().isTrivial(SGF.F))
+      return RValue(SGF, {mv}, subType.getASTType());
+
+    // Otherwise, it's an object.
+
+    // NOTE: we only ensurePlusOne to satisfy SILBuilder.
+    // We expect RemoveSILGenLifetimes to delete the copy if emitted.
+    mv = SGF.B.createMoveValue(E, mv.ensurePlusOne(SGF, E));
+
+    // Set the [allows_diagnostics] flag to indicate this move originated from
+    // an explicit 'consume' at the language level.
+    cast<MoveValueInst>(mv.getValue())->setAllowsDiagnostics(true);
+    return RValue(SGF, {mv}, subType.getASTType());
+  }
+
+
   auto *subExpr = E->getSubExpr();
   auto subASTType = subExpr->getType()->getCanonicalType();
   auto subType = SGF.getLoweredType(subASTType);

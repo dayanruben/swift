@@ -330,12 +330,13 @@ struct AliasAnalysis {
       case let beginBorrow as BeginBorrowInst where !beginBorrow.hasPointerEscape:
         return getBorrowEffects(of: endBorrow, on: memLoc)
       case let loadBorrow as LoadBorrowInst:
-        let borrowEffects = getBorrowEffects(of: endBorrow, on: memLoc)
-        // In addition to the "regular" borrow effects, a load_borrow also has effects on the memory location
-        // from where it loads the value. This includes "write" to prevent any optimization to change the
+        var borrowEffects = getBorrowEffects(of: endBorrow, on: memLoc)
+        // In addition to the "regular" borrow effects, a load_borrow also has
+        // effects on the memory location from where it loads the value. A
+        // "read" effect is added to prevent any optimization from changing the
         // memory location after the load_borrow.
-        if borrowEffects != .worstEffects && memLoc.mayAlias(with: loadBorrow.address, self) {
-          return .worstEffects
+        if !borrowEffects.read && memLoc.mayAlias(with: loadBorrow.address, self) {
+          borrowEffects.read = true
         }
         return borrowEffects
       default:
@@ -815,6 +816,13 @@ private struct FullApplyEffectsVisitor : EscapeVisitorWithResult {
         // by an inout_aliasable operand of an partial_apply.
         // Therefore assume that the called function will both, read and write, to the address.
         return .abort
+      }
+      if path.addressIsStored {
+        // The address was converted to a pointer and stored to memory which is passed to the callee.
+        // The callee can load the pointer and access the address, e.g. via a `pointer_to_address`.
+        // Such accesses are not described by argument effects, but by the global effects of the callee.
+        result.merge(with: calleeAnalysis.getSideEffects(ofApply: apply))
+        return .continueWalk
       }
       let e = calleeAnalysis.getSideEffects(of: apply, operand: operand, path: path.projectionPath)
       result.merge(with: e)
