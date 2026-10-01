@@ -215,21 +215,6 @@ template <> struct DenseMapInfo<OverrideSignatureKey> {
            lhs.derivedParams == rhs.derivedParams;
   }
 
-  static inline OverrideSignatureKey getEmptyKey() {
-    return OverrideSignatureKey(DenseMapInfo<GenericSignature>::getEmptyKey(),
-                                DenseMapInfo<NominalTypeDecl *>::getEmptyKey(),
-                                DenseMapInfo<NominalTypeDecl *>::getEmptyKey(),
-                                DenseMapInfo<GenericParamList *>::getEmptyKey());
-  }
-
-  static inline OverrideSignatureKey getTombstoneKey() {
-    return OverrideSignatureKey(
-        DenseMapInfo<GenericSignature>::getTombstoneKey(),
-        DenseMapInfo<NominalTypeDecl *>::getTombstoneKey(),
-        DenseMapInfo<NominalTypeDecl *>::getTombstoneKey(),
-        DenseMapInfo<GenericParamList *>::getTombstoneKey());
-  }
-
   static unsigned getHashValue(const OverrideSignatureKey &Val) {
     return hash_combine(
         DenseMapInfo<GenericSignature>::getHashValue(Val.baseMethodSig),
@@ -1606,6 +1591,12 @@ MacroDecl *ASTContext::getBuiltinDerivedConformanceMacroDecl(
   case BuiltinDerivedConformanceMacroKind::DeriveDecodable:
     macro = makeMacro("_deriveDecodable", "DeriveDecodableMacro",
                       {stringParam("", "infos")},
+                      MacroIntroducedDeclName::getArbitrary());
+    break;
+  case BuiltinDerivedConformanceMacroKind::DeriveRawRepresentable:
+    macro = makeMacro("_deriveRawRepresentable", "DeriveRawRepresentableMacro",
+                      {stringParam("", "infos"), stringParam("", "witness"),
+                       boolParam("", "isStrictMemorySafety")},
                       MacroIntroducedDeclName::getArbitrary());
     break;
   case BuiltinDerivedConformanceMacroKind::NumKinds:

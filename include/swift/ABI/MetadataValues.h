@@ -1713,6 +1713,34 @@ namespace SpecialPointerAuthDiscriminators {
 
   const uint16_t ProtocolDescriptor = 0xe909; // = 59657
 
+  /// Protocol witness table pointers in the runtime's conformance cache.
+  ///
+  /// Computed with ptrauth_string_discriminator("protocol_witness_table").
+  const uint16_t ProtocolWitnessTable = 0x22d0; // = 8912
+
+  /// The combined pointer/tag words stored in the two swift::SignedPointerUnion
+  /// fields of the runtime conformance cache's entries. Each field has its own
+  /// discriminator so a signed word from one cannot be substituted into the
+  /// other.
+  ///
+  /// Computed with
+  /// ptrauth_string_discriminator("conformance_cache_type_or_descriptor") and
+  /// ptrauth_string_discriminator("conformance_cache_proto_or_storage").
+  const uint16_t ConformanceCacheTypeOrDescriptor = 0xbe9b; // = 48795
+  const uint16_t ConformanceCacheProtoOrStorage = 0x06a2; // = 1698
+
+  /// The individual pointer fields of a conformance cache entry's extended
+  /// storage (used for global-actor-isolated conformances). Each field is
+  /// signed with its own discriminator.
+  ///
+  /// Computed with
+  /// ptrauth_string_discriminator("conformance_cache_storage_protocol"),
+  /// ptrauth_string_discriminator("conformance_cache_storage_global_actor_type")
+  /// and ptrauth_string_discriminator("conformance_cache_storage_next").
+  const uint16_t ConformanceCacheStorageProtocol = 0x2465; // = 9317
+  const uint16_t ConformanceCacheStorageGlobalActorType = 0x31dc; // = 12764
+  const uint16_t ConformanceCacheStorageNext = 0x5664; // = 22116
+
   // Type descriptors as arguments.
   const uint16_t OpaqueTypeDescriptor = 0xbdd1; // = 48593
   const uint16_t ContextDescriptor = 0xb5e3; // = 46563
@@ -1793,6 +1821,11 @@ namespace SpecialPointerAuthDiscriminators {
   const uint16_t EscalationNotificationFunction = 0x7861; // = 30817
   const uint16_t AsyncThinNullaryFunction = 0x0f08; // = 3848
   const uint16_t AsyncFutureFunction = 0x720f; // = 29199
+
+  /// Task pointers in a future's wait queue: the queue head in the future
+  /// fragment, and the link to the next waiter in a task dependency record.
+  const uint16_t TaskFutureWaitQueue = 0xb144; // = 45380
+  const uint16_t TaskNextWaitingTask = 0xc489; // = 50313
 
   /// Swift async context parameter stored in the extended frame info.
   const uint16_t SwiftAsyncContextExtendedFrameEntry = 0xc31a; // = 49946
