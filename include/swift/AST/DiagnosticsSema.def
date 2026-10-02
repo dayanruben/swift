@@ -2287,20 +2287,6 @@ ERROR(cxx_pure_virtual_unsupported,none,
 NOTE(cxx_pure_virtual_declared_here,none,
      "%0 declared pure virtual here",
      (const clang::NamedDecl *))
-ERROR(cxx_virtual_key_function_unsupported,none,
-      "%kind0 cannot implement C++ method %1 because it is the first "
-      "non-inline virtual method of C++ class %2",
-      (ValueDecl *, const clang::NamedDecl *, const clang::NamedDecl *))
-NOTE(cxx_virtual_key_function_workaround,none,
-     "to implement %0 in Swift, declare another non-inline virtual method "
-     "before it and define that method in C++",
-     (const clang::NamedDecl *))
-ERROR(cxx_virtual_override_unsupported,none,
-      "%kind0 cannot implement C++ method %1 because it overrides a "
-      "virtual method %select{in a class hierarchy that uses multiple "
-      "inheritance|in a class hierarchy that has a virtual base|and changes "
-      "its return type}2",
-      (ValueDecl *, const clang::NamedDecl *, unsigned))
 ERROR(cxx_mutating_mismatch,none,
       "%kind0 should%select{|| not}1 be 'mutating' to match "
       "%select{non-'const' ||'const' }1%kindonly2 declared by the header",
@@ -2309,10 +2295,20 @@ ERROR(cxx_param_ownership_unsupported,none,
       "%kindonly0 cannot be marked '@cxx' because parameter %1 of non-trivial "
       "C++ class type is '%select{borrowing|consuming}2'",
       (const AbstractFunctionDecl *, const ParamDecl *, unsigned))
-ERROR(cxx_references_unsupported,none,
-      "%kind0 cannot implement C++ function '%1' because reference "
+ERROR(cxx_rvalue_references_unsupported,none,
+      "%kind0 cannot implement C++ function '%1' because rvalue reference "
       "parameters and return types are not yet supported",
       (ValueDecl *, StringRef))
+ERROR(cxx_references_require_unsafe,none,
+      "%kind0 must be marked '@unsafe' to implement C++ function '%1'",
+      (ValueDecl *, StringRef))
+NOTE(cxx_reference_param_aliasing,none,
+     "C++ callers may %select{modify %kind0 through another reference during "
+     "the call|violate exclusive access to 'inout' %kind0}1",
+     (ValueDecl *, bool))
+NOTE(cxx_reference_param_declared_here,none,
+     "%select{parameter|%1}0 declared as a C++ reference here",
+     (bool, const clang::NamedDecl *))
 
 // @used and @section
 ERROR(section_empty_name,none,
@@ -7781,6 +7777,11 @@ ERROR(availability_copyable_generics_casting_only_version_newer, none,
 
 ERROR(availability_escapable_generics_casting_only_version_newer, none,
       "runtime support for casting types with nonescapable generic arguments "
+      "is only available in %0 %1 or newer",
+      (AvailabilityDomain, AvailabilityRange))
+
+ERROR(availability_noncopyable_existential_casting_only_version_newer, none,
+      "runtime support for casting out of a non-'Copyable' existential "
       "is only available in %0 %1 or newer",
       (AvailabilityDomain, AvailabilityRange))
 
