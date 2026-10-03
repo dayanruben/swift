@@ -3,24 +3,24 @@
 // REQUIRES: swift_feature_CalledAttribute
 // REQUIRES: PTRSIZE=64
 
-// A `@called(once)` closure that consumes a noncopyable capture moves it
+// A `@called(atMostOnce)` closure that consumes a noncopyable capture moves it
 // directly into the closure's context (instead of boxing it), so the
 // partial-apply forwarder that runs the closure's underlying implementation
 // must take (not copy) the value out of the context, and must not let
 // the context's normal, shared per-field destructor destroy it a second
 // time when the context itself is released.
 
-public func callOnce(_ f: @called(once) () -> ()) { f() }
-public func dontCallOnce(_ f: @called(once) () -> ()) { /* never called */ }
-public func callOnceEscaping(_ f: @escaping @called(once) () -> ()) { f() }
-public func dontCallOnceEscaping(_ f: @escaping @called(once) () -> ()) { /* never called */ }
+public func callAtMostOnce(_ f: @called(atMostOnce) () -> ()) { f() }
+public func dontCallAtMostOnce(_ f: @called(atMostOnce) () -> ()) { /* never called */ }
+public func callAtMostOnceEscaping(_ f: @escaping @called(atMostOnce) () -> ()) { f() }
+public func dontCallAtMostOnceEscaping(_ f: @escaping @called(atMostOnce) () -> ()) { /* never called */ }
 
-// CHECK-LABEL: define{{.*}} swiftcc void @"$s4test12dontCallOnceyyyyXEnF"(ptr %0, ptr %1)
+// CHECK-LABEL: define{{.*}} swiftcc void @"$s4test18dontCallAtMostOnceyyyyXEnF"(ptr %0, ptr %1)
 // CHECK: [[CTX_ADDR:%.*]] = getelementptr inbounds{{.*}} %swift.function, ptr %f, i32 0, i32 1
 // CHECK: [[CTX:%.*]] = load ptr, ptr [[CTX_ADDR]]
 // CHECK: call void @swift_release(ptr [[CTX]])
 
-// CHECK-LABEL: define{{.*}} swiftcc void @"$s4test20dontCallOnceEscapingyyyyXOnF"(ptr %0, ptr %1)
+// CHECK-LABEL: define{{.*}} swiftcc void @"$s4test26dontCallAtMostOnceEscapingyyyyXOnF"(ptr %0, ptr %1)
 // CHECK: [[CTX_ADDR:%.*]] = getelementptr inbounds{{.*}} %swift.function, ptr %f, i32 0, i32 1
 // CHECK: [[CTX:%.*]] = load ptr, ptr [[CTX_ADDR]]
 // CHECK: call void @swift_release(ptr [[CTX]])
@@ -37,25 +37,28 @@ final class Tracker {
 }
 
 // A closure whose only capture is consumed (`Direct_Owned`): the whole
-// context is drained by the forwarder, so it's deallocated as if it were
-// never initialized -- no field destructor runs on release.
+// context is drained by the forwarder. Since the context is stack-allocated
+// (as any `@called(atMostOnce)` closure now is), it's reclaimed by the caller's
+// own `dealloc_stack` -- the forwarder has nothing left to release once the
+// capture is taken.
 //
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test16allOwnedCapturesyySiFyyXEfU_TA"(ptr swiftself %0)
 // CHECK:  [[FIELD_ADDR:%.*]] = getelementptr inbounds{{.*}} <{ %swift.refcounted, %T4test8ResourceV }>, ptr %0, i32 0, i32 1
 // CHECK:  [[X_ADDR:%.*]] = getelementptr inbounds{{.*}} %T4test8ResourceV, ptr [[FIELD_ADDR]], i32 0, i32 0
 // CHECK:  [[VALUE:%.*]] = load i64, ptr [[X_ADDR]]
-// CHECK:  call void @swift_deallocUninitializedObject(ptr %0,
+// CHECK-NOT: call void @swift_deallocUninitializedObject
 // CHECK:  tail call swiftcc void @"$s4test16allOwnedCapturesyySiFyyXEfU_"(i64 [[VALUE]])
+// CHECK: ret void
 public func allOwnedCaptures(_ x: Int) {
   let r = Resource(x: x)
-  callOnce { r.use() }
+  callAtMostOnce { r.use() }
 }
 
 // A closure that mixes a consumed capture (`Direct_Owned`, `r`) with a
 // borrowed one (`Direct_Guaranteed`, `t`): the forwarder still needs to
 // release the surviving `t` field, but must skip the already-taken `r`
-// field, then free the context's memory as uninitialized rather than run
-// its normal shared destructor over every field.
+// field. The context itself is stack-allocated, so there's no separate
+// "free as uninitialized" call once `t` has been released.
 //
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test13mixedCapturesyySiFyyXEfU_TA"(ptr swiftself %0)
 // CHECK:  [[TRACKER_ADDR:%.*]] = getelementptr inbounds{{.*}} <{ %swift.refcounted, ptr, %T4test8ResourceV }>, ptr %0, i32 0, i32 1
@@ -67,23 +70,24 @@ public func allOwnedCaptures(_ x: Int) {
 // CHECK:  [[TO_DESTROY_ADDR:%.*]] = getelementptr inbounds{{.*}} <{ %swift.refcounted, ptr, %T4test8ResourceV }>, ptr %0, i32 0, i32 1
 // CHECK:  [[TO_DESTROY:%.*]] = load ptr, ptr [[TO_DESTROY_ADDR]]
 // CHECK:  call void @swift_release(ptr [[TO_DESTROY]])
-// CHECK:  call void @swift_deallocUninitializedObject(ptr %0,
+// CHECK-NOT: call void @swift_deallocUninitializedObject
+// CHECK: ret void
 public func mixedCaptures(_ x: Int) {
   let r = Resource(x: x)
   let t = Tracker()
-  callOnce {
+  callAtMostOnce {
     _ = t
     r.use()
   }
 }
 
-// A `@called(once)` closure that is never called: the context is never
-// touched by a forwarder, so it's released through `dontCallOnce` above
+// A `@called(atMostOnce)` closure that is never called: the context is never
+// touched by a forwarder, so it's released through `dontCallAtMostOnce` above
 // (i.e. `f`'s ordinary, whole-object release) -- which runs the context's
 // normal shared destructor, since nothing was ever taken out of it.
 public func neverCalled(_ x: Int) {
   let r = Resource(x: x)
-  dontCallOnce { r.use() }
+  dontCallAtMostOnce { r.use() }
 }
 
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test24allOwnedCapturesEscapingyySiFyyXOfU_TA"(ptr swiftself %0)
@@ -94,7 +98,7 @@ public func neverCalled(_ x: Int) {
 // CHECK:  tail call swiftcc void @"$s4test24allOwnedCapturesEscapingyySiFyyXOfU_"(i64 [[VALUE]])
 public func allOwnedCapturesEscaping(_ x: Int) {
   let r = Resource(x: x)
-  callOnceEscaping { r.use() }
+  callAtMostOnceEscaping { r.use() }
 }
 
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test21mixedCapturesEscapingyySiFyyXOfU_TA"(ptr swiftself %0)
@@ -111,7 +115,7 @@ public func allOwnedCapturesEscaping(_ x: Int) {
 public func mixedCapturesEscaping(_ x: Int) {
   let r = Resource(x: x)
   let t = Tracker()
-  callOnceEscaping {
+  callAtMostOnceEscaping {
     _ = t
     r.use()
   }
@@ -119,13 +123,13 @@ public func mixedCapturesEscaping(_ x: Int) {
 
 public func neverCalledEscaping(_ x: Int) {
   let r = Resource(x: x)
-  dontCallOnceEscaping { r.use() }
+  dontCallAtMostOnceEscaping { r.use() }
 }
 
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test19allBorrowedCapturesyySiF"(i64 %0)
 // CHECK: [[CTX:%.*]] = alloca i8, i64 32, align 16
 // CHECK: call ptr @swift_initStackObject(ptr {{.*}}, ptr [[CTX]])
-// CHECK: call swiftcc void @"$s4test8callOnceyyyyXEnF"(ptr @"$s4test19allBorrowedCapturesyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
+// CHECK: call swiftcc void @"$s4test14callAtMostOnceyyyyXEnF"(ptr @"$s4test19allBorrowedCapturesyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
 
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test19allBorrowedCapturesyySiFyyXEfU_TA"(ptr swiftself %0)
 // CHECK: call swiftcc void @"$s4test19allBorrowedCapturesyySiFyyXEfU_"(ptr {{%.*}}, i64 {{%.*}})
@@ -133,7 +137,7 @@ public func neverCalledEscaping(_ x: Int) {
 // CHECK-NEXT: ret void
 public func allBorrowedCaptures(_ x: Int) {
   let t = Tracker()
-  callOnce {
+  callAtMostOnce {
     _ = t
     _ = x
   }
@@ -142,7 +146,7 @@ public func allBorrowedCaptures(_ x: Int) {
 // CHECK-LABEL: define{{.*}} swiftcc void @"$s4test30allBorrowedCapturesNeverCalledyySiF"(i64 %0)
 // CHECK: [[CTX:%.*]] = alloca i8, i64 32, align 16
 // CHECK: call ptr @swift_initStackObject(ptr {{.*}}, ptr [[CTX]])
-// CHECK: call swiftcc void @"$s4test12dontCallOnceyyyyXEnF"(ptr @"$s4test30allBorrowedCapturesNeverCalledyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
+// CHECK: call swiftcc void @"$s4test18dontCallAtMostOnceyyyyXEnF"(ptr @"$s4test30allBorrowedCapturesNeverCalledyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
 //
 // CHECK-LABEL: define{{.*}} void @__swift_closure_destructor{{.*}}(ptr swiftself %0)
 // CHECK: [[FIELD:%.*]] = getelementptr inbounds{{.*}} <{ %swift.refcounted, ptr, %TSi }>, ptr %0, i32 0, i32 1
@@ -152,7 +156,7 @@ public func allBorrowedCaptures(_ x: Int) {
 // CHECK: ret void
 public func allBorrowedCapturesNeverCalled(_ x: Int) {
   let t = Tracker()
-  dontCallOnce {
+  dontCallAtMostOnce {
     _ = t
     _ = x
   }
@@ -167,10 +171,10 @@ struct BorrowableValue: ~Copyable {
 // CHECK: [[CTX:%.*]] = alloca i8, i64 24, align 16
 // CHECK-NOT: call ptr @swift_retain
 // CHECK: call ptr @swift_initStackObject(ptr {{.*}}, ptr [[CTX]])
-// CHECK: call swiftcc void @"$s4test8callOnceyyyyXEnF"(ptr @"$s4test26noncopyableBorrowedCaptureyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
+// CHECK: call swiftcc void @"$s4test14callAtMostOnceyyyyXEnF"(ptr @"$s4test26noncopyableBorrowedCaptureyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
 public func noncopyableBorrowedCapture(_ x: Int) {
   let v = BorrowableValue(t: Tracker())
-  callOnce {
+  callAtMostOnce {
     _ = v.peek()
   }
 }
@@ -184,10 +188,10 @@ public func noncopyableBorrowedCapture(_ x: Int) {
 // CHECK: [[CTX:%.*]] = alloca i8, i64 24, align 16
 // CHECK-NOT: call ptr @swift_retain
 // CHECK: call ptr @swift_initStackObject(ptr {{.*}}, ptr [[CTX]])
-// CHECK: call swiftcc void @"$s4test12dontCallOnceyyyyXEnF"(ptr @"$s4test37noncopyableBorrowedCaptureNeverCalledyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
+// CHECK: call swiftcc void @"$s4test18dontCallAtMostOnceyyyyXEnF"(ptr @"$s4test37noncopyableBorrowedCaptureNeverCalledyySiFyyXEfU_TA{{(\.ptrauth)?}}", ptr %closure)
 public func noncopyableBorrowedCaptureNeverCalled(_ x: Int) {
   let v = BorrowableValue(t: Tracker())
-  dontCallOnce {
+  dontCallAtMostOnce {
     _ = v.peek()
   }
 }

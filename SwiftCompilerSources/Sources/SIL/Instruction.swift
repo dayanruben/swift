@@ -479,6 +479,11 @@ final public class AssignInst : Instruction, StoringInstruction {
   public var assignOwnership: AssignOwnership {
     AssignOwnership(rawValue: bridged.AssignInst_getAssignOwnership())!
   }
+  public func set(ownership: AssignOwnership, _ context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.AssignInst_setAssignOwnership(ownership.rawValue)
+    context.notifyInstructionChanged(self)
+  }
 
   public override var mayCallFunction: Bool {
     switch assignOwnership {
@@ -1322,6 +1327,15 @@ class TupleElementAddrInst : SingleValueInstruction, UnaryInstruction {
 
 final public class TupleAddrConstructorInst : Instruction {
   public var destinationOperand: Operand { operands[0] }
+
+  public var isInitializationOfDestination: Bool {
+    bridged.TupleAddrConstructorInst_isInitializationOfDest()
+  }
+  public func set(isInitializationOfDestination: Bool, _ context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.TupleAddrConstructorInst_setIsInitializationOfDest(isInitializationOfDestination)
+    context.notifyInstructionChanged(self)
+  }
 }
 
 final public class StructInst : SingleValueInstruction {
@@ -1655,7 +1669,8 @@ class ClassifyBridgeObjectInst : SingleValueInstruction, UnaryInstruction {}
 final public class PartialApplyInst : SingleValueInstruction, ApplySite {
   public var numArguments: Int { bridged.PartialApplyInst_numArguments() }
 
-  /// True is this is a partial application of a `@called(once)` function value.
+  /// True is this is a partial application of a `@called(atMostOnce)` function
+  /// value.
   public var isCalledOnce: Bool { bridged.PartialApplyInst_isCalledOnce() }
 
   /// Warning: isOnStack returns false for all closures prior to ClosureLifetimeFixup, even if they capture on-stack
@@ -1847,6 +1862,12 @@ public protocol Allocation : SingleValueInstruction { }
 
 final public class AllocStackInst : SingleValueInstruction, Allocation, DebugVariableInstruction, MetaInstruction {
   public var hasDynamicLifetime: Bool { bridged.AllocStackInst_hasDynamicLifetime() }
+
+  public func setDynamicLifetime(_ context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.AllocStackInst_setDynamicLifetime()
+    context.notifyInstructionChanged(self)
+  }
   public var isFromVarDecl: Bool { bridged.AllocStackInst_isFromVarDecl() }
   public var usesMoveableValueDebugInfo: Bool { bridged.AllocStackInst_usesMoveableValueDebugInfo() }
   public override var isLexical: Bool { bridged.AllocStackInst_isLexical() }
@@ -1930,6 +1951,12 @@ final public class AllocBoxInst : SingleValueInstruction, Allocation, DebugVaria
   }
 
   public var hasDynamicLifetime: Bool { bridged.AllocBoxInst_hasDynamicLifetime() }
+
+  public func setDynamicLifetime(_ context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.AllocBoxInst_setDynamicLifetime()
+    context.notifyInstructionChanged(self)
+  }
 }
 
 final public class AllocExistentialBoxInst : SingleValueInstruction, Allocation {

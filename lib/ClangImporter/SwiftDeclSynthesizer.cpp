@@ -44,6 +44,7 @@
 #include "clang/Sema/DelayedDiagnostic.h"
 #include "clang/Sema/Sema.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Twine.h"
 
 using namespace swift;
 using namespace importer;
@@ -1624,6 +1625,23 @@ AccessorDecl *SwiftDeclSynthesizer::buildSubscriptSetterDecl(
   return thunk;
 }
 
+ParamDecl *SwiftDeclSynthesizer::cloneParamForForwarding(
+    ASTContext &ctx, ParamDecl *param, const Twine &nameIfUnnamed) {
+  auto *clonedParam = ParamDecl::clone(ctx, param);
+  // Cloning drops the default argument the importer type-checked up front.
+  if (param->getDefaultArgumentKind() == DefaultArgumentKind::Normal &&
+      param->hasDefaultExpr()) {
+    clonedParam->setTypeCheckedDefaultExpr(param->getTypeCheckedDefaultExpr());
+    SmallString<0> scratch;
+    clonedParam->setDefaultValueStringRepresentation(
+        param->getDefaultValueStringRepresentation(scratch));
+    assert(scratch.empty() && "imported default arguments store their text");
+  }
+  if (clonedParam->getName().empty())
+    clonedParam->setName(ctx.getIdentifier(nameIfUnnamed.str()));
+  return clonedParam;
+}
+
 // MARK: C++ subscripts
 
 Expr *SwiftDeclSynthesizer::synthesizeReturnReinterpretCast(ASTContext &ctx,
@@ -1801,14 +1819,9 @@ SubscriptDecl *SwiftDeclSynthesizer::makeSubscript(FuncDecl *getter,
   auto &ctx = ImporterImpl.SwiftContext;
 
   SmallVector<ParamDecl *> paramVec;
-  for (auto [i, param] : llvm::enumerate(*getterImpl->getParameters())) {
-    auto clonedParam = ParamDecl::clone(ctx, param);
-    // If the subscript parameter is unnamed, give it a name to make sure SILGen
-    // creates a variable for it.
-    if (clonedParam->getName().empty())
-      clonedParam->setName(ctx.getIdentifier("__index" + std::to_string(i)));
-    paramVec.push_back(clonedParam);
-  }
+  for (auto [i, param] : llvm::enumerate(*getterImpl->getParameters()))
+    paramVec.push_back(
+        cloneParamForForwarding(ctx, param, "__index" + Twine(i)));
   auto bodyParams = ParameterList::create(ctx, paramVec);
   DeclName name(ctx, DeclBaseName::createSubscript(), bodyParams);
   auto dc = getterImpl->getDeclContext();
@@ -2454,13 +2467,8 @@ SwiftDeclSynthesizer::makeOperator(FuncDecl *operatorMethod,
   SmallVector<ParamDecl *, 4> newParams;
   newParams.push_back(lhsParam);
 
-  for (auto param : *paramList) {
-    auto clonedParam = ParamDecl::clone(ctx, param);
-    if (clonedParam->getParameterName().empty()) {
-      clonedParam->setName(ctx.getIdentifier("other"));
-    }
-    newParams.push_back(clonedParam);
-  }
+  for (auto param : *paramList)
+    newParams.push_back(cloneParamForForwarding(ctx, param, "other"));
 
   auto oldArgNames = operatorMethod->getName().getArgumentNames();
   SmallVector<Identifier, 4> newArgNames;
@@ -3053,13 +3061,6 @@ SwiftDeclSynthesizer::synthesizeStaticFactoryForCXXForeignRef(
         ctorDecl->getAccess() == clang::AS_protected ||
         ctorDecl->isCopyOrMoveConstructor() || ctorDecl->isVariadic())
       continue;
-
-    bool hasDefaultArg = !ctorDecl->parameters().empty() &&
-                         ctorDecl->parameters().back()->hasDefaultArg();
-    // TODO: Add support for default args in ctors for C++ foreign reference
-    // types.
-    if (hasDefaultArg)
-      continue;
     ctorDeclsForSynth.push_back(ctorDecl);
   }
 
@@ -3147,11 +3148,19 @@ SwiftDeclSynthesizer::synthesizeStaticFactoryForCXXForeignRef(
       if (paramBeginLoc.isInvalid() || paramEndLoc.isInvalid())
         paramBeginLoc = paramEndLoc = cxxRecordDeclLoc;
 
+      clang::Expr *defaultArg = nullptr;
+      if (origParam->hasDefaultArg() &&
+          ImporterImpl.isDefaultArgSafeToImport(origParam))
+        defaultArg = origParam->getDefaultArg();
+
       auto *param = clang::ParmVarDecl::Create(
           clangCtx, synthCxxMethodDecl, paramBeginLoc, paramEndLoc, paramIdent,
           origParam->getType(),
           clangCtx.getTrivialTypeSourceInfo(origParam->getType()),
-          clang::SC_None, /*DefArg=*/nullptr);
+          clang::SC_None, defaultArg);
+      param->setScopeInfo(/*scopeDepth=*/0, /*parameterIndex=*/i);
+      if (hasUnsafeAPIAttr(origParam))
+        param->addAttr(clang::SwiftAttrAttr::Create(clangCtx, "import_unsafe"));
       param->setIsUsed();
       synthParams.push_back(param);
     }

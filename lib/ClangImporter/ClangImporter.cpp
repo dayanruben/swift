@@ -106,6 +106,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/CAS/CASReference.h"
 #include "llvm/CAS/ObjectStore.h"
@@ -6938,10 +6939,16 @@ static ValueDecl *cloneBaseMemberDecl(ClangImporter::Implementation &Impl,
         return nullptr;
     }
 
+    // The synthesized body forwards every parameter to the base method.
+    SmallVector<ParamDecl *, 4> params;
+    for (auto [index, param] : llvm::enumerate(*fn->getParameters()))
+      params.push_back(SwiftDeclSynthesizer::cloneParamForForwarding(
+          context, param, "__param" + Twine(index)));
+
     auto out = FuncDecl::createImplicit(
         context, fn->getStaticSpelling(), fn->getName(), fn->getNameLoc(),
         fn->hasAsync(), fn->hasThrows(), fn->getThrownInterfaceType(),
-        fn->getGenericParams(), fn->getParameters(),
+        fn->getGenericParams(), ParameterList::create(context, params),
         fn->getResultInterfaceType(), newContext, /*isSynthesized=*/true);
     cloneImportedAttributes(decl, out);
     out->setAccess(access);
@@ -8344,10 +8351,9 @@ static ValueDecl *generateThunkForExtraMetatypes(SubstitutionMap subst,
   // parameters along to the clang function.
   SmallVector<ParamDecl *, 4> newParams;
 
-  for (auto param : *newDecl->getParameters()) {
-    auto *newParamDecl = ParamDecl::clone(newDecl->getASTContext(), param);
-    newParams.push_back(newParamDecl);
-  }
+  for (auto [index, param] : llvm::enumerate(*newDecl->getParameters()))
+    newParams.push_back(SwiftDeclSynthesizer::cloneParamForForwarding(
+        newDecl->getASTContext(), param, "__param" + Twine(index)));
 
   auto originalFnSubst = cast<AbstractFunctionDecl>(oldDecl)
                              ->getInterfaceType()
@@ -8423,7 +8429,7 @@ ClangImporter::getCXXFunctionTemplateSpecialization(SubstitutionMap subst,
     return failurePlaceholder();
 
   auto [fnIt, inserted] =
-      Impl.specializedFunctionTemplates.try_emplace(newFn, nullptr);
+      Impl.specializedFunctionTemplates.try_emplace({newFn, decl}, nullptr);
   if (!inserted)
     return ConcreteDeclRef(fnIt->second);
 
@@ -8450,6 +8456,20 @@ ClangImporter::getCXXFunctionTemplateSpecialization(SubstitutionMap subst,
   if (!newDecl)
     return failurePlaceholder();
 
+  // Like a method, the specialization is imported once for each of the
+  // template's spellings, e.g. its original name and its '__<name>Unsafe'
+  // migration stub, which differ in safety and deprecation. Call the one named
+  // like the template that was called.
+  if (newDecl->getBaseName() != decl->getBaseName()) {
+    auto alternates = Impl.getAlternateDecls(newDecl);
+    auto match = llvm::find_if(alternates, [&](ValueDecl *alternate) {
+      return alternate->getBaseName() == decl->getBaseName();
+    });
+    if (match != alternates.end())
+      newDecl = *match;
+  }
+  auto *specialization = newDecl;
+
   if (auto *fn = dyn_cast<AbstractFunctionDecl>(newDecl)) {
     if (!subst.empty()) {
       newDecl = rewriteIntegerTypes(subst, decl, fn);
@@ -8462,6 +8482,25 @@ ClangImporter::getCXXFunctionTemplateSpecialization(SubstitutionMap subst,
     if (needsThunkForMetatypes) {
       newDecl = generateThunkForExtraMetatypes(subst, fn,
                                                cast<FuncDecl>(newDecl));
+    }
+  }
+
+  // The call resolves to a declaration built above in place of the imported
+  // specialization, so give it the specialization's attributes.
+  if (newDecl != specialization) {
+    cloneImportedAttributes(specialization, newDecl);
+    // A specialization named for the metatype thunk is not renamed along with
+    // the template, so take the safety and deprecation of the one called.
+    if (needsThunkForMetatypes) {
+      ASTContext &ctx = decl->getASTContext();
+      if (auto *attr = decl->getAttrs().getAttribute<UnsafeAttr>()) {
+        if (auto *cloned = newDecl->getAttrs().getAttribute<UnsafeAttr>())
+          newDecl->getAttrs().removeAttribute(cloned);
+        newDecl->addAttribute(attr->clone(ctx));
+      }
+      for (auto *avail : decl->getAttrs().getAttributes<AvailableAttr>())
+        if (avail->isUnconditionallyDeprecated())
+          newDecl->addAttribute(avail->clone(ctx, /*implicit=*/true));
     }
   }
 

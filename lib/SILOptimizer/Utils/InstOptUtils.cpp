@@ -999,7 +999,12 @@ void swift::releasePartialApplyCapturedArg(SILBuilder &builder, SILLocation loc,
 /// deleted together with the closure.
 static bool isDeadOnStackClosureUser(SILInstruction *user) {
   return isa<DeallocStackInst>(user) || isa<DebugValueInst>(user) ||
-         isa<DestroyValueInst>(user);
+         isa<DestroyValueInst>(user) ||
+         // `strong_release` is `destroy_value`'s non-OSSA equivalent: a
+         // dead on-stack closure can be found (and deleted) after ownership
+         // has been lowered from its function, e.g. when closure
+         // specialization folds `apply(partial_apply())` into a direct call.
+         isa<StrongReleaseInst>(user);
 }
 
 static bool
@@ -1153,9 +1158,9 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
     // lifetime is managed outside of the closure and there's nothing to do
     // here.
 
-    // A `@called(once)` on-stack closure can also own (consume) its captures,
-    // and is responsible for releasing them via its destructor. Release such
-    // captures here to make up for that.
+    // A `@called(atMostOnce)` on-stack closure can also own (consume) its
+    // captures, and is responsible for releasing them via its destructor.
+    // Release such captures here to make up for that.
     if (pa->isCalledOnce()) {
       SILBuilderContext builderCtxt(pa->getModule());
       for (Operand &argOp : pa->getArgumentOperands()) {

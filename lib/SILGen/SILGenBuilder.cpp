@@ -131,7 +131,7 @@ ManagedValue SILGenBuilder::createConvertEscapeToNoEscape(
          "Expect a escaping to noescape conversion");
   (void)fnType;
 
-  // For a `@called(once)` function value, the conversion is a
+  // For a `@called(atMostOnce)` function value, the conversion is a
   // ownership-consuming forwarding operation, so forward `fn`'s cleanup onto
   // the result, exactly like the sibling `createConvertFunction` above does for
   // other function conversions. Mark the conversion's lifetime as already
@@ -139,7 +139,7 @@ ManagedValue SILGenBuilder::createConvertEscapeToNoEscape(
   // lifetime is already exactly as long as it needs to be, by construction.
   //
   // `OperandOwnershipClassifier` treats `ConvertEscapeToNoEscapeInst` as
-  // `ForwardingConsume` as well when the result type is `@called(once)`.
+  // `ForwardingConsume` as well when the result type is `@called(atMostOnce)`.
   if (resultFnType->isCalledOnce()) {
     CleanupCloner cloner(*this, fn);
     SILValue result =
@@ -609,6 +609,8 @@ static ManagedValue createInputFunctionArgument(
     }
 
     // ManualOwnership checks everything for implicit copies already.
+    // LifetimeResolution still looks for the @noImplicitCopies attribute,
+    // but does not rely on the wrapper for enforcement.
     if (B.hasManualOwnershipAttr())
       isNoImplicitCopy = false;
   }
