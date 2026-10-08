@@ -4873,9 +4873,11 @@ public:
     SILType operandType = OEI->getOperand()->getType();
     require(operandType.isAddress(),
             "open_existential_addr must be applied to address");
-    require(operandType.canUseExistentialRepresentation(
-                                        ExistentialRepresentation::Opaque),
-           "open_existential_addr must be applied to opaque existential");
+    auto representation = operandType.getPreferredExistentialRepresentation();
+    bool supported = representation == ExistentialRepresentation::Opaque ||
+                     representation == ExistentialRepresentation::COM;
+    require(supported, "open_existential_addr must be applied to opaque or COM "
+                       "existential");
 
     require(OEI->getType().isAddress(),
             "open_existential_addr result must be an address");
@@ -7111,10 +7113,17 @@ public:
             "Result and operand must have the same type.");
     require(type.isMoveOnly(/*orWrapped=*/false),
             "drop_deinit only allowed for move-only types");
-    require(type.getNominalOrBoundGenericNominal()
-            ->hasValueTypeDestructor(), "drop_deinit only allowed for "
-            "struct/enum types that define a deinit");
-    assert(!type.isTrivial(F) && "a type with a deinit is nontrivial");
+    // A ~Deinitable type has no deinit, and `discard self` is how its values'
+    // lifetimes end.
+    auto *nominal = type.getNominalOrBoundGenericNominal();
+    bool hasDeinit = nominal->hasValueTypeDestructor();
+    require(hasDeinit ||
+                nominal->canConformTo(InvertibleProtocolKind::Deinitable) ==
+                    TypeDecl::CanBeInvertible::Never,
+            "drop_deinit only allowed for struct/enum types that define a "
+            "deinit or that suppress Deinitable");
+    assert((!hasDeinit || !type.isTrivial(F)) &&
+           "a type with a deinit is nontrivial");
 
     checkDropDeinitUses(ddi);
   }
