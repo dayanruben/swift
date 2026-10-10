@@ -67,6 +67,7 @@
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/Sema/PreparedOverload.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
+#include "clang/AST/DeclCXX.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Compiler.h"
@@ -152,6 +153,31 @@ getTypesToCompare(ValueDecl *reqt, Type reqtType, bool reqtTypeIsIUO,
   applyAdjustment(TypeAdjustment::NoescapeToEscaping);
   applyAdjustment(TypeAdjustment::NonsendableToSendable);
   applyAdjustment(TypeAdjustment::ExecutionSemanticsToPlain);
+
+  // When both sides have execution semantics, the witness can still differ
+  // from the requirement in the same ways that are allowed by function
+  // conversion rules.
+  if (auto *reqtFnType = reqtType->getAs<FunctionType>()) {
+    if (auto *witnessFnType = witnessType->getAs<FunctionType>()) {
+      auto reqtSemantics = reqtFnType->getExecutionSemantics();
+      auto witnessSemantics = witnessFnType->getExecutionSemantics();
+      if (reqtSemantics && witnessSemantics &&
+          reqtSemantics != witnessSemantics) {
+        switch (variance) {
+        case VarianceKind::None:
+          break;
+        case VarianceKind::Covariant:
+          if (canConvertExecutionSemantics(witnessSemantics, reqtSemantics))
+            reqtType = reqtFnType->withExecutionSemantics(witnessSemantics);
+          break;
+        case VarianceKind::Contravariant:
+          if (canConvertExecutionSemantics(reqtSemantics, witnessSemantics))
+            witnessType = witnessFnType->withExecutionSemantics(reqtSemantics);
+          break;
+        }
+      }
+    }
+  }
 
   // For @objc protocols, deal with differences in the optionality.
   // FIXME: It probably makes sense to extend this to non-@objc
@@ -2051,9 +2077,16 @@ checkWitnessAvailability(const ValueDecl *requirement, const ValueDecl *witness,
     return std::nullopt;
 
   // We assume conformances in implicit code have already been checked for
-  // availability.
-  if (!dc->getParentSourceFile())
-    return std::nullopt;
+  // availability. The exception is automatically derived conformances for C++
+  // records, which still need to have their availability checked.
+  if (!dc->getParentSourceFile()) {
+    auto *conformingDecl = dc->getAsDecl();
+    bool isImportedCxxRecord =
+        conformingDecl &&
+        isa_and_nonnull<clang::CXXRecordDecl>(conformingDecl->getClangDecl());
+    if (!isImportedCxxRecord)
+      return std::nullopt;
+  }
 
   assert(dc->getSelfNominalTypeDecl() &&
          "Must have a nominal or extension context");
