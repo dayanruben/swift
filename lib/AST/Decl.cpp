@@ -1303,6 +1303,24 @@ bool Decl::preconcurrency() const {
   return false;
 }
 
+bool Decl::preconcurrencyIncludingInferred() const {
+  if (preconcurrency())
+    return true;
+
+  // An inferred `@preconcurrency` is recorded as an implicit attribute when
+  // the isolation of a source decl is computed. Don't compute it for other
+  // decls: their attributes are already complete, and doing so can be cyclic
+  // (e.g. looking up the source location of a deserialized decl mangles it).
+  auto *value = dyn_cast<ValueDecl>(this);
+  if (!value || !getDeclContext()->getParentSourceFile() ||
+      !DeclAttribute::canAttributeAppearOnDecl(DeclAttrKind::Preconcurrency,
+                                               this))
+    return false;
+
+  (void)getActorIsolation(const_cast<ValueDecl *>(value));
+  return getAttrs().hasAttribute<PreconcurrencyAttr>();
+}
+
 /// Look at the attributes to determine whether they involve an attribute
 /// that explicitly specifies the safety of the declaration.
 static std::optional<ExplicitSafety>
@@ -12660,8 +12678,16 @@ Type EnumElementDecl::getPayloadInterfaceType() const {
 void EnumElementDecl::setParameterList(ParameterList *params) {
   Params = params;
 
-  if (params)
+  if (params) {
     params->setDeclContextOfParamDecls(this);
+
+    // An enum case payload cannot be isolated, and 'isolated' is diagnosed
+    // during type resolution. ParamDecl::setTypeRepr still derives the flag
+    // from the specifier, so clear it here; otherwise the case constructor's
+    // type would carry an isolated parameter that its ExtInfo can't record.
+    for (auto *param : *params)
+      param->setIsolated(false);
+  }
 }
 
 EnumCaseDecl *EnumElementDecl::getParentCase() const {
