@@ -214,14 +214,14 @@ public struct Type : TypeProperties, CustomStringConvertible, NoReflectionChildr
 
   /// Returns nil if the nominal is a resilient type because in this case the complete list
   /// of fields is not known.
-  public func getNominalFields(in function: Function) -> NominalFieldsArray? {
+  public func getNominalFields(in function: Function, withMinimalTypeExpansion: Bool = false) -> NominalFieldsArray? {
     guard let nominal = nominal, !nominal.isResilient(in: function) else {
       return nil
     }
     if let structDecl = nominal as? StructDecl, structDecl.hasUnreferenceableStorage {
       return nil
     }
-    return NominalFieldsArray(type: self, function: function)
+    return NominalFieldsArray(type: self, function: function, withMinimalTypeExpansion: withMinimalTypeExpansion)
   }
 
   /// Returns nil if the enum is a resilient type because in this case the complete list
@@ -319,12 +319,13 @@ public struct TypeArray : RandomAccessCollection, CustomReflectable {
 public struct NominalFieldsArray : RandomAccessCollection, FormattedLikeArray {
   fileprivate let type: Type
   fileprivate let function: Function
+  fileprivate let withMinimalTypeExpansion: Bool
 
   public var startIndex: Int { return 0 }
   public var endIndex: Int { Int(type.bridged.getNumNominalFields()) }
 
   public subscript(_ index: Int) -> Type {
-    type.bridged.getFieldType(index, function.bridged).type
+    type.bridged.getFieldType(index, function.bridged, withMinimalTypeExpansion).type
   }
 
   public func getIndexOfField(withName name: String) -> Int? {
@@ -336,6 +337,12 @@ public struct NominalFieldsArray : RandomAccessCollection, FormattedLikeArray {
 
   public func getNameOfField(withIndex idx: Int) -> StringRef {
     StringRef(bridged: type.bridged.getFieldName(idx))
+  }
+
+  /// The field's declaration as the user wrote it: a property wrapper's backing storage
+  /// maps back to the wrapped property.
+  public func getUserFacingFieldDecl(withIndex idx: Int) -> VarDecl? {
+    type.bridged.getUserFacingFieldDecl(idx).getAs(VarDecl.self)
   }
 }
 
@@ -404,6 +411,11 @@ public struct TupleElementArray : RandomAccessCollection, FormattedLikeArray {
 
   public func label(at index: Int) -> Identifier {
     type.bridged.getTupleElementLabel(index)
+  }
+
+  /// The element's label, or the empty string if it is unlabeled.
+  public func labelName(at index: Int) -> StringRef {
+    StringRef(bridged: type.bridged.getTupleElementLabelName(index))
   }
 }
 

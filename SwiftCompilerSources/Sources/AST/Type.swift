@@ -105,6 +105,10 @@ public struct Type: TypeProperties, CustomStringConvertible, NoReflectionChildre
   public var genericArgumentsOfBoundGenericType: TypeArray {
     TypeArray(bridged: bridged.BoundGenericType_getGenericArgs())
   }
+
+  public var elementTypesOfPackType: TypeArray {
+    TypeArray(bridged: bridged.PackType_getElementTypes())
+  }
 }
 
 /// A Type that is statically known to be canonical.
@@ -199,6 +203,7 @@ extension TypeProperties {
   public var isDynamicSelf: Bool { rawType.bridged.isDynamicSelf()}
   public var isBox: Bool { rawType.bridged.isBox() }
   public var isPack: Bool { rawType.bridged.isPack() }
+  public var isPackExpansion: Bool { rawType.bridged.isPackExpansion() }
   public var isSILPack: Bool { rawType.bridged.isSILPack() }
 
   public var canBeClass: Type.TraitResult { rawType.bridged.canBeClass().result }
@@ -286,6 +291,7 @@ extension TypeProperties {
   public var hasArchetype: Bool { rawType.bridged.hasArchetype() }
   public var hasTypeParameter: Bool { rawType.bridged.hasTypeParameter() }
   public var hasLocalArchetype: Bool { rawType.bridged.hasLocalArchetype() }
+  public var hasOpaqueArchetype: Bool { rawType.bridged.hasOpaqueArchetype() }
   /// True if this type mentions an existential (opened existential) archetype.
   public var hasExistentialArchetype: Bool { rawType.bridged.hasExistentialArchetype() }
   public var hasDynamicSelf: Bool { rawType.bridged.hasDynamicSelf() }
