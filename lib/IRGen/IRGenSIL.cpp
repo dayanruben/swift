@@ -1014,8 +1014,10 @@ public:
   static StackSlotKey getShadowStackSlotKey(const SILDebugScope *Scope,
                                             const SILDebugVariable &VarInfo) {
     llvm::SmallVector<uint64_t, 4> Fragment;
-    for (const SILDIExprElement &Elt :
-         VarInfo.DIExpr.getFragmentPart().elements()) {
+    // getFragmentPart() returns a temporary. Bind it to a local so the
+    // elements we iterate over stay alive for the whole loop.
+    SILDebugInfoExpression FragmentPart = VarInfo.DIExpr.getFragmentPart();
+    for (const SILDIExprElement &Elt : FragmentPart.elements()) {
       Fragment.push_back(Elt.getKind());
       switch (Elt.getKind()) {
       case SILDIExprElement::OperatorKind:
@@ -2693,16 +2695,19 @@ static void noteUseOfMetadataByCXXInterop(IRGenerator &IRGen,
       Walker(IRGenerator &IRGen) : IRGen(IRGen) {}
 
       Action walkToTypePre(Type ty) override {
-        if (ty->is<BoundGenericType>())
-          genericDepth++;
-        else if (auto *nominal = ty->getAs<NominalType>())
-          noteUseOfTypeMetadata(nominal->getDecl());
+        if (auto *nominal = ty->getAs<NominalType>()) {
+          if (nominal->hasGenericArgs())
+            genericDepth++;
+          else
+            noteUseOfTypeMetadata(nominal->getDecl());
+        }
         return Action::Continue;
       }
 
       Action walkToTypePost(Type ty) override {
-        if (ty->is<BoundGenericType>())
-          genericDepth--;
+        if (auto *nominal = ty->getAs<NominalType>())
+          if (nominal->hasGenericArgs())
+            genericDepth--;
 
         return Action::Continue;
       }
