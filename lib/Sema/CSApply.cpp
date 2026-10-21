@@ -7277,6 +7277,13 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
           return cs.cacheType(new (ctx) UnsafeCastExpr(expr, toType));
       }
 
+      // TODO: Record the relationship between scopes instead.
+      // FIXME: Lvalues and function conversions equal up to scopes
+      // aren't coersed so they crash in the AST verifier / SILGen.
+      if (ctx.LangOpts.hasFeature(Feature::ScopeRestrictions) &&
+          eraseScopes(fromType)->isEqual(eraseScopes(toType)))
+        return cs.cacheType(new (ctx) UnsafeCastExpr(expr, toType));
+
       auto &err = llvm::errs();
       err << "fromType->getCanonicalType() = ";
       fromType->getCanonicalType()->dump(err);
@@ -8495,7 +8502,36 @@ Expr *ExprRewriter::finishApply(ApplyExpr *apply, Type openedType,
         cs.setType(replacement, resultType);
         return replacement;
       }
-      
+
+      case DeclTypeCheckingSemantics::WithoutActuallyDiscarding: {
+        // Resolve into body(convert(closure)), where the conversion is marked
+        // as a deliberate drop of the exactly-once guarantee.
+        auto *args = apply->getArgs();
+        assert(args->size() == 2 && "should have two arguments");
+        auto *exactlyOnce = cs.coerceToRValue(args->getExpr(0));
+        auto *body = cs.coerceToRValue(args->getExpr(1));
+        auto bodyFnTy = cs.getType(body)->castTo<FunctionType>();
+        auto resultType = bodyFnTy->getResult();
+        auto atMostOnceTy = bodyFnTy->getParams()[0].getPlainType();
+
+        // The body is immediately called, so is obviously noescape.
+        bodyFnTy = cast<FunctionType>(
+            bodyFnTy->withExtInfo(bodyFnTy->getExtInfo().withNoEscape()));
+        body = coerceToType(body, bodyFnTy, locator);
+        assert(body && "can't make nonescaping?!");
+
+        auto *conversion =
+            new (ctx) FunctionConversionExpr(exactlyOnce, atMostOnceTy);
+        conversion->setWithoutActuallyDiscarding();
+        cs.setType(conversion, atMostOnceTy);
+
+        auto *argList = ArgumentList::forImplicitUnlabeled(ctx, {conversion});
+        auto *replacement = CallExpr::createImplicit(ctx, body, argList);
+        cs.cacheSubExprTypes(replacement);
+        cs.setType(replacement, resultType);
+        return replacement;
+      }
+
       case DeclTypeCheckingSemantics::OpenExistential: {
         // Resolve into an OpenExistentialExpr.
         auto *args = apply->getArgs();

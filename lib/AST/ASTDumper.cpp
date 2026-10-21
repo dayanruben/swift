@@ -3983,6 +3983,8 @@ public:
   }
   void visitFunctionConversionExpr(FunctionConversionExpr *E, Label label) {
     printCommon(E, "function_conversion_expr", label);
+    if (E->isWithoutActuallyDiscarding())
+      printFlag(true, "without_actually_discarding", ExprModifierColor);
     printRec(E->getSubExpr(), Label::optional("sub_expr"));
     printFoot();
   }
@@ -6521,6 +6523,12 @@ namespace {
       printList(T->getGenericArgs(), [&](auto arg, Label label) {  \
         printRec(arg, label);                              \
       }, Label::optional("generic_args"));                 \
+      printStringListField(T->getScopeArgs(), [&](ScopeRef scope) { \
+        std::string value;                                 \
+        llvm::raw_string_ostream os(value);                \
+        scope.print(os);                                   \
+        return value;                                      \
+      }, Label::always("scope_args"), /*delimiter=*/", "); \
                                                            \
       printFoot();                                         \
     }

@@ -2140,6 +2140,7 @@ ConstraintSystem::matchTupleTypes(TupleType *tuple1, TupleType *tuple2,
   case ConstraintKind::Conjunction:
   case ConstraintKind::DynamicTypeOf:
   case ConstraintKind::EscapableFunctionOf:
+  case ConstraintKind::DiscardableFunctionOf:
   case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::KeyPath:
   case ConstraintKind::KeyPathApplication:
@@ -2504,6 +2505,7 @@ static bool matchFunctionRepresentations(FunctionType::ExtInfo einfo1,
   case ConstraintKind::Conjunction:
   case ConstraintKind::DynamicTypeOf:
   case ConstraintKind::EscapableFunctionOf:
+  case ConstraintKind::DiscardableFunctionOf:
   case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::KeyPath:
   case ConstraintKind::KeyPathApplication:
@@ -2959,15 +2961,9 @@ ConstraintSystem::matchFunctionExecutionSemantics(
   // The execution semantics are given by the invertible protocols that the
   // dependent type suppresses if present, otherwise by the function itself.
   auto getInverses = [](FunctionType *func, Type dep) {
-    if (!dep)
-      return getSuppressedInvertibleProtocols(func->getExecutionSemantics());
-
-    InvertibleProtocolSet inverses;
-    if (dep->isNoncopyable())
-      inverses.insert(InvertibleProtocolKind::Copyable);
-    if (!dep->isDeinitable())
-      inverses.insert(InvertibleProtocolKind::Deinitable);
-    return inverses;
+    return getSuppressedInvertibleProtocols(
+        dep ? getUnappliedConsumingMethodExecutionSemantics(dep)
+            : func->getExecutionSemantics());
   };
   auto inverses1 = getInverses(func1, dep1);
   auto inverses2 = getInverses(func2, dep2);
@@ -3383,6 +3379,7 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
   case ConstraintKind::Conjunction:
   case ConstraintKind::DynamicTypeOf:
   case ConstraintKind::EscapableFunctionOf:
+  case ConstraintKind::DiscardableFunctionOf:
   case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::KeyPath:
   case ConstraintKind::KeyPathApplication:
@@ -7269,7 +7266,7 @@ bool ConstraintSystem::repairFailures(
     // Repair a coercion ('as') with a runtime checked cast ('as!' or 'as?').
     if (auto *coerceToCheckCastFix =
             CoerceToCheckedCast::attempt(*this, lhs, rhs, useConditionalCast,
-                                         getConstraintLocator(locator))) {
+                                         locator)) {
       conversionsOrFixes.push_back(coerceToCheckCastFix);
       return true;
     }
@@ -7336,6 +7333,106 @@ static bool isDependentMemberTypeWithBaseThatContainsUnresolvedPackExpansions(
   return llvm::any_of(typeVars, [](const TypeVariableType *typeVar) {
     return typeVar->getImpl().isPackExpansion();
   });
+}
+
+/// Try implicit CGFloat conversion only if this is not:
+///     - an explicit call to a CGFloat initializer;
+///     - an explicit coercion;
+///     - a runtime type check (via `is` expression);
+///     - a checked or conditional cast;
+bool ConstraintSystem::isCGFloatDoubleConversionSupported(
+    ConstraintLocatorBuilder locator) {
+  if (getASTContext().TypeCheckerOpts.SolverEnablePromoteSupertypes) {
+    auto isCGFloatInit = [&]() {
+      auto *expr = locator.trySimplifyToExpr();
+
+      if (auto *call = dyn_cast_or_null<CallExpr>(expr)) {
+        if (auto *typeExpr = dyn_cast<TypeExpr>(call->getFn())) {
+          return getInstanceType(typeExpr)->isCGFloat();
+        }
+      }
+      return false;
+    };
+
+    auto anchor = locator.getAnchor();
+
+    auto isCoercionOrCast = [&]() {
+      // E.g. contextual conversion from coercion/cast
+      // to some other type.
+      if (!locator.endsWith<LocatorPathElt::CoercionOperand>())
+        return false;
+
+      return isExpr<CoerceExpr>(anchor) || isExpr<IsExpr>(anchor) ||
+             isExpr<ConditionalCheckedCastExpr>(anchor) ||
+             isExpr<ForcedCheckedCastExpr>(anchor);
+    };
+
+    return !isCGFloatInit() && !isCoercionOrCast();
+  } else {
+    // Look through all value-to-optional promotions to allow
+    // conversions like Double -> CGFloat?? and vice versa.
+    // T -> Optional<T>
+    if (locator.endsWith<LocatorPathElt::OptionalInjection>() ||
+        locator.endsWith<LocatorPathElt::GenericArgument>()) {
+      SmallVector<LocatorPathElt, 4> path;
+      auto anchor = locator.getLocatorParts(path);
+
+      // Drop all of the applied `value-to-optional` and
+      // `optional-to-optional` conversions.
+      path.erase(llvm::remove_if(
+                     path,
+                     [](const LocatorPathElt &elt) {
+                       return elt.is<LocatorPathElt::OptionalInjection>() ||
+                              elt.is<LocatorPathElt::GenericArgument>();
+                     }),
+                 path.end());
+
+      locator = getConstraintLocator(anchor, path);
+    }
+
+    // Support implicit Double<->CGFloat conversions only for
+    // something which could be directly represented in the AST
+    // e.g. argument-to-parameter, contextual conversions etc.
+    if (!locator.trySimplifyToExpr()) {
+      return false;
+    }
+
+    SmallVector<LocatorPathElt, 4> path;
+    auto anchor = locator.getLocatorParts(path);
+
+    // Try implicit CGFloat conversion only if:
+    // - This is not:
+    //     - an explicit call to a CGFloat initializer;
+    //     - an explicit coercion;
+    //     - a runtime type check (via `is` expression);
+    //     - a checked or conditional cast;
+    // - This is a first type such conversion is attempted for
+    //   for a given path (AST element).
+
+    auto isCGFloatInit = [&](ASTNode locator) {
+      if (auto *call = getAsExpr<CallExpr>(locator)) {
+        if (auto *typeExpr = dyn_cast<TypeExpr>(call->getFn())) {
+          return getInstanceType(typeExpr)->isCGFloat();
+        }
+      }
+      return false;
+    };
+
+    auto isCoercionOrCast = [](ASTNode anchor,
+                               ArrayRef<LocatorPathElt> path) {
+      // E.g. contextual conversion from coercion/cast
+      // to some other type.
+      if (!(path.empty() ||
+            path.back().is<LocatorPathElt::CoercionOperand>()))
+        return false;
+
+      return isExpr<CoerceExpr>(anchor) || isExpr<IsExpr>(anchor) ||
+             isExpr<ConditionalCheckedCastExpr>(anchor) ||
+             isExpr<ForcedCheckedCastExpr>(anchor);
+    };
+
+    return !isCGFloatInit(anchor) && !isCoercionOrCast(anchor, path);
+  }
 }
 
 ConstraintSystem::ImpliedResultConversionKind
@@ -7615,6 +7712,7 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
     case ConstraintKind::Conjunction:
     case ConstraintKind::DynamicTypeOf:
     case ConstraintKind::EscapableFunctionOf:
+    case ConstraintKind::DiscardableFunctionOf:
     case ConstraintKind::OpenedExistentialOf:
     case ConstraintKind::KeyPath:
     case ConstraintKind::KeyPathApplication:
@@ -7952,37 +8050,7 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
           nominal1->getDecl() != nominal2->getDecl() &&
           ((nominal1->isCGFloat() || nominal2->isCGFloat()) &&
            (nominal1->isDouble() || nominal2->isDouble()))) {
-        // Try implicit CGFloat conversion only if this is not:
-        //     - an explicit call to a CGFloat initializer;
-        //     - an explicit coercion;
-        //     - a runtime type check (via `is` expression);
-        //     - a checked or conditional cast;
-
-        auto isCGFloatInit = [&]() {
-          auto *expr = locator.trySimplifyToExpr();
-
-          if (auto *call = dyn_cast_or_null<CallExpr>(expr)) {
-            if (auto *typeExpr = dyn_cast<TypeExpr>(call->getFn())) {
-              return getInstanceType(typeExpr)->isCGFloat();
-            }
-          }
-          return false;
-        };
-
-        auto anchor = locator.getAnchor();
-
-        auto isCoercionOrCast = [&]() {
-          // E.g. contextual conversion from coercion/cast
-          // to some other type.
-          if (!locator.endsWith<LocatorPathElt::CoercionOperand>())
-            return false;
-
-          return isExpr<CoerceExpr>(anchor) || isExpr<IsExpr>(anchor) ||
-                 isExpr<ConditionalCheckedCastExpr>(anchor) ||
-                 isExpr<ForcedCheckedCastExpr>(anchor);
-        };
-
-        if (!isCGFloatInit() && !isCoercionOrCast()) {
+        if (isCGFloatDoubleConversionSupported(locator)) {
           conversionsOrFixes.push_back(
               desugar1->isCGFloat()
                   ? ConversionRestrictionKind::CGFloatToDouble
@@ -13130,6 +13198,75 @@ ConstraintSystem::simplifyEscapableFunctionOfConstraint(
 }
 
 ConstraintSystem::SolutionKind
+ConstraintSystem::simplifyDiscardableFunctionOfConstraint(
+    Type type1, Type type2, TypeMatchOptions flags,
+    ConstraintLocatorBuilder locator) {
+  TypeMatchOptions subflags = getDefaultDecompositionOptions(flags);
+
+  // Local function to form an unsolved result.
+  auto formUnsolved = [&] {
+    if (flags.contains(TMF_GenerateConstraints)) {
+      addUnsolvedConstraint(
+          Constraint::create(*this, ConstraintKind::DiscardableFunctionOf,
+                             type1, type2, getConstraintLocator(locator)));
+      return SolutionKind::Solved;
+    }
+
+    return SolutionKind::Unsolved;
+  };
+
+  type2 = getFixedTypeRecursive(type2, flags, /*wantRValue=*/true);
+  if (auto fn2 = type2->getAs<FunctionType>()) {
+    // Only an exactly-once function can be discarded. Diagnose anything else,
+    // and keep going with the function's own type so that the body closure
+    // still type checks.
+    auto semantics = fn2->getExtInfo().getExecutionSemantics();
+    if (semantics != ExecutionSemantics::Once) {
+      if (recordFix(AllowNonExactlyOnceDiscardArgument::create(
+                        *this, type2, getConstraintLocator(locator)),
+                    FixImpact::TypeMismatch))
+        return SolutionKind::Error;
+      return matchTypes(type1, fn2, ConstraintKind::Bind, subflags, locator);
+    }
+
+    // Solve forward by binding the other type variable to the at-most-once
+    // variation of this type.
+    auto fn1 = fn2->withExtInfo(fn2->getExtInfo().withExecutionSemantics(
+        ExecutionSemantics::AtMostOnce));
+    return matchTypes(type1, fn1, ConstraintKind::Bind, subflags, locator);
+  }
+  if (!type2->isTypeVariableOrMember()) {
+    // Holes were already diagnosed elsewhere.
+    if (type2->is<PlaceholderType>())
+      return SolutionKind::Solved;
+    if (recordFix(AllowNonExactlyOnceDiscardArgument::create(
+                      *this, type2, getConstraintLocator(locator)),
+                  FixImpact::TypeMismatch))
+      return SolutionKind::Error;
+    return SolutionKind::Solved;
+  }
+
+  type1 = getFixedTypeRecursive(type1, flags, /*wantRValue=*/true);
+  if (auto fn1 = type1->getAs<FunctionType>()) {
+    // We should have the at-most-once end of the relation.
+    if (fn1->getExtInfo().getExecutionSemantics() !=
+        ExecutionSemantics::AtMostOnce)
+      return SolutionKind::Error;
+
+    // Solve backward by binding the other type variable to the exactly-once
+    // variation of this type.
+    auto fn2 = fn1->withExtInfo(
+        fn1->getExtInfo().withExecutionSemantics(ExecutionSemantics::Once));
+    return matchTypes(type2, fn2, ConstraintKind::Bind, subflags, locator);
+  }
+  if (!type1->isTypeVariableOrMember())
+    // We definitely don't have a function, so bail.
+    return SolutionKind::Error;
+
+  return formUnsolved();
+}
+
+ConstraintSystem::SolutionKind
 ConstraintSystem::simplifyOpenedExistentialOfConstraint(
                                         Type type1, Type type2,
                                         TypeMatchOptions flags,
@@ -14893,7 +15030,7 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
         loc->isForOptionalTry()) {
       if (restriction == ConversionRestrictionKind::Superclass) {
         if (auto *fix = CoerceToCheckedCast::attempt(
-                *this, fromType, toType, /*useConditionalCast*/ false, loc))
+                *this, fromType, toType, /*useConditionalCast*/ false, locator))
           return !recordFix(fix, impact);
       }
       
@@ -14901,6 +15038,12 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
       // tuple mismatch.
       if (hasFixFor(loc, FixKind::AllowTupleTypeMismatch))
         return true;
+
+      if (restriction == ConversionRestrictionKind::OptionalToOptional) {
+        auto *fix = GenericArgumentsMismatch::create(
+          *this, fromType, toType, {0}, loc);
+        return !recordFix(fix, impact);
+      }
 
       if (restriction == ConversionRestrictionKind::ValueToOptional) {
         // If this is an optional injection we can drop optional from
@@ -16320,6 +16463,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::IgnoreInvalidPatternInExpr:
   case FixKind::IgnoreInvalidPlaceholder:
   case FixKind::IgnoreOutOfPlaceThenStmt:
+  case FixKind::AllowNonExactlyOnceDiscardArgument:
   case FixKind::IgnoreMissingEachKeyword:
   case FixKind::TooManyDynamicMemberLookups:
   case FixKind::IgnoreNonMetatypeDynamicType:
@@ -16369,6 +16513,10 @@ ConstraintSystem::addConstraintImpl(ConstraintKind kind, Type first,
   case ConstraintKind::EscapableFunctionOf:
     return simplifyEscapableFunctionOfConstraint(first, second,
                                                  subflags, locator);
+
+  case ConstraintKind::DiscardableFunctionOf:
+    return simplifyDiscardableFunctionOfConstraint(first, second, subflags,
+                                                   locator);
 
   case ConstraintKind::OpenedExistentialOf:
     return simplifyOpenedExistentialOfConstraint(first, second,
@@ -16489,8 +16637,6 @@ ConstraintSystem::addKeyPathApplicationRootConstraint(Type root, ConstraintLocat
   auto subscript = getAsExpr<SubscriptExpr>(anchor);
   if (!subscript)
     return;
-
-  ASSERT(getConstraintLocator(locator)->isSubscriptMemberRef());
 
   // If a keypath subscript is used without the expected `keyPath:` label,
   // continue with type-checking when attempting fixes so that it gets caught
@@ -16933,6 +17079,11 @@ ConstraintSystem::simplifyConstraint(const Constraint &constraint) {
 
   case ConstraintKind::EscapableFunctionOf:
     return simplifyEscapableFunctionOfConstraint(
+        constraint.getFirstType(), constraint.getSecondType(), std::nullopt,
+        constraint.getLocator());
+
+  case ConstraintKind::DiscardableFunctionOf:
+    return simplifyDiscardableFunctionOfConstraint(
         constraint.getFirstType(), constraint.getSecondType(), std::nullopt,
         constraint.getLocator());
 
