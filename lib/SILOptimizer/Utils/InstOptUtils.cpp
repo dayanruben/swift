@@ -1017,7 +1017,9 @@ deadMarkDependenceUser(Operand *use,
   for (auto *mdiUse : mdi->getUses()) {
     // In OSSA the closure is destroyed via the forwarding mark_dependence.
     if (isDeadOnStackClosureUser(mdiUse->getUser())) {
-      deleteInsts.push_back(mdiUse->getUser());
+      // Debug uses are salvaged rather than deleted.
+      if (!isa<DebugValueInst>(mdiUse->getUser()))
+        deleteInsts.push_back(mdiUse->getUser());
       continue;
     }
     if (!deadMarkDependenceUser(mdiUse, deleteInsts))
@@ -1146,7 +1148,9 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
     SmallVector<SILInstruction *, 8> deleteInsts;
     for (auto *use : pa->getUses()) {
       if (isDeadOnStackClosureUser(use->getUser())) {
-        deleteInsts.push_back(use->getUser());
+        // Debug uses are salvaged rather than deleted.
+        if (!isa<DebugValueInst>(use->getUser()))
+          deleteInsts.push_back(use->getUser());
       } else if (!deadMarkDependenceUser(use, deleteInsts)) {
         return false;
       }
@@ -1156,7 +1160,7 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
     // lifetime is managed outside of the closure and there's nothing to do
     // here.
 
-    // A `@called(atMostOnce)` on-stack closure can also own (consume) its
+    // An at-most-once on-stack closure can also own (consume) its
     // captures, and is responsible for releasing them via its destructor.
     // Release such captures here to make up for that.
     if (pa->hasCalledAtMostOnceSemantics()) {
@@ -1171,8 +1175,11 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
       }
     }
 
-    for (auto *inst : reverse(deleteInsts))
+    for (auto *inst : reverse(deleteInsts)) {
+      salvageDebugInfo(inst);
       callbacks.deleteInst(inst);
+    }
+    salvageDebugInfo(pa);
     callbacks.deleteInst(pa);
 
     return true;
@@ -1216,13 +1223,18 @@ bool swift::tryDeleteDeadClosure(SingleValueInstruction *closure,
   // deleted first.
   for (auto *use : closureDestroys) {
     auto *user = use->getUser();
+    // Debug uses are salvaged rather than deleted.
+    if (isa<DebugValueInst>(user))
+      continue;
     assert(
         (useDoesNotKeepValueAlive(user) || useHasTransitiveOwnership(user)) &&
         "We expect only ARC operations without "
         "results or a cast from escape to noescape without users");
+    salvageDebugInfo(user);
     callbacks.deleteInst(user);
   }
 
+  salvageDebugInfo(closure);
   callbacks.deleteInst(closure);
   return true;
 }

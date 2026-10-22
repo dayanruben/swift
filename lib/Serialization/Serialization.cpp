@@ -3110,7 +3110,7 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
     case DeclAttrKind::PrivateImport:
     case DeclAttrKind::AllowFeatureSuppression:
     case DeclAttrKind::Diagnose:
-    case DeclAttrKind::Called:
+    case DeclAttrKind::Callable:
       llvm_unreachable("cannot serialize attribute");
 
 #define SIMPLE_DECL_ATTR(_, CLASS, ...)                                        \
@@ -4863,9 +4863,9 @@ public:
     if (theClass->hasSuperclass()) {
       // FIXME: Nested types can still be a problem here: it's possible that (for
       // whatever reason) they won't be able to be deserialized, in which case
-      // we'll be in trouble forming the actual superclass type. However, we
-      // need a more robust handling of deserialization dependencies that can
-      // handle circularities. rdar://problem/50835214
+      // we'll be in trouble forming the actual superclass type. The
+      // deserializer skips re-entrant dependency checks to avoid infinite
+      // recursion, so a cycle can still leave a class only partly checked.
       collectDependenciesFromType(dependencyTypes, theClass->getSuperclass(),
                                   /*excluding*/theClass);
     }

@@ -1480,7 +1480,7 @@ ERROR(cannot_jump_in_single_value_stmt,none,
 WARNING(effect_marker_on_single_value_stmt,none,
       "'%0' has no effect on '%1' expression", (StringRef, StmtKind))
 ERROR(without_actually_discarding_requires_exactly_once,none,
-      "'withoutActuallyDiscarding' requires a '@called(exactlyOnce)' function, "
+      "'withoutActuallyDiscarding' requires a '@once' function, "
       "but argument has type %0", (Type))
 ERROR(out_of_place_then_stmt,none,
       "'then' may only appear as the last statement in an 'if', 'switch', or "
@@ -2513,6 +2513,8 @@ ERROR(expose_unsupported_client_emission_to_cxx,none,
       "%kind0 can not be exposed to C++ as it requires code to be emitted into client", (ValueDecl *))
 ERROR(expose_generic_decl_to_cxx,none,
       "generic %kind0 can not yet be exposed to C++", (ValueDecl *))
+ERROR(expose_generic_superclass_to_cxx,none,
+      "%kind0 inherits from a generic class and can not yet be exposed to C++", (ValueDecl *))
 ERROR(expose_generic_requirement_to_cxx,none,
       "generic requirements for %kind0 can not yet be represented in C++", (ValueDecl *))
 ERROR(expose_throwing_to_cxx,none,
@@ -2697,19 +2699,22 @@ WARNING(spi_preferred_over_spi_available,none,
         "symbols that are '@_spi_available' on all platforms should use "
         "'@_spi' instead", ())
 
-// @called
-ERROR(called_attr_cannot_be_used_with_borrowing,none,
-      "'@called(%0)' cannot be used together with 'borrowing'", (StringRef))
-ERROR(called_attr_function_type_mismatch,none,
-      "invalid conversion from '@called(%0)' function of type %1 "
+// @once and @callable(once)
+ERROR(execution_semantics_attr_cannot_be_used_with_borrowing,none,
+      "'%0' cannot be used together with 'borrowing'", (StringRef))
+ERROR(execution_semantics_function_type_mismatch,none,
+      "invalid conversion from '%0' function of type %1 "
       "to function type %2", (StringRef, Type, Type))
+ERROR(execution_semantics_function_type_mismatch_to,none,
+      "invalid conversion from function of type %0 "
+      "to '%1' function of type %2", (Type, StringRef, Type))
 ERROR(sending_capture_requires_experimental_feature,none,
       "'sending' capture is only valid when experimental feature "
-      "'CalledAttribute' is enabled",
+      "'OnceFunctions' is enabled",
       ())
-ERROR(sending_capture_decl_requires_called_closure,none,
-      "'sending' capture may only be declared in a '@called(atMostOnce)' or "
-      "'@called(exactlyOnce)' closure",
+ERROR(sending_capture_decl_requires_once_closure,none,
+      "'sending' capture may only be declared in a '@once' or "
+      "'@callable(once)' closure",
       ())
 
 // Alignment attribute
@@ -5987,9 +5992,10 @@ ERROR(enum_element_pattern_member_not_found,none,
 ERROR(optional_element_pattern_not_valid_type,none,
       "optional pattern '?' cannot match value of non-optional type %0",
       (Type))
-ERROR(condition_optional_element_pattern_not_valid_type,none,
-      "initializer for conditional binding must have Optional type, not %0",
-      (Type))
+GROUPED_WARNING(condition_binding_non_optional_type,
+                ConditionalBindingNonOptionalType,none,
+                "initializer for conditional binding has non-optional type %0",
+                (Type))
 ERROR(ambiguous_enum_pattern_type,none,
       "generic enum type %0 is ambiguous without explicit generic parameters "
       "when matching value of type %1", (Type, Type))
@@ -6329,6 +6335,12 @@ NOTE(marked_nonisolated_here,none,
 ERROR(actor_isolated_partial_apply,none,
         "actor-isolated %kind0 can not be partially applied",
         (const ValueDecl *))
+ERROR(actor_isolated_closure_unowned_self_capture,none,
+      "actor-isolated closure cannot capture 'self' as %0",
+      (ReferenceOwnership))
+NOTE(actor_isolated_closure_unowned_self_capture_use_weak,none,
+      "capture 'self' as 'weak' instead",
+      ())
 ERROR(concurrent_access_local,none,
         "use of local %kind0 in concurrently-executing code",
         (const ValueDecl *))
@@ -7117,9 +7129,9 @@ ERROR(unsupported_convention,none,
 ERROR(invalid_isolated_and_convention_attributes,none,
       "'@convention(%0)' attribute is not allowed on '@isolated' types",
       (StringRef))
-ERROR(invalid_called_and_attr_attributes,none,
-      "%0 attribute is not allowed on '@called' types",
-      (TypeAttribute *))
+ERROR(invalid_execution_semantics_and_attr_attributes,none,
+      "%0 attribute is not allowed on '%1' types",
+      (TypeAttribute *, StringRef))
 GROUPED_ERROR(unreferenced_generic_parameter,NoUsage,NoUsage,
       "generic parameter '%0' is not used in function signature", (StringRef))
 ERROR(non_inferrable_opaque_generic_parameter,none,
@@ -8141,6 +8153,17 @@ ERROR(specialize_attr_unsupported_kind_of_req,none,
       "only same-type and layout requirements are supported by '_specialize' attribute", ())
 ERROR(specialized_attr_unsupported_kind_of_req,none,
       "only same-type are supported by 'specialized' attribute", ())
+ERROR(specialized_attr_exported_experimental,none,
+      "'@specialized(exported: true)' requires "
+      "'-enable-experimental-feature ExtendedSpecializedAttribute'", ())
+ERROR(specialized_attr_exported_library_evolution,none,
+      "'@specialized(exported: true)' is not supported in a module built "
+      "with library evolution", ())
+ERROR(specialized_attr_exported_emitted_into_client,none,
+      "'@specialized(exported: true)' cannot be combined with "
+      "%select{'@export(implementation)'|'@_alwaysEmitIntoClient'|"
+      "'@_transparent'|the 'implementation' code generation model}0",
+      (unsigned))
 ERROR(specialize_target_function_not_found, none,
      "target function %0 could not be found", (DeclNameRef))
 ERROR(specialize_target_function_of_type_not_found, none,

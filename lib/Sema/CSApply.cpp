@@ -4211,6 +4211,24 @@ namespace {
           expr->getElseExpr(), resultTy,
           cs.getConstraintLocator(expr, LocatorPathElt::TernaryBranch(false))));
 
+      // If both branches inject their result into an optional, rewrite the
+      // ternary in terms of the injected values and then inject the result
+      // of the ternary. This is an opportunistic hack to help diagnostics
+      // which simplistically pattern match on the outermost expression
+      // being an InjectIntoOptionalExpr.
+      if (isa<InjectIntoOptionalExpr>(expr->getThenExpr()) &&
+          isa<InjectIntoOptionalExpr>(expr->getElseExpr())) {
+        auto objectTy = resultTy->getOptionalObjectType();
+        cs.setType(expr, objectTy);
+
+        auto *thenExpr = cast<InjectIntoOptionalExpr>(expr->getThenExpr());
+        auto *elseExpr = cast<InjectIntoOptionalExpr>(expr->getElseExpr());
+        expr->setThenExpr(thenExpr->getSubExpr());
+        expr->setElseExpr(elseExpr->getSubExpr());
+
+        return cs.cacheType(new (ctx) InjectIntoOptionalExpr(expr, resultTy));
+      }
+
       return expr;
     }
     
@@ -7890,7 +7908,7 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
     }
 
     // If we have a ClosureExpr, then we can safely propagate the
-    // '@called(atMostOnce)' bit to the closure without invalidating prior
+    // at-most-once bit to the closure without invalidating prior
     // analysis.
     fromEI = fromFunc->getExtInfo();
     if (toEI.hasCalledAtMostOnceSemantics() &&
@@ -7900,7 +7918,7 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
       if (applyTypeToClosureExpr(cs, expr, newFromFuncType)) {
         fromFunc = newFromFuncType->castTo<FunctionType>();
 
-        // Propagating '@called(atMostOnce)' might have satisfied the entire
+        // Propagating at-most-once might have satisfied the entire
         // conversion. If so, we're done, otherwise keep converting.
         if (fromFunc->isEqual(toType))
           return expr;

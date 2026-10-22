@@ -953,6 +953,12 @@ llvm::Constant *irgen::getCoroFrameAllocStubFn(IRGenModule &IGM) {
   if (coroAllocFn->getLinkage() != llvm::GlobalValue::ExternalWeakLinkage)
     return coroAllocFn;
 
+  auto availability = IGM.Context.getTypedCoroAllocAvailability();
+  auto &sdkVersion = IGM.Context.LangOpts.SDKVersion;
+  bool sdkHasCoroFrameAlloc =
+      !sdkVersion || !availability.hasMinimumVersion() ||
+      *sdkVersion >= availability.getRawMinimumVersion();
+
   // Otherwise, create a stub function to call it when available, or malloc
   // when it isn't.
   return IGM.getOrCreateHelperFunction(
@@ -960,6 +966,15 @@ llvm::Constant *irgen::getCoroFrameAllocStubFn(IRGenModule &IGM) {
       [&](IRGenFunction &IGF) {
         auto parameters = IGF.collectParameters();
         auto *size = parameters.claimNext();
+        // The weak reference still has to be resolved by the static linker
+        // for Darwin, so if the SDK's Swift runtime predates
+        // swift_coroFrameAlloc, always use malloc.
+        if (!sdkHasCoroFrameAlloc) {
+          (void)parameters.claimNext(); // The type id is unused.
+          IGF.Builder.CreateRet(IGF.Builder.CreateCall(
+              IGF.IGM.getMallocFunctionPointer(), {size}));
+          return;
+        }
         auto *coroFrameAllocFn = IGF.IGM.getOpaquePtr(coroAllocPtr);
         auto *nullSwiftCoroFrameAlloc = IGF.Builder.CreateCmp(
             llvm::CmpInst::Predicate::ICMP_NE, coroFrameAllocFn,
@@ -2582,7 +2597,7 @@ std::optional<StackAddress> irgen::emitFunctionPartialApplication(
 
     // Empty values don't matter, unless they still require a nontrivial
     // destroy (e.g. a zero-sized `~Copyable` type with a user-defined
-    // deinit captured by a `@called(atMostOnce)` closure).
+    // deinit captured by an at-most-once closure).
     auto schema = ti.getSchema();
     if (schema.empty() && !param.isFormalIndirect() &&
         ti.isTriviallyDestroyable(ResilienceExpansion::Maximal))
@@ -2827,7 +2842,7 @@ std::optional<StackAddress> irgen::emitFunctionPartialApplication(
           stackAddr->getAddress(), IGF.IGM.OpaqueTy));
       data = stackAddr->getAddress().getAddress();
 
-      // @called(atMostOnce) closures always get a context even if they are
+      // at-most-once closures always get a context even if they are
       // stack promoted because they can have consuming captures.
       if (outType->hasCalledAtMostOnceSemantics()) {
         assert(!outType->isTrivialNoEscape());

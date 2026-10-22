@@ -3748,7 +3748,8 @@ protected:
     case BuiltinValueKind::ResumeThrowingContinuationReturning:
     case BuiltinValueKind::AddTaskLocalValue:
     case BuiltinValueKind::TaskLocalValuePush:
-    case BuiltinValueKind::GetEnumTag: {
+    case BuiltinValueKind::GetEnumTag:
+    case BuiltinValueKind::AddressOfRawLayout: {
       SILValue opAddr = addrMat.materializeAddress(use->get());
       bi->setOperand(use->getOperandNumber(), opAddr);
       break;
@@ -4541,6 +4542,13 @@ void UseRewriter::visitUncheckedEnumDataInst(
   auto *enumAddrInst =
       builder.createUncheckedEnumDataAddrForTake(loc, srcAddr, elt, destTy);
 
+  if (!enumDataInst->getType().isAddressOnly(*pass.function)) {
+    auto *load = builder.createTrivialLoadOr(loc, enumAddrInst,
+                                             LoadOwnershipQualifier::Take);
+    enumDataInst->replaceAllUsesWith(load);
+    pass.deleter.forceDelete(enumDataInst);
+    return;
+  }
   markRewritten(enumDataInst, enumAddrInst);
 }
 
