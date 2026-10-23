@@ -3151,7 +3151,15 @@ void IRGenSILFunction::visitSILBasicBlock(SILBasicBlock *BB) {
 
 void IRGenSILFunction::visitDifferentiableFunctionInst(
     DifferentiableFunctionInst *i) {
-  auto origFnExp = getLoweredExplosion(i->getOriginalFunction());
+  auto origFn = i->getOriginalFunction();
+  auto origFnType =
+      i->getOriginalFunction()->getType().castTo<SILFunctionType>();
+  auto origFnExp = getLoweredExplosion(origFn);
+  if (origFnType->isDifferentiable()) {
+    setLoweredExplosion(i, origFnExp);
+    return;
+  }
+
   Explosion e;
   e.add(origFnExp.claimAll());
   // TODO(TF-1211): Uncomment assertions after upstreaming differentiation
@@ -3172,8 +3180,6 @@ void IRGenSILFunction::visitDifferentiableFunctionInst(
     if (i->hasDerivativeFunctions())
       return getLoweredExplosion(i->getDerivativeFunction(kind));
     // Otherwise, create an undef explosion.
-    auto origFnType =
-        i->getOriginalFunction()->getType().castTo<SILFunctionType>();
     auto derivativeFnType = origFnType->getAutoDiffDerivativeFunctionType(
         i->getParameterIndices(), i->getResultIndices(), kind,
         i->getModule().Types,
@@ -6348,7 +6354,7 @@ void IRGenSILFunction::visitDebugValueInst(DebugValueInst *i) {
     return;
 
   auto VarInfo = i->getCompleteVarInfo();
-  if (SILVal && isa<SILUndef>(SILVal) && VarInfo.Name == "$error") {
+  if (SILVal && isa<SILUndef>(SILVal) && VarInfo.isErrorVariable()) {
     // We cannot track the location of inlined error arguments because it has no
     // representation in SIL.
     if (!SILVal->getType().isAddress() && !i->getDebugScope()->InlinedCallSite) {
