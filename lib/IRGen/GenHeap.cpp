@@ -23,7 +23,6 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SipHash.h"
-#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include "swift/Basic/SourceLoc.h"
 #include "swift/ABI/MetadataValues.h"
@@ -717,13 +716,18 @@ llvm::Constant *HeapLayout::getPrivateMetadata(
     std::optional<uint64_t> mallocTypeId, const llvm::Twine &name,
     const llvm::BitVector &unownedFields, bool isStackAllocated,
     bool trapsOnDestroy) const {
-  if (!privateMetadata)
+  if (!privateMetadata) {
+    llvm::Function *dtorFn;
+    if (trapsOnDestroy) {
+      dtorFn = IGM.getExactlyOnceClosureDestructor();
+    } else {
+      dtorFn = createDtorFn(IGM, *this, mallocTypeId, name, unownedFields,
+                            isStackAllocated);
+      privateDestructor = dtorFn;
+    }
     privateMetadata = buildPrivateMetadata(
-        IGM, *this,
-        trapsOnDestroy ? IGM.getExactlyOnceClosureDestructor()
-                       : createDtorFn(IGM, *this, mallocTypeId, name,
-                                      unownedFields, isStackAllocated),
-        captureDescriptor, MetadataKind::HeapLocalVariable);
+        IGM, *this, dtorFn, captureDescriptor, MetadataKind::HeapLocalVariable);
+  }
   return privateMetadata;
 }
 
@@ -776,10 +780,10 @@ static void emitExactlyOnceSharedContextInitializer(
                          {metadata, context});
   IGF.Builder.CreateRetVoid();
 
-  // Use the same priority as the other static initializers that IRGen emits,
-  // which is slightly lower than the priority of C++ global constructors, so
-  // that the context is initialized before any code that could use it runs.
-  llvm::appendToGlobalCtors(IGM.Module, fn, 60000, nullptr);
+  // Initialize the context before the C++ global constructors in this module
+  // run, in case they use it. Global constructors in other object files might
+  // still run first.
+  IGM.addStaticInitializer(fn);
 }
 
 llvm::Constant *IRGenModule::getAddrOfExactlyOnceSharedContext() {
