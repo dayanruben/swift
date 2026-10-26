@@ -664,6 +664,27 @@ func genericArgumentInferred(
   }
 }
 
+struct ConditionallyCopyableBox<T: ~Copyable>: ~Copyable {
+  init(_: consuming T) {}
+  consuming func finish() {}
+}
+
+extension ConditionallyCopyableBox: Copyable where T: Copyable {}
+
+func partiallyAppliedWithTypeDependence() {
+  struct NC: ~Copyable {}
+
+  func generic<T>(_: T) {}
+  // expected-note@-1 {{required by local function 'generic' where 'T' = '@callable(once) () -> ()'}}
+  func genericNC<T: ~Copyable>(_: consuming T) {}
+
+  generic(ConditionallyCopyableBox(42).finish) // Ok
+  generic(ConditionallyCopyableBox(NC()).finish)
+  // expected-error@-1 {{type '@callable(once) () -> ()' cannot conform to 'Copyable'}}
+  // expected-note@-2 {{only concrete types such as structs, enums and classes can conform to protocols}}
+  genericNC(ConditionallyCopyableBox(NC()).finish) // Ok
+}
+
 // MARK: - Captures
 
 // A closure owns its capture list entries and the captures that it consumes,
@@ -720,6 +741,12 @@ func captureRulesAtMostOnce(
   let _ = { @once in b() } // Ok
   let _ = { @callable(once) [c] in c() } // Ok
   let _ = { [d] in _ = d } // Ok
+}
+
+// `UnsafeMutablePointer.pointee` has addressors but no getter.
+func capturePointer(_ pointer: UnsafeMutablePointer<Int>) {
+  let _ = { @once in _ = pointer.pointee } // Ok
+  let _ = { @callable(once) in pointer.pointee = 1 } // Ok
 }
 
 // MARK: - Storage
