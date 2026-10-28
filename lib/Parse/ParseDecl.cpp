@@ -3317,7 +3317,8 @@ ParserStatus Parser::parseNewDeclAttribute(DeclAttributes &Attributes,
     if (CurDeclContext->isLocalContext()) {
       // Emit an error, but do not discard the attribute.  This enables
       // better recovery in the parser.
-      diagnose(Loc, diag::attr_name_only_at_non_local_scope, AttrName);
+      diagnose(Loc, diag::attr_name_only_at_non_local_scope,
+               '@' + AttrName.str());
     }
 
     if (!DiscardAttribute) {
@@ -4478,6 +4479,17 @@ ParserStatus Parser::parseNewDeclAttribute(DeclAttributes &Attributes,
     break;
   }
 
+  case DeclAttrKind::ScopeParams: {
+    SourceRange parens;
+    ScopeParamListRepr *params = nullptr;
+    Status |= parseScopeParamsAttrArgs(parens, params);
+    if (params && !DiscardAttribute) {
+      AttrRange = SourceRange(Loc, parens.End);
+      Attributes.add(new (Context) ScopeParamsAttr(AtLoc, AttrRange, params));
+    }
+    break;
+  }
+
   case DeclAttrKind::Callable: {
     auto parens = parseCallableAttrArgument(*this, /*justChecking=*/false);
     if (!parens)
@@ -5065,7 +5077,7 @@ bool Parser::parseConventionAttributeInternal(SourceLoc atLoc, SourceLoc attrLoc
 ///     'immortal'
 ///     '&'? (identifier | 'self')
 /// \endverbatim
-static std::optional<ScopeRepr> parseScope(Parser &P) {
+static std::optional<ScopeRepr> parseScope(Parser &P, StringRef attrName) {
   SourceLoc ampersandLoc;
   bool isAccess = P.consumeIf(tok::amp_prefix, ampersandLoc);
 
@@ -5088,7 +5100,7 @@ static std::optional<ScopeRepr> parseScope(Parser &P) {
     return ScopeRepr::forScopeName({ScopeName(name), loc});
   }
 
-  P.diagnose(P.Tok, diag::expected_scope);
+  P.diagnose(P.Tok, diag::expected_scope, attrName);
   return std::nullopt;
 }
 
@@ -5112,7 +5124,7 @@ static std::optional<ScopeRestrictionRepr> parseScopeRestriction(Parser &P) {
     P.consumeToken(tok::colon);
   }
 
-  auto scope = parseScope(P);
+  auto scope = parseScope(P, "_scoped");
   if (!scope)
     return std::nullopt;
   return ScopeRestrictionRepr(label, *scope);
@@ -5136,7 +5148,7 @@ static ParserStatus parseScopedTypeAttr(Parser &P, SourceLoc atLoc,
   }
 
   if (P.Tok.is(tok::r_paren)) {
-    P.diagnose(P.Tok, diag::expected_scope);
+    P.diagnose(P.Tok, diag::expected_scope, "_scoped");
     P.consumeToken(tok::r_paren);
     return makeParserSuccess();
   }
@@ -5163,6 +5175,93 @@ static ParserStatus parseScopedTypeAttr(Parser &P, SourceLoc atLoc,
     result = ScopedTypeAttr::create(P.Context, atLoc, attrLoc,
                                     {lParenLoc, rParenLoc}, restrictions);
   }
+  return status;
+}
+
+/// \verbatim
+///   access-scope-attribute-arguments:
+///     '(' scope ')'
+/// \endverbatim
+///
+/// Only returns an error for missing parentheses, returns success and leaves
+/// \p result unset for invalid arguments to avoid cascading parse failure.
+static ParserStatus parseAccessScopeTypeAttr(Parser &P, SourceLoc atLoc,
+                                             SourceLoc attrLoc,
+                                             TypeOrCustomAttr &result) {
+  SourceLoc lParenLoc = P.Tok.getLoc();
+  if (!P.consumeIfAttributeLParen()) {
+    P.diagnose(P.Tok, diag::attr_expected_lparen, "_accessScope",
+               /*DeclModifier=*/false);
+    return makeParserError();
+  }
+
+  auto scope = parseScope(P, "_accessScope");
+  SourceLoc rParenLoc;
+  if (scope && P.consumeIf(tok::r_paren, rParenLoc)) {
+    result = new (P.Context)
+        AccessScopeTypeAttr(atLoc, attrLoc, {lParenLoc, rParenLoc}, *scope);
+    return makeParserSuccess();
+  }
+
+  if (scope) {
+    P.diagnose(P.Tok, diag::attr_expected_rparen, "_accessScope",
+               /*DeclModifier=*/false);
+  }
+  P.skipUntil(tok::r_paren);
+  return P.consumeIf(tok::r_paren) ? makeParserSuccess() : makeParserError();
+}
+
+/// \verbatim
+///   scope-params-attribute-arguments:
+///     '(' identifier (',' identifier)* ')'
+/// \endverbatim
+///
+/// Only returns an error for missing parentheses, returns success and leaves
+/// \p result unset for invalid arguments to avoid cascading parse failure.
+ParserStatus Parser::parseScopeParamsAttrArgs(SourceRange &parens,
+                                              ScopeParamListRepr *&result) {
+  SourceLoc lParenLoc = Tok.getLoc();
+  if (!consumeIfAttributeLParen()) {
+    diagnose(Tok, diag::attr_expected_lparen, "_scopeParams",
+             /*DeclModifier=*/false);
+    return makeParserError();
+  }
+
+  if (Tok.is(tok::r_paren)) {
+    diagnose(Tok, diag::expected_scope_param);
+    consumeToken(tok::r_paren);
+    return makeParserSuccess();
+  }
+
+  SmallVector<Located<ScopeName>, 2> params;
+  bool invalidParam = false;
+  SourceLoc rParenLoc;
+  auto status = parseList(
+      tok::r_paren, lParenLoc, rParenLoc, /*AllowSepAfterLast=*/false,
+      {diag::attr_expected_rparen, {"_scopeParams", /*DeclModifier=*/false}},
+      [&]() -> ParserStatus {
+        if (Tok.isNot(tok::identifier)) {
+          diagnose(Tok, diag::expected_scope_param);
+          invalidParam = true;
+          return makeParserError();
+        }
+
+        if (Tok.isContextualKeyword("immortal")) {
+          diagnose(Tok, diag::immortal_scope_param);
+          diagnose(Tok, diag::backticks_to_escape)
+              .fixItReplace(Tok.getLoc(), "`immortal`");
+          invalidParam = true;
+        }
+        Identifier name;
+        auto loc = consumeIdentifier(name, /*diagnoseDollarPrefix=*/false);
+        params.push_back({ScopeName(name), loc});
+        return makeParserSuccess();
+      });
+  if (status.isError() || invalidParam)
+    return status;
+
+  parens = {lParenLoc, rParenLoc};
+  result = ScopeParamListRepr::create(Context, params);
   return status;
 }
 
@@ -5486,9 +5585,21 @@ ParserStatus Parser::parseTypeAttribute(TypeOrCustomAttr &result,
     return makeParserSuccess();
   }
 
+  // TODO: Don't allocate / diagnose when justChecking?
   case TypeAttrKind::Scoped:
-    // TODO: Don't allocate / diagnose when justChecking?
     return parseScopedTypeAttr(*this, AtLoc, attrLoc, result);
+
+  case TypeAttrKind::AccessScope:
+    return parseAccessScopeTypeAttr(*this, AtLoc, attrLoc, result);
+
+  case TypeAttrKind::ScopeParams: {
+    SourceRange parens;
+    ScopeParamListRepr *params = nullptr;
+    auto status = parseScopeParamsAttrArgs(parens, params);
+    if (params)
+      result = new (Context) ScopeParamsTypeAttr(AtLoc, attrLoc, parens, params);
+    return status;
+  }
 
   case TypeAttrKind::Convention: {
     ConventionTypeAttr *convention = nullptr;
@@ -6076,7 +6187,7 @@ static void diagnoseOperatorFixityAttributes(Parser &P,
     if (it != fixityAttrs.begin()) {
       auto *attr = *it;
       P.diagnose(attr->getLocation(), diag::mutually_exclusive_decl_attrs, attr,
-                 fixityAttrs.front(), attr->isDeclModifier())
+                 fixityAttrs.front())
           .fixItRemove(attr->getRange());
       attr->setInvalid();
     }

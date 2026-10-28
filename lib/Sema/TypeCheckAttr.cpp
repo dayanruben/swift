@@ -555,6 +555,7 @@ public:
   void visitUnsafeSelfDependentResultAttr(UnsafeSelfDependentResultAttr *attr);
 
   void visitCoroutineAttr(CoroutineAttr *attr);
+  void visitScopeParamsAttr(ScopeParamsAttr *attr);
 };
 
 } // end anonymous namespace
@@ -9375,6 +9376,14 @@ void AttributeChecker::visitUnsafeSelfDependentResultAttr(
                      diag::unsafe_self_dependent_result_attr_on_invalid_decl);
 }
 
+void AttributeChecker::visitScopeParamsAttr(ScopeParamsAttr *attr) {
+  // TODO: What to do for ABI?
+  if (!ABIRoleInfo(D).providesAPI())
+    return;
+  // TODO: Support explicit scope parameters.
+  diagnoseAndRemoveAttr(attr, diag::scope_params_unsupported);
+}
+
 namespace {
 
 class ClosureAttributeChecker
@@ -9387,8 +9396,7 @@ public:
 
   void visitDeclAttribute(DeclAttribute *attr) {
     ctx.Diags
-        .diagnose(attr->getLocation(), diag::unsupported_closure_attr,
-                  attr->isDeclModifier(), attr)
+        .diagnose(attr->getLocation(), diag::unsupported_closure_attr, attr)
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
   }
@@ -9447,9 +9455,8 @@ public:
       return;
 
     ctx.Diags
-        .diagnose(attr->getLocation(), diag::mutually_exclusive_attr_names,
-                  getAttrNameForDiagnostics(attr),
-                  getAttrNameForDiagnostics(winner), /*isModifier=*/false)
+        .diagnose(attr->getLocation(), diag::mutually_exclusive_decl_attrs,
+                  attr, winner)
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
   }
@@ -9498,8 +9505,7 @@ public:
 
     // Otherwise, it's an error.
     ctx.Diags
-        .diagnose(attr->getLocation(), diag::unsupported_closure_attr,
-                  attr->isDeclModifier(), attr)
+        .diagnose(attr->getLocation(), diag::unsupported_closure_attr, attr)
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
   }

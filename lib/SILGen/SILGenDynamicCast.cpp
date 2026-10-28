@@ -774,6 +774,16 @@ SILValue Lowering::emitIsa(SILGenFunction &SGF, SILLocation loc,
     auto sourceType =
         operand->getType()->getWithoutSpecifierType()->getCanonicalType();
     auto targetCanType = targetType->getCanonicalType();
+
+    // FIXME: The `isNoncopyable()` restriction shouldn't be needed here,
+    // but that actually changes the behavior of some Copyable casts where
+    // Sema and the runtime disagree.
+    if (castKind == CheckedCastKind::Coercion && sourceType->isNoncopyable()) {
+      FormalEvaluationScope borrowScope(SGF);
+      (void)emitTypeTestOperand(SGF, operand);
+      auto i1Ty = SILType::getBuiltinIntegerType(1, SGF.getASTContext());
+      return SGF.B.createIntegerLiteral(loc, i1Ty, 1);
+    }
     if (canUseTypeTestForIsa(SGF, sourceType, targetCanType, castKind)) {
       auto i1Ty = SILType::getBuiltinIntegerType(1, SGF.getASTContext());
 
@@ -800,6 +810,11 @@ SILValue Lowering::emitIsa(SILGenFunction &SGF, SILLocation loc,
       return contBB->createPhiArgument(i1Ty, OwnershipKind::None);
     }
   }
+
+  // The lowering below consumes its operand. Computing a closure's captures
+  // assumes that this only happens for a cast that involves a COM existential
+  // or a value whose representation depends on abstraction (see
+  // FindCapturedVars::isBorrowingIsCheck()).
 
   // Handle collection downcasts separately.
   if (castKind == CheckedCastKind::ArrayDowncast ||

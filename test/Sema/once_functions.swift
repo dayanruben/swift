@@ -1,4 +1,5 @@
 // RUN: %target-typecheck-verify-swift -enable-experimental-feature OnceFunctions
+// RUN: %target-typecheck-verify-swift -enable-experimental-feature OnceFunctions -solver-enable-promote-supertypes
 
 // REQUIRES: swift_feature_OnceFunctions
 
@@ -874,4 +875,140 @@ func copyOperator(
 ) {
   _ = copy exactlyOnce // expected-error {{'copy' cannot be applied to non-'Copyable' types}}
   _ = copy atMostOnce // expected-error {{'copy' cannot be applied to non-'Copyable' types}}
+}
+
+// MARK: - Casts
+
+// Casting a value of a non-'Copyable' type requires NoncopyableCasting (see
+// test/SIL/callable_once_attr_consuming_captures.swift).
+
+func casts(
+  _ exactlyOnce: @once () -> Void,
+  _ atMostOnce: @callable(once) () -> Void
+) {
+  _ = exactlyOnce is Int
+  // expected-warning@-1 {{cast from '@once () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+  _ = atMostOnce is Int
+  // expected-warning@-1 {{cast from '@callable(once) () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+  _ = exactlyOnce as? Int
+  // expected-warning@-1 {{cast from '@once () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+  _ = atMostOnce as? Int
+  // expected-warning@-1 {{cast from '@callable(once) () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+  _ = exactlyOnce as! Int
+  // expected-warning@-1 {{cast from '@once () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+  _ = atMostOnce as! Int
+  // expected-warning@-1 {{cast from '@callable(once) () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+}
+
+func andAtMostOnce(
+  _ lhs: Bool, _ rhs: @autoclosure @callable(once) () -> Bool
+) -> Bool {
+  lhs ? rhs() : false
+}
+
+// An `is` check of a function consumes it, so the autoclosure does too.
+func isCheckInAtMostOnceAutoclosure(
+  _ exactlyOnce: @once () -> Void,
+  _ atMostOnce: @callable(once) () -> Void
+) {
+  _ = andAtMostOnce(true, exactlyOnce is Int)
+  // expected-error@-1 {{consumed capture 'exactlyOnce' of 'Deinitable'-conforming closure has non-'Deinitable' type '@once () -> Void'}}
+  // expected-warning@-2 {{cast from '@once () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-3 {{non-'Copyable' types cannot be conditionally cast}}
+  _ = andAtMostOnce(true, atMostOnce is Int)
+  // expected-warning@-1 {{cast from '@callable(once) () -> Void' to unrelated type 'Int' always fails}}
+  // expected-error@-2 {{non-'Copyable' types cannot be conditionally cast}}
+}
+
+// MARK: - rethrows
+
+struct RethrowsError: Error {}
+
+// A `rethrows` function can call and forward its own parameters with
+// execution semantics, which are implicitly `consuming`.
+
+func rethrowsCallOnce<R>(_ body: @once () throws -> R) rethrows -> R {
+  try body()
+}
+
+func rethrowsCallAtMostOnce<R>(
+  _ body: @callable(once) () throws -> R
+) rethrows -> R? {
+  Bool.random() ? try body() : nil
+}
+
+func rethrowsForwardOnce<R>(_ body: @once () throws -> R) rethrows -> R {
+  try rethrowsCallOnce(body)
+}
+
+func rethrowsForwardOnceInClosure<R>(
+  _ body: @once () throws -> R
+) rethrows -> R {
+  try rethrowsCallOnce { try body() }
+}
+
+func rethrowsForwardAtMostOnce<R>(
+  _ body: @callable(once) () throws -> R
+) rethrows -> R? {
+  try rethrowsCallAtMostOnce(body)
+}
+
+func rethrowsCallOptional(
+  _ body: consuming (@callable(once) () throws -> Void)?
+) rethrows {
+  try body?()
+}
+
+func rethrowsCallConsumed<R>(_ body: @once () throws -> R) rethrows -> R {
+  try (consume body)()
+}
+
+func rethrowsForwardConsumed<R>(_ body: @once () throws -> R) rethrows -> R {
+  try rethrowsCallOnce(consume body)
+}
+
+// A parameter that's modified no longer holds the argument.
+func rethrowsCallReassigned(
+  _ body: @callable(once) () throws -> Void
+) rethrows {
+  body = { throw RethrowsError() }
+  try body() // expected-error {{call can throw, but the error is not handled; a function declared 'rethrows' may only throw if its parameter does}}
+}
+
+func rethrowsCallReassignedInClosure(
+  _ body: @callable(once) () throws -> Void
+) rethrows {
+  func reassign() { body = { throw RethrowsError() } }
+  reassign()
+  try body() // expected-error {{call can throw, but the error is not handled; a function declared 'rethrows' may only throw if its parameter does}}
+}
+
+func callRethrowsWithoutThrowing() {
+  _ = rethrowsCallOnce { 1 }
+  _ = rethrowsForwardOnce { 1 }
+  _ = rethrowsForwardOnceInClosure { 1 }
+  _ = rethrowsForwardAtMostOnce { 1 }
+  _ = rethrowsCallConsumed { 1 }
+  _ = rethrowsForwardConsumed { 1 }
+  rethrowsCallOptional(nil)
+  rethrowsCallOptional { }
+}
+
+func callRethrowsWithThrowing() throws {
+  _ = try rethrowsCallOnce { throw RethrowsError() }
+  _ = try rethrowsForwardOnce { throw RethrowsError() }
+  _ = try rethrowsForwardAtMostOnce { throw RethrowsError() }
+  try rethrowsCallOptional { throw RethrowsError() }
+}
+
+func callRethrowsMissingTry() {
+  rethrowsForwardOnce { throw RethrowsError() }
+  // expected-error@-1 {{call can throw, but it is not marked with 'try' and the error is not handled}}
+  // expected-note@-2 {{call is to 'rethrows' function, but argument function can throw}}
 }
