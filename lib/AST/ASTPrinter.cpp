@@ -364,7 +364,7 @@ PrintOptions PrintOptions::printSwiftInterfaceFile(ModuleDecl *ModuleToPrint,
         }
       }
 
-      // Skip @c @implementation functions along with the attribute.
+      // Skip C-exported @implementation functions along with the attribute.
       if (auto AFD = dyn_cast<AbstractFunctionDecl>(D)) {
         if (options.excludeAttrKind(DeclAttrKind::ObjCImplementation) &&
             AFD->isObjCImplementation() && AFD->getCDeclKind())
@@ -3156,14 +3156,15 @@ static bool sortClangDecls(Decl *lhs, Decl *rhs) {
   auto *LHS = getClangDecl(lhs), *RHS = getClangDecl(rhs);
   if (LHS && RHS) {
     // Both lhs and rhs are directly imported from Clang
-    // First, sort based on module name, if any
+    // First, sort based on module name, if any. Decls without an owning module
+    // (e.g., members of implicit template instantiations) fall through.
     auto *LMod = LHS->getOwningModule(), *RMod = RHS->getOwningModule();
-    if (!LMod || !RMod)
+    if (!LMod != !RMod)
       return (bool)LMod < (bool)RMod;
-    if (LMod != RMod)
+    if (LMod && LMod != RMod)
       return LMod->Name < RMod->Name;
 
-    // Both come from the same module; sort based on location, if any
+    // Same (or no) module; sort based on location, if any
     auto LLoc = LHS->getLocation(), RLoc = RHS->getLocation();
     if (!LLoc.isValid() || !RLoc.isValid())
       return LLoc.isValid() < RLoc.isValid();
@@ -4369,12 +4370,36 @@ static bool isEscaping(Type type) {
   return false;
 }
 
-static void printParameterFlags(ASTPrinter &printer,
-                                const PrintOptions &options,
-                                const ParamDecl *param,
-                                ParameterTypeFlags flags,
-                                bool escaping,
-                                bool isIsolatedToCaller = false) {
+/// Returns true if printing a parameter with \p flags and type \p type
+/// shows that it's consuming without printing `consuming`, as printing a
+/// function type with at-most-once semantics does.
+static bool isImplicitlyConsuming(Type type, ParameterTypeFlags flags,
+                                  const PrintOptions &options) {
+  if (!options.SuppressImpliedConsumingParams)
+    return false;
+
+  // A `sending` parameter that isn't written as `consuming` has a different
+  // specifier.
+  if (!type || flags.isSending())
+    return false;
+
+  // A parameter whose type is written as a typealias isn't consuming unless
+  // it's written as such.
+  auto *funcType = dyn_cast<AnyFunctionType>(type.getPointer());
+  if (!funcType)
+    return false;
+
+  auto semantics = funcType->getExecutionSemantics();
+  return semantics &&
+         !options.excludeAttrKind(*semantics == ExecutionSemantics::Once
+                                      ? TypeAttrKind::Once
+                                      : TypeAttrKind::Callable);
+}
+
+static void
+printParameterFlags(ASTPrinter &printer, const PrintOptions &options,
+                    const ParamDecl *param, ParameterTypeFlags flags, Type type,
+                    bool escaping, bool isIsolatedToCaller = false) {
   // Always print `nonisolated(nonsending)` specifier on a parameter
   // first, to avoid any issues with ordering.
   if (isIsolatedToCaller) {
@@ -4392,7 +4417,8 @@ static void printParameterFlags(ASTPrinter &printer,
     printer.printKeyword("borrowing", options, " ");
     break;
   case ParamSpecifier::Consuming:
-    printer.printKeyword("consuming", options, " ");
+    if (!isImplicitlyConsuming(type, flags, options))
+      printer.printKeyword("consuming", options, " ");
     break;
   case ParamSpecifier::LegacyShared:
     printer.printKeyword("__shared", options, " ");
@@ -4575,7 +4601,7 @@ void PrintAST::printOneParameter(const ParamDecl *param,
 
       // We suppress `@escaping` on enum element parameters because it cannot
       // be written explicitly in this position.
-      printParameterFlags(Printer, Options, param, paramFlags,
+      printParameterFlags(Printer, Options, param, paramFlags, type,
                           isEscaping(type) && !isEnumElement,
                           isNonisolatedNonsending);
     }
@@ -4851,7 +4877,7 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
 
         if (!willUseTypeReprPrinting(TheTypeLoc, CurrentType, Options))
           printParameterFlags(Printer, Options, nullptr,
-                              yield.getFlags().asParamFlags(), false);
+                              yield.getFlags().asParamFlags(), Type(), false);
 
         printTypeLoc(TheTypeLoc, getNonRecursiveOptions(decl));
       }
@@ -7600,7 +7626,7 @@ public:
         Printer << "...";
       } else {
         printParameterFlags(Printer, Options, nullptr,
-                            Param.getParameterFlags(), isEscaping(type));
+                            Param.getParameterFlags(), type, isEscaping(type));
         visit(type);
       }
     }

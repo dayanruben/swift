@@ -1066,12 +1066,17 @@ void Serializer::writeHeader() {
     if (auto build = Options.UserModuleVersion.getBuild()) {
       userModuleBuild = *build;
     }
+    auto userModuleSubbuild = 0;
+    if (auto subbuild = Options.UserModuleVersion.getSubbuild()) {
+      userModuleSubbuild = *subbuild;
+    }
     Metadata.emit(ScratchRecord,
                   SWIFTMODULE_VERSION_MAJOR, SWIFTMODULE_VERSION_MINOR,
                   shortVersionStringLength,
                   compatibilityVersionStringLength,
                   userModuleMajor, userModuleMinor,
                   userModuleSubminor, userModuleBuild,
+                  userModuleSubbuild,
                   versionString.str());
 
     if (!Options.SDKName.empty())
@@ -3439,8 +3444,8 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
     case DeclAttrKind::Specialize: {
       auto abbrCode = S.DeclTypeAbbrCodes[SpecializeDeclAttrLayout::Code];
       auto attr = cast<AbstractSpecializeAttr>(DA);
-      auto *afd = cast<AbstractFunctionDecl>(D);
-      auto *targetFunDecl = attr->getTargetFunctionDecl(afd);
+      auto *VD = cast<ValueDecl>(D);
+      auto *targetFunDecl = attr->getTargetFunctionDecl(VD);
 
       SmallVector<IdentifierID, 4> pieces;
 
@@ -3461,7 +3466,7 @@ class Serializer::DeclSerializer : public DeclVisitor<DeclSerializer> {
           S.Out, S.ScratchRecord, abbrCode, (unsigned)attr->isPublic(),
           (unsigned)attr->isExported(),
           (unsigned)attr->getSpecializationKind(),
-          S.addGenericSignatureRef(attr->getSpecializedSignature(afd)),
+          S.addGenericSignatureRef(attr->getSpecializedSignature(VD)),
           S.addDeclRef(targetFunDecl), numSPIGroups, numAvailabilityAttrs,
           pieces);
       for (auto availAttr : attr->getAvailableAttrs()) {

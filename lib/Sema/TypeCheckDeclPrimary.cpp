@@ -3692,6 +3692,15 @@ public:
               .fixItInsert(CD->getAttributeInsertionLoc(/*forModifier=*/true),
                            "final ");
         }
+
+        // The layout of a Swift subclass of a C++ foreign reference type is
+        // fixed at compile time, and it has no Swift class metadata that could
+        // describe its generic arguments (yet), so it cannot be generic.
+        if (!isInvalidSuperclass && CD->getForeignReferenceSuperclassOrSelf() &&
+            CD->isGenericContext()) {
+          CD->diagnose(diag::foreign_reference_subclass_cannot_be_generic, CD,
+                       /*inGenericContext=*/!CD->getGenericParams());
+        }
       }
     }
 
@@ -3919,7 +3928,9 @@ public:
     }
 
     // If the function is exported to a foreign language, its signature must be
-    // representable in that language.
+    // representable in that language. This covers @c and @_cdecl (C) and
+    // @cxx (C++), as well as @objc on a top-level function (SE-0495), which
+    // is a C export accepting Objective-C types.
     DeclAttribute *foreignLangAttr =
         FD->getAttrs().getAttribute<swift::CDeclAttr>();
     if (!foreignLangAttr)
@@ -3928,6 +3939,13 @@ public:
       evaluateOrDefault(Ctx.evaluator,
                         TypeCheckForeignFunctionRequest{FD, foreignLangAttr},
                         {});
+    } else if (FD->getDeclContext()->isModuleScopeContext() &&
+               !isa<AccessorDecl>(FD)) {
+      if (auto objcAttr = FD->getAttrs().getAttribute<ObjCAttr>()) {
+        evaluateOrDefault(Ctx.evaluator,
+                          TypeCheckForeignFunctionRequest{FD, objcAttr},
+                          {});
+      }
     }
 
     TypeChecker::checkObjCImplementation(FD);
@@ -4435,6 +4453,17 @@ public:
           && isa<EnumDecl>(nom)
           && !nom->canBeCopyable()) {
         DD->diagnose(diag::destructor_decl_on_noncopyable_enum);
+      }
+
+      // A Swift subclass of a C++ foreign reference type is destroyed by the
+      // C++ destructor of the implicitly instantiated shim type, which destroys
+      // the Swift fields of the subclass but does not run a Swift deinit.
+      if (auto classDecl = dyn_cast_or_null<ClassDecl>(nom)) {
+        if (classDecl->getForeignReferenceSuperclassOrSelf() &&
+            !DD->isImplicit() && !classDecl->hasClangNode()) {
+          DD->diagnose(diag::foreign_reference_subclass_cannot_have_deinit,
+                       classDecl);
+        }
       }
     }
 

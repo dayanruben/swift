@@ -304,6 +304,7 @@ private enum DwarfError: Error {
   case badRangeListEntry(Dwarf_Byte)
   case missingRngListsSection
   case missingRngListsBase
+  case badReference(UInt64)
 }
 
 // .. Dwarf utilities for ImageSource ..........................................
@@ -843,6 +844,15 @@ class DwarfReader<S: DwarfSource & AnyObject> {
 
       unit.attributes = attributes
 
+      // If DW_AT_low_pc used one of the DW_FORM_addrx forms, we couldn't decode
+      // it until we had the address base.  It's the base address for range
+      // lists, so it matters.
+      if unit.lowPC == nil,
+         let value = attributes[.DW_AT_low_pc],
+         case let .address(lowPC) = value {
+        unit.lowPC = lowPC
+      }
+
       units.append(unit)
 
       cursor.pos = next
@@ -1188,6 +1198,7 @@ class DwarfReader<S: DwarfSource & AnyObject> {
         case let .unsignedInt16(value): return UInt64(value)
         case let .unsignedInt32(value): return UInt64(value)
         case let .unsignedInt64(value): return value
+        case let .signedInt64(value): return value >= 0 ? UInt64(value) : nil
         default:
           return nil
       }
@@ -1743,7 +1754,7 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     }
   }
 
-  struct CallSiteInfo {
+  struct CallSiteInfo: DwarfRanged {
     var depth: Int
     var rawName: String?
     var name: String?
@@ -1754,6 +1765,99 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     var column: Int
   }
 
+  /// Find the unit whose DIEs contain the given `.debug_info` offset.
+  private func unit(containing offset: Address) -> Unit? {
+    var lo = 0
+    var hi = units.count
+    while lo < hi {
+      let mid = lo + (hi - lo) / 2
+      if units[mid].baseOffset <= offset {
+        lo = mid + 1
+      } else {
+        hi = mid
+      }
+    }
+    guard lo > 0 else {
+      return nil
+    }
+    let candidate = units[lo - 1]
+    return offset >= candidate.dieBounds.base && offset < candidate.dieBounds.end
+      ? candidate : nil
+  }
+
+  /// Read the attributes of a subprogram DIE that is referenced from
+  /// another DIE.
+  ///
+  /// The referenced DIE may live in a different unit from the referring
+  /// one (for example in a partial unit produced by `dwz`), so we need to
+  /// use that unit's abbreviations and base offset to decode it.
+  ///
+  /// - Parameter offset: The `.debug_info` offset of the referenced DIE.
+  ///
+  /// - Returns: The attributes of the DIE, or `nil` if it is a null entry
+  ///   or is not a subprogram.
+  private func readReferencedSubprogram(
+    at offset: Address
+  ) throws -> [Dwarf_Attribute:DwarfValue]? {
+    guard let target = unit(containing: offset) else {
+      throw DwarfError.badReference(offset)
+    }
+
+    var cursor = ImageSourceCursor(source: infoSection, offset: offset)
+    let abbrev = try cursor.readULEB128()
+    if abbrev == 0 {
+      return nil
+    }
+
+    guard let abbrevInfo = target.abbrevs[abbrev] else {
+      throw DwarfError.missingAbbrev(abbrev)
+    }
+
+    if abbrevInfo.tag != .DW_TAG_subprogram {
+      return nil
+    }
+
+    return try readDieAttributes(
+      at: &cursor,
+      unit: target,
+      abbrevInfo: abbrevInfo,
+      shouldFetchIndirect: true
+    )
+  }
+
+  /// Add the attributes that a DIE inherits through `DW_AT_abstract_origin`
+  /// and `DW_AT_specification` (which can be chained).  Attributes on the DIE
+  /// itself take precedence over inherited ones; in particular a definition
+  /// might have a different (e.g. C2/D2) linkage name from its declaration
+  /// (C4/D4).  Returns `nil` if one of the references doesn't lead to a
+  /// `DW_TAG_subprogram`.
+  private func inheritingAttributes(
+    of attributes: [Dwarf_Attribute:DwarfValue]
+  ) throws -> [Dwarf_Attribute:DwarfValue]? {
+    var result = attributes
+    var current = attributes
+
+    // Don't loop forever if the DWARF is malformed
+    for _ in 0..<8 {
+      let target: Address
+      if case let .reference(ref)? = current[.DW_AT_abstract_origin] {
+        target = ref
+      } else if case let .reference(ref)? = current[.DW_AT_specification] {
+        target = ref
+      } else {
+        break
+      }
+
+      guard let next = try readReferencedSubprogram(at: target) else {
+        return nil
+      }
+      result = next.merging(result) { _, own in own }
+      current = next
+    }
+
+    return result
+  }
+
   private func buildCallSiteInfo(
     depth: Int,
     unit: Unit,
@@ -1761,61 +1865,19 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     _ fn: (CallSiteInfo) -> ()
   ) throws {
     guard let abstractOriginVal = attributes[.DW_AT_abstract_origin],
-          let callFile = attributes[.DW_AT_call_file]?.uint64Value(),
-          let callLine = attributes[.DW_AT_call_line]?.uint64Value(),
-          let callColumn = attributes[.DW_AT_call_column]?.uint64Value(),
           case let .reference(abstractOrigin) = abstractOriginVal else {
       return
     }
 
-    var cursor = ImageSourceCursor(source: infoSection,
-                                   offset: abstractOrigin)
-    var abbrev = try cursor.readULEB128()
-    if abbrev == 0 {
+    // Compilers leave out DW_AT_call_line and DW_AT_call_column when they
+    // are zero, and DW_AT_call_file when there isn't one.
+    let callFile = attributes[.DW_AT_call_file]?.uint64Value()
+    let callLine = attributes[.DW_AT_call_line]?.uint64Value() ?? 0
+    let callColumn = attributes[.DW_AT_call_column]?.uint64Value() ?? 0
+
+    guard let originAttrs = try readReferencedSubprogram(at: abstractOrigin),
+          let refAttrs = try inheritingAttributes(of: originAttrs) else {
       return
-    }
-
-    guard let abbrevInfo = unit.abbrevs[abbrev] else {
-      throw DwarfError.missingAbbrev(abbrev)
-    }
-
-    let tag = abbrevInfo.tag
-
-    if tag != .DW_TAG_subprogram {
-      return
-    }
-
-    var refAttrs = try readDieAttributes(
-      at: &cursor,
-      unit: unit,
-      abbrevInfo: abbrevInfo,
-      shouldFetchIndirect: true
-    )
-
-    if let specificationVal = refAttrs[.DW_AT_specification],
-       case let .reference(specification) = specificationVal {
-      cursor = ImageSourceCursor(source: infoSection,
-                                 offset: specification)
-      abbrev = try cursor.readULEB128()
-      if abbrev == 0 {
-        return
-      }
-
-      guard let abbrevInfo = unit.abbrevs[abbrev] else {
-        throw DwarfError.missingAbbrev(abbrev)
-      }
-
-      let tag = abbrevInfo.tag
-      if tag != .DW_TAG_subprogram {
-        return
-      }
-
-      refAttrs = try readDieAttributes(
-        at: &cursor,
-        unit: unit,
-        abbrevInfo: abbrevInfo,
-        shouldFetchIndirect: true
-      )
     }
 
     var name: String? = nil
@@ -1834,12 +1896,14 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     }
 
     var filename: String = "<unknown>"
-    for info in lineNumberInfo {
-      if info.baseOffset == unit.lineBase {
-        if let ndx = Int(exactly: callFile) {
-          filename = info.fullPathForFile(index: ndx)
+    if let callFile {
+      for info in lineNumberInfo {
+        if info.baseOffset == unit.lineBase {
+          if let ndx = Int(exactly: callFile) {
+            filename = info.fullPathForFile(index: ndx)
+          }
+          break
         }
-        break
       }
     }
 
@@ -1880,7 +1944,7 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     }
   }
 
-  struct FunctionInfo {
+  struct FunctionInfo: DwarfRanged {
     var depth: Int
     var rawName: String
     var name: String?
@@ -1895,32 +1959,11 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     _ fn: (FunctionInfo) -> ()
   ) throws {
     var name: String? = nil
-    var refAttrs = attributes
 
-    if let specificationVal = refAttrs[.DW_AT_specification],
-       case let .reference(specification) = specificationVal {
-      var cursor = ImageSourceCursor(source: infoSection,
-                                     offset: specification)
-      let abbrev = try cursor.readULEB128()
-      if abbrev == 0 {
-        return
-      }
-
-      guard let abbrevInfo = unit.abbrevs[abbrev] else {
-        throw DwarfError.missingAbbrev(abbrev)
-      }
-
-      let tag = abbrevInfo.tag
-      if tag != .DW_TAG_subprogram {
-        return
-      }
-
-      refAttrs = try readDieAttributes(
-        at: &cursor,
-        unit: unit,
-        abbrevInfo: abbrevInfo,
-        shouldFetchIndirect: true
-      )
+    // Out-of-line instances of inlined functions get their names from their
+    // abstract origin, and definitions get them from their declaration.
+    guard let refAttrs = try inheritingAttributes(of: attributes) else {
+      return
     }
 
     if let nameVal = refAttrs[.DW_AT_name],
@@ -1979,57 +2022,40 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     _lazyInfo.functions
   }
 
+  private lazy var callSiteIndex = RangeIndex(sortedElements: inlineCallSites)
+  private lazy var functionIndex = RangeIndex(sortedElements: functions)
+
+  /// Find the inlined call sites that contain `address`, innermost first.
   func lookupInlineCallSites(
     at address: Address
   ) -> ArraySlice<CallSiteInfo> {
-    var min = 0
-    var max = inlineCallSites.count
+    var result: [CallSiteInfo] = []
+    callSiteIndex.forEachContaining(address) { result.append($0) }
 
-    while min < max {
-      let mid = min + (max - min) / 2
-      let callSite = inlineCallSites[mid]
-
-      if callSite.lowPC <= address && callSite.highPC > address {
-        var first = mid, last = mid
-        while first > 0
-                && inlineCallSites[first - 1].lowPC <= address
-                && inlineCallSites[first - 1].highPC > address {
-          first -= 1
-        }
-        while last < inlineCallSites.count - 1
-                && inlineCallSites[last + 1].lowPC <= address
-                && inlineCallSites[last + 1].highPC > address {
-          last += 1
-        }
-
-        return inlineCallSites[first...last]
-      } else if callSite.highPC <= address {
-        min = mid + 1
-      } else if callSite.lowPC > address {
-        max = mid
-      }
-    }
-
-    return []
+    // Sorting by address doesn't tell us how the call sites nest if some of
+    // them have more than one range; the depth of the DIE does.
+    result.sort { $0.depth > $1.depth || ($0.depth == $1.depth
+                                            && $0.lowPC > $1.lowPC) }
+    return result[...]
   }
 
   func lookupFunction(
     at address: Address
   ) -> FunctionInfo? {
-    var min = 0, max = functions.count
-    while min < max {
-      let mid = min + (max - min) / 2
-      let function = functions[mid]
+    var result: FunctionInfo? = nil
 
-      if function.lowPC <= address && function.highPC > address {
-        return function
-      } else if function.highPC <= address {
-        min = mid + 1
-      } else if function.lowPC > address {
-        max = mid
+    functionIndex.forEachContaining(address) { function in
+      // Prefer the function that starts closest to the address, and
+      // the most deeply nested one if there's more than one.
+      if let best = result,
+         best.lowPC > function.lowPC
+           || (best.lowPC == function.lowPC && best.depth >= function.depth) {
+        return
       }
+      result = function
     }
-    return nil
+
+    return result
   }
 
   typealias SourceLocation = SymbolicatedBacktrace.SourceLocation
@@ -2149,6 +2175,62 @@ class DwarfReader<S: DwarfSource & AnyObject> {
     return (callSites: callSites, functions: functions)
   }
 
+}
+
+/// Something that covers a range of addresses.
+@available(BacktracingDT 6.2, *)
+protocol DwarfRanged {
+  var lowPC: UInt64 { get }
+  var highPC: UInt64 { get }
+}
+
+/// An immutable collection of address ranges that can efficiently find all of
+/// the ranges that contain a particular address.
+@available(BacktracingDT 6.2, *)
+struct RangeIndex<Element: DwarfRanged> {
+  private(set) var elements: [Element]
+
+  /// The greatest `highPC` of the elements up to and including each index.
+  private var maxHighPC: [UInt64]
+
+  /// - Parameter sortedElements: Elements, sorted by `lowPC`.
+  init(sortedElements: [Element]) {
+    var maxHighPC: [UInt64] = []
+    maxHighPC.reserveCapacity(sortedElements.count)
+
+    var highest: UInt64 = 0
+    for element in sortedElements {
+      highest = Swift.max(highest, element.highPC)
+      maxHighPC.append(highest)
+    }
+
+    self.elements = sortedElements
+    self.maxHighPC = maxHighPC
+  }
+
+  /// Call `fn` for every element that contains `address`, from the highest
+  /// `lowPC` to the lowest.
+  func forEachContaining(_ address: UInt64, _ fn: (Element) -> ()) {
+    // Find the first element that starts after the address
+    var min = 0, max = elements.count
+    while min < max {
+      let mid = min + (max - min) / 2
+      if elements[mid].lowPC <= address {
+        min = mid + 1
+      } else {
+        max = mid
+      }
+    }
+
+    // Then walk backwards until nothing earlier can possibly cover it
+    var ndx = min - 1
+    while ndx >= 0 && maxHighPC[ndx] > address {
+      if elements[ndx].highPC > address {
+        fn(elements[ndx])
+      }
+      ndx -= 1
+    }
+  }
 }
 
 struct DwarfFileInfo {
@@ -2470,6 +2552,58 @@ public func testDwarfReaderFor(path: String) -> Bool {
 
     print("Call Sites:")
     print(reader.inlineCallSites)
+    return true
+  } else {
+    print("\(path) is not an ELF image")
+    return false
+  }
+}
+
+@available(BacktracingDT 6.2, *)
+private func printDwarfLookups<S: DwarfSource & AnyObject>(
+  _ reader: DwarfReader<S>,
+  at addresses: [UInt64]
+) {
+  for address in addresses {
+    print("address \(hex(address, width: 0)):")
+
+    if let function = reader.lookupFunction(at: address) {
+      print("  function: \(function.rawName)")
+    } else {
+      print("  function: <none>")
+    }
+
+    for site in reader.lookupInlineCallSites(at: address) {
+      print("  inline: \(site.rawName ?? "<none>") "
+              + "\(site.filename):\(site.line):\(site.column)")
+    }
+  }
+}
+
+/// Look up each of `addresses` in the DWARF in the ELF image at `path`, and
+/// print the function and the inline call sites (innermost first) that we
+/// find for it.
+@_spi(DwarfTest)
+@available(BacktracingDT 6.2, *)
+public func testDwarfLookupsFor(path: String, addresses: [UInt64]) -> Bool {
+  guard let source = try? ImageSource(path: path) else {
+    print("\(path) was not accessible")
+    return false
+  }
+
+  if let elfImage = try? Elf32Image(source: source) {
+    guard let reader = try? DwarfReader(source: elfImage) else {
+      print("Unable to create reader")
+      return false
+    }
+    printDwarfLookups(reader, at: addresses)
+    return true
+  } else if let elfImage = try? Elf64Image(source: source) {
+    guard let reader = try? DwarfReader(source: elfImage) else {
+      print("Unable to create reader")
+      return false
+    }
+    printDwarfLookups(reader, at: addresses)
     return true
   } else {
     print("\(path) is not an ELF image")
