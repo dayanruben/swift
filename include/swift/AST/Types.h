@@ -385,6 +385,16 @@ enum class TypeMatchFlags {
   /// module didn't record the Clang function type; two present-but-different
   /// Clang types still mismatch.
   AllowMissingClangType = 1 << 10,
+  /// Allow mismatched ownership qualifiers on value parameters.
+  AllowMismatchedParameterOwnership = 1 << 11,
+  /// Treat the function type as an `init` member's declaration type, so that
+  /// unqualified parameters of the method are treated as compatible with
+  /// `consuming` parameters rather than `borrowing` parameters.
+  MatchAsInit = 1 << 12,
+  /// Treat the function type as an `init` member's method type, so that
+  /// unqualified parameters of the method are treated as compatible with
+  /// `consuming` parameters rather than `borrowing` parameters.
+  MatchAsInitParams = 1 << 13,
 };
 using TypeMatchOptions = OptionSet<TypeMatchFlags>;
 
@@ -2601,6 +2611,12 @@ StringRef getNameForParamSpecifier(ParamSpecifier name);
 /// What does \c ParamSpecifier::Default mean for a parameter that's directly
 /// attached to \p VD ? Pass \c nullptr for the value for a closure.
 ParamSpecifier getDefaultParamSpecifier(const ValueDecl *VD);
+
+/// Returns true if an override with the given parameter ownership specifier is
+/// allowed over a base method with a given parameter ownership specifier.
+bool paramSpecifiersMatch(const ValueDecl *baseDecl,
+                          ParamSpecifier baseSpec,
+                          ParamSpecifier derivedSpec);
 
 /// Provide parameter type relevant flags, i.e. variadic, autoclosure, and
 /// escaping.
