@@ -1585,6 +1585,18 @@ public:
     SILValue(V).verifyOwnership(DEBlocks.get());
   }
 
+  void checkType(SILType silTy) {
+    // Make sure we don't have any types that should be eliminated by the
+    // type-checker.
+    auto ty = silTy.getASTType();
+    require(!ty->hasPlaceholder(), "placeholders should not appear in SIL");
+    require(!ty->hasUnboundGenericType(),
+            "unbound generics should not appear in SIL");
+    require(!ty->hasTypeVariableOrHole(),
+            "solver-allocated types should not appear in SIL");
+    require(!ty->hasJoinOrMeet(), "join and meets should not appear in SIL");
+  }
+
   void checkSILInstruction(SILInstruction *I) {
     const SILBasicBlock *BB = I->getParent();
     require(BB, "Instruction with null parent");
@@ -1603,6 +1615,8 @@ public:
 
     // Verify that all of our uses are in this function.
     for (auto result : I->getResults()) {
+      // Verify the result types.
+      checkType(result->getType());
       for (Operand *use : result->getUses()) {
         auto user = use->getUser();
         require(user, "instruction user is null?");
@@ -2816,10 +2830,18 @@ public:
                                       "result of createAsyncTask");
       bool haveSending =
           F.getASTContext().LangOpts.hasFeature(Feature::SendingArgsAndResults);
-      auto expectedExtInfo = SILExtInfoBuilder()
-                                 .withAsync(true)
-                                 .withSendable(!haveSending)
-                                 .build();
+      // The operation may be a synchronous function.
+      bool hasSyncOperation = !fnType->isAsync();
+      require(!hasSyncOperation || !BI->getSubstitutions(),
+              "a createAsyncTask whose operation is synchronous must be "
+              "discarding and have no result type");
+      require(!hasSyncOperation || !fnType->hasErrorResult(),
+              "the synchronous operation of a createAsyncTask cannot throw");
+      auto expectedExtInfo =
+          SILExtInfoBuilder()
+              .withAsync(!hasSyncOperation)
+              .withSendable(!haveSending)
+              .build();
       require(fnType->getExtInfo().isEqualTo(expectedExtInfo, /*clang types*/true),
               "function argument to createAsyncTask has incorrect ext info");
       // FIXME: it'd be better if we took a consuming closure here
@@ -2846,11 +2868,12 @@ public:
       // and non-discarding tasks so that we can't get this wrong?
       // If we generalize this to allow an arbitrary error type,
       // handle that here.
-      require(fnType->hasErrorResult() &&
+      require(hasSyncOperation ||
+              (fnType->hasErrorResult() &&
               fnType->getErrorResult().getConvention()
                 == ResultConvention::Owned &&
               fnType->getErrorResult().getInterfaceType()
-                == F.getASTContext().getErrorExistentialType(),
+                == F.getASTContext().getErrorExistentialType()),
               "function argument to createAsyncTask has wrong error convention");
     }
 
