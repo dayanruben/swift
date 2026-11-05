@@ -99,7 +99,11 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   P.startPipeline("Mandatory Diagnostic Passes + Enabling Optimization Passes");
 
   P.addMarkNeverWrittenMutableClosureBoxesAsImmutable();
-  P.addDiagnoseInvalidEscapingCaptures();
+
+  // Under LifetimeResolution, we run this earlier.
+  if (!P.getOptions().EnableLifetimeResolution)
+    P.addDiagnoseInvalidEscapingCaptures();
+
   P.addReferenceBindingTransform();
   P.addNestedSemanticFunctionCheck();
   P.addCapturePromotion();
@@ -108,7 +112,9 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   // This guarantees that stack-promotable boxes have [static] enforcement.
   P.addAccessEnforcementSelection();
 
-  P.addMandatoryAllocBoxToStack();
+  // Under LifetimeResolution, we run this earlier.
+  if (!P.getOptions().EnableLifetimeResolution)
+    P.addMandatoryAllocBoxToStack();
 
   // Needs to run after MandatoryAllocBoxToStack, because MandatoryAllocBoxToStack
   // can convert dynamic accesses to static accesses.
@@ -152,7 +158,10 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   P.addDifferentiation();
 
   const auto &Options = P.getOptions();
-  P.addClosureLifetimeFixup();
+
+  // Under LifetimeResolution, we run this earlier.
+  if (!Options.EnableLifetimeResolution)
+    P.addClosureLifetimeFixup();
 
   //===---
   // Begin Ownership Optimizations
@@ -307,10 +316,16 @@ SILPassPipelinePlan::getSILGenPassPipeline(const SILOptions &Options) {
   P.addSILGenCleanup();
 
   if (P.getOptions().EnableLifetimeResolution) {
+    // First, run passes that LifetimeResolution currently depends on.
+
     if (P.getOptions().EnableLifetimeDependenceDiagnostics)
       P.addLifetimeDependenceInsertion();
 
+    P.addDiagnoseInvalidEscapingCaptures();  // Precedes ClosureLifetimeFixup.
     P.addMandatoryAllocBoxToStack();
+    P.addClosureLifetimeFixup();
+
+    // Now, actually begin LifetimeResolution.
     P.addRemoveSILGenLifetimes();
     P.addLifetimeResolution();
     P.addLifetimeResolutionDiagnose();
@@ -431,6 +446,15 @@ void addHighLevelLoopOptPasses(SILPassPipelinePlan &P) {
   P.addAccessEnforcementOpts();
   P.addLoopInvariantCodeMotion();
   // Simplify CFG after LICM that creates new exit blocks
+  P.addSimplifyCFG();
+  // LoopRotate cannot rotate when the header contains a begin_access. LICM can
+  // only hoist code that runs in every iteration, which LoopRotate can achieve
+  // for the loop body. The earlier LICM may have hoisted a begin_access that
+  // had prevented that LoopRotate. Try LoopRotate again so that LICM can hoist
+  // other begin_access and more. This is cheap: a pass is skipped if the
+  // function didn't change since the pass last ran on it.
+  P.addLoopRotate();
+  P.addLoopInvariantCodeMotion();
   P.addSimplifyCFG();
   // LICM might have added new merging potential by hoisting
   // we don't want to restart the pipeline - ignore the
@@ -614,6 +638,7 @@ void addFunctionPasses(SILPassPipelinePlan &P,
   P.addCommonSubexpressionElimination();
   P.addDCE();
   P.addDeadDebugVariableElimination();
+  P.addDebugReconstructionBlockSimplification();
   P.addDeadAccessScopeElimination();
 
   // Perform retain/release code motion and run the first ARC optimizer.
@@ -767,6 +792,10 @@ static void addMidLevelFunctionPipeline(SILPassPipelinePlan &P) {
 
 static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
   P.startPipeline("ClosureSpecialize");
+  // Runs after serialization, because specialized witness tables are not
+  // serialized. The created specialized witness methods are optimized by the
+  // following low-level function passes.
+  P.addWitnessTableSpecialization();
   P.addDeadFunctionAndGlobalElimination();
   P.addReadOnlyGlobalVariablesPass();
   P.addDeadStoreElimination();
