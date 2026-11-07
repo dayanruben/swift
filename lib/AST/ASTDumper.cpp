@@ -495,6 +495,9 @@ static StringRef getDumpString(Associativity value) {
 
   llvm_unreachable("Unhandled Associativity in switch.");
 }
+static StringRef getDumpString(CArrayProjection projection) {
+  return getCArrayProjectionSpelling(projection);
+}
 static StringRef getDumpString(CheckedCastKind kind) {
   return getCheckedCastKindName(kind);
 }
@@ -3269,6 +3272,10 @@ void ValueDecl::dumpRef(raw_ostream &os) const {
     cast<ModuleDecl>(this)->getReverseFullModuleName().printForward(os);
   }
 
+  if (auto attr = getAttrs().getAttribute<CArrayProjectionAttr>())
+    os << " c-array-projection("
+       << getCArrayProjectionSpelling(attr->getProjection()) << ")";
+
   if (getAttrs().hasAttribute<KnownToBeLocalAttr>()) {
     os << " known-to-be-local";
   }
@@ -3986,8 +3993,8 @@ public:
   }
   void visitFunctionConversionExpr(FunctionConversionExpr *E, Label label) {
     printCommon(E, "function_conversion_expr", label);
-    if (E->isWithoutActuallyDiscarding())
-      printFlag(true, "without_actually_discarding", ExprModifierColor);
+    if (E->isWithoutActuallyDeiniting())
+      printFlag(true, "without_actually_deiniting", ExprModifierColor);
     printRec(E->getSubExpr(), Label::optional("sub_expr"));
     printFoot();
   }
@@ -5085,6 +5092,15 @@ public:
 // Dumping for DeclAttributes
 //===----------------------------------------------------------------------===//
 
+StringRef swift::getCArrayProjectionSpelling(CArrayProjection value) {
+  switch (value) {
+  case CArrayProjection::Modern: return "modern";
+  case CArrayProjection::Legacy: return "legacy";
+  case CArrayProjection::HiddenStorage: return "hiddenStorage";
+  }
+  llvm_unreachable("unknown CArrayProjection");
+}
+
 namespace {
 class PrintAttribute : public AttributeVisitor<PrintAttribute, void, Label>,
                        public PrintBase {
@@ -5511,6 +5527,11 @@ public:
     printCommon(Attr, "nonisolated_attr", label);
     printFlag(Attr->isUnsafe(), "unsafe");
     printFlag(Attr->isNonSending(), "nonsending");
+    printFoot();
+  }
+  void visitCArrayProjectionAttr(CArrayProjectionAttr *Attr, Label label) {
+    printCommon(Attr, "c_array_projection", label);
+    printField(Attr->getProjection(), Label::optional("projection"));
     printFoot();
   }
   void visitInheritActorContextAttr(InheritActorContextAttr *Attr,
@@ -5963,11 +5984,12 @@ public:
                                 VisitedConformances &visited, Label label) {
     // A recursive conformance shouldn't have its contents printed, or there's
     // infinite recursion. (This also avoids printing things that occur multiple
-    // times in a conformance hierarchy.) We also don't print the details in the
-    // parsable (JSON) output because it is far too much information when it is
-    // rendered as part of every declref that contains such a conformance.
-    auto shouldPrintDetails =
-        visited.insert(conformance).second && !Writer.isParsable();
+    // times in a conformance hierarchy.) For normal conformances, we also don't
+    // print witness details in the parsable (JSON) output because it is far too
+    // much information when rendered as part of every declref that contains
+    // such a conformance.
+    auto isFirstVisit = visited.insert(conformance).second;
+    auto shouldPrintDetails = isFirstVisit && !Writer.isParsable();
 
     auto printCommon = [&](StringRef kind) {
       printHead(kind, ASTNodeColor, label);
@@ -5994,8 +6016,8 @@ public:
                      Label::always("module"));
           printFoot();
         }, Label::always("context"));
-      } else {
-        printFlag(!shouldPrintDetails, "<details printed above>");
+      } else if (!Writer.isParsable()) {
+        printFlag(!isFirstVisit, "<details printed above>");
       }
     };
 
@@ -6092,7 +6114,7 @@ public:
       case ProtocolConformanceKind::Inherited: {
         auto conf = cast<InheritedProtocolConformance>(conformance);
         printCommon("inherited_conformance");
-        if (!shouldPrintDetails)
+        if (!isFirstVisit)
           break;
 
         printRec(conf->getInheritedConformance(), visited,
@@ -6103,22 +6125,24 @@ public:
       case ProtocolConformanceKind::Specialized: {
         auto conf = cast<SpecializedProtocolConformance>(conformance);
         printCommon("specialized_conformance");
-        if (!shouldPrintDetails)
+        if (!isFirstVisit)
           break;
 
         printRec(conf->getSubstitutionMap(),
                  SubstitutionMap::DumpStyle::Full, visited,
                  Label::optional("substitutions"));
-        if (auto condReqs = conf->getConditionalRequirementsIfAvailableOrCached(/*computeIfPossible=*/false)) {
-          printList(*condReqs, [&](auto subReq, Label label) {
-            printRec(subReq, label);
-          }, Label::optional("conditional_reqs"));
-        } else {
-          printRecArbitrary([&](Label label) {
-            printHead("<conditional requirements unable to be computed>",
-                      ASTNodeColor, label);
-            printFoot();
-          }, Label::optional("conditional_reqs"));
+        if (!Writer.isParsable()) {
+          if (auto condReqs = conf->getConditionalRequirementsIfAvailableOrCached(/*computeIfPossible=*/false)) {
+            printList(*condReqs, [&](auto subReq, Label label) {
+              printRec(subReq, label);
+            }, Label::optional("conditional_reqs"));
+          } else {
+            printRecArbitrary([&](Label label) {
+              printHead("<conditional requirements unable to be computed>",
+                        ASTNodeColor, label);
+              printFoot();
+            }, Label::optional("conditional_reqs"));
+          }
         }
         printRec(conf->getGenericConformance(), visited,
                  Label::optional("generic_conformance"));
