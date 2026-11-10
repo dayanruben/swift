@@ -2012,7 +2012,7 @@ static void emitRawApply(SILGenFunction &SGF,
                          ExecutorBreadcrumb prevExecutor) {
   // We completely drop the generic signature if all generic parameters were
   // concrete.
-  if (subs && subs.getGenericSignature()->areAllParamsConcrete())
+  if (subs && !subs.isEffectivelyGeneric())
     subs = SubstitutionMap();
 
   SILFunctionConventions substFnConv(
@@ -4232,7 +4232,12 @@ private:
                 loc, result);
           }
         }
-        result = result.materialize(SGF, loc);
+        // A borrowed value may itself be a formal-evaluation borrow, such as
+        // a borrowed subscript index, so the borrow of the temporary has to
+        // end with the formal access rather than with the enclosing scope.
+        result = SGF.isInFormalEvaluationScope()
+                     ? result.formallyMaterialize(SGF, loc)
+                     : result.materialize(SGF, loc);
       }
 
     // Otherwise, simultaneously emit and reabstract.
@@ -6755,7 +6760,7 @@ SILValue SILGenFunction::emitApplyWithRethrow(SILLocation loc, SILValue fn,
                                               ArrayRef<SILValue> args) {
   // We completely drop the generic signature if all generic parameters were
   // concrete.
-  if (subs && subs.getGenericSignature()->areAllParamsConcrete())
+  if (subs && !subs.isEffectivelyGeneric())
     subs = SubstitutionMap();
 
   CanSILFunctionType silFnType = substFnType.castTo<SILFunctionType>();
@@ -6882,7 +6887,7 @@ SILGenFunction::emitBeginApplyWithRethrow(SILLocation loc, SILValue fn,
                                           SmallVectorImpl<SILValue> &yields) {
   // We completely drop the generic signature if all generic parameters were
   // concrete.
-  if (subs && subs.getGenericSignature()->areAllParamsConcrete())
+  if (subs && !subs.isEffectivelyGeneric())
     subs = SubstitutionMap();
 
   // TODO: adjust this to create try_begin_apply when appropriate.
