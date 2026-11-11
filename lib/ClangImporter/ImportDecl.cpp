@@ -1039,13 +1039,11 @@ static bool shouldEagerlyImportClangRecordMember(const clang::NamedDecl *decl,
     return false;
   }
 
-  if (isa<clang::FunctionTemplateDecl>(decl))
-    return true;
+  // Classify a member function template like the underlying function
+  if (auto *ftd = dyn_cast<clang::FunctionTemplateDecl>(decl))
+    decl = ftd->getTemplatedDecl();
 
   if (auto *fn = dyn_cast<clang::FunctionDecl>(decl)) {
-    if (fn->getDescribedFunctionTemplate())
-      return true;
-
     switch (fn->getDeclName().getNameKind()) {
     case clang::DeclarationName::CXXOperatorName:
     case clang::DeclarationName::CXXConversionFunctionName:
@@ -5000,15 +4998,18 @@ namespace {
           hasUnsafeAPIAttr(decl) && !isEscapable(resultTypeForEscapability);
 
       auto warnForEscapableReturnType = [&] {
-        if (isEscapableAnnotatedType(retType.getTypePtr())) {
+        if (isEscapableAnnotatedType(resultTypeForEscapability.getTypePtr())) {
           // Swift drops lifetime dependencies on Escapable targets, so this
           // annotation is not enforced. Import the API as @unsafe.
           skipLifetime(
               Diagnostic(diag::cxx_unsafe_skipped_lifetime_escapable_result));
+          auto policy = Impl.getClangASTContext().getPrintingPolicy();
+          policy.SuppressTagKeyword = true;
           Impl.addImportDiagnostic(
               decl,
               Diagnostic(diag::return_escapable_with_lifetimebound,
-                         Impl.SwiftContext.AllocateCopy(retType.getAsString())),
+                         Impl.SwiftContext.AllocateCopy(
+                             resultTypeForEscapability.getAsString(policy))),
               decl->getLocation());
         }
       };
@@ -5100,6 +5101,8 @@ namespace {
 
               paramHasAnnotation[idx] = true;
               unsigned targetIdx;
+              const clang::ParmVarDecl *target = nullptr;
+              clang::QualType targetTy;
               if (hasThisParam && param == clang::LifetimeCaptureByAttr::This) {
                 // A constructor's 'this' is the object it produces, so the
                 // capture is a result dependence.
@@ -5108,8 +5111,22 @@ namespace {
                   continue;
                 }
                 targetIdx = result->getSelfIndex();
+                targetTy = method->getThisType()->getPointeeType();
               } else {
                 targetIdx = param - hasThisParam;
+                target = decl->getParamDecl(targetIdx);
+                targetTy = target->getType().getNonReferenceType();
+              }
+              // Swift drops lifetime dependencies on Escapable targets, so this
+              // annotation is not enforced. Import the API as @unsafe.
+              if (isEscapable(targetTy)) {
+                skipLifetime(Diagnostic(
+                    diag::cxx_unsafe_skipped_lifetime_escapable_target,
+                    annotated != nullptr,
+                    annotated ? annotated->getName() : StringRef(),
+                    target != nullptr,
+                    target ? target->getName() : StringRef()));
+                continue;
               }
               auto &deps = capturedArgDependences
                                .try_emplace(targetIdx, dependencyVecSize)
@@ -5293,10 +5310,6 @@ namespace {
     /// Whether the C++ standard library overlay in stdlib/public/Cxx still
     /// spells \a stubName in a protocol requirement. Uses of these stubs are
     /// not deprecated yet, because Swift itself asks for them by name.
-    ///
-    /// Matching is on the stub name rather than the C++ base name because
-    /// '__beginMutatingUnsafe' derives from the imported name 'beginMutating',
-    /// not from 'begin'.
     static bool overlayStillSpellsUnsafeStub(DeclBaseName stubName,
                                              const clang::CXXMethodDecl *decl) {
       if (stubName.isSpecial())
@@ -5304,12 +5317,7 @@ namespace {
       auto name = stubName.getIdentifier().str();
       // Spelled in protocol requirements, so they can be witnessed by any
       // conforming type.
-      if (llvm::StringSwitch<bool>(name)
-              .Cases({"__beginUnsafe", "__endUnsafe", "__beginMutatingUnsafe",
-                      "__endMutatingUnsafe", "__findUnsafe",
-                      "__findMutatingUnsafe", "__eraseUnsafe", "__dataUnsafe"},
-                     true)
-              .Default(false))
+      if (name == "__eraseUnsafe")
         return true;
       // Spelled by the overlay only for standard library types
       // ('CxxSet.insert(_:)', 'std.string.append(_:)'), so a user type's stub

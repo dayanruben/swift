@@ -932,9 +932,14 @@ RValue SILGenFunction::emitRValueForSelfInDelegationInit(SILLocation loc,
   // to the delegating initializer is a metatype. Thus, we perform a
   // load_borrow. And move from WillSharedBorrowSelf -> DidSharedBorrowSelf.
   if (SelfInitDelegationState == SILGenFunction::WillSharedBorrowSelf) {
-    assert(C.isGuaranteedPlusZeroOk() &&
-           "This should only be called if guaranteed plus zero is ok");
     SelfInitDelegationState = SILGenFunction::DidSharedBorrowSelf;
+    // If +1 is requested, it's a misuse of self that we expect
+    // definite initialization to diagnose.
+    if (!C.isGuaranteedPlusZeroOk()) {
+      const auto &typeLowering = getTypeLowering(addr->getType());
+      ManagedValue result = emitLoad(loc, addr, typeLowering, C, IsNotTake);
+      return RValue(*this, loc, refType, result);
+    }
     ManagedValue result =
         B.createLoadBorrow(loc, ManagedValue::forBorrowedAddressRValue(addr));
     return RValue(*this, loc, refType, result);
@@ -943,8 +948,12 @@ RValue SILGenFunction::emitRValueForSelfInDelegationInit(SILLocation loc,
   // If we are already in the did shared borrow self state, just return the
   // shared borrow value.
   if (SelfInitDelegationState == SILGenFunction::DidSharedBorrowSelf) {
-    assert(C.isGuaranteedPlusZeroOk() &&
-           "This should only be called if guaranteed plus zero is ok");
+    // As above, +1 indicates a misuse of self for definite initialization to diagnose.
+    if (!C.isGuaranteedPlusZeroOk()) {
+      const auto &typeLowering = getTypeLowering(addr->getType());
+      ManagedValue result = emitLoad(loc, addr, typeLowering, C, IsNotTake);
+      return RValue(*this, loc, refType, result);
+    }
     ManagedValue result =
         B.createLoadBorrow(loc, ManagedValue::forBorrowedAddressRValue(addr));
     return RValue(*this, loc, refType, result);
@@ -2913,6 +2922,25 @@ RValue RValueEmitter::visitMemberRefExpr(MemberRefExpr *e,
 
   // Any writebacks for this access are tightly scoped.
   FormalEvaluationScope scope(SGF);
+
+  // A noncopyable member read whose base is an opened existential must
+  // be borrowed so the access stays open across the uses.  Concrete and
+  // generic bases already emit the whole member chain as a single l-value, so
+  // they don't need this (and taking this path for them regresses the
+  // address-only move-checker's diagnostics).
+  if (e->getType()->isNoncopyable() &&
+      e->getBase()->getType()->getRValueType()->is<ExistentialArchetypeType>()) {
+    LValue lv = SGF.emitLValue(e, SGFAccessKind::BorrowedObjectRead);
+    ManagedValue mv = SGF.emitRawProjectedLValue(e, std::move(lv));
+
+    // If we got back a borrow (aka +0) because of a coroutine read
+    // accessor, defer the end_apply to the outer evaluation scope.
+    // Otherwise, we can end any other formal accesses now.
+    if (mv.isPlusZero())
+      std::move(scope).deferPop();
+
+    return RValue(SGF, e, mv);
+  }
 
   LValue lv = SGF.emitLValue(e, SGFAccessKind::OwnedObjectRead);
 
