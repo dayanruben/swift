@@ -292,6 +292,12 @@ public struct Builder {
     return notifyNew(dr.getAs(DeallocStackRefInst.self))
   }
 
+  @discardableResult
+  public func createDeallocPartialRef(_ operand: Value, metatype: Value) -> DeallocPartialRefInst {
+    let dr = bridged.createDeallocPartialRef(operand.bridged, metatype.bridged)
+    return notifyNew(dr.getAs(DeallocPartialRefInst.self))
+  }
+
   public func createAddressToPointer(address: Value, pointerType: Type,
                                      needStackProtection: Bool) -> AddressToPointerInst {
     let dr = bridged.createAddressToPointer(address.bridged, pointerType.bridged, needStackProtection)
@@ -585,6 +591,14 @@ public struct Builder {
   }
 
   @discardableResult
+  public func createReturnBorrow(of value: Value, fromScopes enclosingValues: [Value]) -> ReturnBorrowInst {
+    let rbi = enclosingValues.withBridgedValues { valuesRef in
+      return bridged.createReturnBorrow(value.bridged, valuesRef)
+    }
+    return notifyNew(rbi.getAs(ReturnBorrowInst.self))
+  }
+
+  @discardableResult
   public func createThrow(of value: Value) -> ThrowInst {
     return notifyNew(bridged.createThrow(value.bridged).getAs(ThrowInst.self))
   }
@@ -745,6 +759,10 @@ public struct Builder {
 
   public func createStructElementAddr(structAddress: Value, fieldIndex: Int) -> StructElementAddrInst {
     return notifyNew(bridged.createStructElementAddr(structAddress.bridged, fieldIndex).getAs(StructElementAddrInst.self))
+  }
+
+  public func createRefElementAddr(classReference: Value, fieldIndex: Int) -> RefElementAddrInst {
+    return notifyNew(bridged.createRefElementAddr(classReference.bridged, fieldIndex).getAs(RefElementAddrInst.self))
   }
 
   public func createDestructureStruct(struct: Value) -> DestructureStructInst {

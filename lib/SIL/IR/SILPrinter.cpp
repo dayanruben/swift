@@ -2047,7 +2047,10 @@ public:
     if (LBI->isUnchecked()) {
       *this << "[unchecked] ";
     }
-    *this << getIDAndType(LBI->getOperand());
+    *this << getIDAndType(LBI->getAddress());
+    if (LBI->hasValueHint()) {
+      *this << ", value_hint " << getIDAndType(LBI->getValueHint());
+    }
   }
 
   void visitBeginBorrowInst(BeginBorrowInst *BBI) {
@@ -2589,6 +2592,7 @@ public:
 
   void visitUncheckedOwnershipInst(UncheckedOwnershipInst *I) {
     *this << getIDAndType(I->getOperand());
+    printForwardingOwnershipKind(I);
   }
 
   void visitUnownedCopyValueInst(UnownedCopyValueInst *I) {
@@ -2977,6 +2981,9 @@ public:
       break;
     case DiagnoseKind::LetReinit:
       *this << "[let_reinit] ";
+      break;
+    case DiagnoseKind::MissingSuperInit:
+      *this << "[missing_super_init] ";
       break;
     }
     *this << getIDAndType(I->getOperand());

@@ -3394,6 +3394,36 @@ public:
     return getSubstCalleeConv().hasGuaranteedAddressResult();
   }
 
+  /// If the non-trivial @guaranteed result borrows a @guaranteed self value,
+  /// like a begin_borrow, return the self operand. Otherwise return nullptr.
+  Operand *getSelfObjectOfGuaranteedBorrowAccessorResult() {
+    if (!hasGuaranteedResult() || !hasSelfArgument() ||
+        getType().isTrivial(*getFunction())) {
+      return nullptr;
+    }
+    Operand &selfOperand = getSelfArgumentOperand();
+    if (selfOperand.get()->getType().isAddress()) {
+      return nullptr;
+    }
+    return &selfOperand;
+  }
+
+  /// If the result borrows an @in_guaranteed self memory location, return the
+  /// self operand, whose address must not be modified over the scope of the
+  /// result. Returns nullptr if self is @guaranteed, there is no self, or the
+  /// result is trivial.
+  Operand *getSelfAddressOfGuaranteedBorrowAccessorResult() {
+    if (!hasGuaranteedResult() || !hasSelfArgument() ||
+        getType().isTrivial(*getFunction())) {
+      return nullptr;
+    }
+    Operand &selfOperand = getSelfArgumentOperand();
+    if (!selfOperand.get()->getType().isAddress()) {
+      return nullptr;
+    }
+    return &selfOperand;
+  }
+
   bool hasAddressResult() const {
     return getSubstCalleeConv().hasAddressResult();
   }
@@ -5018,17 +5048,39 @@ public:
 /// Represents a load of a borrowed value. Must be paired with an end_borrow
 /// instruction in its use-def list.
 class LoadBorrowInst :
-    public UnaryInstructionBase<SILInstructionKind::LoadBorrowInst,
-                                SingleValueInstruction>
+    public InstructionBase<SILInstructionKind::LoadBorrowInst,
+                           SingleValueInstruction>
 {
   friend class SILBuilder;
+
+  FixedOperandList<2> Operands;
 
   bool Unchecked = false;
 
 public:
-  LoadBorrowInst(SILDebugLocation DebugLoc, SILValue LValue)
-      : UnaryInstructionBase(DebugLoc, LValue,
-                             LValue->getType().getObjectType()) {}
+  LoadBorrowInst(SILDebugLocation DebugLoc, SILValue address, SILValue valueHint)
+      : InstructionBase(DebugLoc, address->getType().getObjectType()),
+        Operands{this, address, valueHint} {}
+
+  SILValue getAddress() const { return getOperand(0); }
+
+  /// Returns the optional value hint.
+  ///
+  /// If present, the loaded value is exactly the value of the value hint.
+  /// This is used if the load_borrow cannot be replaced by the value hint in
+  /// OSSA because it would violate ownership rules, e.g. if the value hint is
+  /// consumed before the load_borrow. The value hint is not an ownership use.
+  ///
+  /// Must only be called if `hasValueHint()` is true.
+  SILValue getValueHint() const { return getOperand(1); }
+
+  /// Returns true if the load_borrow has a value hint.
+  bool hasValueHint() const { return (bool)Operands[1].get(); }
+
+  /// Sets the value hint, which must have the same type as the load_borrow.
+  ///
+  /// `v` must not be null, i.e. this cannot be used to remove a value hint.
+  void setValueHint(SILValue v) { Operands[1].set(v); }
 
   // True if the invariants on `load_borrow` have not been checked and
   // should not be strictly enforced.
@@ -5047,6 +5099,13 @@ public:
 
   /// Return a range over all EndBorrow instructions for this BeginBorrow.
   EndBorrowRange getEndBorrows() const;
+
+  ArrayRef<Operand> getAllOperands() const {
+    return Operands.asArray().drop_back(hasValueHint() ? 0 : 1);
+  }
+  MutableArrayRef<Operand> getAllOperands() {
+    return Operands.asArray().drop_back(hasValueHint() ? 0 : 1);
+  }
 };
 
 inline auto LoadBorrowInst::getEndBorrows() const -> EndBorrowRange {
@@ -9364,6 +9423,10 @@ public:
     /// The marked address is the destination of a second initialization of
     /// immutable storage.
     LetReinit,
+
+    /// The marked address holds `self` in a derived class initializer, which
+    /// may be used before `super.init` initializes its superclass part.
+    MissingSuperInit,
   };
 
 private:

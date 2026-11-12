@@ -1514,6 +1514,8 @@ static std::optional<AccessorKind> getAccessorKind(StringRef ident) {
       .Case("modify", AccessorKind::Modify)
       .Case("modify2", AccessorKind::YieldingMutate)
       .Case("yielding_mutate", AccessorKind::YieldingMutate)
+      .Case("borrow", AccessorKind::Borrow)
+      .Case("mutate", AccessorKind::Mutate)
       .Default(std::nullopt);
 }
 
@@ -2555,7 +2557,17 @@ bool SILParser::parseSILDeclRef(SILDeclRef &Member, bool FnTypeRequired) {
       auto lookupTy =
         decl->getInterfaceType()
             ->removeArgumentLabels(decl->getNumCurryLevels());
-      if (declTy == lookupTy->getCanonicalType()) {
+      // The type of a mutate accessor has an inout result, which its printed
+      // type does not spell.
+      CanType candidateTy = declTy;
+      auto *accessor = dyn_cast<AccessorDecl>(decl);
+      if (accessor && accessor->isMutateAccessor()) {
+        if (auto fnTy = dyn_cast<AnyFunctionType>(declTy)) {
+          candidateTy = fnTy.withExtInfo(
+              fnTy->getExtInfo().intoBuilder().withHasInOutResult().build());
+        }
+      }
+      if (candidateTy == lookupTy->getCanonicalType()) {
         TheDecl = decl;
         // Update SILDeclRef to point to the right Decl.
         Member.loc = decl;
@@ -4043,6 +4055,8 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
                             .Case("unpermitted_copy",
                                   DiagnoseKind::UnpermittedCopy)
                             .Case("let_reinit", DiagnoseKind::LetReinit)
+                            .Case("missing_super_init",
+                                  DiagnoseKind::MissingSuperInit)
                             .Default(DiagnoseKind::Invalid);
 
     if (Kind == DiagnoseKind::Invalid) {
@@ -4184,9 +4198,12 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
   case SILInstructionKind::UncheckedOwnershipInst: {
     if (parseTypedValueRef(Val, B))
       return true;
+    ValueOwnershipKind forwardingOwnership = Val->getOwnershipKind();
+    if (parseForwardingOwnershipKind(forwardingOwnership))
+      return true;
     if (parseSILDebugLocation(InstLoc, B))
       return true;
-    ResultVal = B.createUncheckedOwnership(InstLoc, Val);
+    ResultVal = B.createUncheckedOwnership(InstLoc, Val, forwardingOwnership);
     break;
   }
 
@@ -4228,11 +4245,22 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
       }
     }
 
-    if (parseTypedValueRef(Val, AddrLoc, B) ||
-        parseSILDebugLocation(InstLoc, B))
+    if (parseTypedValueRef(Val, AddrLoc, B))
       return true;
 
-    auto LB = B.createLoadBorrow(InstLoc, Val);
+    SILValue valueHint;
+    if (P.Tok.is(tok::comma) && !peekSILDebugLocation(P)) {
+      P.consumeToken(tok::comma);
+      if (parseVerbatim("value_hint") ||
+          parseTypedValueRef(valueHint, AddrLoc, B)) {
+        return true;
+      }
+    }
+
+    if (parseSILDebugLocation(InstLoc, B))
+      return true;
+
+    auto LB = B.createLoadBorrow(InstLoc, Val, valueHint);
     LB->setUnchecked(IsUnchecked);
     ResultVal = LB;
     break;

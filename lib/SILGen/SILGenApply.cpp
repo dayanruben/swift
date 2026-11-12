@@ -28,6 +28,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/ConformanceLookup.h"
+#include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/DistributedDecl.h"
 #include "swift/AST/Effects.h"
@@ -3411,12 +3412,22 @@ Expr *SILGenFunction::findStorageReferenceExprForMoveOnly(Expr *argExpr,
         // that currently disrupts what the move checker expects. It would also
         // be valuable to borrow copyable global lets, but this is a targeted
         // fix to allow noncopyable globals to work properly.
+        // 
+        // rdar://192270068: Also proceed if the decl ref is to a mutable 
+        // variable.
+        // We end up with a non-LValueType DeclRef to a mutable variable 
+        // without a LoadExpr when a closure literal infers `consuming` from
+        // its type context, since the parameter specified is applied only after
+        // the closure body has been type checked.
         bool isGlobal = false;
+        bool isVar = false;
         if (auto vd = dyn_cast<VarDecl>(declRef->getDecl())) {
           isGlobal = vd->isGlobalStorage();
+          isVar = isa<ParamDecl>(vd)
+            && vd->getIntroducer() == VarDecl::Introducer::Var;
         }
         
-        if (!isGlobal) {
+        if (!isGlobal && !isVar) {
           return nullptr;
         }
       }
@@ -3451,6 +3462,16 @@ Expr *SILGenFunction::findStorageReferenceExprForMoveOnly(Expr *argExpr,
 
   if (!storage)
     return nullptr;
+
+  // A capture held as a value has no memory to consume in place.
+  if (auto *vd = dyn_cast<VarDecl>(storage)) {
+    auto it = VarLocs.find(vd);
+    if (kind == StorageReferenceOperationKind::Consume &&
+        it != VarLocs.end() && vd->getDeclContext() != FunctionDC &&
+        !silConv.useLoweredAddresses() &&
+        it->second.value->getType().isObject())
+      return nullptr;
+  }
 
   // This should match the strategy computation used in
   // SILGenLValue::visit{DeclRef,Member}RefExpr.
@@ -5830,13 +5851,14 @@ ManagedValue SILGenFunction::applyBorrowMutateAccessor(
   emitRawApply(*this, loc, fn, subs, args, substFnType, options,
                /*indirect results*/ {}, /*indirect errors*/ {}, rawResults,
                ExecutorBreadcrumb());
+  // FIXME: Support returning tuples from borrow accessors.
   assert(rawResults.size() == 1);
   auto rawResult = rawResults[0];
 
-  if (rawResult->getType().isMoveOnly()) {
-    if (rawResult->getType().isAddress()) {
-      SILFunctionConventions substFnConv(
-          substFnType, SILAddressConventions::forFunction(F));
+  if (rawResult->getType().isAddress()) {
+    if (rawResult->getType().isMoveOnly()) {
+      SILFunctionConventions substFnConv(substFnType,
+                                         SILAddressConventions::forFunction(F));
       auto result = B.createMarkUnresolvedNonCopyableValueInst(
           loc, rawResult,
           substFnConv.hasInoutResult()
@@ -5846,14 +5868,33 @@ ManagedValue SILGenFunction::applyBorrowMutateAccessor(
                     NoConsumeOrAssign);
       return ManagedValue::forRValueWithoutOwnership(result);
     }
-    auto result = emitManagedCopy(loc, rawResult);
+    return ManagedValue::forForwardedRValue(*this, rawResult);
+  }
+
+  if (rawResult->getOwnershipKind() != OwnershipKind::Guaranteed) {
+     return ManagedValue::forForwardedRValue(*this, rawResult);
+  }
+
+  // A borrow accessor with a @guaranteed result is a borrow introducer, emit
+  // with cleanup.
+  auto borrowIntroducingResult = emitFormalEvaluationManagedBorrowedRValueWithCleanup(
+        loc, rawResult, rawResult);
+
+  // If the callsite is within another borrow accessor, emit unchecked_ownership
+  // which SILGenCleanup will fixup.
+  if (getFunction().getConventions().hasGuaranteedResult()) {
+    borrowIntroducingResult = B.createUncheckedOwnership(loc, borrowIntroducingResult);
+  }
+
+  if (borrowIntroducingResult.getValue()->getType().isMoveOnly()) {
+    auto result = emitManagedCopy(loc, borrowIntroducingResult.getValue());
     result = B.createMarkUnresolvedNonCopyableValueInst(
         loc, result,
         MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
     return emitManagedBeginBorrow(loc, result.getValue());
   }
 
-  return ManagedValue::forForwardedRValue(*this, rawResult);
+  return borrowIntroducingResult;
 }
 
 RValue CallEmission::applyFirstLevelCallee(SGFContext C) {
@@ -8438,7 +8479,11 @@ ManagedValue SILGenFunction::emitBorrowMutateAccessor(
 
   CanAnyFunctionType accessType = callee.getSubstFormalType();
 
+  // Create a dead writeback scope, so that the borrow introducer of a
+  // @guaranteed result ends with the enclosing formal access just as
+  // coroutines.
   FormalEvaluationScope writebackScope(*this);
+  writebackScope.pop();
   CallEmission emission(*this, std::move(callee), std::move(writebackScope));
 
   // Self ->
