@@ -2550,13 +2550,8 @@ public:
             ExpandExtensionMacros{nominal},
             { });
 
-        // If strict memory safety checking is enabled, check the storage
-        // of the nominal type.
-        if (Ctx.LangOpts.hasFeature(
-                Feature::StrictMemorySafety, /*allowMigration=*/true) &&
-            !isa<ProtocolDecl>(nominal)) {
+        if (!isa<ProtocolDecl>(nominal))
           checkUnsafeStorage(nominal);
-        }
       }
     }
   }
@@ -2638,7 +2633,6 @@ public:
     // concurrency checking enabled.
     if (ID->preconcurrency() &&
         Ctx.LangOpts.StrictConcurrencyLevel == StrictConcurrency::Complete &&
-        Ctx.LangOpts.hasFeature(Feature::StrictMemorySafety) &&
         ID->getExplicitSafety() != ExplicitSafety::Unsafe) {
       diagnoseUnsafeUse(UnsafeUse::forPreconcurrencyImport(ID));
     }
@@ -4016,6 +4010,8 @@ public:
       TypeChecker::checkYieldList(FD->getYields(), FD);
     }
 
+    checkScopedSignature(FD);
+
     checkDeclCommon(FD);
 
     TypeChecker::checkDeclAttributes(FD);
@@ -4469,6 +4465,7 @@ public:
 
     TypeChecker::checkDeclAttributes(CD);
     TypeChecker::checkParameterList(CD->getParameters(), CD);
+    checkScopedSignature(CD);
 
     checkEmbeddedRestrictionsInSignature(CD);
 

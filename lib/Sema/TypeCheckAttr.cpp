@@ -27,6 +27,8 @@
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Attr.h"
 #include "swift/AST/AttrKind.h"
+#include "swift/AST/AvailabilityQuery.h"
+#include "swift/AST/SemanticAttrs.h"
 #include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
@@ -207,7 +209,6 @@ public:
   IGNORED_ATTR(RawDocComment)
   IGNORED_ATTR(RequiresStoredPropertyInits)
   IGNORED_ATTR(RestatedObjCConformance)
-  IGNORED_ATTR(Semantics)
   IGNORED_ATTR(NoLocks)
   IGNORED_ATTR(NoAllocation)
   IGNORED_ATTR(NoRuntime)
@@ -479,6 +480,7 @@ public:
   void visitNeverEmitIntoClientAttr(NeverEmitIntoClientAttr *attr);
   void diagnoseNeverEmittedIntoClientInBackDeployedType(DeclAttribute *attr);
   void visitExportAttr(ExportAttr *attr);
+  void visitSemanticsAttr(SemanticsAttr *attr);
 
   void visitDiscardableResultAttr(DiscardableResultAttr *attr);
   void visitDynamicReplacementAttr(DynamicReplacementAttr *attr);
@@ -4200,10 +4202,17 @@ void AttributeChecker::visitInlineAttr(InlineAttr *attr) {
   if (attr->getKind() != InlineKind::Always)
     return;
 
-  // Can't have @inline(always) on @usableFromInline.
+  // Can't have @inline(always) on @usableFromInline: @usableFromInline
+  // exposes an entry point but not the body, so a caller in another module
+  // could not inline the function (SE-0496). Suggest @inlinable instead,
+  // rather than offering to remove @inline(always).
   auto *VD = cast<ValueDecl>(D);
-  if (VD->getAttrs().hasAttribute<UsableFromInlineAttr>()) {
-    diagnoseAndRemoveAttr(attr, diag::attr_inline_always_no_usable_from_inline);
+  if (auto *ufi = VD->getAttrs().getAttribute<UsableFromInlineAttr>()) {
+    attr->setInvalid();
+    auto diag = diagnose(attr->getLocation(),
+                         diag::attr_inline_always_no_usable_from_inline);
+    if (ufi->getLocation().isValid() && !ufi->isImplicit())
+      diag.fixItReplace(ufi->getRangeWithAt(), "@inlinable");
     return;
   }
   // Check that @inline(always) is only used on statically dispatched methods
@@ -4319,6 +4328,38 @@ void AttributeChecker::visitExclusivityAttr(ExclusivityAttr *attr) {
   }
   diagnoseAndRemoveAttr(attr, diag::exclusivity_on_wrong_decl);
   attr->setInvalid();
+}
+
+void AttributeChecker::visitSemanticsAttr(SemanticsAttr *attr) {
+  StringRef value = attr->Value;
+  if (!value.starts_with(semantics::AVAILABILITY_OSVERSION))
+    return;
+
+  // An explicit kind must be one that we know about.
+  if (value.size() > semantics::AVAILABILITY_OSVERSION.size()) {
+    if (!parseOSVersionQuerySemanticsAttr(value)) {
+      StringRef kind = value.drop_front(
+          semantics::AVAILABILITY_OSVERSION.size());
+      kind.consume_front("(");
+      kind.consume_back(")");
+      diagnose(attr->getLocation(),
+               diag::attr_semantics_unknown_osversion_kind, kind);
+    }
+    return;
+  }
+
+  // Infer the kind of query function and add it to the attribute so that
+  // later stages need not look up the standard library's declarations to find
+  // it. Leave the attribute without a kind if there is no kind to infer.
+  auto *func = dyn_cast<FuncDecl>(D);
+  if (!func)
+    return;
+
+  auto kind = inferOSVersionQueryKind(func);
+  if (!kind)
+    return;
+
+  attr->Value = Ctx.AllocateCopy(getOSVersionQuerySemanticsAttr(*kind));
 }
 
 void AttributeChecker::visitExportAttr(ExportAttr *attr) {
@@ -7549,7 +7590,7 @@ getTransposeOriginalFunctionType(AnyFunctionType *transposeFnType,
     if (linearParamIndices->contains(i)) {
       auto resultType =
           transposeResultTypes[transposeResultTypesIndex++].getType();
-      originalParams.push_back(AnyFunctionType::Param(resultType));
+      originalParams.push_back(AnyFunctionType::Param::bodyAccess(resultType));
     }
     // Otherwise, the next original parameter is the next transpose parameter.
     else {
@@ -7569,7 +7610,8 @@ getTransposeOriginalFunctionType(AnyFunctionType *transposeFnType,
         transposeFnType->isThrowing(), transposeFnType->getThrownError(),
         /*genericSignature=*/nullptr);
     originalType = makeFunctionType(
-        AnyFunctionType::Param(selfType), /* yields */ {}, originalType,
+        AnyFunctionType::Param::bodyAccess(selfType), /* yields */ {},
+        originalType,
         /*throws=*/false, Type(), transposeFnType->getOptGenericSignature());
   }
   // Otherwise, the original function type is simply:
@@ -9746,10 +9788,12 @@ void AttributeChecker::visitUnsafeSelfDependentResultAttr(
 }
 
 void AttributeChecker::visitScopeParamsAttr(ScopeParamsAttr *attr) {
-  // TODO: What to do for ABI?
-  if (!ABIRoleInfo(D).providesAPI())
+  // `checkScopedSignature` diagnoses the scope parameters for functions where
+  // scopes are supported.
+  if (auto *fn = dyn_cast<AbstractFunctionDecl>(D);
+      fn && resolvesScopesInSignature(fn))
     return;
-  // TODO: Support explicit scope parameters.
+  // TODO: Support explicit scope parameters of types and accessors.
   diagnoseAndRemoveAttr(attr, diag::scope_params_unsupported);
 }
 
