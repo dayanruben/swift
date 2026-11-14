@@ -2071,7 +2071,7 @@ class AllocStackInst final
     : public InstructionBase<SILInstructionKind::AllocStackInst,
                              AllocationInst>,
       private SILDebugVariableSupplement,
-      private llvm::TrailingObjects<AllocStackInst, SILType, SILLocation,
+      private llvm::TrailingObjects<AllocStackInst, SILLocation,
                                     const SILDebugScope *, Operand, char> {
   friend TrailingObjects;
   friend SILBuilder;
@@ -2194,7 +2194,7 @@ public:
   /// \param complete If true, always retrieve the complete variable with
   /// location, scope, and element type. If false, only return the
   /// values if they are stored (if they are different from the instruction's
-  /// location, scope, and type). This should only be set to false in
+  /// location and scope). This should only be set to false in
   /// SILPrinter. Incomplete var info is unpredictable, as it will sometimes
   /// have location and scope and sometimes not.
   std::optional<SILDebugVariable> getVarInfo(bool complete = true) const {
@@ -2207,9 +2207,7 @@ public:
     std::optional<SILType> AuxVarType;
     std::optional<SILLocation> VarDeclLoc;
     const SILDebugScope *VarDeclScope = nullptr;
-    if (HasAuxDebugVariableType)
-      AuxVarType = *getTrailingObjects<SILType>();
-    else if (complete)
+    if (complete)
       AuxVarType = getElementType();
 
     if (hasAuxDebugLocation())
@@ -5929,6 +5927,13 @@ public:
   /// reconstruction block, returns its return type. Otherwise returns the
   /// SSA operand type.
   SILType getVarType() const;
+
+  /// Returns true if the variable type is the type of the SSA operand, and
+  /// therefore follows a change of the operand's type. Otherwise it's a stored
+  /// type or the return type of a debug reconstruction block.
+  bool varTypeFollowsOperand() const {
+    return !HasAuxDebugVariableType && !getDebugReconstructionBlock();
+  }
 
   /// Return the debug variable information attached to this instruction.
   ///

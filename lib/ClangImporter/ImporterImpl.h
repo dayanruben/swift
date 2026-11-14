@@ -2677,6 +2677,11 @@ Identifier getOperatorName(ASTContext &ctx, clang::OverloadedOperatorKind op);
 /// correspond to an overloaded C++ operator.
 Identifier getOperatorName(ASTContext &ctx, Identifier op);
 
+/// Alternative to \c NominalTypeDecl::lookupDirect for an imported C++ record,
+/// which does not load (and hence deserialize) extensions of \p decl.
+TinyPtrVector<ValueDecl *> lookupDirectWithoutExtensions(NominalTypeDecl *decl,
+                                                         DeclName name);
+
 bool hasSwiftAttribute(const clang::Decl *decl, ArrayRef<StringRef> attrs);
 bool hasOwnedValueAttr(const clang::RecordDecl *decl);
 bool hasUnsafeAPIAttr(const clang::Decl *decl);
@@ -2685,6 +2690,11 @@ bool hasIteratorAPIAttr(const clang::Decl *decl);
 bool hasNonEscapableAttr(const clang::RecordDecl *decl);
 bool hasNonCopyableAttr(const clang::RecordDecl *decl);
 bool hasEscapableAttr(const clang::RecordDecl *decl);
+
+/// Whether the C++ escapability of \p type is known to be non-Escapable. An
+/// unknown escapability does not count.
+bool isNonEscapable(Evaluator &evaluator, const clang::Type *type,
+                    ClangImporter::Implementation *impl);
 
 /// The \c @_refCountedPtr attribute marking \p decl as a reference counting
 /// smart pointer, or null if it does not have one.
@@ -2819,6 +2829,10 @@ const T *getFirstImplicitObjectParamAnnotation(const clang::FunctionDecl *FD) {
   auto attrs = getImplicitObjectParamAnnotations<T>(FD);
   return attrs.empty() ? nullptr : attrs.front();
 }
+
+/// Whether \p method is the dereference operator of \c std::unique_ptr or
+/// \c std::shared_ptr, whose result is imported as depending on \c self.
+bool isSmartPointerDereference(const clang::CXXMethodDecl *method);
 
 /// Compute the foreign reference type info for \p decl without consulting or
 /// populating the \c ForeignReferenceTypeInfoRequest cache.
