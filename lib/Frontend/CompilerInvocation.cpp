@@ -1255,6 +1255,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.EnableWorkaroundBrokenModules
     &= !Args.hasArg(OPT_disable_workaround_broken_modules);
 
+  Opts.DebugDuplicateClosureDiscriminators |=
+      Args.hasArg(OPT_debug_duplicate_closure_discriminators);
+
   // Either the env var and the flag has to be set to enable package interface load
   Opts.EnablePackageInterfaceLoad = Args.hasArg(OPT_experimental_package_interface_load) ||
                                     ::getenv("SWIFT_ENABLE_PACKAGE_INTERFACE_LOAD");
@@ -1425,6 +1428,12 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   if (parseFeatureArgs(Opts, Args, Diags))
     HadError = true;
+
+  // The C++ overlay uses '@unsafe(always)', including in .swiftinterface files
+  // built without the flag, so the feature is always on for it. This also makes
+  // '$AlwaysUnsafeAttribute' true when its interface is rebuilt.
+  if (FrontendOpts.ModuleName == CXX_MODULE_NAME)
+    Opts.enableFeature(Feature::AlwaysUnsafeAttribute);
 
   // '-strict-memory-safety' only enables the diagnostic group, but
   // `#if hasFeature` and the module's strict memory safety flag key on the
