@@ -1,5 +1,5 @@
 // RUN: %target-run-simple-swift(-enable-experimental-feature OnceFunctions) | %FileCheck %s
-// RUN: %target-run-simple-swift(-enable-experimental-feature OnceFunctions -O) | %FileCheck %s
+// RUN: %target-run-simple-swift(-enable-experimental-feature OnceFunctions -O -Xfrontend -sil-verify-all) | %FileCheck %s
 
 // REQUIRES: executable_test
 // REQUIRES: swift_feature_OnceFunctions
@@ -52,3 +52,123 @@ testInlinedThrowing(true, "a")
 // CHECK-NEXT: inlined throwing: caught
 testInlinedThrowing(false, "bc")
 // CHECK-NEXT: inlined throwing: 2
+
+// A function reference passed for an exactly-once parameter that's captured by
+// another exactly-once closure.
+
+@inline(__always)
+func callInlined<R>(_ x: Int, _ body: @once (Int) -> R) -> R {
+  body(x)
+}
+
+@inline(never)
+func forwardToInlined<R>(_ x: Int, _ body: @once (Int) -> R) -> R {
+  callInlined(x) { body($0) }
+}
+
+func increment(_ x: Int) -> Int { x + 1 }
+
+@inline(never)
+func testCapturedFunctionReference(_ x: Int) -> Int {
+  forwardToInlined(x, increment)
+}
+
+print("captured function reference: \(testCapturedFunctionReference(41))")
+// CHECK-NEXT: captured function reference: 42
+
+// A plain closure converted to an exactly-once closure, which is called on one
+// path and forwarded on another.
+
+@inline(never)
+func forwardNoninlined<R>(_ body: @once () -> R) -> R { body() }
+
+@_optimize(none)
+func callUnoptimized<R>(_ body: @once () -> R) -> R { body() }
+
+@inline(__always)
+func callOrForward<R>(_ direct: Bool, _ body: @once () -> R) -> R {
+  if direct { return callUnoptimized(body) }
+  return forwardNoninlined(body)
+}
+
+@inline(never)
+func testCallOrForward(_ direct: Bool, _ body: () -> Int) -> Int {
+  callOrForward(direct, body)
+}
+
+print("call or forward: \(testCallOrForward(true, { 1 })) \(testCallOrForward(false, { 2 }))")
+// CHECK-NEXT: call or forward: 1 2
+
+// Exactly-once closures with heap-allocated re-abstraction thunks, which are
+// forwarded to a generic function.
+
+@inline(__always)
+func forwardToGeneric(_ body: @once () -> Int) -> Int {
+  forwardNoninlined(body)
+}
+
+@inline(never)
+func testForwardCapturingVar(_ y: Int) -> Int {
+  var x = y
+  let r = forwardToGeneric { x += 1; return x }
+  return r + x
+}
+
+print("forward capturing var: \(testForwardCapturingVar(1))")
+// CHECK-NEXT: forward capturing var: 4
+
+@inline(never)
+func forwardEscapingNoninlined<R>(_ body: @escaping @once () -> R) -> R { body() }
+
+@inline(__always)
+func forwardEscapingToGeneric(_ body: @escaping @once () -> Int) -> Int {
+  forwardEscapingNoninlined(body)
+}
+
+final class Counter { var value = 1 }
+
+@inline(never)
+func testForwardEscaping(_ c: Counter) -> Int {
+  forwardEscapingToGeneric { c.value }
+}
+
+print("forward escaping: \(testForwardEscaping(Counter()))")
+// CHECK-NEXT: forward escaping: 1
+
+// An inlined exactly-once closure that consumes a noncopyable capture and is
+// called on either of two paths.
+
+struct Resource: ~Copyable {
+  let tag: String
+  init(_ tag: String) { self.tag = tag }
+  deinit { print("Resource(\(tag)) deinit") }
+}
+
+@inline(never)
+func useResource(_ r: consuming Resource) { print("Resource(\(r.tag)) used") }
+
+@inline(__always)
+func callOnEitherPath(_ first: Bool, _ body: @once () -> Void) {
+  if first {
+    print("first path")
+    body()
+  } else {
+    print("second path")
+    body()
+  }
+}
+
+@inline(never)
+func testCalledOnEitherPath(_ first: Bool, _ tag: String) {
+  let r = Resource(tag)
+  callOnEitherPath(first) { useResource(r) }
+}
+
+testCalledOnEitherPath(true, "either first")
+// CHECK-NEXT: first path
+// CHECK-NEXT: Resource(either first) used
+// CHECK-NEXT: Resource(either first) deinit
+testCalledOnEitherPath(false, "either second")
+// CHECK-NEXT: second path
+// CHECK-NEXT: Resource(either second) used
+// CHECK-NEXT: Resource(either second) deinit

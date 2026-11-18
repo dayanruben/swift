@@ -17,6 +17,7 @@
 #include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/Initializer.h"
 #include "swift/AST/PropertyWrappers.h"
+#include "swift/AST/SwiftNameTranslation.h"
 #include "swift/Basic/Assertions.h"
 #include "swift/Basic/CodeGenerationModel.h"
 #include "swift/ClangImporter/ClangImporter.h"
@@ -24,6 +25,7 @@
 #include "swift/Demangling/ManglingMacros.h"
 #include "swift/SIL/SILLinkage.h"
 #include "swift/SIL/SILLocation.h"
+#include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/Utils/SpecializationMangler.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
@@ -1297,6 +1299,43 @@ bool SILDeclRef::declExposedToForeignLanguage(const ValueDecl *decl) {
   return false;
 }
 
+bool SILDeclRef::declMayBePrintedInCxxHeader(const ValueDecl *decl,
+                                             const SILModule &M) {
+  const auto &options = M.getOptions();
+  if (!options.CxxHeaderMinAccess ||
+      decl->getModuleContext() != M.getSwiftModule())
+    return false;
+  return cxx_translation::mayBePrintedInCxxHeader(
+      decl, *options.CxxHeaderMinAccess, options.CxxHeaderRequiresExposeAttr);
+}
+
+bool SILDeclRef::mayBeCalledFromCxxHeader(const SILModule &M) const {
+  // Check the option first, as this is on the hot path of
+  // SILFunction::isPossiblyUsedExternally.
+  if (!M.getOptions().CxxHeaderMinAccess)
+    return false;
+  auto *decl = getDecl();
+  if (!decl || isForeign || isThunk() || isAutoDiffDerivativeFunction())
+    return false;
+
+  // The header calls methods, allocating initializers, and the getters and
+  // setters of properties and subscripts.
+  switch (kind) {
+  case Kind::Func:
+    if (auto *accessor = dyn_cast<AccessorDecl>(decl)) {
+      if (accessor->getAccessorKind() != AccessorKind::Get &&
+          accessor->getAccessorKind() != AccessorKind::Set)
+        return false;
+    }
+    break;
+  case Kind::Allocator:
+    break;
+  default:
+    return false;
+  }
+  return declMayBePrintedInCxxHeader(decl, M);
+}
+
 bool SILDeclRef::declHasNonUniqueDefinition(const ValueDecl *decl) {
   return decl->hasNonUniqueDefinition();
 }
@@ -1326,11 +1365,11 @@ bool SILDeclRef::isForeignToNativeThunk() const {
   return false;
 }
 
-bool SILDeclRef::isForeignReferenceInitializer() const {
-  if (!isForeign || kind != Kind::Initializer || !hasDecl())
+bool SILDeclRef::isCXXForeignReferenceInitializer() const {
+  if (!isForeign || kind != Kind::Initializer)
     return false;
-  auto ctor = dyn_cast<ConstructorDecl>(getDecl());
-  if (!ctor || !ctor->hasClangNode())
+  auto ctor = cast<ConstructorDecl>(getDecl());
+  if (!ctor->hasClangNode())
     return false;
   auto classDecl = ctor->getDeclContext()->getSelfClassDecl();
   if (!classDecl || !classDecl->isForeignReferenceType())
@@ -1607,10 +1646,20 @@ std::optional<std::string> SILDeclRef::getAsmName() const {
   if (isAutoDiffDerivativeFunction())
     return std::nullopt;
 
-  // The Clang decl of a C++ foreign reference type's initializer is the static
-  // factory it was imported from, which is not the initializing entry point.
-  if (isForeignReferenceInitializer())
-    return std::nullopt;
+  // The initializing entry point of a constructor of a C++ foreign reference
+  // type is the base-object variant of the C++ constructor. Mangle that rather
+  // than the Clang decl of the Swift initializer, which is the static factory
+  // that the initializer was imported from.
+  if (isCXXForeignReferenceInitializer()) {
+    auto &ctx = getASTContext();
+    auto importer = static_cast<ClangImporter *>(ctx.getClangModuleLoader());
+    auto cxxCtorDecl = importer->getOriginalForeignReferenceConstructor(
+        cast<ConstructorDecl>(getDecl()));
+    std::string storage;
+    llvm::raw_string_ostream SS(storage);
+    importer->getMangledBaseObjectConstructorName(SS, cxxCtorDecl);
+    return storage;
+  }
 
   if (hasDecl() && !isDefaultArgGenerator() &&
       (getDecl()->getClangDecl() || getDecl()->getImplementedObjCDecl())) {

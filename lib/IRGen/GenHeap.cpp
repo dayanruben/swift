@@ -807,12 +807,6 @@ HeapLayout::computeTypedMallocTypeDescriptor(IRGenModule &IGM) const {
   }
   llvm::SmallVector<SILType> storageEntries;
 
-  auto rawPointerType = SILType::getRawPointerType(IGM.Context);
-
-  // Add the heap header as the first entry
-  storageEntries.push_back(rawPointerType);
-  storageEntries.push_back(rawPointerType);
-
   for (auto elType : ElementTypes) {
     if (!elType) {
       // FIXME: In partial function application, the bindings get stored as
@@ -823,7 +817,8 @@ HeapLayout::computeTypedMallocTypeDescriptor(IRGenModule &IGM) const {
     storageEntries.push_back(elType.getObjectType());
   }
 
-  return ::computeTypedMallocTypeDescriptor(IGM, storageEntries);
+  return ::computeTypedMallocTypeDescriptor(IGM, HeapHeaderKind::Swift,
+                                            storageEntries);
 }
 
 /// Emit a static initializer that makes the runtime initialize the header of
@@ -2588,15 +2583,32 @@ uint64_t getTypedMemoryDescriptorStableSipHash(StringRef Str) {
 } // namespace
 
 std::optional<uint64_t> irgen::computeTypedMallocTypeDescriptor(
-    IRGenModule &IGM, llvm::SmallVectorImpl<SILType> &fieldTypes,
-    bool isArray) {
+    IRGenModule &IGM, HeapHeaderKind header,
+    llvm::SmallVectorImpl<SILType> &fieldTypes,
+    TypedMemoryCallsiteFlags callsiteFlags,
+    ArrayRef<SILType> tailElementTypes) {
   if (!IGM.isTypedAllocationAvailable()) {
     return std::nullopt;
   }
 
+  llvm::SmallVector<SILType, 8> storageEntries;
+  auto rawPointerType = SILType::getRawPointerType(IGM.Context);
+  switch (header) {
+  case HeapHeaderKind::None:
+    break;
+  case HeapHeaderKind::ObjC:
+    storageEntries.push_back(rawPointerType);
+    break;
+  case HeapHeaderKind::Swift:
+    storageEntries.push_back(rawPointerType);
+    storageEntries.push_back(rawPointerType);
+    break;
+  }
+  storageEntries.append(fieldTypes.begin(), fieldTypes.end());
+
   llvm::SmallVector<LayoutSemanticsSpan, 4> layoutProperties;
   uint64_t offset = 0;
-  for (auto fieldType : fieldTypes) {
+  for (auto fieldType : storageEntries) {
     auto &fieldTI = IGM.getTypeInfo(fieldType);
     auto *fieldTLE =
         fieldTI.buildTypeLayoutEntry(IGM, fieldType, /*useStructLayouts*/ true);
@@ -2623,6 +2635,37 @@ std::optional<uint64_t> irgen::computeTypedMallocTypeDescriptor(
 
     offset += fieldTLE->fixedSize(IGM)->getValue();
   }
+
+  // The tail element types form a union: they all start at the same offset,
+  // aligned for all of them.
+  llvm::SmallVector<TypeLayoutEntry *, 4> tailElementTLEs;
+  uint64_t unionAlignmentMask = 0, unionSize = 0;
+  for (auto tailElementType : tailElementTypes) {
+    auto &tailElementTI = IGM.getTypeInfo(tailElementType);
+    auto *tailElementTLE =
+        tailElementTI.buildTypeLayoutEntry(IGM, tailElementType,
+                                           /*useStructLayouts*/ true);
+    if (!tailElementTLE->isFixedSize(IGM)) {
+      return std::nullopt;
+    }
+    tailElementTLEs.push_back(tailElementTLE);
+    unionAlignmentMask =
+        std::max(unionAlignmentMask,
+                 tailElementTLE->fixedAlignment(IGM)->getMaskValue());
+    unionSize = std::max(unionSize, tailElementTLE->fixedSize(IGM)->getValue());
+  }
+  uint64_t unionOffset = (offset + unionAlignmentMask) & ~unionAlignmentMask;
+  if (unionOffset > offset) {
+    layoutProperties.push_back({offset, unionOffset - offset,
+                                TypedMemoryLayoutSemantics::GenericData});
+  }
+  for (auto *tailElementTLE : tailElementTLEs) {
+    if (!tailElementTLE->computeLayoutSemantics(IGM, unionOffset,
+                                                layoutProperties)) {
+      return std::nullopt;
+    }
+  }
+  offset = unionOffset + unionSize;
 
   llvm::stable_sort(layoutProperties,
                     [&](LayoutSemanticsSpan L, LayoutSemanticsSpan R) {
@@ -2662,7 +2705,7 @@ std::optional<uint64_t> irgen::computeTypedMallocTypeDescriptor(
       getTypedMemoryDescriptorStableSipHash(layoutString) & 0xffffffff;
 
   uint64_t summary = 0; // Version 0
-  summary |= (isArray ? 2 : 1) << 6; // Callsite flags: Array | FixedSize
+  summary |= uint64_t(callsiteFlags) << 6; // Callsite flags
   summary |= 2 << 10;   // Type kind: Swift
   summary |= ((uint64_t)layoutSemantics) << 16;
 

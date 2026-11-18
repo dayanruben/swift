@@ -659,7 +659,7 @@ protected:
     IsDebuggerAlias : 1
   );
 
-  SWIFT_INLINE_BITFIELD(NominalTypeDecl, GenericTypeDecl, 1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD(NominalTypeDecl, GenericTypeDecl, 1+1+1+1+1+1,
     /// Whether we have already added implicitly-defined initializers
     /// to this declaration.
     AddedImplicitInitializers : 1,
@@ -674,7 +674,10 @@ protected:
     HasDestructorComputed : 1,
 
     /// Whether we have a user-defined deinit.
-    HasDestructor : 1
+    HasDestructor : 1,
+
+    /// Whether this type exposes a foreign type that Swift code must not use.
+    NoExposedUnusableForeignTypes : 1
   );
 
   SWIFT_INLINE_BITFIELD_FULL(ProtocolDecl, NominalTypeDecl, 1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+8,
@@ -4740,6 +4743,7 @@ protected:
     Bits.NominalTypeDecl.IsComputingSemanticMembers = false;
     Bits.NominalTypeDecl.HasDestructorComputed = false;
     Bits.NominalTypeDecl.HasDestructor = false;
+    Bits.NominalTypeDecl.NoExposedUnusableForeignTypes = false;
     ExtensionGeneration = 0;
   }
 
@@ -4829,6 +4833,15 @@ public:
   /// Note that we have attempted to add implicit initializers.
   void setAddedImplicitInitializers() {
     Bits.NominalTypeDecl.AddedImplicitInitializers = true;
+  }
+
+  /// Whether this type is known not to expose an unusable foreign type.
+  bool hasNoExposedUnusableForeignTypes() const {
+    return Bits.NominalTypeDecl.NoExposedUnusableForeignTypes;
+  }
+
+  void setNoExposedUnusableForeignTypes() {
+    Bits.NominalTypeDecl.NoExposedUnusableForeignTypes = true;
   }
 
   /// getDeclaredType - Retrieve the type declared by this entity, without
@@ -5573,6 +5586,10 @@ public:
   /// Retrieve the ClassDecl for the superclass of this class, or null if there
   /// is no superclass.
   ClassDecl *getSuperclassDecl() const;
+
+  /// The `@_tailAllocated` attribute of this class or of its nearest superclass
+  /// that has one, and the class it is attached to; {nullptr, nullptr} if none.
+  std::pair<TailAllocatedAttr *, ClassDecl *> getTailAllocatedAttr() const;
 
   /// Check if this class is a superclass or equal to the given class.
   bool isSuperclassOf(const ClassDecl *other) const;
@@ -6535,6 +6552,7 @@ public:
       case StorageMutability::Initializable:
         return true;
     }
+    llvm_unreachable("covered switch");
   }
 
   /// Determine the mutability of this storage declaration when
@@ -6568,6 +6586,7 @@ public:
       case StorageMutability::Initializable:
         return true;
     }
+    llvm_unreachable("covered switch");
   }
 
   /// Does this storage declaration have explicitly-defined accessors
@@ -6903,6 +6922,7 @@ public:
     case VarDecl::Introducer::Borrowing:
       return "_borrowing";
     }
+    llvm_unreachable("covered switch");
   }
 
 protected:

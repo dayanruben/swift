@@ -523,6 +523,7 @@ void checkCircularOpaqueReturnTypeDecl(OpaqueTypeDecl *opaqueDecl);
 
 void addImplicitDynamicAttribute(Decl *D);
 void checkDeclAttributes(Decl *D);
+void checkTailAllocatedCounts(ClassDecl *classDecl);
 void checkDeclABIAttribute(Decl *apiDecl, ABIAttr *abiAttr);
 void checkClosureAttributes(ClosureExpr *closure);
 void checkParameterList(ParameterList *params, DeclContext *owner);
@@ -1193,6 +1194,12 @@ FuncDecl *getForEachIteratorNextFunction(
 /// Otherwise, return nil.
 VarDecl *getSelfForInitDelegationInConstructor(DeclContext *DC,
                                                UnresolvedDotExpr *UDE);
+
+/// If an initializer of a C++ foreign reference type called with `super.init`
+/// from a Swift subclass cannot construct the base subobject of the subclass,
+/// diagnose it.
+bool diagnoseForeignReferenceSuperInit(ConstructorDecl *ctor, SourceLoc loc,
+                                       bool implicitlyGenerated);
 
 /// Diagnose assigning variable to itself.
 bool diagnoseSelfAssignment(const Expr *E);

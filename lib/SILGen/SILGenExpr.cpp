@@ -5726,7 +5726,7 @@ bool SILGenFunction::isInitDelegationBorrowingSelf() const {
   auto otherCtor = rebind->getCalledConstructor(isChaining)->getDecl();
   return isChaining && SILDeclRef(otherCtor, SILDeclRef::Kind::Initializer)
                            .asForeign(requiresForeignEntryPoint(otherCtor))
-                           .isForeignReferenceInitializer();
+                           .isCXXForeignReferenceInitializer();
 }
 
 /// Emit the builtin that points the C++ v-table pointers of \p self, a Swift
@@ -6937,6 +6937,16 @@ void SILGenFunction::emitOpenExistentialExprImpl(
       LValue lv = emitLValue(load->getSubExpr(),
                              SGFAccessKind::BorrowedAddressRead);
       existentialValue = emitBorrowedLValue(load, std::move(lv));
+    }
+    // Do the same for a reference to a locally-mutable parameter that is implicitly
+    // loaded from.
+    if (auto dr = dyn_cast<DeclRefExpr>(existentialExpr)) {
+      auto pd = dyn_cast<ParamDecl>(dr->getDecl());
+      if (pd && pd->getIntroducer() == VarDecl::Introducer::Var) {
+        LValue lv = emitLValue(dr,
+                               SGFAccessKind::BorrowedAddressRead);
+        existentialValue = emitBorrowedLValue(dr, std::move(lv));
+      }
     }
   }
 
