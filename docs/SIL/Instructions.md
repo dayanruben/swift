@@ -27,9 +27,9 @@ address of the allocated memory.
 `alloc_stack` always allocates memory on the stack even for
 runtime-sized type.
 
-`alloc_stack` is a stack allocation instruction. See the section above
-on stack discipline. The corresponding stack deallocation instruction is
-`dealloc_stack`.
+`alloc_stack` is a stack allocation instruction. See [Stack
+Discipline](SIL.md#stack-discipline). The corresponding stack deallocation
+instruction is `dealloc_stack`.
 
 The `dynamic_lifetime` attribute specifies that the initialization and
 destruction of the stored value cannot be verified at compile time. This
@@ -68,9 +68,9 @@ Allocates uninitialized memory on the stack for a value pack of the
 given type, which must be a pack type. The result of the instruction is
 the address of the allocated memory.
 
-`alloc_pack` is a stack allocation instruction. See the section above on
-stack discipline. The corresponding stack deallocation instruction is
-`dealloc_pack`.
+`alloc_pack` is a stack allocation instruction. See [Stack
+Discipline](SIL.md#stack-discipline). The corresponding stack deallocation
+instruction is `dealloc_pack`.
 
 ### alloc_pack_metadata
 
@@ -81,9 +81,9 @@ sil-instruction ::= 'alloc_pack_metadata' $()
 Inserted as the last SIL lowering pass of IRGen, indicates that the next
 instruction may have on-stack pack metadata allocated on its behalf.
 
-Notionally, `alloc_pack_metadata` is a stack allocation instruction. See
-the section above on stack discipline. The corresponding stack
-deallocation instruction is `dealloc_pack_metadata`.
+Notionally, `alloc_pack_metadata` is a stack allocation instruction. See [Stack
+Discipline](SIL.md#stack-discipline). The corresponding stack deallocation
+instruction is `dealloc_pack_metadata`.
 
 Only valid in Lowered SIL.
 
@@ -2923,7 +2923,9 @@ signature). Instead:
     that are passed directly and the noncopyable address-only values that
     are passed as `@in` arguments. The `partial_apply` consumes such an 
     `@in` argument, which leaves its memory uninitialized, and the caller
-    has nothing left to destroy.
+    has nothing left to destroy. Like any other on-stack context, it
+    borrows the values that the closure doesn't consume, whether or not
+    they are Copyable.
 2.  If the `partial_apply` has an escaping function type (not
     `[on_stack]`) then the closure context will be heap allocated with a
     retain count of 1. Any closed over parameters (except for `@inout`
@@ -4374,9 +4376,10 @@ These instructions are collectively called the *pack indexing
 instructions*. Each of them produces a single value of type
 `Builtin.PackIndex`. Instructions that consume pack indices generally
 provide a projected element type which is required to be structurally
-well-typed for the given pack index and the actual pack type they index
-into. This rule depends on the exact pack indexing instruction used and
-is described in a section above.
+well-typed for the given pack index and the actual pack type they
+index into. This rule depends on the exact pack indexing instruction
+used and is described in [Structural type matching for pack
+indices](SIL.md#structural-type-matching-for-pack-indices).
 
 All pack indexing instructions carry an **indexed pack type**, which is
 a formal type that must be a pack type. Pack indexing instructions can
@@ -5242,7 +5245,8 @@ sil-terminator ::= 'return_borrow' sil-operand 'from_scopes' '(' (sil-operand ('
 
 return_borrow %0 : $T from_scopes (%1, %2 ...)
 // %0 must be a @guaranteed value
-// %1, %2, ... must be borrow introducers for %0, like `load_borrow`
+// %1, %2, ... must be borrow introducers for %0, like `load_borrow`,
+//   ordered from inner to outer
 // $T must be the return type of the current function
 ```
 

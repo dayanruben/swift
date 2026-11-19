@@ -901,6 +901,7 @@ struct BridgedInstruction {
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedConformanceArray InitExistentialMetatypeInst_getConformances() const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedCanType InitExistentialMetatypeInst_getFormalConcreteType() const;
   BRIDGED_INLINE bool OpenExistentialAddr_isImmutable() const;
+  BRIDGED_INLINE void OpenExistentialAddr_setImmutable(bool immutable) const;
   BRIDGED_INLINE BridgedGenericEnvironment OpenExistentialRefInst_getDefinedGenericEnvironment() const;
   BRIDGED_INLINE BridgedGenericEnvironment
   OpenCOMExistentialInst_getDefinedGenericEnvironment() const;
@@ -1519,6 +1520,7 @@ struct BridgedBuilder{
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createReturnBorrow(BridgedValue op,
                                                                            BridgedValueArray enclosingValues) const;
   SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createThrow(BridgedValue op) const;
+  SWIFT_IMPORT_UNSAFE BRIDGED_INLINE BridgedInstruction createThrowAddr() const;
   SWIFT_IMPORT_UNSAFE BridgedInstruction createSwitchEnumInst(BridgedValue enumVal,
                                           OptionalBridgedBasicBlock defaultBlock,
                                           const void * _Nullable enumCases, SwiftInt numEnumCases) const;

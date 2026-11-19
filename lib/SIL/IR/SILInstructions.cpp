@@ -1132,6 +1132,16 @@ PartialApplyInst::PartialApplyInst(
   sharedUInt8().PartialApplyInst.isNested = uint8_t(IsNested);
 }
 
+bool PartialApplyInst::contextBorrowsArgument(const Operand &argOp) const {
+  if (!isOnStack() || argOp.get()->getType().isAddress())
+    return false;
+  if (!isNoncopyable())
+    return true;
+  return !ApplySite(const_cast<PartialApplyInst *>(this))
+              .getArgumentConvention(argOp)
+              .isOwnedConventionInCaller();
+}
+
 PartialApplyInst *PartialApplyInst::create(
     SILDebugLocation Loc, SILValue Callee, ArrayRef<SILValue> Args,
     SubstitutionMap Subs, ParameterConvention calleeConvention,
@@ -4127,7 +4137,8 @@ ReturnBorrowInst *ReturnBorrowInst::create(SILDebugLocation DebugLoc,
 ReturnBorrowInst::ReturnBorrowInst(SILDebugLocation DebugLoc,
                                    ArrayRef<SILValue> operands)
     : InstructionBaseWithTrailingOperands(operands, DebugLoc) {
-  assert(operands[0]->getOwnershipKind() == OwnershipKind::Guaranteed);
+  assert(operands[0]->getType().isAddress() ||
+         operands[0]->getOwnershipKind() == OwnershipKind::Guaranteed);
 }
 
 // This may be called in an invalid SIL state. SILCombine creates new

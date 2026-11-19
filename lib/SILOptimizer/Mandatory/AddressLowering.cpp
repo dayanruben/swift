@@ -2789,6 +2789,7 @@ protected:
       case FullApplySiteKind::TryApplyInst:
         return cast<TryApplyInst>(apply)->getErrorBB()->begin();
     }
+    llvm_unreachable("covered switch");
   }
 
   void makeIndirectArgs(MutableArrayRef<SILValue> newCallArgs);
@@ -3008,6 +3009,7 @@ SILBasicBlock::iterator ApplyRewriter::getResultInsertionPoint() {
     llvm_unreachable("coroutines don't have indirect results");
   }
   }
+  llvm_unreachable("covered switch");
 }
 
 /// Return the storage address for the indirect output corresponding to the
@@ -4057,10 +4059,12 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::CanBeObjCClass:
   case BuiltinValueKind::CopyArray:
   case BuiltinValueKind::CreateAsyncTask:
+  case BuiltinValueKind::CreateSplitContinuation:
   case BuiltinValueKind::CreateTaskGroup:
   case BuiltinValueKind::CreateTaskGroupWithFlags:
   case BuiltinValueKind::DeallocRawTyped:
   case BuiltinValueKind::DestroyArray:
+  case BuiltinValueKind::DestroySplitContinuation:
   case BuiltinValueKind::GetObjCTypeEncoding:
   case BuiltinValueKind::InitializeDistributedRemoteActor:
   case BuiltinValueKind::InjectEnumTag:
@@ -4098,6 +4102,7 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::AddTaskLocalValue:
   case BuiltinValueKind::AddressOfRawLayout:
   case BuiltinValueKind::GetEnumTag:
+  case BuiltinValueKind::GetSplitContinuationAddr:
   case BuiltinValueKind::ResumeNonThrowingContinuationReturning:
   case BuiltinValueKind::ResumeThrowingContinuationReturning:
   case BuiltinValueKind::TaskLocalValuePush:
@@ -6136,6 +6141,16 @@ void swift::lowerAddress(SILPassManager *pm, SILFunction *function) {
 
   allocator.sinkProjections();
 
+  // Mark the function lowered now, so its conventions and verification see
+  // address form immediately.
+  //
+  // This must happen before deleting the rewritten instructions. Deleting an
+  // instruction kills its debug uses, and a killed debug_value of an
+  // address-only type keeps its address form only once the function has lowered
+  // addresses. Otherwise, it is left as an object-typed undef, which the
+  // verifier rejects.
+  function->setHasLoweredAddresses(true);
+
   deleteRewrittenInstructions(pass);
 
   StackNesting::fixNesting(function);
@@ -6144,11 +6159,6 @@ void swift::lowerAddress(SILPassManager *pm, SILFunction *function) {
   // createStackAllocation or StackNesting.
   pm->invalidateAnalysis(
       function, SILAnalysis::InvalidationKind::BranchesAndInstructions);
-
-  // Mark the function lowered now, so its conventions and verification see
-  // address form immediately (the module stage only reaches Canonical after all
-  // diagnostic passes; see runSILDiagnosticPasses in Passes.cpp).
-  function->setHasLoweredAddresses(true);
 }
 
 //===----------------------------------------------------------------------===//

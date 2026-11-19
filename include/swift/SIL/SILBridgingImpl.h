@@ -614,6 +614,7 @@ swift::ValueOwnershipKind BridgedValue::unbridge(Ownership ownership) {
     case BridgedValue::Ownership::Guaranteed: return swift::OwnershipKind::Guaranteed;
     case BridgedValue::Ownership::None:       return swift::OwnershipKind::None;
   }
+  llvm_unreachable("covered switch");
 }
 
 swift::ValueBase * _Nonnull BridgedValue::getSILValue() const {
@@ -1604,6 +1605,12 @@ bool BridgedInstruction::OpenExistentialAddr_isImmutable() const {
     case swift::OpenedExistentialAccess::Immutable: return true;
     case swift::OpenedExistentialAccess::Mutable: return false;
   }
+}
+
+void BridgedInstruction::OpenExistentialAddr_setImmutable(bool immutable) const {
+  getAs<swift::OpenExistentialAddrInst>()->setAccessKind(
+      immutable ? swift::OpenedExistentialAccess::Immutable
+                : swift::OpenedExistentialAccess::Mutable);
 }
 
 BridgedGenericEnvironment BridgedInstruction::OpenExistentialRefInst_getDefinedGenericEnvironment() const {
@@ -2868,6 +2875,7 @@ swift::SILBuilder BridgedBuilder::unbridged() const {
   case BridgedBuilder::InsertAt::intoGlobal:
     return swift::SILBuilder(BridgedGlobalVar(insertionObj).getGlobal());
   }
+  llvm_unreachable("covered switch");
 }
 
 swift::SILLocation BridgedBuilder::regularLoc() const {
@@ -3291,6 +3299,10 @@ BridgedInstruction BridgedBuilder::createReturnBorrow(BridgedValue op,
 
 BridgedInstruction BridgedBuilder::createThrow(BridgedValue op) const {
   return {unbridged().createThrow(regularLoc(), op.getSILValue())};
+}
+
+BridgedInstruction BridgedBuilder::createThrowAddr() const {
+  return {unbridged().createThrowAddr(regularLoc())};
 }
 
 BridgedInstruction BridgedBuilder::createUncheckedEnumData(BridgedValue enumVal, SwiftInt caseIdx,

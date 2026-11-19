@@ -1195,6 +1195,12 @@ class DeinitExistentialValueInst : Instruction {}
 final public
 class OpenExistentialAddrInst : SingleValueInstruction, UnaryInstruction {
   public var isImmutable: Bool { bridged.OpenExistentialAddr_isImmutable() }
+
+  public func set(isImmutable: Bool, context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.OpenExistentialAddr_setImmutable(isImmutable)
+    context.notifyInstructionChanged(self)
+  }
 }
 
 final public
@@ -1820,6 +1826,15 @@ final public class ApplyInst : SingleValueInstruction, FullApplySite {
       return nil
     }
     return selfAddress
+  }
+
+  /// The object-typed self of a borrow or mutate accessor with an address result.
+  public var selfObjectOfBorrowMutateAccessorAddressResult: Value? {
+    guard functionConvention.hasAddressResult,
+          let selfObject = selfArgument, !selfObject.type.isAddress else {
+      return nil
+    }
+    return selfObject
   }
 }
 

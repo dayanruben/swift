@@ -593,6 +593,13 @@ OperandOwnershipClassifier::visitFullApply(FullApplySite apply) {
   if (getValue()->getType().isAddress()) {
     return OperandOwnership::TrivialUse;
   }
+  // The object self of a borrow or mutate accessor with an address result is
+  // an InteriorPointerOperand.
+  if (auto *ai = dyn_cast<ApplyInst>(apply.getInstruction())) {
+    if (ai->getSelfObjectOfAddressBorrowMutateAccessorResult() == &op) {
+      return OperandOwnership::AnyInteriorPointer;
+    }
+  }
   auto calleeTy = apply.getSubstCalleeType();
   SILArgumentConvention argConv = [&]() {
     if (apply.isCalleeOperand(op)) {
@@ -662,16 +669,10 @@ OperandOwnershipClassifier::visitPartialApplyInst(PartialApplyInst *i) {
       return OperandOwnership::TrivialUse;
     }
 
-    if (i->isNoncopyable()) {
-      auto argConv = ApplySite(i).getArgumentConvention(op);
-      // Borrowed non-Copyable captures aren't owned by the closure.
-      if (operandTy.isMoveOnly() && !argConv.isOwnedConventionInCaller())
-        return OperandOwnership::Borrow;
-      // ... the rest of the operands are consumed.
-      return OperandOwnership::ForwardingConsume;
-    }
-
-    return OperandOwnership::Borrow;
+    // A noncopyable closure's context owns, and so consumes, the values that
+    // the closure consumes.
+    return i->contextBorrowsArgument(op) ? OperandOwnership::Borrow
+                                         : OperandOwnership::ForwardingConsume;
   }
   // All non-trivial types should be captured.
   return OperandOwnership::ForwardingConsume;
@@ -709,8 +710,12 @@ OperandOwnership OperandOwnershipClassifier::visitReturnInst(ReturnInst *i) {
 
 OperandOwnership
 OperandOwnershipClassifier::visitReturnBorrowInst(ReturnBorrowInst *rbi) {
-  return getOperandIndex() == 0 ? OperandOwnership::GuaranteedForwarding
-                                : OperandOwnership::EndBorrow;
+  if (getOperandIndex() != 0) {
+    return OperandOwnership::EndBorrow;
+  }
+  return getValue()->getType().isAddress()
+             ? OperandOwnership::TrivialUse
+             : OperandOwnership::GuaranteedForwarding;
 }
 
 OperandOwnership OperandOwnershipClassifier::visitAssignInst(AssignInst *i) {
@@ -1202,6 +1207,12 @@ OperandOwnershipBuiltinClassifier::visitTaskPushDeadline(BuiltinInst *bi,
 
 // Trivial use since our operand is just an UnsafeRawPointer.
 BUILTIN_OPERAND_OWNERSHIP(TrivialUse, TaskPopDeadline)
+
+BUILTIN_OPERAND_OWNERSHIP(TrivialUse, CreateSplitContinuation)
+// The resume buffer is passed by address, and address operands are trivial at
+// the SIL level.
+BUILTIN_OPERAND_OWNERSHIP(TrivialUse, GetSplitContinuationAddr)
+BUILTIN_OPERAND_OWNERSHIP(TrivialUse, DestroySplitContinuation)
 
 #undef BUILTIN_OPERAND_OWNERSHIP
 

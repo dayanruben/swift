@@ -3428,7 +3428,7 @@ public:
 
   /// If this is a borrow or mutate accessor with an address result and an
   /// address-typed self, return the self operand. Otherwise return nullptr.
-  Operand *getAddressSelfOfAddressBorrowMutateAccessorResult() {
+  Operand *getSelfAddressOfAddressBorrowMutateAccessorResult() {
     if (!hasAddressResult() || !hasSelfArgument()) {
       return nullptr;
     }
@@ -3437,6 +3437,29 @@ public:
       return nullptr;
     }
     return &selfOperand;
+  }
+
+  /// If this is a borrow or mutate accessor with an address result and an
+  /// object-typed self, return the self operand.
+  Operand *getSelfObjectOfAddressBorrowMutateAccessorResult() {
+    if (!hasAddressResult() || !hasSelfArgument()) {
+      return nullptr;
+    }
+    Operand &selfOperand = getSelfArgumentOperand();
+    if (!selfOperand.get()->getType().isObject()) {
+      return nullptr;
+    }
+    return &selfOperand;
+  }
+
+  /// If the result of a borrow or mutate accessor depends on an object-typed
+  /// self, return the self operand: a non-trivial @guaranteed result borrows
+  /// self, and an address result is an interior pointer of self.
+  Operand *getSelfObjectOfBorrowMutateAccessorResult() {
+    if (auto *selfOperand = getSelfObjectOfGuaranteedBorrowAccessorResult()) {
+      return selfOperand;
+    }
+    return getSelfObjectOfAddressBorrowMutateAccessorResult();
   }
 
   bool hasInoutResult() const { return getSubstCalleeConv().hasInoutResult(); }
@@ -3504,6 +3527,16 @@ public:
   /// Returns true if the resulting closure can't be copied. See
   /// `SILFunctionType::isNoncopyable()`.
   bool isNoncopyable() const { return getFunctionType()->isNoncopyable(); }
+
+  /// Returns true if this closure's on-stack context borrows the value
+  /// argument \p argOp instead of owning it.
+  ///
+  /// An on-stack context borrows each value argument, except that the context
+  /// of a noncopyable closure owns the values that the closure consumes.
+  /// Always false for an escaping closure, whose context owns its value
+  /// arguments, and for an address argument, whose ownership follows from its
+  /// convention.
+  bool contextBorrowsArgument(const Operand &argOp) const;
 
   /// Returns true if calling the resulting closure consumes it. See
   /// `SILFunctionType::isCallConsuming()`.
@@ -10022,6 +10055,7 @@ public:
     case CheckKind::InitableButNotConsumable:
       return true;
     }
+    llvm_unreachable("covered switch");
   }
 
   IsStrict_t isStrict() const {
