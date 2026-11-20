@@ -120,6 +120,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileCollector.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/IOSandbox.h"
 #include "llvm/Support/Memory.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/PrefixMapper.h"
@@ -522,16 +523,31 @@ static inline bool isPCHFilenameExtension(StringRef path) {
     .ends_with(file_types::getExtension(file_types::TY_PCH));
 }
 
+/// Disables the IO sandbox for running the Clang driver, which is not
+/// sandboxed, as in clang. A direct cc1 module build only runs the driver to
+/// compute the code generation options for -clang-target.
+static llvm::sys::sandbox::ScopedSetting
+bypassSandboxForClangDriver(const ASTContext &ctx) {
+  ASSERT((!ctx.ClangImporterOpts.DirectClangCC1ModuleBuild ||
+          ctx.LangOpts.ClangTarget.has_value()) &&
+         "direct cc1 module build should not run the Clang driver");
+  return llvm::sys::sandbox::scopedDisable();
+}
+
 /// Returns the set of sanitizers Clang's driver considers supported for
 /// \p triple.
 static clang::SanitizerMask
-getClangSupportedSanitizers(const llvm::Triple &triple) {
+getClangSupportedSanitizers(const ASTContext &ctx, const llvm::Triple &triple) {
+  auto BypassSandbox = bypassSandboxForClangDriver(ctx);
+  auto VFS = ctx.SourceMgr.getFileSystem();
+
   clang::DiagnosticOptions diagOpts;
   auto diagIDs = llvm::makeIntrusiveRefCnt<clang::DiagnosticIDs>();
   clang::DiagnosticsEngine clangDiags(diagIDs, diagOpts,
                                       new clang::IgnoringDiagConsumer(),
                                       /*ShouldOwnClient=*/true);
-  clang::driver::Driver driver("clang", triple.str(), clangDiags);
+  clang::driver::Driver driver("clang", triple.str(), clangDiags,
+                               "clang LLVM compiler", std::move(VFS));
   driver.setCheckInputsExist(false);
   std::string targetArg = "--target=" + triple.str();
   llvm::SmallVector<const char *, 8> argv = {
@@ -600,7 +616,7 @@ void importer::getNormalInvocationArguments(
   // If there are no shims in the resource dir, add a search path in the SDK.
   SmallString<128> shimsPath(searchPathOpts.RuntimeResourcePath);
   llvm::sys::path::append(shimsPath, "shims");
-  if (!llvm::sys::fs::exists(shimsPath)) {
+  if (!ctx.SourceMgr.getFileSystem()->exists(shimsPath)) {
     shimsPath = searchPathOpts.getSDKPath();
     llvm::sys::path::append(shimsPath, "usr", "lib", "swift", "shims");
     llvm::append_values(invocationArgStrs, "-isystem",
@@ -694,7 +710,8 @@ void importer::getNormalInvocationArguments(
   // already captured by the dependency scanner and command-line module map
   // files are dropped, so don't add the shim module map.
   if (LangOpts.EnableCXXInterop && !ctx.CASOpts.HasImmutableFileSystem) {
-    if (auto path = getCxxShimModuleMapPath(searchPathOpts, LangOpts, triple)) {
+    if (auto path = getCxxShimModuleMapPath(searchPathOpts, LangOpts, triple,
+                                            *ctx.SourceMgr.getFileSystem())) {
       invocationArgStrs.push_back((Twine("-fmodule-map-file=") + *path).str());
     }
   }
@@ -934,7 +951,8 @@ void importer::getNormalInvocationArguments(
   // would error out with "unsupported option '-fsanitize=...' for target ...".
   auto &enabledSanitizers = ctx.SILOpts.Sanitizers;
   if (enabledSanitizers) {
-    clang::SanitizerMask clangSupported = getClangSupportedSanitizers(triple);
+    clang::SanitizerMask clangSupported =
+        getClangSupportedSanitizers(ctx, triple);
     if ((enabledSanitizers & SanitizerKind::Address) &&
         (clangSupported & clang::SanitizerKind::Address))
       invocationArgStrs.push_back("-fsanitize=address");
@@ -1169,7 +1187,7 @@ void importer::addCommonInvocationArguments(
 }
 
 bool ClangImporter::canReadPCH(StringRef PCHFilename) {
-  if (!llvm::sys::fs::exists(PCHFilename))
+  if (!Impl.SwiftContext.SourceMgr.getFileSystem()->exists(PCHFilename))
     return false;
 
   // FIXME: The following attempts to do an initial ReadAST invocation to verify
@@ -1539,7 +1557,10 @@ std::unique_ptr<clang::CompilerInvocation> ClangImporter::createClangInvocation(
     CIOpts.Diags = clangDiags;
     CIOpts.RecoverOnError = false;
     CIOpts.ProbePrecompiled = true;
-    CI = clang::createInvocation(invocationArgs, std::move(CIOpts));
+    {
+      auto BypassSandbox = bypassSandboxForClangDriver(ctx);
+      CI = clang::createInvocation(invocationArgs, std::move(CIOpts));
+    }
     if (!CI)
       return nullptr;
 
@@ -6864,9 +6885,10 @@ synthesizeBaseClassMethodBody(AbstractFunctionDecl *afd, void *context) {
                               ? LValueType::get(param->getTypeInContext())
                               : param->getTypeInContext());
 
-    forwardingParams.push_back(param->isInOut()
-                                   ? Argument::implicitInOut(ctx, paramRefExpr)
-                                   : Argument::unlabeled(paramRefExpr));
+    auto arg = param->isInOut() ? Argument::implicitInOut(ctx, paramRefExpr)
+                                : Argument::unlabeled(paramRefExpr);
+    arg.setLabel(param->getArgumentName());
+    forwardingParams.push_back(arg);
   }
 
   Argument selfArg = [&]() {
@@ -7475,9 +7497,23 @@ static ValueDecl *cloneBaseMemberDecl(ClangImporter::Implementation &Impl,
 
     // The synthesized body forwards every parameter to the base method.
     SmallVector<ParamDecl *, 4> params;
-    for (auto [index, param] : llvm::enumerate(*fn->getParameters()))
-      params.push_back(SwiftDeclSynthesizer::cloneParamForForwarding(
-          context, param, "__param" + Twine(index)));
+    params.reserve(fn->getParameters()->size());
+    for (auto [index, param] : llvm::enumerate(*fn->getParameters())) {
+      auto *cloned = SwiftDeclSynthesizer::cloneParamForForwarding(
+          context, param, "__param" + Twine(index));
+      // The base method takes by-value parameters owned, but a native Swift
+      // method borrows them by default, so forwarding would need a copy. Take
+      // noncopyable parameters as consuming instead. A `const T &` parameter is
+      // also imported as a default `T`, but the base method only borrows it.
+      auto *clangParam =
+          dyn_cast_or_null<clang::ParmVarDecl>(param->getClangDecl());
+      auto paramTy = cloned->getInterfaceType();
+      if (cloned->getSpecifier() == ParamSpecifier::Default && clangParam &&
+          !clangParam->getType()->isReferenceType() &&
+          !paramTy->hasTypeParameter() && paramTy->isNoncopyable())
+        cloned->setSpecifier(ParamSpecifier::Consuming);
+      params.push_back(cloned);
+    }
 
     auto out = FuncDecl::createImplicit(
         context, fn->getStaticSpelling(), fn->getName(), fn->getNameLoc(),
@@ -9341,6 +9377,54 @@ ClangImporter::getOriginalForeignReferenceConstructor(const ConstructorDecl *cto
   if (!factory)
     return nullptr;
   return Impl.foreignReferenceFactoryToOriginalConstructor.lookup(factory);
+}
+
+bool ClangImporter::hasNonTrivialAssignmentOperator(const StructDecl *decl) {
+  auto *cxxRecordDecl =
+      dyn_cast_or_null<clang::CXXRecordDecl>(decl->getClangDecl());
+  if (!cxxRecordDecl)
+    return false;
+
+  for (bool isMove : {false, true}) {
+    if (auto *assignOp = lookupCXXAssignmentOperator(cxxRecordDecl, isMove)) {
+      if (!assignOp->isTrivial())
+        return true;
+    }
+  }
+  return false;
+}
+
+bool ClangImporter::tryDefineCXXAssignmentOperatorBody(
+    clang::CXXMethodDecl *assignOp) {
+  if (assignOp->isInvalidDecl())
+    return false;
+
+  auto &sema = Impl.getClangSema();
+  auto &diags = sema.getDiagnostics();
+  bool prevSuppressAllDiagnostics = diags.getSuppressAllDiagnostics();
+  diags.setSuppressAllDiagnostics(true);
+  SWIFT_DEFER { diags.setSuppressAllDiagnostics(prevSuppressAllDiagnostics); };
+  clang::DiagnosticErrorTrap trap(diags);
+
+  {
+    clang::Sema::GlobalEagerInstantiationScope instantiations(
+        sema, /*Enabled=*/true, /*AtEndOfTU=*/true);
+
+    if (assignOp->isDefaulted() && !assignOp->doesThisDeclarationHaveABody()) {
+      if (assignOp->isMoveAssignmentOperator())
+        sema.DefineImplicitMoveAssignment(clang::SourceLocation(), assignOp);
+      else
+        sema.DefineImplicitCopyAssignment(clang::SourceLocation(), assignOp);
+    } else if (assignOp->getTemplateInstantiationPattern()) {
+      sema.InstantiateFunctionDefinition(assignOp->getLocation(), assignOp);
+    }
+
+    instantiations.perform();
+  }
+
+  if (trap.hasErrorOccurred())
+    assignOp->setInvalidDecl();
+  return !assignOp->isInvalidDecl();
 }
 
 ValueDecl *ClangImporter::getOverriddenSuperclassMember(const ValueDecl *decl) {

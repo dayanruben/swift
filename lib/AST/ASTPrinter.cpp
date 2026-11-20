@@ -2892,6 +2892,27 @@ void PrintAST::printAccessors(const AbstractStorageDecl *ASD,
     }
 
     Printer << " {";
+
+    // A lifetime dependence is part of an accessor's signature, so print it
+    // even when the accessor is printed abstractly.
+    auto printLifetimeAttrs = [&](AccessorKind kind) {
+      auto *accessor = ASD->getAccessor(kind);
+      if (!accessor)
+        return;
+      // Print the attribute inline: by default a long attribute such as
+      // '@lifetime' would get its own line.
+      PrintOptions inlineOptions;
+      inlineOptions.SuppressLifetimes = Options.SuppressLifetimes;
+      for (auto *attr : accessor->getAttrs().getAttributes<LifetimeAttr>()) {
+        SmallString<64> buffer;
+        llvm::raw_svector_ostream os(buffer);
+        StreamPrinter attrPrinter(os);
+        attr->print(attrPrinter, inlineOptions, accessor);
+        Printer << " " << buffer.str().rtrim();
+      }
+    };
+
+    printLifetimeAttrs(AccessorKind::Get);
     if (mutatingGetter) printWithSpace("mutating");
 
     if (Options.PrintSelfAccessKindKeyword) {
@@ -2917,6 +2938,7 @@ void PrintAST::printAccessors(const AbstractStorageDecl *ASD,
     }
 
     if (settable) {
+      printLifetimeAttrs(AccessorKind::Set);
       if (nonmutatingSetter) printWithSpace("nonmutating");
 
       if (ASD->getParsedAccessor(AccessorKind::Mutate)) {
@@ -4885,7 +4907,7 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
       SWIFT_DEFER {
         Printer.printStructurePost(PrintStructureKind::CoroutineYieldsTypes);
       };
-      Printer << " " << tok::kw_yield << " (";
+      Printer << " yields (";
 
       for (auto [idx, yield] : llvm::enumerate(yields)) {
         if (idx > 0)
@@ -4905,6 +4927,7 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
 
         printTypeLoc(TheTypeLoc, getNonRecursiveOptions(decl));
       }
+      Printer << ")";
     }
 
     Type ResultTy = decl->getResultInterfaceType();

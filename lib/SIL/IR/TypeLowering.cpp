@@ -32,6 +32,7 @@
 #include "swift/AST/TypeDifferenceVisitor.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/LLVMExtras.h"
+#include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/PrettyStackTrace.h"
 #include "swift/SIL/SILArgument.h"
@@ -1860,9 +1861,20 @@ namespace {
     void
     emitLoweredDestroyValue(SILBuilder &B, SILLocation loc, SILValue aggValue,
                             TypeExpansionKind loweringStyle) const override {
+      if (loweringStyle == TypeExpansionKind::None)
+        return emitDestroyValue(B, loc, aggValue);
       // A value type with a deinit cannot be memberwise destroyed.
       if (auto *nominal = getLoweredType().getNominalDecl()) {
         if (nominal->hasValueTypeDestructor()) {
+          emitDestroyValue(B, loc, aggValue);
+          return;
+        }
+      }
+      for (auto *field :
+           getLoweredType().getStructDecl()->getStoredProperties()) {
+        auto fieldTy = getLoweredType().getFieldType(
+            field, B.getModule(), B.getFunction().getTypeExpansionContext());
+        if (!B.getFunction().isTypeABIAccessible(fieldTy)) {
           emitDestroyValue(B, loc, aggValue);
           return;
         }
@@ -2973,6 +2985,10 @@ namespace {
         properties.setAddressOnly();
         properties.setNonTrivial();
         properties.setLexical(IsLexical);
+        auto *importer =
+            static_cast<ClangImporter *>(TC.Context.getClangModuleLoader());
+        if (importer->hasNonTrivialAssignmentOperator(D))
+          properties.setCustomAssign();
       }
 
       if (auto *clangDecl = D->getClangDecl()) {
