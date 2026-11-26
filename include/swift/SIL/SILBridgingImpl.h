@@ -444,6 +444,10 @@ bool BridgedType::mayHaveCustomDeinit(BridgedFunction f) const {
   return unbridged().mayHaveCustomDeinit(*f.getFunction());
 }
 
+bool BridgedType::isOrContainsRawLayout(BridgedFunction f) const {
+  return unbridged().isOrContainsRawLayout(*f.getFunction());
+}
+
 SwiftInt BridgedType::getCaseIdxOfEnumType(BridgedStringRef name) const {
   return unbridged().getCaseIdxOfEnumType(name.unbridged());
 }
@@ -3088,6 +3092,12 @@ BridgedInstruction BridgedBuilder::createUncheckedOwnershipConversion(BridgedVal
                                                                       BridgedValue::Ownership ownership) const {
   return {unbridged().createUncheckedOwnershipConversion(regularLoc(), op.getSILValue(),
                                                          BridgedValue::unbridge(ownership))};
+}
+
+BridgedInstruction BridgedBuilder::createUncheckedOwnership(BridgedValue op,
+                                                            BridgedValue::Ownership forwardingOwnership) const {
+  return {unbridged().createUncheckedOwnership(regularLoc(), op.getSILValue(),
+                                               BridgedValue::unbridge(forwardingOwnership))};
 }
 
 BridgedInstruction BridgedBuilder::createLoadBorrow(BridgedValue op) const {

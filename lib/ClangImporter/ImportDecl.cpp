@@ -3029,12 +3029,19 @@ namespace {
           return nullptr;
         }
 
-        // Escapability annotations have no effect on a foreign reference type.
+        // Escapability annotations have no effect on a foreign reference type
+        // (SWIFT_VIEW was rejected above), and neither do copyability
+        // annotations: the class is imported as usual, and references to it
+        // are copied freely.
         for (auto *swiftAttr : decl->specific_attrs<clang::SwiftAttrAttr>()) {
-          if (swiftAttr->getAttribute() == "Escapable" ||
-              swiftAttr->getAttribute().starts_with("escapable_if:"))
+          if (importer::isEscapabilityAnnotation(swiftAttr))
             Impl.diagnose(HeaderLoc(decl->getLocation()),
                           diag::escapable_foreign_reference_type,
+                          importer::getPrettySwiftAttributeName(swiftAttr),
+                          decl);
+          else if (importer::isCopyabilityAnnotation(swiftAttr))
+            Impl.diagnose(HeaderLoc(decl->getLocation()),
+                          diag::noncopyable_foreign_reference_type,
                           importer::getPrettySwiftAttributeName(swiftAttr),
                           decl);
         }
@@ -3551,10 +3558,12 @@ namespace {
           structResult->setIsCxxNonTrivial(isAddressOnly);
         }
 
-        auto gettersAndSetters = Impl.GetterSetterMap[result];
-        for (const auto &getterAndSetter : gettersAndSetters) {
-          auto getter = getterAndSetter.second.first;
-          auto setter = getterAndSetter.second.second;
+        SmallVector<std::pair<FuncDecl *, FuncDecl *>, 4> gettersAndSetters;
+        if (auto it = Impl.GetterSetterMap.find(result);
+            it != Impl.GetterSetterMap.end())
+          llvm::append_range(gettersAndSetters,
+                             llvm::make_second_range(it->second));
+        for (auto [getter, setter] : gettersAndSetters) {
           // We cannot make a computed property without a getter.
           if (!getter || getter->getDeclContext() != result)
             continue;
@@ -3733,7 +3742,7 @@ namespace {
         return nullptr;
 
       auto &clangSema = Impl.getClangSema();
-      // Make Clang define any implicit constructors it may need (copy,
+      // Make Clang declare any implicit constructors it may need (copy,
       // default). Make sure we only do this if the class has been fully defined
       // with complete fields, and we're not in a dependent context(this is
       // equivalent to the logic in CanDeclareSpecialMemberFunction in Clang's
@@ -3765,19 +3774,13 @@ namespace {
             }
           }
         }
-        if (decl->needsImplicitDefaultConstructor()) {
-          clang::CXXConstructorDecl *ctor =
-              clangSema.DeclareImplicitDefaultConstructor(
-                  const_cast<clang::CXXRecordDecl *>(decl));
-          if (!ctor->isDeleted())
-            clangSema.DefineImplicitDefaultConstructor(clang::SourceLocation(),
-                                                       ctor);
-        }
+        if (decl->needsImplicitDefaultConstructor())
+          clangSema.DeclareImplicitDefaultConstructor(
+              const_cast<clang::CXXRecordDecl *>(decl));
         // If the C++ struct is annotated as non-copyable, we should not try to
         // instantiate its copy constructor.
         bool isExplicitlyNonCopyable = hasNonCopyableAttr(decl);
 
-        clang::CXXConstructorDecl *defaultCtor = nullptr;
         if (decl->needsImplicitCopyConstructor() && !isExplicitlyNonCopyable) {
           clangSema.DeclareImplicitCopyConstructor(
               const_cast<clang::CXXRecordDecl *>(decl));
@@ -3785,31 +3788,6 @@ namespace {
         if (decl->needsImplicitMoveConstructor()) {
           clangSema.DeclareImplicitMoveConstructor(
               const_cast<clang::CXXRecordDecl *>(decl));
-        }
-        if (decl->needsImplicitDefaultConstructor()) {
-          defaultCtor = clangSema.DeclareImplicitDefaultConstructor(
-              const_cast<clang::CXXRecordDecl *>(decl));
-        }
-        // We may have a defaulted copy/move/default constructor that needs to
-        // be defined. Try to find it.
-        for (auto methods : decl->methods()) {
-          if (auto declCtor = dyn_cast<clang::CXXConstructorDecl>(methods)) {
-            if (declCtor->isDefaulted() &&
-                declCtor->getAccess() == clang::AS_public &&
-                !declCtor->isDeleted() &&
-                // Note: we use "doesThisDeclarationHaveABody" here because
-                // that's what "DefineImplicitCopyConstructor" checks.
-                !declCtor->doesThisDeclarationHaveABody()) {
-              if (declCtor->isDefaultConstructor()) {
-                if (!defaultCtor)
-                  defaultCtor = declCtor;
-              }
-            }
-          }
-        }
-        if (defaultCtor) {
-          clangSema.DefineImplicitDefaultConstructor(clang::SourceLocation(),
-                                                     defaultCtor);
         }
 
         if (decl->needsImplicitDestructor()) {
@@ -4315,9 +4293,32 @@ namespace {
 
       checkBridgingAttrs(decl);
       Impl.validateSwiftAttributes(decl);
+      diagnoseRedundantReturnsIndependentValue(decl);
 
       return importFunctionDecl(decl, importedName, correctSwiftName,
                                 std::nullopt);
+    }
+
+    /// Warn if SWIFT_RETURNS_INDEPENDENT_VALUE has no effect on \p decl.
+    void diagnoseRedundantReturnsIndependentValue(
+        const clang::FunctionDecl *decl) {
+      auto redundant = importer::getRedundantReturnsIndependentValue(
+          decl, Impl.SwiftContext);
+      if (!redundant)
+        return;
+      // Diagnose a template once, rather than once per instantiation.
+      const clang::FunctionDecl *diagnosed =
+          decl->getTemplateInstantiationPattern();
+      if (!diagnosed)
+        diagnosed = decl;
+      if (!Impl.DiagnosedRedundantReturnsIndependentValue
+               .insert(diagnosed->getCanonicalDecl())
+               .second)
+        return;
+      Impl.diagnose(HeaderLoc(decl->getLocation()),
+                    diag::returns_independent_value_has_no_effect, diagnosed,
+                    static_cast<unsigned>(redundant->kind),
+                    redundant->type.getTypePtr());
     }
 
     /// Emit diagnostics for incorrect usage of SWIFT_RETURNS_RETAINED and
@@ -5455,6 +5456,8 @@ namespace {
       if (decl->getOverloadedOperator() ==
               clang::OverloadedOperatorKind::OO_Call &&
           decl->isStatic()) {
+        // The synthesized member is implicit, so diagnose the operator itself.
+        diagnoseRedundantReturnsIndependentValue(decl);
         auto result = synthesizer.makeInstanceToStaticOperatorCallMethod(
             decl, getCArrayProjection());
         if (result)
@@ -10730,7 +10733,7 @@ static void filterUsableVersionedAttrs(
   // We have a better attribute option if there exists another versioned attr
   // wrapper for this attribute kind with a valid version that is lower than the
   // one of the attribute we are considering
-  auto haveBetterAttr = [swiftVersionedAttributes, applicableVersion](
+  auto haveBetterAttr = [&swiftVersionedAttributes, applicableVersion](
                             clang::VersionTuple attrVersion,
                             clang::attr::Kind attrKind) -> bool {
     for (auto otherVersionedAttr : swiftVersionedAttributes) {
@@ -12118,6 +12121,12 @@ void ClangRecordMemberLoader::load(const clang::RecordDecl *clangRecord,
     }
   }
 
+  // Index the members of swiftDecl by name so that checking whether a base
+  // member is already present doesn't need a scan over all members. Built on
+  // first use, since getMembers() loads all members of swiftDecl.
+  llvm::DenseMap<DeclName, TinyPtrVector<const ValueDecl *>> membersByName;
+  bool indexedMembers = false;
+
   // Add the members here.
   for (auto member : members) {
     if (inheritance) {
@@ -12130,27 +12139,31 @@ void ClangRecordMemberLoader::load(const clang::RecordDecl *clangRecord,
       if (Impl.isMemberSynthesizedPerType(baseMember))
         continue;
 
+      if (!indexedMembers) {
+        for (auto *currentMember : swiftDecl->getMembers())
+          if (auto *vd = dyn_cast<ValueDecl>(currentMember))
+            membersByName[vd->getName()].push_back(vd);
+        indexedMembers = true;
+      }
+
       // Do not clone the base member into the derived class
       // when the derived class already has a member of such
       // name and arity for the same C array projection.
       auto memberArity = getImportedBaseMemberDeclArity(baseMember);
-      bool shouldAddBaseMember = true;
-      for (const auto *currentMember : swiftDecl->getMembers()) {
-        auto vd = dyn_cast<ValueDecl>(currentMember);
-        if (vd->getName() == baseMember->getName() &&
-            memberArity == getImportedBaseMemberDeclArity(vd) &&
-            !isCloneOfCArrayCounterpart(Impl, baseMember, vd)) {
-          shouldAddBaseMember = false;
-          break;
-        }
-      }
-      if (!shouldAddBaseMember)
+      auto it = membersByName.find(baseMember->getName());
+      if (it != membersByName.end() &&
+          llvm::any_of(it->second, [&](const ValueDecl *vd) {
+            return memberArity == getImportedBaseMemberDeclArity(vd) &&
+                   !isCloneOfCArrayCounterpart(Impl, baseMember, vd);
+          }))
         continue;
 
       // So we need to clone the member into the derived class.
       if (auto cloned =
-              Impl.importBaseMemberDecl(baseMember, swiftDecl, inheritance))
+              Impl.importBaseMemberDecl(baseMember, swiftDecl, inheritance)) {
         swiftDecl->addMember(cloned);
+        membersByName[cloned->getName()].push_back(cloned);
+      }
 
       continue;
     }
@@ -12238,9 +12251,11 @@ void ClangImporter::Implementation::loadStorageMembers(Decl *D,
   // If a Clang decl has no owning module, then it needs to be added to the
   // bridging header lookup table. This has most likely already been done, but
   // in some cases, such as when processing DWARF imported AST nodes from LLDB,
-  // it has not. Do it here just to be safe.
+  // it has not. Do it here just to be safe. Template instantiations belong to
+  // the module of their pattern.
   if (auto namedDecl = dyn_cast_or_null<clang::NamedDecl>(D->getClangDecl())) {
-    if (!namedDecl->hasOwningModule()) {
+    if (!namedDecl->hasOwningModule() &&
+        !importer::getClangOwningModule(namedDecl, getClangASTContext())) {
       auto mutableNamedDecl = const_cast<clang::NamedDecl *>(namedDecl);
       addBridgeHeaderTopLevelDecls(mutableNamedDecl);
       addEntryToLookupTable(*BridgingHeaderLookupTable,
